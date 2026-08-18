@@ -1,0 +1,18 @@
+[package]
+name = "harness-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+harness-core = { path = "../core" }
+harness-config = { path = "../config" }
+harness-session = { path = "../session" }
