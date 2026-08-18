@@ -1,5 +1,5 @@
 [package]
-name = "harness-core"
+name = "tetanus-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

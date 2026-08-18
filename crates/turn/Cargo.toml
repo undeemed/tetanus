@@ -1,5 +1,5 @@
 [package]
-name = "harness-turn"
+name = "tetanus-turn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,5 +11,5 @@ thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-harness-core = { path = "../core" }
-harness-session = { path = "../session" }
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }

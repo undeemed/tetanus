@@ -1,5 +1,5 @@
 [package]
-name = "harness-session"
+name = "tetanus-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,4 +9,4 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-harness-core = { path = "../core" }
+tetanus-core = { path = "../core" }

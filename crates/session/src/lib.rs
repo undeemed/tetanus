@@ -19,12 +19,12 @@ impl Session {
     pub fn open(path: impl AsRef<Path>) -> Self {
         Self { path: path.as_ref().to_path_buf() }
     }
-    pub fn append(&self, ev: &harness_core::Event) -> Result<(), SessionError> {
+    pub fn append(&self, ev: &tetanus_core::Event) -> Result<(), SessionError> {
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
         writeln!(f, "{}", serde_json::to_string(ev).expect("event serializes"))?;
         Ok(())
     }
-    pub fn replay(&self) -> Result<Vec<harness_core::Event>, SessionError> {
+    pub fn replay(&self) -> Result<Vec<tetanus_core::Event>, SessionError> {
         let f = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

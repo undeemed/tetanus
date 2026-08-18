@@ -1,7 +1,7 @@
-use harness_turn::engine::TurnEngine;
-use harness_turn::event::TurnEvent;
-use harness_turn::llm::EchoAdapter;
-use harness_turn::tools::ToolRegistry;
+use tetanus_turn::engine::TurnEngine;
+use tetanus_turn::event::TurnEvent;
+use tetanus_turn::llm::EchoAdapter;
+use tetanus_turn::tools::ToolRegistry;
 
 #[tokio::test]
 async fn emits_documented_event_sequence() {

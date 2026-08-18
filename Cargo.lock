@@ -144,64 +144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "harness-config",
- "harness-core",
- "harness-session",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "harness-config"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "harness-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "harness-session"
-version = "0.1.0"
-dependencies = [
- "harness-core",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "harness-turn"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "harness-core",
- "harness-session",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -420,6 +362,64 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tetanus-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "tetanus-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tetanus-hardness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tetanus-config",
+ "tetanus-core",
+ "tetanus-session",
+ "tokio",
+]
+
+[[package]]
+name = "tetanus-session"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tetanus-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "tetanus-turn"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tetanus-core",
+ "tetanus-session",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
