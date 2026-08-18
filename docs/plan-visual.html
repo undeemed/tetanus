@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>deepseek-harness → Rust: the two roads</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel2: #1d2129;
+      --border: #2a2f3a;
+      --fg: #e8eaf0;
+      --dim: #9aa3b2;
+      --faint: #6b7280;
+      --good: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --accent: #818cf8;
+      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      min-width: 0
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.55 -apple-system, Segoe UI, Inter, sans-serif;
+      padding: 32px 20px 80px
+    }
+
+    main {
+      max-width: 1060px;
+      margin: 0 auto;
+      display: grid;
+      gap: 28px
+    }
+
+    h1 {
+      font-size: 30px;
+      margin: 0
+    }
+
+    h2 {
+      font-size: 20px;
+      margin: 0 0 12px;
+      color: var(--fg)
+    }
+
+    p {
+      margin: 0 0 10px;
+      color: var(--dim)
+    }
+
+    .sub {
+      color: var(--dim);
+      font-size: 15px
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-right: 6px
+    }
+
+    .pill.g {
+      background: #14351f;
+      color: var(--good)
+    }
+
+    .pill.y {
+      background: #3a2e10;
+      color: var(--warn)
+    }
+
+    .pill.r {
+      background: #3a1717;
+      color: var(--bad)
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: 13px;
+      background: var(--panel2);
+      padding: 1px 6px;
+      border-radius: 6px;
+      color: #c7d2fe;
+      overflow-wrap: anywhere
+    }
+
+    /* what-it-is strip */
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px
+    }
+
+    .fact {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px
+    }
+
+    .fact b {
+      display: block;
+      font-size: 22px
+    }
+
+    .fact span {
+      font-size: 12.5px;
+      color: var(--faint)
+    }
+
+    /* matrix */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14.5px
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top
+    }
+
+    th {
+      color: var(--faint);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      border-top: none
+    }
+
+    td:first-child {
+      color: var(--fg)
+    }
+
+    .v {
+      font-weight: 700;
+      white-space: nowrap
+    }
+
+    .v.g {
+      color: var(--good)
+    }
+
+    .v.y {
+      color: var(--warn)
+    }
+
+    .v.r {
+      color: var(--bad)
+    }
+
+    /* option cards */
+    .duel {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px
+    }
+
+    .card {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      display: grid;
+      gap: 10px;
+      align-content: start
+    }
+
+    .card.rec {
+      border-color: var(--good);
+      box-shadow: 0 0 0 1px #14351f
+    }
+
+    .card h3 {
+      margin: 0;
+      font-size: 17px
+    }
+
+    .tag {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--good)
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--dim);
+      font-size: 14px;
+      display: grid;
+      gap: 5px
+    }
+
+    li b {
+      color: var(--fg)
+    }
+
+    .meter {
+      display: flex;
+      gap: 6px;
+      font-size: 12.5px;
+      color: var(--faint);
+      flex-wrap: wrap
+    }
+
+    .meter span {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px 8px
+    }
+
+    /* flow strip */
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 12.5px
+    }
+
+    .flow i {
+      font-style: normal;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 9px;
+      color: #c7d2fe
+    }
+
+    .flow em {
+      font-style: normal;
+      color: var(--faint)
+    }
+
+    .decide {
+      border-color: var(--accent)
+    }
+
+    .choices {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 8px
+    }
+
+    .choice {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      font-size: 14px;
+      color: var(--dim)
+    }
+
+    .choice b {
+      display: block;
+      color: var(--fg);
+      margin-bottom: 4px
+    }
+
+    /* cordis diff diagram */
+    .legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 12.5px;
+      color: var(--dim);
+      margin-bottom: 14px
+    }
+
+    .legend i {
+      font-style: normal;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      display: inline-block
+    }
+
+    .dot.g {
+      background: var(--good)
+    }
+
+    .dot.y {
+      background: var(--warn)
+    }
+
+    .dot.r {
+      background: var(--bad)
+    }
+
+    .diff {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 74px minmax(0, 1fr);
+      gap: 10px 8px;
+      align-items: stretch
+    }
+
+    .diff .hdr {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--faint);
+      text-align: center;
+      padding-bottom: 2px
+    }
+
+    .node {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13.5px;
+      color: var(--dim);
+      display: grid;
+      gap: 3px;
+      align-content: start
+    }
+
+    .node b {
+      color: var(--fg);
+      font-size: 13.5px
+    }
+
+    .node code {
+      font-size: 12px
+    }
+
+    .node.g {
+      border-left: 3px solid var(--good)
+    }
+
+    .node.y {
+      border-left: 3px solid var(--warn)
+    }
+
+    .node.r {
+      border-left: 3px solid var(--bad)
+    }
+
+    .node.dead {
+      border-style: dashed;
+      opacity: .78
+    }
+
+    .node.dead b {
+      text-decoration: line-through;
+      text-decoration-color: var(--bad);
+      text-decoration-thickness: 2px
+    }
+
+    .lnk {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center
+    }
+
+    .lnk .arr {
+      font-size: 16px;
+      line-height: 1
+    }
+
+    .lnk.g {
+      color: var(--good)
+    }
+
+    .lnk.y {
+      color: var(--warn)
+    }
+
+    .lnk.r {
+      color: var(--bad)
+    }
+
+    .life {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-top: 18px
+    }
+
+    .lifebox {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px
+    }
+
+    .lifebox h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--faint);
+      text-transform: uppercase;
+      letter-spacing: .05em
+    }
+
+    .lifeflow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 12px
+    }
+
+    .lifeflow i {
+      font-style: normal;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 4px 8px;
+      color: #c7d2fe
+    }
+
+    .lifeflow i.x {
+      color: var(--bad);
+      border-color: #3a1717;
+      text-decoration: line-through
+    }
+
+    .lifeflow em {
+      font-style: normal;
+      color: var(--faint)
+    }
+
+    @media (max-width:720px) {
+      .diff {
+        grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1fr)
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+
+    <header>
+      <h1>deepseek-harness → Rust</h1>
+      <p class="sub">What a rewrite can and cannot be, and the one real decision. Grounded in the actual clone
+        (<code>docs/architecture.md</code>, API-gateway spec, package tree) — 2026-08-18.</p>
+    </header>
+
+    <section>
+      <h2>What dsh actually is</h2>
+      <div class="facts">
+        <div class="fact"><b>568K</b><span>TypeScript lines</span></div>
+        <div class="fact"><b>~50</b><span>workspace packages</span></div>
+        <div class="fact"><b>0.1.0-rc.7</b><span>breaking changes expected</span></div>
+        <div class="fact"><b>MIT</b><span>license — rewrite is clean</span></div>
+        <div class="fact"><b>100%</b><span>plugins — even the agent loop</span></div>
+      </div>
+      <p style="margin-top:14px">Its identity is <b style="color:var(--fg)">Cordis</b>: every part (model adapter,
+        tools, session log, agent loop) is a hot-swappable plugin with <i>reversible</i> registrations, composed at boot
+        from profiles/bundles/patch overlays. The web API is <b style="color:var(--fg)">generated</b> from
+        <code>@Remote</code> decorators — not a hand-written, stable protocol.
+      </p>
+      <p style="margin:6px 0 0">The part worth stealing — the turn flow — is cleanly documented:</p>
+      <div class="flow" style="margin-top:8px">
+        <i>turn/start</i><em>→</em><i>claim input</i><em>→</em><i>prompt +
+          schemas</i><em>→</em><i>agent/pre-step</i><em>→</em><i>llm/stream</i><em>→</em><i>tool
+          pipeline</i><em>→</em><i>step/end</i><em>→</em><i>turn-stopping</i>
+      </div>
+    </section>
+
+    <section>
+      <h2>Possible vs not — the honest matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Piece</th>
+            <th>In Rust?</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Agent loop, append-only session log, turn/step engine</td>
+            <td class="v g">Clean fit</td>
+            <td>Well-specified in docs; ~15–25K Rust lines total core</td>
+          </tr>
+          <tr>
+            <td>LLM streaming adapter, MCP, shell/subprocess tools</td>
+            <td class="v g">Clean fit</td>
+            <td>Standard territory; their sandbox is landlock anyway</td>
+          </tr>
+          <tr>
+            <td>Event taxonomy (session / agent / capability events)</td>
+            <td class="v g">Clean fit</td>
+            <td>Maps beautifully to Rust enums + typed event bus</td>
+          </tr>
+          <tr>
+            <td>Config layering (profiles / bundles / patches)</td>
+            <td class="v y">Expensive</td>
+            <td>Layered serde config works; “patch any row” needs the tree to be data</td>
+          </tr>
+          <tr>
+            <td>Speaking their generated web protocol (Option 1)</td>
+            <td class="v y">Expensive</td>
+            <td>Wire contract is a <b>build artifact</b> of TS decorators; must be reverse-extracted, re-verified every
+              rc bump, pinned to one commit</td>
+          </tr>
+          <tr>
+            <td>Cordis semantics: hot-swap plugins, reversible effects, HMR</td>
+            <td class="v y">In scope — priced</td>
+            <td>Reversible effects = RAII handles (cheap); live remount = tree-as-data (moderate); code hot-swap = WASM
+              component host (the big line item — accepted by captain 2026-08-18)</td>
+          </tr>
+          <tr>
+            <td>1:1 port of all ~50 packages</td>
+            <td class="v r">Not realistic</td>
+            <td>568K lines, rc-stage moving target, paradigm Rust can’t express</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>The two roads</h2>
+      <div class="duel">
+        <div class="card">
+          <h3>Option 1 — Rust host behind their web UI</h3>
+          <div class="meter"><span>~25–40K lines</span><span>UI free</span><span>protocol risk high</span></div>
+          <ul>
+            <li><b>Keep</b> their polished <code>web</code> bundle frontend; demo-able early.</li>
+            <li><b>Rebuild in Rust:</b> Connection RPC framing, <code>/api</code> route, the generated Remote surface,
+              Typert identity lookups, session-event stream.</li>
+            <li><b>Cost:</b> the UI drags server scope far past the core loop — goals, plans, todos, skills,
+              session-query…</li>
+            <li><b>Risk:</b> married to an undocumented generated protocol at rc stage; every upstream bump can silently
+              break the wire.</li>
+          </ul>
+        </div>
+        <div class="card rec">
+          <div class="tag">Chosen — full parity 2026-08-18</div>
+          <h3>Option 2 — Clean Rust harness, everything dsh has but better</h3>
+          <div class="meter"><span>~25–35K lines at parity scope</span><span>zero upstream coupling</span><span>own
+              protocol</span>
+          </div>
+          <ul>
+            <li><b>Spec:</b> their architecture / turn-flow / event docs; steal the best ideas (append-only log,
+              capability seams, guarded tool pipeline).</li>
+            <li><b>Own:</b> simple JSON-RPC/WS protocol; headless CLI first, thin web view later.</li>
+            <li><b>Phases:</b> ① core turn engine → ② Cordis parity (live recompose, RAII effects, tool pipeline) → ③
+              better (WASM plugin host, conformance suite, perf proof).</li>
+            <li><b>Cost:</b> no ready-made frontend; the WASM host is the priciest single line item — accepted.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="cordis-diff">
+      <h2>Cordis → Rust: the diagram diff</h2>
+      <p>Target locked: <b style="color:var(--fg)">everything dsh has, but better</b>. Every Cordis idea and its Rust
+        counterpart — nothing dropped; the one honest residue is flagged at the bottom. Left: how dsh does it. Right:
+        the Rust rewrite.</p>
+      <div class="legend">
+        <i><span class="dot g"></span> kept (same idea, often stronger)</i>
+        <i><span class="dot y"></span> transformed (same outcome, different mechanism)</i>
+      </div>
+      <div class="diff">
+        <div class="hdr">dsh / Cordis (TypeScript)</div>
+        <div class="hdr"></div>
+        <div class="hdr">Rust rewrite</div>
+
+        <div class="node g"><b>Plugin = Service object</b>runtime-mounted <code>apply(ctx)</code> functions or Service
+          subclasses</div>
+        <div class="lnk g"><span class="arr">⇒</span>kept</div>
+        <div class="node g"><b>Plugin = trait impl</b><code>trait Plugin { fn mount(&amp;self, host) }</code> — compiled
+          in, mounted at boot from the same kind of config rows</div>
+
+        <div class="node g"><b>Context = service repository</b>string-keyed <code>ctx.tools</code>,
+          <code>ctx.llm</code>, <code>ctx.sessions</code>; lookup at runtime
+        </div>
+        <div class="lnk g"><span class="arr">⇒</span>kept, stronger</div>
+        <div class="node g"><b>Typed service registry</b>one slot per service type; a missing service is a <b>compile
+            error</b>, not a boot stall</div>
+
+        <div class="node g"><b><code>inject</code> declares deps</b>plugins wait for named services; load order emerges
+          from requirements</div>
+        <div class="lnk g"><span class="arr">⇒</span>kept</div>
+        <div class="node g"><b>Declared deps → topo sort</b>boot resolves the dependency graph once; cycles rejected at
+          startup, not deadlocked</div>
+
+        <div class="node g"><b>Typed events, 4 dispatch modes</b><code>emit</code> / <code>waterfall</code> /
+          <code>parallel</code> / <code>serial</code>; waterfall is around-middleware with <code>next()</code>
+        </div>
+        <div class="lnk g"><span class="arr">⇒</span>kept</div>
+        <div class="node g"><b>Enum event bus, same 4 modes</b><code>emit</code>→broadcast,
+          <code>waterfall</code>→tower-style layer chain (around-middleware is exactly what tower does),
+          <code>parallel</code>→<code>join_all</code>, <code>serial</code>→ordered dispatch
+        </div>
+
+        <div class="node g"><b>Profiles / bundles / <code>cordis.patch.yml</code></b>layered config rows; patch any row
+          by id; <code>disabled</code> re-evaluated at every mount</div>
+        <div class="lnk g"><span class="arr">⇒</span>kept</div>
+        <div class="node g"><b>Same layered config, live recompose</b>identical row/patch data model in serde; a config
+          watcher diffs the tree and remounts only the changed subtree at runtime — <code>disabled</code> re-evaluated
+          at every mount, same as upstream</div>
+
+        <div class="node g"><b>Reversible effects</b><code>ctx.effect()</code> + disposers; unload a plugin and its
+          prompt sections, tools, listeners unwind live</div>
+        <div class="lnk g"><span class="arr">⇒</span>kept, stronger</div>
+        <div class="node g"><b>RAII effect handles</b>every registration returns an <code>EffectHandle</code>; dropping
+          it unwinds the registration live. Disposal is compiler-owned — a forgotten disposer is a type error, not a
+          code-review catch</div>
+
+        <div class="node y"><b>Hot-module-reload / live remount</b>edit plugin code, tree updates in a running
+          session</div>
+        <div class="lnk y"><span class="arr">≈</span>reshaped</div>
+        <div class="node y"><b>Two-tier live reload</b>config/tree changes remount in-process while sessions keep
+          running; plugin code ships as hot-swappable WASM components. Only <i>native core</i> edits need the
+          ms-restart + session-log resume</div>
+
+        <div class="node y"><b>Out-of-tree npm plugins</b>drop a JS package beside a profile and it mounts</div>
+        <div class="lnk g"><span class="arr">⇒</span>kept, wider</div>
+        <div class="node g"><b>WASM component host</b>third-party plugins in any language, not just JS — sandboxed by
+          default, mounted/unmounted at runtime; MCP + subprocess seams on top. Strictly wider than npm drop-ins, and
+          safer</div>
+
+        <div class="node y"><b>Generated Typert <code>@Remote</code> API</b>wire contract generated from decorators at
+          build time</div>
+        <div class="lnk y"><span class="arr">≈</span>reshaped</div>
+        <div class="node y"><b>Hand-written JSON-RPC/WS</b>small, versioned by us, documented — boring on purpose</div>
+      </div>
+
+      <div class="life">
+        <div class="lifebox">
+          <h4>dsh plugin lifecycle</h4>
+          <div class="lifeflow"><i>mount</i><em>→</em><i>ctx.effect()</i><em>→</em><i>run</i><em>→</em><i>unload
+              (unwind)</i><em>→</em><i>remount, session keeps running</i></div>
+        </div>
+        <div class="lifebox">
+          <h4>Rust lifecycle</h4>
+          <div class="lifeflow"><i>compose from
+              config</i><em>→</em><i>topo-mount</i><em>→</em><i>run</i><em>→</em><i>unload
+              (RAII unwind)</i><em>→</em><i>remount live, session keeps running</i></div>
+        </div>
+      </div>
+
+      <div class="life" style="margin-top:16px">
+        <div class="lifebox">
+          <h4>Why "better" is credible in Rust</h4>
+          <div class="lifeflow"><i>single static binary</i><i>ms cold boot</i><i>registry + events checked at compile
+              time</i><i>no GC pauses mid-stream</i><i>parallel dispatch without data races</i><i>sandboxed plugins by
+              default</i></div>
+        </div>
+        <div class="lifebox">
+          <h4>The one honest residue</h4>
+          <div class="lifeflow"><i class="x">TS-style HMR of native core code</i><em>→</em><i>ms restart + session-log
+              resume covers it</i></div>
+        </div>
+      </div>
+      <p style="margin-top:14px;font-size:14px"><b style="color:var(--fg)">The one-line truth:</b> nothing Cordis does
+        is dropped. Composition, service registry, dep-driven load order, typed events, patch-layered config: kept and
+        compile-time checked. Runtime mutability: kept via RAII effect handles, live subtree remount, and hot-swappable
+        WASM plugins. The single residue is HMR of <i>native core</i> code, where a millisecond restart with session-log
+        resume stands in — everything else is parity or better.</p>
+    </section>
+    <section class="decide">
+      <h2>The decision — made</h2>
+      <p><b style="color:var(--fg)">Locked by captain 2026-08-18: clean Rust harness at full dsh parity — "everything
+          deepseek-harness has, but better."</b> That retires Option 1 (living behind their generated protocol) and
+        raises Option 2's bar: runtime mutability is in scope, not dropped — RAII effect handles, live subtree remount,
+        and a WASM component host are core deliverables, not future maybes.</p>
+      <div class="choices">
+        <div class="choice"><b>Phase ① core</b>Headless CLI running one full documented turn: typed registry, event bus
+          (4 modes), session log, one model adapter.</div>
+        <div class="choice"><b>Phase ② parity</b>Layered config + live recompose, RAII effect unwind, tool pipeline,
+          remaining adapters, JSON-RPC/WS surface.</div>
+        <div class="choice"><b>Phase ③ better</b>WASM plugin host (any-language, sandboxed), conformance suite against
+          dsh's documented turn flow, perf proof: boot, tokens/s, memory.</div>
+      </div>
+      <p style="margin-top:12px;font-size:13.5px;color:var(--faint)">Scaffolding starts as a normal lane; annotate
+        anything here to redirect it before the first commit lands.</p>
+    </section>
+
+  </main>
+</body>
+
+</html>
