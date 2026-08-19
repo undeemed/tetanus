@@ -62,11 +62,15 @@ pub struct Harness {
     #[allow(dead_code)]
     pub sections: Arc<PromptRegistry>,
     trace: TurnTrace,
+    // Not every suite sharing this fixture listens on the bus, and a test
+    // binary lints the parts of it that its own cases do not reach.
+    #[allow(dead_code)]
     bus: EventBus,
     _dir: TempDir,
 }
 
 impl Harness {
+    #[allow(dead_code)]
     pub async fn new(name: &str) -> Self {
         Self::with_tools(name, ToolRegistry::new().with(Arc::new(EchoTool))).await
     }
@@ -108,6 +112,7 @@ impl Harness {
         }
     }
 
+    #[allow(dead_code)]
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
