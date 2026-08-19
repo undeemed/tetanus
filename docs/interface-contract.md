@@ -109,7 +109,8 @@ The crate is authoritative for field-level detail; this section states the invar
 `seq` equals the index of the line, so a replay verifies contiguity.
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
-The durable vocabulary a surface renders today: `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
+The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
+`session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
 `assistant/chunk` is the streaming surface.
 Raw chunks stay on the log, so a surface replays a stream exactly as it arrived rather than re-deriving it.
 There is no separate progress event: progress is `step/start`, the chunks, `tool/call`, `tool/result` and `step/end`, in order.
