@@ -133,6 +133,15 @@ pub enum LlmError {
     Provider { status: u16, message: String },
     #[error("PROTOCOL: {0}")]
     Protocol(String),
+    /// A provider that completed normally and said nothing at all.
+    ///
+    /// It is a failure rather than an empty answer, and a retryable one: the
+    /// request was well formed, the model just produced no output, and asking
+    /// again is the thing most likely to help. `EMPTY_RESPONSE` has been in
+    /// [`retry::DEFAULT_RETRYABLE_CODES`](crate::llm::retry::DEFAULT_RETRYABLE_CODES)
+    /// since the policy was ported; this is the error that reaches it.
+    #[error("EMPTY_RESPONSE: {0}")]
+    EmptyResponse(String),
     #[error("SINK: {0}")]
     Sink(String),
 }
@@ -150,6 +159,7 @@ impl LlmError {
             LlmError::MissingCredential(_) => "MISSING_CREDENTIAL",
             LlmError::InvalidCredential(_) => "INVALID_CREDENTIAL",
             LlmError::Transport(_) => "TRANSPORT",
+            LlmError::EmptyResponse(_) => "EMPTY_RESPONSE",
             LlmError::Provider { status, .. } => match status {
                 408 => "TIMEOUT",
                 429 => "RATE_LIMIT",

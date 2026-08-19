@@ -240,6 +240,32 @@ fn every_failure_carries_the_code_a_policy_reads() {
     );
 }
 
+/// TC-PORT-RETRY-10: a provider that completed and said nothing is retried.
+///
+/// Upstream: `retry.spec.ts`, "retries an EMPTY_RESPONSE error finish under the
+/// default retryable codes".
+///
+/// Input: [`LlmError::EmptyResponse`] against the default policy.
+/// Expected: its code is `EMPTY_RESPONSE`, which the defaults already list, so
+/// the decision is another attempt. Until an adapter could raise this error the
+/// listed code was unreachable; the DeepSeek adapter now raises it, so the
+/// default retryable set is fully served.
+#[test]
+fn a_completed_response_with_no_content_is_worth_another_attempt() {
+    let empty =
+        LlmError::EmptyResponse("model \"m\" returned a completed response with no content".into());
+
+    assert_eq!(empty.code(), "EMPTY_RESPONSE");
+    assert_eq!(
+        empty.to_string(),
+        "EMPTY_RESPONSE: model \"m\" returned a completed response with no content"
+    );
+    assert!(matches!(
+        RetryPolicy::default().decide(0, empty.code(), None, 0.0),
+        RetryDecision::Wait { .. }
+    ));
+}
+
 /// The default waits with jitter turned off, so a case can assert an exact one.
 fn steady() -> Backoff {
     Backoff {
