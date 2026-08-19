@@ -6,6 +6,7 @@ members = [
   "crates/session",
   "crates/cli",
   "crates/protocol",
+  "crates/ui",
   "crates/turn",
 ]
 
