@@ -28,7 +28,7 @@ The engine lane publishes this contract.
 The presentation lane consumes it and reviews it.
 Neither lane edits the other's code.
 
-Three rules follow.
+Four rules follow.
 
 1. **A boundary change is its own pull request.**
 It touches this document and the `tetanus-protocol` types together, adds a row to section 8, and lands before any feature that depends on it.
@@ -39,6 +39,10 @@ If a presentation need cannot be met from the facts here, the contract is incomp
 3. **`tetanus-protocol` depends on no engine crate.**
 It has three dependencies: `serde`, `serde_json`, `async-trait`.
 The engine converts its internal types into these wire shapes, so refactoring the engine is not a breaking change for a surface.
+4. **A surface matches the wire types, and matches them openly.**
+Every enum that section 7.5 calls growable may gain a variant in a minor version, so a match on one carries a fallback arm rather than one arm per variant.
+`KnownEvent` is not one of those, having no `Other` because nothing deserializes it, and it is why section 4.3.2 lands a new durable type in two steps: an open match on it is what would make those two one.
+A surface never reaches past the wire type to match an engine enum instead, such as `tetanus_turn::StopReason`, for the reason section 4.5 already gives for the error case: an internal type has no fallback, so a match on one outside the engine crate stops compiling the day the engine names a new case.
 
 ## 4. Design views
 
@@ -500,6 +504,7 @@ With the trait, adding a call is a compile error in every surface that has not h
 Rust's `serde` rejects an unknown enum variant by default, which would make every added state a breaking change for an older surface.
 `Other(String)` costs one variant and one match arm, and converts a breaking change into a minor one.
 The variants that are not growable, such as the JSON-RPC envelope's `result` and `error`, deliberately have no fallback: a frame that is neither is malformed.
+A fallback variant answers an unknown value, not an added variant, which is why section 3 rule 4 asks for an open match as well.
 
 ### 7.6 Wire types duplicated, not re-exported
 
@@ -523,3 +528,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | No boundary change. Records in §6 that §4.1's "one contract, three carriers" is now verified against two of them: `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs` assert the same claims against the same engine double (TC-STDIO-1..5, TC-WS-1..7). The WebSocket carrier is served; no subcommand hosts it yet. |
 | 1.0 | Names who maps an engine failure to a code (§4.5): the engine does, in `tetanus_engine::convert::turn_error` and `convert::journal_error`, which this change publishes. A surface must not match on an engine error type to derive a code of its own, because an engine error enum has no fallback variant and a surface that matches one stops compiling the day the engine names a new failure. No wire types change. Two mapping fixes travel with it: `Io` now carries the `path` the table already asked for, and a session log that refused a chunk is `Internal` rather than `ProviderError`, since nothing about the provider was wrong and retrying it cannot help. The presentation lane's own copy of the mapping in `crates/cli` is redundant from this version; removing it is that lane's change. |
 | 1.0 | Publishes two durable types the engine is about to write (§4.3.2): `llm/retry` before a policy's wait and `llm/retry-started` when the wait is over, so a surface can say a request is being retried instead of showing a stalled turn. No type changes, no version bump and nothing to recompile: `type` is a free string by §4.3, and the two are deliberately not `KnownEvent` variants, because that enum has no fallback and growing it stops a consumer's build. §4.3.2 states the two-step rule that follows from that; the presentation lane decides when to take the variants, and that step is the minor bump. TC-PROTO-16 pins the staged behaviour. |
+| 1.0 | No boundary change, and no type changes: states in section 3 that a surface matches the wire types with a fallback arm, and never matches an engine enum such as `tetanus_turn::StopReason` (issue #142). Section 4.5 said this for engine error types only, so a growable enum that is not an error was left unstated, and every added variant is a build break in the consuming lane rather than the minor change section 5 promises. `KnownEvent` is named too: an open match on it is what would let section 4.3.2's two steps become one. The rule is a promise here rather than a compiler error, because `#[non_exhaustive]` on those enums would fail the build of a surface that has not adopted it yet; the marker lands with the adoption, in its own row. |
