@@ -1,13 +1,14 @@
 //! Test Design Specification: the text rules every renderer shares.
 //!
-//! Features tested: cutting a value to a width and saying so, and folding a
-//! paragraph to a width without losing a word. Features NOT tested here: what
+//! Features tested: cutting a value to a width and saying so, folding a
+//! paragraph to a width without losing a word, and measuring and cutting a
+//! line that a theme has already painted. Features NOT tested here: what
 //! any particular renderer does with the result - the status line owns its own
 //! cases in `progress.rs`, the timeline owns its own in `render/timeline.rs`.
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{truncate, wrap, Charset};
+use tetanus_ui::{fit, truncate, visible_width, wrap, Charset};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -84,4 +85,41 @@ fn a_word_too_long_for_the_line_is_broken() {
         lines.concat().replace(' ', ""),
         "see/very/long/path/to/somewhere/deep/insidenow"
     );
+}
+
+/// TC-UI-TEXT-7: the width of a painted line.
+/// Expected: the columns a terminal draws, not the characters the string
+/// holds. Every alignment bug this lane has shipped so far came from counting
+/// the escapes, so the measurement is a case of its own.
+#[test]
+fn a_painted_line_is_measured_by_what_is_drawn() {
+    assert_eq!(visible_width("plain"), 5);
+    assert_eq!(visible_width("\u{1b}[1mbold\u{1b}[0m"), 4);
+    assert_eq!(visible_width(""), 0);
+}
+
+/// TC-UI-TEXT-8: cutting a painted line.
+/// Expected: the visible text is cut to the width, the sequences that opened
+/// the colour are kept, and a reset closes the line. A cut that dropped the
+/// reset would leave every row under it painted.
+#[test]
+fn cutting_a_painted_line_keeps_its_colour_and_closes_it() {
+    let painted = "\u{1b}[1mfour five six\u{1b}[0m";
+    let cut = fit(painted, 6, Charset::Unicode);
+
+    assert_eq!(visible_width(&cut), 6);
+    assert!(cut.starts_with("\u{1b}[1m"), "{cut:?}");
+    assert!(cut.ends_with("\u{1b}[0m"), "{cut:?}");
+    assert!(cut.contains("four …"), "{cut:?}");
+}
+
+/// TC-UI-TEXT-9: what `fit` leaves alone, and the ASCII mark.
+/// Expected: a painted line that already fits is returned character for
+/// character, so a frame that changed nothing writes the same bytes; and an
+/// ASCII terminal is cut with the mark it can draw.
+#[test]
+fn fit_leaves_a_line_that_fits_and_marks_an_ascii_cut() {
+    let painted = "\u{1b}[1mshort\u{1b}[0m";
+    assert_eq!(fit(painted, 40, Charset::Unicode), painted);
+    assert_eq!(fit("four five six", 8, Charset::Ascii), "four ...");
 }

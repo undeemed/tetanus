@@ -24,6 +24,84 @@ pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
     text.chars().take(keep).chain(mark.chars()).collect()
 }
 
+/// The columns a terminal draws `text` in, ignoring the SGR sequences a theme
+/// wrote into it.
+///
+/// A painted string is longer than it looks: `\x1b[1mai\x1b[0m` is two columns
+/// and eleven characters. Any renderer that pads, cuts or counts a line it did
+/// not compose itself has to ask this rather than `chars().count()`.
+pub fn visible_width(text: &str) -> usize {
+    let mut columns = 0;
+    let mut chars = text.chars();
+    while let Some(char) = chars.next() {
+        if char != '\u{1b}' {
+            columns += 1;
+            continue;
+        }
+        // Every escape a `Theme` writes is `ESC [ ... m`. Skipping to the `m`
+        // is enough for those and harmless for the rest.
+        for escape in chars.by_ref() {
+            if escape == 'm' {
+                break;
+            }
+        }
+    }
+    columns
+}
+
+/// Cut a possibly painted `text` to `width` columns.
+///
+/// [`truncate`] counts characters, so it would spend the width on escape
+/// sequences and cut a line that fits - or cut one in the middle of an escape
+/// and leave the terminal painted for the rest of the session. This one counts
+/// what is drawn, keeps the sequences it passes, and closes with a reset when
+/// it cut a painted line.
+pub fn fit(text: &str, width: usize, charset: Charset) -> String {
+    if visible_width(text) <= width {
+        return text.to_string();
+    }
+    let mark = match charset {
+        Charset::Unicode => "…",
+        Charset::Ascii => "...",
+    };
+    // The same rule as `truncate`: with no room for the mark, the width is
+    // still the harder promise.
+    let keep = width.saturating_sub(mark.chars().count());
+    let (keep, mark) = if width <= mark.chars().count() {
+        (width, "")
+    } else {
+        (keep, mark)
+    };
+
+    let mut out = String::new();
+    let mut columns = 0;
+    let mut painted = false;
+    let mut chars = text.chars();
+    while let Some(char) = chars.next() {
+        if char == '\u{1b}' {
+            painted = true;
+            out.push(char);
+            for escape in chars.by_ref() {
+                out.push(escape);
+                if escape == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if columns == keep {
+            break;
+        }
+        out.push(char);
+        columns += 1;
+    }
+    out.push_str(mark);
+    if painted {
+        out.push_str("\u{1b}[0m");
+    }
+    out
+}
+
 /// Fold `text` to `width` columns, breaking between words.
 ///
 /// Prose a model wrote is the one thing on the page whose length the renderer
