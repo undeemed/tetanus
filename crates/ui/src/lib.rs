@@ -57,12 +57,12 @@ pub mod view;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
-pub use edit::{Line, Typed};
+pub use edit::{read, Line, Typed};
 pub use frame::Frame;
 pub use page::{bar, Page};
 pub use progress::Progress;
 pub use screen::Screen;
-pub use terminal::{when_killed, Console, Held, Key, Keys, Killed, Tty};
+pub use terminal::{when_killed, Console, Held, Key, Keys, Killed, Tty, Typing};
 pub use text::{fit, light, or_empty, plain, tame, tame_line, truncate, visible_width, wrap};
 pub use theme::{Painted, Role, Theme};
 pub use view::{show, size, Flow, Show, Stop, View};
