@@ -384,6 +384,7 @@ The conformance cases in §6 hold these rules to their word.
 
 The cases run offline.
 Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`.
+Those that hold a carrier to §4.1 live in `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs`, which drive the same engine double, so a claim proved for one carrier and not the other is a failing case rather than an omission.
 
 | Clause | Case |
 | --- | --- |
@@ -405,6 +406,14 @@ Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; tho
 | §4.3.1 `assistant/chunk` names the step it belongs to | TC-CONTRACT-4 |
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
+| §4.1 stdio: one JSON object per line, correlated by id | TC-STDIO-1 |
+| §4.1 WebSocket: one JSON object per text frame, correlated by id | TC-WS-1 |
+| §4.1 a frame that asks nothing is answered with nothing | TC-STDIO-2, TC-WS-2 |
+| §4.1 either push arrives as a notification frame, on either carrier | TC-STDIO-3, TC-WS-3 |
+| §4.1 a binary frame is not a frame the WebSocket carrier defines | TC-WS-6 |
+| §4.2 a peer that hangs up leaves no subscription open | TC-STDIO-4, TC-WS-4 |
+| §4.4.1 the handshake is connection state, one connection at a time | TC-WS-7 |
+| §4.4.2 a call is answered while an earlier one is still running | TC-STDIO-5, TC-WS-5 |
 | §4.1 the id a server answers when it cannot read one | TC-PROTO-15 |
 
 ## 7. Design rationale
@@ -471,3 +480,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Names what `session.create` does with a journal a crash left mid-turn (§4.4.4): it appends the missing `tool/result`, `step/end` and `turn/end` closers before answering, so `last_seq` may jump and `stop_reason: "interrupted"` may appear. No type changes: `StopReason` is growable by §7.5, and the closers use payloads §4.3.1 already fixes. |
 | 1.0 | States the guarantee behind a session id (§4.7, issue #67): an id is a fact of the journal's `session/start` line and not of its file name, so every id `session.list` reports resolves for the other `session.*` calls. Wording only, and no type changes: it names which of two readings the engine is held to, and the engine defect that resolved the other way is fixed on its own. |
 | 1.0 | No boundary change. Records in §6 that §4.3.1 is now verified against the engine's own output, not only against the boundary type: `crates/engine/tests/contract_events.rs` runs a real turn and parses every event it wrote (TC-CONTRACT-1..4). A renamed durable field used to fail no test. |
+| 1.0 | No boundary change. Records in §6 that §4.1's "one contract, three carriers" is now verified against two of them: `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs` assert the same claims against the same engine double (TC-STDIO-1..5, TC-WS-1..7). The WebSocket carrier is served; no subcommand hosts it yet. |

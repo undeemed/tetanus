@@ -2,8 +2,8 @@
 //!
 //! Test design: contract section 4.1 says every carrier moves the same
 //! payloads, so this suite restates the stdio suite's claims (TC-STDIO-1..5)
-//! against a real socket. What only this carrier can be asked - framing that
-//! is not text, and two peers on one server - follows in TC-WS-6 and TC-WS-7.
+//! against a real socket, and adds the two only this carrier can be asked:
+//! framing that is not text, and two peers on one server.
 //!
 //! Behind it is `harness::Fake`, the same double the stdio suite drives, so a
 //! difference between the two suites is a difference between the carriers.
@@ -221,6 +221,79 @@ async fn a_call_is_answered_while_an_earlier_one_runs() {
     assert_eq!(second["id"], 1, "the turn's own answer follows");
     assert_eq!(second["result"]["summary"]["stop_reason"], "natural");
     peer.hangup().await;
+}
+
+/// TC-WS-6: contract section 4.1 puts one JSON object in one *text* frame, so a
+/// binary frame is not a frame this carrier defines.
+///
+/// Expected: it is refused with `id: null` rather than served or dropped.
+/// Serving it would leave two clients disagreeing about the framing; dropping
+/// it would leave this one waiting for an answer that never comes.
+#[tokio::test]
+async fn a_binary_frame_is_refused_rather_than_served() {
+    let address = host(Arc::new(Fake::default())).await;
+    let mut peer = greeted(&address).await;
+
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": method::HELLO,
+                          "params": { "protocol_version": PROTOCOL_VERSION,
+                                      "client": { "name": "t", "version": "0" } } });
+    peer.socket
+        .send(Message::Binary(request.to_string().into_bytes().into()))
+        .await
+        .expect("the peer writes");
+
+    let answer = peer.frame().await;
+    assert!(answer["id"].is_null(), "a frame with no readable id");
+    assert_eq!(answer["error"]["code"], -32600);
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("text-framed"),
+        "the refusal says what the framing is: {}",
+        answer["error"]["message"]
+    );
+    peer.hangup().await;
+}
+
+/// TC-WS-7: contract section 4.4.1 makes the handshake connection state, and
+/// one WebSocket server holds many connections at once.
+///
+/// Expected: greeting on one connection does not greet another. The second
+/// peer's first call is refused for being made before `rpc.hello`, even though
+/// the first peer is already greeted on the same server.
+#[tokio::test]
+async fn each_connection_greets_the_server_for_itself() {
+    let engine = Arc::new(Fake::default());
+    let address = host(engine.clone()).await;
+    let first = greeted(&address).await;
+
+    let mut second = connect(&address).await;
+    second
+        .send(
+            json!({ "jsonrpc": "2.0", "id": 9, "method": method::AGENT_STATUS,
+                      "params": { "session_id": "s1" } }),
+        )
+        .await;
+
+    let answer = second.frame().await;
+    assert_eq!(answer["id"], 9);
+    assert_eq!(answer["error"]["code"], -32600);
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .expect("a message")
+            .contains(method::HELLO),
+        "the refusal names the call that was owed: {}",
+        answer["error"]["message"]
+    );
+    assert_eq!(
+        engine.called(),
+        vec![method::HELLO],
+        "the second connection reached no method"
+    );
+    first.hangup().await;
+    second.hangup().await;
 }
 
 /// Wait for the engine to have been asked `call`.
