@@ -104,8 +104,8 @@ impl LlmAdapter for GateAdapter {
 struct OneProvider(Arc<dyn LlmAdapter>);
 
 impl Providers for OneProvider {
-    fn adapter(&self, provider: &str) -> Option<Arc<dyn LlmAdapter>> {
-        (provider == self.0.provider()).then(|| Arc::clone(&self.0))
+    fn all(&self) -> Vec<Arc<dyn LlmAdapter>> {
+        vec![Arc::clone(&self.0)]
     }
 }
 

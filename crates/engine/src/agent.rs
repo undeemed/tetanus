@@ -32,7 +32,15 @@ use crate::subscribe::Hub;
 /// not choose one, it asks. Adding a provider is then a boot-time change and
 /// not an engine change.
 pub trait Providers: Send + Sync {
-    fn adapter(&self, provider: &str) -> Option<Arc<dyn LlmAdapter>>;
+    /// Every adapter this build can run, in the order a catalog lists them.
+    fn all(&self) -> Vec<Arc<dyn LlmAdapter>>;
+
+    /// The adapter for one provider route.
+    fn adapter(&self, provider: &str) -> Option<Arc<dyn LlmAdapter>> {
+        self.all()
+            .into_iter()
+            .find(|adapter| adapter.provider() == provider)
+    }
 }
 
 /// The offline default: the deterministic mock adapter and nothing else, so a
@@ -40,9 +48,8 @@ pub trait Providers: Send + Sync {
 pub struct MockProviders;
 
 impl Providers for MockProviders {
-    fn adapter(&self, provider: &str) -> Option<Arc<dyn LlmAdapter>> {
-        (provider == mock::PROVIDER)
-            .then(|| Arc::new(mock::MockAdapter::new()) as Arc<dyn LlmAdapter>)
+    fn all(&self) -> Vec<Arc<dyn LlmAdapter>> {
+        vec![Arc::new(mock::MockAdapter::new())]
     }
 }
 
