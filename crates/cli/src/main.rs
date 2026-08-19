@@ -83,7 +83,10 @@ struct RunArgs {
     /// Step budget for the turn
     #[arg(long, value_name = "N", default_value_t = 8)]
     max_steps: u32,
-    /// Print the payload of every durable event next to its topic
+    /// Print the raw event sequence instead of the turn
+    #[arg(long)]
+    trace: bool,
+    /// With `--trace`, print each event's payload next to its topic
     #[arg(long)]
     verbose: bool,
 }
@@ -193,18 +196,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 }
                 return Ok(());
             }
-            // The one crossing between the engine's journal type and the
-            // contract shape the renderer reads. In M2 this is `session.events`
-            // returning `tetanus_protocol::SessionEvent`, and the map goes.
-            let events: Vec<render::stub::SessionEvent> = events
-                .into_iter()
-                .map(|event| render::stub::SessionEvent {
-                    ty: event.ty,
-                    seq: event.seq,
-                    data: event.data,
-                })
-                .collect();
-            render::timeline::render(&mut out, &events).ok();
+            render::timeline::render(&mut out, &boundary(events)).ok();
             Ok(())
         }
         Cmd::Info => {
@@ -216,6 +208,22 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             Ok(())
         }
     }
+}
+
+/// Carry journal events across to the shape the renderer reads.
+///
+/// The one crossing between an engine type and a contract type. In M2 this is
+/// `session.events` returning `tetanus_protocol::SessionEvent`, and this
+/// function goes.
+fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<render::stub::SessionEvent> {
+    events
+        .into_iter()
+        .map(|event| render::stub::SessionEvent {
+            ty: event.ty,
+            seq: event.seq,
+            data: event.data,
+        })
+        .collect()
 }
 
 /// Write a diagnostic, with an optional next step, and pick an exit status.
@@ -320,32 +328,42 @@ async fn run<W: std::io::Write>(
         .await
         .map_err(|err| report(policy, &err.to_string(), None))?;
 
-    let theme: Theme = *out.theme();
-    for (i, entry) in trace.entries().into_iter().enumerate() {
-        // An in-memory extension point has no journal seq. Leave the column
-        // blank rather than painting four spaces.
-        let seq = match entry.seq {
-            Some(seq) => format!("{:>4}", theme.paint(Role::Seq, &seq.to_string())),
-            None => " ".repeat(4),
-        };
-        let mut line = format!("{i:>4}  {seq}  {}", theme.paint(Role::Topic, &entry.topic));
-        if let Some(data) = entry.data.filter(|_| args.verbose) {
-            line.push_str(&format!("  {data}"));
+    if args.trace {
+        let theme: Theme = *out.theme();
+        for (i, entry) in trace.entries().into_iter().enumerate() {
+            // An in-memory extension point has no journal seq. Leave the
+            // column blank rather than painting four spaces.
+            let seq = match entry.seq {
+                Some(seq) => format!("{:>4}", theme.paint(Role::Seq, &seq.to_string())),
+                None => " ".repeat(4),
+            };
+            let mut line = format!("{i:>4}  {seq}  {}", theme.paint(Role::Topic, &entry.topic));
+            if let Some(data) = entry.data.filter(|_| args.verbose) {
+                line.push_str(&format!("  {data}"));
+            }
+            out.line(&line).ok();
         }
-        out.line(&line).ok();
+        out.blank().ok();
+        out.field("turn", 7, &outcome.turn.to_string()).ok();
+        out.field("steps", 7, &outcome.steps.to_string()).ok();
+        out.field("stop", 7, outcome.reason.as_str()).ok();
+        if let Some(veto) = &outcome.stop_veto {
+            out.field("veto", 7, veto).ok();
+        }
+        // A debugging view still owes the user the answer they asked for.
+        out.blank().ok();
+        out.line(&outcome.content).ok();
+    } else {
+        // Read back what was written, rather than rendering the in-memory
+        // outcome: the journal is the durable record, so the turn a user sees
+        // is the turn a replay will show them tomorrow.
+        let events = tetanus_session::replay(log.path())
+            .map_err(|err| report(policy, &err.to_string(), None))?;
+        render::timeline::render(out, &boundary(events)).ok();
     }
 
-    let stop = outcome.reason.as_str().to_string();
     out.blank().ok();
-    out.field("turn", 7, &outcome.turn.to_string()).ok();
-    out.field("steps", 7, &outcome.steps.to_string()).ok();
-    out.field("stop", 7, &stop).ok();
-    if let Some(veto) = &outcome.stop_veto {
-        out.field("veto", 7, veto).ok();
-    }
     out.field("journal", 7, &log.path().display().to_string())
         .ok();
-    out.blank().ok();
-    out.line(&outcome.content).ok();
     Ok(())
 }
