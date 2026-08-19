@@ -5,7 +5,7 @@
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
-//! - [`repair`] names the closers an interrupted journal is missing.
+//! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
 //! - [`tools`] is the model-facing capability registry.

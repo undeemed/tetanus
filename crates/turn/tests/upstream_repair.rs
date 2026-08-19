@@ -5,19 +5,22 @@
 //! `packages/core/session/tests/repair.spec.ts` as `interruptedTurnClosers`;
 //! each case names the upstream case it comes from.
 //!
-//! Approach: hand-built logs, one branch per case, so the synthesis is pinned
-//! on its own. Upstream's `surfaceOp` marker has no tetanus counterpart (a
-//! citation is carried by `sourceEventSeqs` alone), so that half of its
-//! assertion is not restated. Committing the closers to a journal is the next
-//! slice.
+//! Approach: hand-built logs, one branch per case, plus one case that commits
+//! the closers to a real journal so the seq numbering is covered too.
+//! Upstream's `surfaceOp` marker has no tetanus counterpart (a citation is
+//! carried by `sourceEventSeqs` alone), so that half of its assertion is not
+//! restated.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
 
 use serde_json::json;
-use tetanus_session::SessionEvent;
+use tetanus_core::EventBus;
+use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
 use tetanus_turn::log::topic;
-use tetanus_turn::repair::{interrupted_turn_closers, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN};
+use tetanus_turn::repair::{
+    interrupted_turn_closers, repair, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN,
+};
 
 /// TC-PORT-REPAIR-1: a healthy journal needs nothing.
 ///
@@ -269,6 +272,52 @@ fn an_orphan_tool_call_is_not_answered() {
     let closers = interrupted_turn_closers(&log);
 
     assert_eq!(types(&closers), vec![topic::STEP_END, topic::TURN_END]);
+}
+
+/// TC-PORT-REPAIR-10: applying the closers leaves one contiguous journal.
+///
+/// Upstream: the persistence contract exercises the synthesis end to end; this
+/// is the tetanus equivalent against the JSONL journal.
+///
+/// Expected: the appended closers continue the numbering, the citation
+/// survives the round trip, and repairing the repaired journal appends nothing.
+#[test]
+fn applying_the_closers_leaves_one_contiguous_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("interrupted.jsonl");
+    let log = JsonlSessionLog::create("interrupted", &path, EventBus::new()).unwrap();
+
+    log.append(topic::TURN_START, json!({ "turn": 1 })).unwrap();
+    log.append(topic::STEP_START, json!({ "turn": 1, "step": 1 }))
+        .unwrap();
+    log.append(topic::ASSISTANT_MESSAGE, asked("call-1"))
+        .unwrap();
+    log.append(
+        topic::TOOL_CALL,
+        json!({ "id": "call-1", "name": "echo", "arguments": {} }),
+    )
+    .unwrap();
+
+    let written = repair(log.as_ref()).unwrap();
+    log.flush().unwrap();
+
+    assert_eq!(
+        written.iter().map(|e| e.ty.as_str()).collect::<Vec<_>>(),
+        vec![topic::TOOL_RESULT, topic::STEP_END, topic::TURN_END]
+    );
+    assert_eq!(
+        written.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![4, 5, 6],
+        "the closers continue the journal's numbering"
+    );
+    assert_eq!(written[0].source_event_seqs, Some(vec![3]));
+
+    let replayed = tetanus_session::replay(&path).unwrap();
+    assert_eq!(replayed, log.events());
+    assert!(
+        repair(log.as_ref()).unwrap().is_empty(),
+        "a repaired journal is balanced"
+    );
 }
 
 fn types(closers: &[tetanus_turn::repair::Closer]) -> Vec<&str> {
