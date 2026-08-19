@@ -25,6 +25,7 @@
 //! readable.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
 use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason, Usage};
 use tetanus_ui::{truncate, wrap, Role, Theme, Ui};
@@ -42,6 +43,8 @@ pub struct Reader {
     /// message carries usage, because a build that does not measure tokens
     /// must not be reported as a turn that spent none.
     spent: Option<Usage>,
+    /// When the turn in progress started, from the journal's own clock.
+    started: Option<u64>,
 }
 
 impl Reader {
@@ -49,12 +52,12 @@ impl Reader {
     /// finished turn does not show.
     pub fn lines(&mut self, theme: &Theme, width: usize, event: &SessionEvent) -> Vec<String> {
         match event.parse() {
-            Some(known) => self.draw(theme, width, &known),
+            Some(known) => self.draw(theme, width, event.time, &known),
             None => vec![raw(theme, width, event)],
         }
     }
 
-    fn draw(&mut self, theme: &Theme, width: usize, event: &KnownEvent) -> Vec<String> {
+    fn draw(&mut self, theme: &Theme, width: usize, time: u64, event: &KnownEvent) -> Vec<String> {
         match event {
             KnownEvent::SessionStart { model, .. } => {
                 vec![format!("session on {}", theme.paint(Role::Accent, model))]
@@ -62,6 +65,7 @@ impl Reader {
             KnownEvent::TurnStart { turn } => vec![
                 {
                     self.spent = None;
+                    self.started = Some(time);
                     String::new()
                 },
                 theme
@@ -139,6 +143,14 @@ impl Reader {
                 let reason = theme.paint(Role::Ok, &shown);
                 let unit = if *steps == 1 { "step" } else { "steps" };
                 let mut closing = format!("turn {turn} {dot} {reason} {dot} {steps} {unit}");
+                // Under a second is not worth reporting, and reporting it
+                // would cost more than it is worth: two identical offline runs
+                // would print different bytes, which is the reproducibility
+                // TC-CLI-2 and TC-CLI-UI-4 both rest on.
+                let took = self.started.take().map(|start| time.saturating_sub(start));
+                if let Some(took) = took.filter(|took| *took >= 1_000) {
+                    closing.push_str(&format!(" {dot} {}", duration(Duration::from_millis(took))));
+                }
                 if let Some(spent) = self.spent.take() {
                     let total = spent.prompt_tokens + spent.completion_tokens;
                     let noun = if total == 1 { "token" } else { "tokens" };
@@ -155,6 +167,21 @@ impl Reader {
             KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
         }
     }
+}
+
+/// Wall clock, as a person reads it: tenths under a minute, minutes above.
+///
+/// One wording for the whole binary - the footer of a running turn and the
+/// closing line of a finished one - because two would drift. Minutes carry a
+/// zero-padded remainder where upstream writes `1m5s`: this figure sits in a
+/// footer that repaints every 80 ms, and a field that changes width under a
+/// spinner reads as a glitch.
+pub(super) fn duration(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    format!("{}m{:02}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
 }
 
 /// A token count the way upstream's conversation UI writes one: `517`,
@@ -266,6 +293,14 @@ mod tests {
     use tetanus_ui::{buffered, Charset, Theme};
 
     use super::*;
+
+    /// An event at a stated moment on the journal's clock.
+    fn timed(time: u64, ty: &str, data: serde_json::Value) -> SessionEvent {
+        SessionEvent {
+            time,
+            ..event(ty, data)
+        }
+    }
 
     fn event(ty: &str, data: serde_json::Value) -> SessionEvent {
         SessionEvent {
@@ -618,6 +653,61 @@ mod tests {
             told.contains("turn 2 \u{b7} natural \u{b7} 1 step \u{b7} 12 tokens"),
             "{told}"
         );
+    }
+
+    /// TC-CLI-TL-13: how long the turn took.
+    /// Expected: a turn whose journal spans twelve seconds says so, in the
+    /// same wording the live footer uses; a turn under a second says nothing.
+    /// Two identical offline runs have to print identical bytes - that is what
+    /// TC-CLI-2 and TC-CLI-UI-4 rest on - and a sub-second figure would differ
+    /// between them while telling a reader nothing they waited for.
+    #[test]
+    fn a_turn_that_took_time_says_how_long() {
+        let slow = [
+            timed(0, "turn/start", json!({ "turn": 1 })),
+            timed(
+                12_400,
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            ),
+        ];
+        let told = rendered(&slow, Charset::Unicode, 80);
+        assert!(
+            told.ends_with("turn 1 \u{b7} natural \u{b7} 1 step \u{b7} 12.4s\n"),
+            "{told}"
+        );
+
+        let quick = [
+            timed(0, "turn/start", json!({ "turn": 1 })),
+            timed(
+                999,
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            ),
+        ];
+        let told = rendered(&quick, Charset::Unicode, 80);
+        assert!(
+            told.ends_with("turn 1 \u{b7} natural \u{b7} 1 step\n"),
+            "{told}"
+        );
+    }
+
+    /// TC-CLI-TL-14: the wording of a duration, at both scales.
+    /// Expected: tenths of a second under a minute, and minutes with a padded
+    /// remainder above it - the same string the live footer shows, because
+    /// there is one function and both callers use it.
+    #[test]
+    fn a_duration_is_written_one_way_for_the_whole_binary() {
+        for (millis, shown) in [
+            (0, "0.0s"),
+            (1_500, "1.5s"),
+            (59_940, "59.9s"),
+            (60_000, "1m00s"),
+            (65_000, "1m05s"),
+            (3_725_000, "62m05s"),
+        ] {
+            assert_eq!(duration(Duration::from_millis(millis)), shown, "{millis}");
+        }
     }
 
     /// TC-CLI-TL-12: the compact figure, at every scale.
