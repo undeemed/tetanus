@@ -20,7 +20,8 @@ use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 use tetanus_ui::{
-    ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Theme, Tty, Ui, View,
+    ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Stop, Theme, Tty, Ui,
+    View,
 };
 
 use render::help;
@@ -100,6 +101,10 @@ enum Cmd {
         /// Print the model's thinking in full, not folded to its first line
         #[arg(long)]
         think: bool,
+        /// Read the journal on a screen of its own, scrollable, instead of
+        /// printing the whole of it into the scrollback
+        #[arg(long, conflicts_with_all = ["raw", "live", "json"])]
+        ui: bool,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long, conflicts_with_all = ["raw", "live"])]
         json: bool,
@@ -312,8 +317,15 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             live,
             speed,
             think,
+            ui,
             json,
         } => {
+            // Before the path is even looked at, for the reason `run` answers
+            // it before the journal is opened: a flag the terminal cannot
+            // honour is wrong at the moment it is read.
+            if ui && !policy.stdout_is_terminal {
+                return Err(fail(policy, &nowhere_to_draw()));
+            }
             // A path that is not there is a typo, and reading it as an
             // empty session is how a typo becomes a blank page and a zero
             // exit. The check is here, before any view is chosen, so every
@@ -356,6 +368,26 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 render::json::line(&mut out, &page)
                     .map_err(|err| report(policy, &err.to_string(), None))?;
                 return Ok(());
+            }
+            if ui {
+                return match render::browse::browse(&mut out, &path, &events, think) {
+                    // Ctrl-C is the one way out that is not "I have read it",
+                    // and §4.5 gives an interrupted command 130 - the same
+                    // status `--live` reports when it is stopped part way.
+                    Ok(Stop::Interrupted) => Err(stopped(policy)),
+                    Ok(Stop::Quit) => Ok(()),
+                    // The journal is worth more than the view of it. Whatever
+                    // the terminal did, the reader still asked to read a turn,
+                    // and by here they have their terminal back to read it in.
+                    Err(err) => {
+                        policy
+                            .stderr()
+                            .note(&format!("no full-screen view: {err}"))
+                            .ok();
+                        render::timeline::render(&mut out, &events, think).ok();
+                        Ok(())
+                    }
+                };
             }
             if !live {
                 render::timeline::render(&mut out, &events, think).ok();
@@ -678,6 +710,16 @@ fn missing_journal(path: &std::path::Path) -> RpcError {
         format!("no journal at {}", path.display()),
     )
     .with_data(serde_json::json!({ "path": path.display().to_string() }))
+}
+
+/// `--ui` where there is no screen to draw on.
+///
+/// Both views that take the flag answer it the same way, at the point the flag
+/// was read: it is a bad argument, not a failure of the work the command was
+/// asked to do, and §4.5 gives that exit 2.
+fn nowhere_to_draw() -> RpcError {
+    RpcError::new(ErrorCode::InvalidParams, "--ui needs a terminal to draw on")
+        .with_data(serde_json::json!({ "field": "ui" }))
 }
 
 /// Read a journal as text, one line at a time.
@@ -1140,9 +1182,7 @@ async fn run<W: std::io::Write>(
     // that cannot have one should say so at the point the flag was read rather
     // than after it has written a journal nobody will get to see.
     if args.ui && !policy.stdout_is_terminal {
-        let nowhere = RpcError::new(ErrorCode::InvalidParams, "--ui needs a terminal to draw on")
-            .with_data(serde_json::json!({ "field": "ui" }));
-        return Err(fail(policy, &nowhere));
+        return Err(fail(policy, &nowhere_to_draw()));
     }
 
     // Then, before the journal exists: a prompt this build will not send is
