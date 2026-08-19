@@ -5,6 +5,7 @@
 
 pub mod deepseek;
 pub mod mock;
+pub mod retry;
 
 use crate::tools::{ToolCall, ToolSchema};
 
@@ -134,6 +135,31 @@ pub enum LlmError {
     Protocol(String),
     #[error("SINK: {0}")]
     Sink(String),
+}
+
+impl LlmError {
+    /// The stable failure code a policy is written against, such as
+    /// [`retry::RetryPolicy`].
+    ///
+    /// For everything but a provider response it is the prefix this error
+    /// already prints. A provider response is classed by its status instead,
+    /// because "the service is overloaded" and "the request was malformed"
+    /// arrive the same way and are not the same failure.
+    pub fn code(&self) -> &'static str {
+        match self {
+            LlmError::MissingCredential(_) => "MISSING_CREDENTIAL",
+            LlmError::InvalidCredential(_) => "INVALID_CREDENTIAL",
+            LlmError::Transport(_) => "TRANSPORT",
+            LlmError::Provider { status, .. } => match status {
+                408 => "TIMEOUT",
+                429 => "RATE_LIMIT",
+                500..=599 => "SERVER",
+                _ => "PROVIDER",
+            },
+            LlmError::Protocol(_) => "PROTOCOL",
+            LlmError::Sink(_) => "SINK",
+        }
+    }
 }
 
 /// Where an adapter delivers chunks as they arrive. The turn engine's sink

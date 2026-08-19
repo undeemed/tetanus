@@ -23,7 +23,8 @@ find scripts -name '*.spec.ts' | wc -l                                       # 4
 ```
 
 650 spec files across 49 package families, plus 47 specs that test upstream's own build and release tooling.
-tetanus today carries 103 identified cases (`TC-*`), all of which run offline.
+tetanus's own cases each carry a `TC-*` identifier and all of them run offline.
+Their count moves with every merge, so it is not kept here as a number: it is what `grep -rhoE 'TC-[A-Z0-9-]+' crates/*/tests | sort -u | wc -l` prints.
 Case counts are not a parity metric on their own: one upstream spec file can hold thirty assertions, and tetanus asserts a whole event sequence in one case.
 They are used here only to size an area.
 
@@ -39,7 +40,7 @@ Upstream's web contract is generated from TypeScript decorators, so its client s
 | --- | ---: | --- | --- | --- |
 | `core/*` (agent-loop, session, tools, agent, system-prompt, scope) | 58 | Turn engine, session log, registry, four dispatch modes, prompt assembly as a waterfall, resume from a cold journal, interrupt at the step boundary | Fork, scoped stores, the full tool pipeline (permissions, concurrency), a queued inbox with steering and latched wakes, cancellation inside a step, a `max-tokens` stop reason, a durable `turn/end` for a failed turn, header metadata (cwd, parent session, subagent origin, delegation depth), isolation of a failing `session/event` observer from its peers, fiber disposal, containment of a throwing listener, a named section registry with prompt variables and runtime-context providers, property tests | ② (port list in section 4) |
 | `session/*`, `session-query/*` | 38 | JSONL log, session store, self-describing journal, crash repair on reopen | SQLite persistence, projections and caches, titles, telemetry, stats, checkpoints, log export and query | ② for persistence, ③ for query |
-| `llm/*` | 34 | DeepSeek adapter, streaming seam, token-free mock | Further providers, retry policy, token metering | ② |
+| `llm/*` | 34 | DeepSeek adapter, streaming seam, token-free mock, a bounded retry policy with jitter | Further providers, the executor that runs the retry policy against a live route, resolving a policy out of settings, token metering | ② |
 | `client/*` | 125 | Terminal UI, owned by the presentation lane | Not a port. See section 5 | out of scope |
 | `host/*` (apiproxy, webserver, static frontend, directory picker) | 33 | None | HTTP host and its provider proxy | ③ |
 | `subagent/*` (drivers: in-process, fork, ACP, Codex, Claude Code) | 28 | None | Subagent spawn, control and report tools | ② |
@@ -87,6 +88,7 @@ Closing a row updates it here and in section 3, in the same PR.
 | `core/session/tests/repair.spec.ts` | `crates/turn/tests/upstream_repair.rs`, `crates/engine/tests/sessions.rs` | An interrupted turn is closed, not left dangling | ported: TC-PORT-REPAIR-1..10 for the synthesis and its commit, TC-SESS-6 for repair on reopen, TC-PORT-SESS-3 for the torn tail |
 | `core/scope/tests/scope.spec.ts` | `crates/core/tests/effects.rs` | Composite teardown order, and a scope disposed more than once | part ported: TC-EFFECT-2, -3. Scope keys, scoped dispatch and the scope parent chain have no surface, so the rest of the file has nothing to restate |
 | `core/system-prompt/tests/system-prompt.spec.ts` | `crates/turn/tests/upstream_system_prompt.rs` | Assembly inputs and their order | part ported: TC-PORT-PROMPT-1..7 for section order, empty sections, waterfall composition, short-circuiting, removal on drop, and one assembly per step. The named section registry, prompt variables, runtime-context providers and complete sections have no surface |
+| `llm/llm/tests/retry-policy.spec.ts`, `llm/llm-retry/tests/retry.spec.ts` | `crates/turn/tests/upstream_retry_policy.rs` | Which failures are worth another attempt, and the wait before it | part ported: TC-PORT-RETRY-1..9 for the defaults, the bounded and unbounded modes, capped exponential backoff with symmetric jitter, and a provider-asked wait. The executor half - the attempt loop, its abort signal and the events it publishes - has no surface yet, and no policy is resolved out of settings, so upstream's validation cases have nothing to restate |
 
 Suites deliberately not ported yet, because the surface does not exist: `fork.spec.ts`, `scoped.spec.ts` (both areas), every `properties.spec.ts`, all of `core/tools`, and upstream's max-tokens cases (tetanus has no `max-tokens` stop reason).
 They are listed with their phase in section 3.
@@ -116,3 +118,4 @@ It does not mean the capability is refused: if one of these turns into a real re
 | 2026-08-19 | The `SessionStore` half of `session.spec.ts` ported as far as the surface reaches (TC-PORT-STORE-1..5). Header metadata and observer isolation added to the `core/*` gap column. |
 | 2026-08-19 | The named regressions ported as far as the surface reaches (TC-PORT-REG-1..3): publication order, tool-call identity, and request routing. Disposal and listener containment added to the `core/*` gap column. |
 | 2026-08-19 | Effects compose: `EffectScope` unwinds newest first, nests, and finishes past a panicking undo, and `Registry::start_all` rolls a failed mount back (TC-EFFECT-1..6, TC-PLUGIN-1..2). |
+| 2026-08-19 | The retry policy implemented (`crates/turn/src/llm/retry.rs`) and ported (TC-PORT-RETRY-1..9). The executor that runs it and settings resolution named as the remaining `llm/*` gap. The section 2 case count was stale at 103; it is now a command to run rather than a number to maintain. |

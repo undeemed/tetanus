@@ -163,6 +163,13 @@ Two adapters ship:
   network. Credentials are referenced by environment variable name; config never carries a literal
   key.
 
+Every failure carries a stable code (`LlmError::code`), and
+[crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs) decides from that code whether another
+attempt is worth making and how long to wait first.
+The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
+which is what keeps its cases offline and free of a clock.
+The executor that would act on the decision is phase ② ([docs/parity.md](docs/parity.md) section 4).
+
 ### 4.7 Interface view - surfaces
 
 The only surface today is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)):
