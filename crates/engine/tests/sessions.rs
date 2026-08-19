@@ -11,6 +11,7 @@ use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{Engine, SessionCreateParams, SessionEventsParams};
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::types::AgentState;
+use tetanus_session::SessionLog;
 
 fn engine() -> (HarnessEngine, TempDir) {
     let dir = TempDir::new().expect("temp dir");
@@ -72,6 +73,69 @@ async fn reopening_a_session_keeps_its_original_header() {
     assert_eq!(second.model, "first-model");
     assert_eq!(second.session_id, first.session_id);
     assert_eq!(second.last_seq, 0, "reopening appends no second header");
+}
+
+/// TC-SESS-6: reopening a journal a crash left mid-turn closes that turn
+/// first, so the session a surface resumes has no dangling tool call.
+///
+/// Upstream does the same on load (`session-persistence` `prepareCore`); the
+/// synthesis itself is pinned by `crates/turn/tests/upstream_repair.rs`.
+#[tokio::test]
+async fn reopening_an_interrupted_journal_closes_its_turn() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let path = dir.path().join("crashed.jsonl");
+
+    // A crash: the boundaries and the model's request were written, the tool
+    // result never was, and the process went away without a `turn/end`.
+    let crashed = HarnessEngine::new(config.clone());
+    crashed
+        .session_create(SessionCreateParams {
+            session_id: Some("crashed".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("create");
+    drop(crashed);
+
+    let log =
+        tetanus_session::JsonlSessionLog::create("crashed", &path, tetanus_core::EventBus::new())
+            .expect("journal");
+    log.append("turn/start", serde_json::json!({ "turn": 1 }))
+        .expect("append");
+    log.append("step/start", serde_json::json!({ "turn": 1, "step": 1 }))
+        .expect("append");
+    log.append(
+        "assistant/message",
+        serde_json::json!({
+            "content": "",
+            "tool_calls": [{ "id": "call-1", "name": "echo", "arguments": {} }],
+        }),
+    )
+    .expect("append");
+    log.flush().expect("flush");
+    drop(log);
+
+    let restarted = HarnessEngine::new(config);
+    let reopened = restarted
+        .session_create(SessionCreateParams {
+            session_id: Some("crashed".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("reopen");
+
+    let events = tetanus_session::replay(&path).expect("replay");
+    let tail: Vec<&str> = events.iter().skip(4).map(|e| e.ty.as_str()).collect();
+    assert_eq!(tail, vec!["tool/result", "step/end", "turn/end"]);
+    assert_eq!(events[6].data["stop_reason"], "interrupted");
+    assert_eq!(
+        reopened.last_seq, 6,
+        "the reopened session reports the repaired tail"
+    );
 }
 
 /// TC-SESS-3: a cold journal left behind by a restart is listed from its own

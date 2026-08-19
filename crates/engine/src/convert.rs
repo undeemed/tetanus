@@ -30,6 +30,9 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
         tetanus_turn::StopReason::PreStepRejected => wire::StopReason::PreStepRejected,
         tetanus_turn::StopReason::MaxSteps => wire::StopReason::MaxSteps,
         tetanus_turn::StopReason::Cancelled => wire::StopReason::Cancelled,
+        // Crash repair's reason has no named wire variant: it arrived after
+        // contract 1.0, and section 7.5 is what lets it travel as the fallback.
+        tetanus_turn::StopReason::Interrupted => wire::StopReason::Other("interrupted".into()),
     }
 }
 
