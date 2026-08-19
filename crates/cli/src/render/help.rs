@@ -109,6 +109,7 @@ pub fn run_epilogue(theme: &Theme) -> String {
   tetanus run \"list the files\"        ask for something else
   tetanus run - < task.md             a prompt too long to quote
   tetanus run --trace                 the raw event sequence instead
+  tetanus run --ui                    watch it on a screen of its own
   tetanus run --session /tmp/t.jsonl  choose where the journal lands
   tetanus run --max-steps 1           stop after one step
   tetanus run --think                 unfold what the model thought

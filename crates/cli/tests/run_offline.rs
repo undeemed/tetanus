@@ -1,11 +1,14 @@
 //! Test Design Specification: the headless `tetanus run` command.
 //!
 //! Features tested: an offline turn on the built-in mock adapter, the printed
-//! event sequence, the journal on disk, where the prompt is read from, and the
-//! failure message when a real provider has no credential. Features NOT tested
-//! here: the flow itself (owned by the conformance suite in `tetanus-turn`),
-//! any live provider, and resolving a prompt from plain data (owned by
-//! `prompt`, asserted in its own module).
+//! event sequence, the journal on disk, where the prompt is read from, the
+//! failure message when a real provider has no credential, and the refusal of
+//! a full-screen view with no screen to draw on. Features NOT tested here: the
+//! flow itself (owned by the conformance suite in `tetanus-turn`), any live
+//! provider, resolving a prompt from plain data (owned by `prompt`, asserted
+//! in its own module), and what a full-screen view draws once it has a
+//! terminal - a case that runs offline cannot have one, so the drawing is
+//! asserted by `tetanus_ui::Page` and the loop by `tetanus_ui::show`.
 //!
 //! Environmental needs: none. Every case runs offline.
 
@@ -256,4 +259,38 @@ fn the_two_prompt_forms_are_refused_together() {
         !dir.path().join("never.jsonl").exists(),
         "nothing was written"
     );
+}
+
+/// TC-CLI-8: a full-screen view with nowhere to draw.
+/// Expected: `InvalidParams`, exit 2 per contract §4.5, a message naming the
+/// terminal, and no journal - the refusal comes before anything is opened, so
+/// a run that will never be seen leaves nothing behind. And `--ui` with
+/// `--json` is refused by the parser, because one of them owns the screen and
+/// the other owns stdout.
+#[test]
+fn a_full_screen_view_needs_a_screen() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "--ui", "--session", "never.jsonl"],
+        None,
+    );
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("terminal"), "{stderr}");
+    assert!(
+        !dir.path().join("never.jsonl").exists(),
+        "nothing was written"
+    );
+
+    let clash = run(
+        dir.path(),
+        &["run", "--ui", "--json", "--session", "never.jsonl"],
+        None,
+    );
+
+    assert_eq!(clash.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&clash.stderr);
+    assert!(stderr.contains("--json"), "{stderr}");
 }

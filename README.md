@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
+| Surfaces | `tetanus` CLI, headless, with `tetanus run --ui` for a scrollable full-screen view of a turn; `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -140,7 +140,7 @@ Without the key the command says so and stops before any network call.
 
 | Command | What it does |
 | --- | --- |
-| `tetanus run` | Run one turn and print it as a conversation |
+| `tetanus run` | Run one turn and print it as a conversation, or watch it full-screen with `--ui` |
 | `tetanus sessions` | List the journals in a directory, newest first |
 | `tetanus replay <path>` | Read a session journal back, at once or `--live` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
@@ -151,7 +151,8 @@ Without the key the command says so and stops before any network call.
 
 `tetanus run` flags: `--adapter mock|deepseek`, `--model <id>`,
 `--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
-`--trace` (the raw sequence) with `--verbose` (each durable payload), and `--json`.
+`--trace` (the raw sequence) with `--verbose` (each durable payload), `--ui` (a screen of its own),
+and `--json`.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
@@ -161,6 +162,14 @@ The prompt is the command's own argument: `tetanus run "list the files"`.
 Either form given as `-` reads the prompt from standard input instead, so `tetanus run - < task.md` and a heredoc both become one turn, newlines and all.
 With no prompt at all the run asks `run one full turn`, which is what makes the quickstart above a bare command.
 An empty prompt is refused before the journal is opened, with the exit status [docs/interface-contract.md](docs/interface-contract.md) §4.5 gives a bad argument.
+
+`--ui` watches the turn on a screen of its own instead of in a block under the shell prompt.
+Up and Down move a row, PageUp and PageDown a screenful, Home goes to the first line of the turn and End back to following the newest, and `q`, Esc or Ctrl-C closes the view.
+The transcript is kept whole, so a turn can be read back from its first line while it is still running, and the block showing what is arriving stays at the foot of the screen however far back you have scrolled.
+The view outlives the turn: it stays up until you close it, because the moment to look back over a turn is after it has finished.
+Closing it before the turn finishes stops the turn, and a stopped turn has no result to report.
+It needs a terminal - a piped `--ui` is refused with the same exit status as any other bad argument, before a journal is opened - and it cannot be combined with `--trace` or `--json`.
+When the view comes down, the answer and the journal path are written on the ordinary screen, so what a run leaves in the scrollback is the same either way.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.
