@@ -4,15 +4,14 @@
 //! A process that dies mid-turn leaves a journal whose last turn never ended,
 //! and possibly a tool call the model asked for and no result answers. Deriving
 //! history from that log yields a dangling assistant tool call, which a
-//! provider rejects. This module names that missing tail. It is a pure
-//! function of the log: nothing here mutates a journal, so the caller decides
-//! when the closers become durable events.
+//! provider rejects. This module names that missing tail, and commits it:
+//! nothing is repaired in memory that the journal does not record.
 //!
 //! Parity: upstream `packages/core/session` `interruptedTurnClosers`, pinned by
 //! its `repair.spec.ts`.
 
 use serde_json::json;
-use tetanus_session::SessionEvent;
+use tetanus_session::{SessionError, SessionEvent, SessionLog};
 
 use crate::events::StopReason;
 use crate::log::topic;
@@ -86,6 +85,20 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<Closer> {
         sources: None,
     });
     closers
+}
+
+/// Append the closers an interrupted journal is missing, and return them as
+/// committed events. A balanced journal is left untouched.
+pub fn repair(log: &dyn SessionLog) -> Result<Vec<SessionEvent>, SessionError> {
+    let mut written = Vec::new();
+    for closer in interrupted_turn_closers(&log.events()) {
+        let event = match closer.sources {
+            Some(sources) => log.append_with_sources(closer.ty, closer.data, sources)?,
+            None => log.append(closer.ty, closer.data)?,
+        };
+        written.push(event);
+    }
+    Ok(written)
 }
 
 /// A call the model asked for inside the open step, in the order it was asked.

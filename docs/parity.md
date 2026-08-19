@@ -38,7 +38,7 @@ Upstream's web contract is generated from TypeScript decorators, so its client s
 | Upstream area | Specs | Today | Gap | Closes in |
 | --- | ---: | --- | --- | --- |
 | `core/*` (agent-loop, session, tools, agent, system-prompt, scope) | 58 | Turn engine, session log, registry, four dispatch modes | Cancel, resume, fork, scoped stores, the full tool pipeline (permissions, concurrency), a `max-tokens` stop reason, a durable `turn/end` for a failed turn, property tests | ② (port list in section 4) |
-| `session/*`, `session-query/*` | 38 | JSONL log, session store, self-describing journal, the closers an interrupted turn needs | Committing those closers on reopen, SQLite persistence, projections and caches, titles, telemetry, stats, checkpoints, log export and query | ② for persistence, ③ for query |
+| `session/*`, `session-query/*` | 38 | JSONL log, session store, self-describing journal, crash repair on reopen | SQLite persistence, projections and caches, titles, telemetry, stats, checkpoints, log export and query | ② for persistence, ③ for query |
 | `llm/*` | 34 | DeepSeek adapter, streaming seam, token-free mock | Further providers, retry policy, token metering | ② |
 | `client/*` | 125 | Terminal UI, owned by the presentation lane | Not a port. See section 5 | out of scope |
 | `host/*` (apiproxy, webserver, static frontend, directory picker) | 33 | None | HTTP host and its provider proxy | ③ |
@@ -84,7 +84,7 @@ Closing a row updates it here and in section 3, in the same PR.
 | `core/agent-loop/tests/contract-regressions.spec.ts` | `crates/turn/tests/` | The named regressions upstream keeps pinned | to do |
 | `core/session/tests/session.spec.ts`, `surface.spec.ts` | `crates/session/tests/upstream_session.rs`, `crates/turn/tests/upstream_history.rs` | The append-only log contract, replay, citations, and what derives to a message | ported: TC-PORT-SESS-1..7, TC-PORT-HIST-1..4 |
 | `core/session/tests/session.spec.ts` (`SessionStore`) | `crates/engine/tests/sessions.rs` | Session creation, listing, and the event surface | to do |
-| `core/session/tests/repair.spec.ts` | `crates/turn/tests/upstream_repair.rs` | An interrupted turn is closed, not left dangling | ported: TC-PORT-REPAIR-1..9 for the synthesis, TC-PORT-SESS-3 for the torn tail. Committing the closers on reopen is the next slice |
+| `core/session/tests/repair.spec.ts` | `crates/turn/tests/upstream_repair.rs`, `crates/engine/tests/sessions.rs` | An interrupted turn is closed, not left dangling | ported: TC-PORT-REPAIR-1..10 for the synthesis and its commit, TC-SESS-6 for repair on reopen, TC-PORT-SESS-3 for the torn tail |
 | `core/system-prompt/tests/system-prompt.spec.ts` | `crates/turn/tests/` | Assembly inputs and their order | to do |
 
 Suites deliberately not ported yet, because the surface does not exist: `fork.spec.ts`, `scoped.spec.ts` (both areas), every `properties.spec.ts`, all of `core/tools`, and upstream's max-tokens cases (tetanus has no `max-tokens` stop reason).
@@ -108,3 +108,4 @@ It does not mean the capability is refused: if one of these turns into a real re
 | 2026-08-19 | First seven cases ported from `agent-loop` into `crates/turn/tests/upstream_loop.rs`. Two gaps they exposed added to the `core/*` row. |
 | 2026-08-19 | The log contract and history derivation ported from `core/session` (TC-PORT-SESS-1..7, TC-PORT-HIST-1..4, TC-PORT-LOOP-8). Crash repair named as the remaining `repair.spec.ts` gap. |
 | 2026-08-19 | Crash-repair synthesis implemented (`crates/turn/src/repair.rs`) and ported (TC-PORT-REPAIR-1..9). |
+| 2026-08-19 | The closers are committed when a cold journal is reopened (TC-PORT-REPAIR-10, TC-SESS-6), closing the `repair.spec.ts` row. |
