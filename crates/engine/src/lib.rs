@@ -120,9 +120,10 @@ impl Engine for HarnessEngine {
 
     async fn session_events(
         &self,
-        _: SessionEventsParams,
+        params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError> {
-        Err(not_implemented(method::SESSION_EVENTS))
+        self.sessions
+            .events(&params.session_id, params.from_seq, params.limit)
     }
 
     async fn session_subscribe(
