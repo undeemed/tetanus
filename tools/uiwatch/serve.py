@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -398,12 +399,35 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
+def own_stamp(last: float) -> float:
+    """This file's timestamp, or the last one seen.
+
+    A `git checkout` takes the file away for a few milliseconds. Losing the
+    watcher to that race leaves the server up and the page frozen for good,
+    which is worse than one poll on a stale timestamp.
+    """
+    try:
+        return Path(__file__).stat().st_mtime
+    except OSError:
+        return last
+
+
 def watch() -> None:
+    try:
+        poll()
+    except Exception:
+        traceback.print_exc()
+        # keep.sh restarts a dead process, but it cannot see a dead thread,
+        # and a server with no watcher serves one page for ever.
+        os._exit(1)
+
+
+def poll() -> None:
     build_and_render()
-    seen, own = sources(), Path(__file__).stat().st_mtime
+    seen, own = sources(), own_stamp(0.0)
     while True:
         time.sleep(POLL_SECONDS)
-        if Path(__file__).stat().st_mtime != own:
+        if own_stamp(own) != own:
             # This file is part of the UI lane too. Reload it in place rather
             # than serving a page whose renderer is out of date.
             print("uiwatch: serve.py changed, restarting", flush=True)
