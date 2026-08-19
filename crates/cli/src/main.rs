@@ -80,6 +80,10 @@ enum Cmd {
         /// Directory the journals live in
         #[arg(long, value_name = "PATH", default_value = "sessions")]
         dir: PathBuf,
+        /// Move a cursor down the list on a screen of its own, instead of
+        /// printing the whole of it into the scrollback
+        #[arg(long, conflicts_with = "json")]
+        ui: bool,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -288,7 +292,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             render::catalog::tools(&mut out, &catalog).ok();
             Ok(())
         }
-        Cmd::Sessions { dir, json } => {
+        Cmd::Sessions { dir, ui, json } => {
+            // Answered before the directory is read, for the reason `run` and
+            // `replay` answer it before a journal is opened: a flag the
+            // terminal cannot honour is wrong at the moment it is read.
+            if ui && !policy.stdout_is_terminal {
+                return Err(fail(policy, &nowhere_to_draw()));
+            }
             // A listing is the store's own view of a directory: what ids it
             // holds, and which of them a turn is running on. No surface can
             // assemble that from a path, which is why this is the first
@@ -307,6 +317,22 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             if json {
                 return render::json::line(&mut out, &list)
                     .map_err(|err| report(policy, &err.to_string(), None));
+            }
+            if ui {
+                return match render::pick::pick(&mut out, &list) {
+                    Ok(Stop::Interrupted) => Err(stopped(policy)),
+                    Ok(Stop::Quit) => Ok(()),
+                    // The list is worth more than the view of it, and by here
+                    // the terminal has been given back to print it on.
+                    Err(err) => {
+                        policy
+                            .stderr()
+                            .note(&format!("no full-screen view: {err}"))
+                            .ok();
+                        render::sessions::render(&mut out, &list).ok();
+                        Ok(())
+                    }
+                };
             }
             render::sessions::render(&mut out, &list).ok();
             Ok(())
