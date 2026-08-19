@@ -65,7 +65,10 @@ crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```
 
 `tetanus-core` depends on nothing in the workspace.
-`tetanus-config` is standalone and, in Phase ①, is reached only by the CLI.
+`tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.
+It holds one document per layer rather than one folded map, because a layer that is re-read can
+*drop* a key and the value under it has to come back; a folded map has nothing to come back to
+([crates/config/src/lib.rs](crates/config/src/lib.rs)).
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
@@ -237,7 +240,7 @@ not protocol-level.
 ## 7. Not built yet
 
 Layered config recompose at run time, reversible effects beyond registration handles, the full tool
-pipeline (permissions, concurrency, cancellation), further adapters, MCP, sandboxing, an `Engine`
-implementation and the carriers that serve it, the web UI, and the WASM plugin host.
+pipeline (permissions, concurrency, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM
+plugin host.
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.

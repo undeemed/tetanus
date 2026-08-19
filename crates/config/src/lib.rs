@@ -1,9 +1,21 @@
 //! Layered config: defaults < file < env < CLI flags, with full
 //! provenance (every resolved key remembers which layer set it).
+//!
+//! Each layer is kept as its own document instead of being folded into one
+//! map. The reason is recompose: a settings file a user edits at run time can
+//! *drop* a key, and the value under it has to come back. A folded map has
+//! nothing to come back to.
 
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Where a resolved value came from.
+///
+/// The variants are declared lowest precedence first, and the derived [`Ord`]
+/// is that precedence: of two layers that set the same key, the greater one
+/// wins.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Layer {
     Default,
     File,
@@ -17,34 +29,68 @@ pub struct Resolved {
     pub layer: Layer,
 }
 
+/// One layer's contribution: dotted keys to values, flat.
+pub type Document = BTreeMap<String, serde_json::Value>;
+
 #[derive(Default, Debug)]
 pub struct Config {
-    entries: BTreeMap<String, Resolved>,
+    layers: BTreeMap<Layer, Document>,
+    /// Derived from `layers` and kept in step with it by [`Config::resolve`].
+    /// Held rather than recomputed per read so [`Config::provenance`] can hand
+    /// out references into it.
+    resolved: BTreeMap<String, Resolved>,
 }
 
 impl Config {
+    /// Set one key on one layer. A lower layer never displaces a higher one,
+    /// because what a read returns is resolved from the layers, not from the
+    /// order the calls arrived in.
     pub fn set(&mut self, key: &str, value: serde_json::Value, layer: Layer) {
-        match self.entries.get(key) {
-            Some(existing) if layer_rank(existing.layer) > layer_rank(layer) => {}
-            _ => {
-                self.entries
-                    .insert(key.to_string(), Resolved { value, layer });
-            }
+        self.layers
+            .entry(layer)
+            .or_default()
+            .insert(key.to_string(), value);
+        self.resolve(key);
+    }
+
+    /// Replace a whole layer with `document`.
+    ///
+    /// A key the layer used to set and no longer does falls back to the layer
+    /// below it, which is what makes re-reading an edited settings file
+    /// correct rather than additive.
+    pub fn load(&mut self, layer: Layer, document: Document) {
+        let mut touched: Vec<String> = document.keys().cloned().collect();
+        if let Some(previous) = self.layers.insert(layer, document) {
+            touched.extend(previous.into_keys());
+        }
+        for key in touched {
+            self.resolve(&key);
         }
     }
-    pub fn get(&self, key: &str) -> Option<&Resolved> {
-        self.entries.get(key)
-    }
-    pub fn provenance(&self) -> impl Iterator<Item = (&String, &Resolved)> {
-        self.entries.iter()
-    }
-}
 
-fn layer_rank(l: Layer) -> u8 {
-    match l {
-        Layer::Default => 0,
-        Layer::File => 1,
-        Layer::Env => 2,
-        Layer::Flag => 3,
+    pub fn get(&self, key: &str) -> Option<&Resolved> {
+        self.resolved.get(key)
+    }
+
+    pub fn provenance(&self) -> impl Iterator<Item = (&String, &Resolved)> {
+        self.resolved.iter()
+    }
+
+    /// Recompute one key from the layers, highest precedence first.
+    fn resolve(&mut self, key: &str) {
+        let winner = self.layers.iter().rev().find_map(|(layer, document)| {
+            document.get(key).map(|value| Resolved {
+                value: value.clone(),
+                layer: *layer,
+            })
+        });
+        match winner {
+            Some(resolved) => {
+                self.resolved.insert(key.to_string(), resolved);
+            }
+            None => {
+                self.resolved.remove(key);
+            }
+        }
     }
 }
