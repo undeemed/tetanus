@@ -1,4 +1,5 @@
-//! Test Design Specification: the binary's colour policy and diagnostics.
+//! Test Design Specification: the binary's colour policy, progress line and
+//! diagnostics.
 //!
 //! Features tested: that the resolved palette reaches clap's own rendering as
 //! well as the lines this crate writes itself; that a colour-hostile
@@ -171,4 +172,24 @@ fn an_unknown_colour_value_is_a_usage_error() {
     for value in ["auto", "always", "never"] {
         assert!(err.contains(value), "`{value}` missing from:\n{err}");
     }
+}
+
+/// TC-CLI-UI-7: the progress line on a piped run.
+/// Expected: the phase reaches stderr and never stdout, so the byte-identical
+/// invariant above still holds; and a pipe gets a whole line, with no spinner
+/// frame and no carriage return.
+#[test]
+fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(dir.path(), &["run", "--session", "j.jsonl"], &[]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("running the turn on"), "no progress: {err:?}");
+    assert!(!err.contains('\r'), "a pipe got repainted frames: {err:?}");
+    assert!(!err.contains(ESC), "a pipe got escape codes: {err:?}");
+    assert!(
+        !stdout(&out).contains("running the turn"),
+        "progress leaked onto stdout"
+    );
 }
