@@ -21,7 +21,7 @@ use std::time::Duration;
 use tetanus_protocol::types::{Chunk, KnownEvent, SessionEvent};
 use tetanus_ui::{progress, Role, Theme};
 
-use super::timeline::{said, Reader};
+use super::timeline::{duration, said, Reader};
 
 /// Rows the block may occupy. A block taller than the terminal scrolls its own
 /// top away and the next frame lands on the wrong row, so the answer shows its
@@ -125,7 +125,7 @@ impl Live {
     fn footer(&self, elapsed: Duration) -> String {
         let glyph = progress::frame(self.theme.charset(), self.tick);
         let dot = self.theme.glyph("·", "-");
-        let text = format!("{} {dot} {}", self.phase, seconds(elapsed));
+        let text = format!("{} {dot} {}", self.phase, duration(elapsed));
         let spin = self.theme.paint(Role::Accent, glyph);
         let text = self.theme.paint(Role::Muted, &text);
         format!("  {spin} {text}")
@@ -153,15 +153,6 @@ impl Live {
             _ => self.phase.clone(),
         }
     }
-}
-
-/// Wall clock, as a person reads it: tenths under a minute, minutes above.
-fn seconds(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs_f64();
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    format!("{}m{:02}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
 }
 
 /// Test Design Specification: the live view.
