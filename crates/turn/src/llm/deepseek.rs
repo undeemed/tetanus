@@ -14,7 +14,7 @@ use std::sync::Arc;
 use futures_util::{Stream, StreamExt};
 
 use crate::llm::{
-    ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse, StreamChunk, Usage,
+    ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse, Role, StreamChunk, Usage,
 };
 use crate::tools::ToolCall;
 
@@ -22,6 +22,16 @@ pub const PROVIDER: &str = "deepseek-official";
 pub const PUBLIC_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEFAULT_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const BASE_URL_ENV: &str = "DEEPSEEK_BASE_URL";
+
+/// What a tool message carries when the tool produced no output. Blank content
+/// reads to the model as a tool that said nothing, which it cannot tell apart
+/// from a tool that never ran.
+pub const EMPTY_TOOL_RESULT: &str = "(no output)";
+
+/// The finish reason a stream that never states one is reported as. The
+/// provider omits the field on some plain completions, and an empty string
+/// downstream reads as a turn that ended for no stated reason.
+pub const DEFAULT_FINISH_REASON: &str = "stop";
 
 #[derive(Debug, Clone)]
 pub struct DeepSeekConfig {
@@ -145,9 +155,13 @@ pub fn wire_request(request: &ModelRequest, adapter_max_tokens: Option<u32>) -> 
         .messages
         .iter()
         .map(|message| {
+            let content = match (&message.role, message.content.as_str()) {
+                (Role::Tool, "") => EMPTY_TOOL_RESULT,
+                _ => message.content.as_str(),
+            };
             let mut wire = serde_json::json!({
                 "role": message.role.as_str(),
-                "content": message.content,
+                "content": content,
             });
             let object = wire.as_object_mut().expect("object literal");
             if let Some(id) = &message.tool_call_id {
@@ -341,7 +355,11 @@ impl StreamDecoder {
             content: self.content,
             reasoning: self.reasoning,
             tool_calls,
-            finish_reason: self.finish_reason,
+            finish_reason: if self.finish_reason.is_empty() {
+                DEFAULT_FINISH_REASON.to_string()
+            } else {
+                self.finish_reason
+            },
             usage: self.usage,
         };
         (chunks, response)
