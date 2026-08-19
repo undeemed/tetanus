@@ -28,10 +28,22 @@ pub struct SystemPrompt {
 }
 
 impl SystemPrompt {
+    /// The model-facing text: every section that has any, in order, separated
+    /// by a blank line.
+    ///
+    /// An empty section contributes nothing at all. A deployment that
+    /// configures no persona does not pay a blank gap for the section it left
+    /// unfilled, and an assembly whose sections are all empty renders as the
+    /// empty string, which is what keeps the system message off the request
+    /// entirely.
+    ///
+    /// Parity: upstream `renderPrompt`, `packages/core/system-prompt/src`,
+    /// "drop empty sections, and join the rest with blank lines".
     pub fn text(&self) -> String {
         self.sections
             .iter()
             .map(|s| s.text.as_str())
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
