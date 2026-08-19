@@ -3,10 +3,10 @@
 //!
 //! Upstream keeps this registry on its `systemPrompt` service. A section has a
 //! unique name, an explicit order, and text that is either fixed or produced
-//! for each assembly. tetanus keeps that shape. What upstream also keeps there
-//! and tetanus has no surface for - scopes, prompt variables, runtime-context
-//! providers, and a "complete" section that replaces the assembly - stays a
-//! row in `docs/parity.md`.
+//! for each assembly, and one section may declare itself the whole prompt.
+//! tetanus keeps that shape. What upstream also keeps there and tetanus has no
+//! surface for - scopes, prompt variables and runtime-context providers - stays
+//! a row in `docs/parity.md`.
 //!
 //! The registry is the assembly's input, not its decision. It produces the
 //! ordered sections the engine hands to the `system-prompt/assemble`
@@ -34,6 +34,8 @@ pub enum PromptError {
     Duplicate(String),
     #[error("prompt section \"{0}\" is the engine's own slot, filled from the turn config")]
     Reserved(String),
+    #[error("prompt section \"{refused}\" cannot be the whole prompt: \"{held}\" already is")]
+    Complete { held: String, refused: String },
 }
 
 /// What one assembly tells a section provider about itself.
@@ -86,6 +88,9 @@ pub struct Section {
     /// the order it wrote them.
     pub order: i32,
     pub text: SectionText,
+    /// Set by [`Section::complete`]. Private, so the only way to claim the
+    /// whole prompt is to say so in words at the construction site.
+    complete: bool,
 }
 
 impl Section {
@@ -94,7 +99,21 @@ impl Section {
             id: id.into(),
             order,
             text: text.into(),
+            complete: false,
         }
+    }
+
+    /// This section is the whole prompt: what the model reads is its text and
+    /// nothing else.
+    ///
+    /// The assembly still runs in full, so tool schemas and every other
+    /// contribution still resolve and every listener still sees them; the
+    /// engine restores this section as the sole prompt section afterwards.
+    /// A registry holds one such section at a time, so the second registration
+    /// is refused rather than silently shadowing the first.
+    pub fn complete(mut self) -> Self {
+        self.complete = true;
+        self
     }
 }
 
@@ -103,6 +122,7 @@ struct Entry {
     id: String,
     order: i32,
     text: SectionText,
+    complete: bool,
 }
 
 #[derive(Default)]
@@ -128,6 +148,15 @@ impl PromptRegistry {
     pub fn section(self: &Arc<Self>, section: Section) -> Result<EffectHandle, PromptError> {
         if section.id == BASE_SECTION {
             return Err(PromptError::Reserved(section.id));
+        }
+        if section.complete {
+            let held = self.complete_id();
+            if let Some(held) = held {
+                return Err(PromptError::Complete {
+                    held,
+                    refused: section.id,
+                });
+            }
         }
         let id = section.id.clone();
         self.insert(section).ok_or(PromptError::Duplicate(id))
@@ -164,6 +193,21 @@ impl PromptRegistry {
             .collect()
     }
 
+    /// The name of the section that is the whole prompt, if one is registered.
+    ///
+    /// The engine asks before it assembles, and keeps that section aside: a
+    /// complete prompt is restored after `system-prompt/assemble` has run, so
+    /// a listener sees the whole assembly but cannot edit what the model
+    /// finally reads.
+    pub fn complete_id(&self) -> Option<String> {
+        let inner = self.inner.lock().expect("prompt registry");
+        inner
+            .entries
+            .iter()
+            .find(|e| e.complete)
+            .map(|e| e.id.clone())
+    }
+
     fn insert(self: &Arc<Self>, section: Section) -> Option<EffectHandle> {
         let mut inner = self.inner.lock().expect("prompt registry");
         if inner.entries.iter().any(|e| e.id == section.id) {
@@ -176,6 +220,7 @@ impl PromptRegistry {
             id: section.id,
             order: section.order,
             text: section.text,
+            complete: section.complete,
         });
         drop(inner);
 

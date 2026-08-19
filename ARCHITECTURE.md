@@ -144,6 +144,11 @@ starts from. A section has a unique name, an explicit order, and text that is ei
 for at each assembly; registration returns an effect handle, so a plugin's prompt text dies with the
 plugin. The engine fills one reserved slot, `base`, from `TurnConfig::base_prompt`, and the
 `system-prompt/assemble` waterfall still has the last word over what the registry produced.
+The one exception is a section registered as the whole prompt (`Section::complete`): the assembly
+still runs in full, so tool schemas and every other contribution still resolve and every listener
+still sees them, but the engine restores that section afterwards as the sole prompt section. A
+registry holds one at a time, so the second registration is refused rather than shadowing the
+first.
 
 ### 4.5 Information view - the session log
 
