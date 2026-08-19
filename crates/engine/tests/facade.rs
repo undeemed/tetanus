@@ -3,11 +3,25 @@
 //!
 //! Test design: each case names the contract clause it fixes, and runs offline.
 
+use std::sync::Arc;
+
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
-use tetanus_protocol::methods::{Engine, HelloParams, PeerInfo};
+use tetanus_protocol::methods::{
+    AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams, PeerInfo,
+    SessionCreateParams, SessionEventPush, SessionEventsParams, SessionRef, SessionSubscribeParams,
+    SessionUnsubscribeParams,
+};
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::PROTOCOL_VERSION;
+
+/// A sink for a case that is asserting a call answers, not what it pushes.
+struct Silent;
+
+impl EventSink for Silent {
+    fn session_event(&self, _: SessionEventPush) {}
+    fn agent_status(&self, _: AgentStatusPush) {}
+}
 
 fn engine() -> (HarnessEngine, TempDir) {
     let dir = TempDir::new().expect("temp dir");
@@ -57,21 +71,60 @@ async fn hello_refuses_a_version_it_cannot_parse() {
     assert_eq!(error.kind(), Some(ErrorCode::UnsupportedProtocolVersion));
 }
 
-/// TC-ENG-3: every call this build does not serve answers `NotImplemented`
-/// naming itself, so a surface can tell "not yet" from "went wrong".
+/// TC-ENG-3: every call in the contract's method table is served by this
+/// build, so no caller meets `NotImplemented`. This supersedes the earlier
+/// form of the case, which asserted the "not yet" answer of the three
+/// read-only calls now that they are served.
 #[tokio::test]
-async fn unserved_calls_name_themselves() {
+async fn every_call_in_the_table_is_served() {
     let (engine, _dir) = engine();
-    let error = engine.catalog_tools().await.expect_err("not served yet");
-    assert_eq!(error.kind(), Some(ErrorCode::NotImplemented));
-    assert_eq!(
-        error.data.expect("data")["method"],
-        serde_json::json!("catalog.tools")
-    );
+    engine.hello(hello(PROTOCOL_VERSION)).await.expect("hello");
 
-    let error = engine.config_dump().await.expect_err("not served yet");
-    assert_eq!(
-        error.data.expect("data")["method"],
-        serde_json::json!("config.dump")
-    );
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("session.create");
+    let of = || SessionRef {
+        session_id: info.session_id.clone(),
+    };
+
+    engine.session_list().await.expect("session.list");
+    engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id.clone(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("session.events");
+    let subscribed = engine
+        .session_subscribe(
+            SessionSubscribeParams {
+                session_id: info.session_id.clone(),
+                from_seq: None,
+            },
+            Arc::new(Silent),
+        )
+        .await
+        .expect("session.subscribe");
+    engine
+        .session_unsubscribe(SessionUnsubscribeParams {
+            subscription_id: subscribed.subscription_id,
+        })
+        .await
+        .expect("session.unsubscribe");
+
+    engine
+        .agent_prompt(AgentPromptParams {
+            session_id: info.session_id.clone(),
+            content: "hello".into(),
+        })
+        .await
+        .expect("agent.prompt");
+    engine.agent_status(of()).await.expect("agent.status");
+    engine.agent_interrupt(of()).await.expect("agent.interrupt");
+
+    engine.catalog_tools().await.expect("catalog.tools");
+    engine.catalog_models().await.expect("catalog.models");
+    engine.config_dump().await.expect("config.dump");
 }

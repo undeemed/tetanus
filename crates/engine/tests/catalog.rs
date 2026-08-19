@@ -1,5 +1,5 @@
-//! Conformance for the read-only calls. This file starts with
-//! `catalog.models`; `catalog.tools` and `config.dump` join it as they land.
+//! Conformance for the read-only calls: `catalog.models`, `catalog.tools` and
+//! `config.dump`.
 //!
 //! Test design: these calls exist so a surface never has to work out for
 //! itself what the engine is running. Each case therefore asserts the answer
@@ -12,10 +12,14 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tetanus_config::{Config, Layer};
 use tetanus_engine::agent::Providers;
+use tetanus_engine::catalog::key;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::Engine;
+use tetanus_protocol::types::{ConfigEntry, ConfigLayer};
 use tetanus_turn::llm::{ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse};
+use tetanus_turn::tools::{EchoTool, Tool, ToolRegistry};
 
 /// An env var no environment sets, and one every environment sets.
 const ABSENT: &str = "TETANUS_TEST_CREDENTIAL_THAT_IS_NEVER_SET";
@@ -144,4 +148,146 @@ async fn the_default_build_lists_the_offline_provider() {
         "the offline adapter needs no key"
     );
     assert!(listed[0].available);
+}
+
+/// TC-CAT-3: `catalog.tools` reports every tool the engine registered, with
+/// the schema the model is offered. A help surface and the model therefore
+/// read one list, and a tool cannot appear in help without being callable.
+#[tokio::test]
+async fn the_tool_catalog_is_the_registry_the_turn_runs() {
+    let registry = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
+    let (engine, _dir) = engine(EngineConfig {
+        tools: Arc::clone(&registry),
+        ..EngineConfig::default()
+    });
+
+    let listed = engine.catalog_tools().await.expect("tools").tools;
+    let mut expected = registry.schemas();
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(listed.len(), expected.len());
+    for (descriptor, schema) in listed.iter().zip(&expected) {
+        assert_eq!(descriptor.name, schema.name);
+        assert_eq!(descriptor.description, schema.description);
+        assert_eq!(descriptor.parameters, schema.parameters);
+    }
+
+    let echo = EchoTool.schema();
+    assert_eq!(listed[0].name, echo.name);
+    assert_eq!(
+        listed[0].parameters, echo.parameters,
+        "the catalog carries the JSON Schema, not a summary of it"
+    );
+}
+
+/// TC-CAT-4: an empty registry lists nothing. A build with no tools is a build
+/// with no tools: not an error, and not a default list.
+#[tokio::test]
+async fn a_build_with_no_tools_lists_none() {
+    let (engine, _dir) = engine(EngineConfig {
+        tools: Arc::new(ToolRegistry::new()),
+        ..EngineConfig::default()
+    });
+    assert!(engine
+        .catalog_tools()
+        .await
+        .expect("tools")
+        .tools
+        .is_empty());
+}
+
+fn entry(entries: &[ConfigEntry], key: &str) -> ConfigEntry {
+    entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| panic!("`{key}` is missing from the dump"))
+        .clone()
+}
+
+/// TC-CAT-5: `config.dump` reports the value the engine will actually use, and
+/// the layer the caller resolved it from. A key the caller never named is
+/// reported at the `default` layer rather than omitted, so a config surface
+/// shows the whole effective configuration.
+#[tokio::test]
+async fn the_dump_reports_effective_values_with_their_provenance() {
+    let mut resolved = Config::default();
+    resolved.set(key::PROVIDER, serde_json::json!("mock"), Layer::Flag);
+    resolved.set(key::MAX_STEPS, serde_json::json!(3), Layer::File);
+
+    let dir = TempDir::new().expect("temp dir");
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        default_provider: "mock".into(),
+        default_model: "mock-echo-1".into(),
+        max_steps: 3,
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let entries = engine.config_dump().await.expect("dump").entries;
+    assert_eq!(
+        entry(&entries, key::PROVIDER).value,
+        serde_json::json!("mock")
+    );
+    assert_eq!(entry(&entries, key::PROVIDER).layer, ConfigLayer::Flag);
+    assert_eq!(entry(&entries, key::MAX_STEPS).value, serde_json::json!(3));
+    assert_eq!(entry(&entries, key::MAX_STEPS).layer, ConfigLayer::File);
+
+    assert_eq!(
+        entry(&entries, key::MODEL).value,
+        serde_json::json!("mock-echo-1")
+    );
+    assert_eq!(
+        entry(&entries, key::MODEL).layer,
+        ConfigLayer::Default,
+        "a key the caller never named came from the default"
+    );
+    assert_eq!(
+        entry(&entries, key::SESSIONS_ROOT).value,
+        serde_json::json!(dir.path().display().to_string()),
+        "the journal root is where journals are actually written"
+    );
+
+    let keys: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(keys, sorted, "entries are ordered by key");
+}
+
+/// TC-CAT-6: where the caller's resolved value and the engine's differ, the
+/// dump reports the engine's. A surface that printed the caller's would tell
+/// the user a turn will use a model it will not use. A key the engine does not
+/// settle passes through with the caller's own value and layer.
+#[tokio::test]
+async fn the_dump_reports_the_engine_not_the_callers_copy() {
+    let mut resolved = Config::default();
+    resolved.set(key::MODEL, serde_json::json!("stale-model"), Layer::Env);
+    resolved.set(
+        key::SESSIONS_ROOT,
+        serde_json::json!("/nowhere"),
+        Layer::Env,
+    );
+    resolved.set("ui.theme", serde_json::json!("dark"), Layer::File);
+
+    let (engine, dir) = engine(EngineConfig {
+        default_model: "running-model".into(),
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let entries = engine.config_dump().await.expect("dump").entries;
+    assert_eq!(
+        entry(&entries, key::MODEL).value,
+        serde_json::json!("running-model")
+    );
+    assert_eq!(
+        entry(&entries, key::MODEL).layer,
+        ConfigLayer::Env,
+        "the value is the engine's, the provenance is the caller's"
+    );
+    assert_eq!(
+        entry(&entries, key::SESSIONS_ROOT).value,
+        serde_json::json!(dir.path().display().to_string())
+    );
+    assert_eq!(entry(&entries, "ui.theme").value, serde_json::json!("dark"));
+    assert_eq!(entry(&entries, "ui.theme").layer, ConfigLayer::File);
 }

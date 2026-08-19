@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tetanus_protocol::methods::{
-    capability, method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult,
-    ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
-    SessionCreateParams, SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
+    capability, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult, ConfigDumpResult,
+    Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo, SessionCreateParams,
+    SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
     SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
@@ -30,7 +30,6 @@ use tetanus_turn::tools::{EchoTool, ToolRegistry};
 
 use crate::agent::{MockProviders, Providers, Runtime};
 use crate::catalog::Catalogs;
-use crate::convert::not_implemented;
 use crate::session::{SessionDefaults, SessionStore};
 use crate::subscribe::Hub;
 
@@ -48,6 +47,10 @@ pub struct EngineConfig {
     pub providers: Arc<dyn Providers>,
     /// The tools every turn on this engine can call.
     pub tools: Arc<ToolRegistry>,
+    /// The layered config the caller resolved. The engine does not read it to
+    /// configure itself - the fields above are already resolved - it reports
+    /// its provenance, so `config.dump` can say where a value came from.
+    pub resolved: Arc<tetanus_config::Config>,
 }
 
 impl Default for EngineConfig {
@@ -61,6 +64,7 @@ impl Default for EngineConfig {
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
             tools: Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
+            resolved: Arc::new(tetanus_config::Config::default()),
         }
     }
 }
@@ -84,8 +88,19 @@ impl HarnessEngine {
                 },
             )),
             hub: Arc::new(Hub::new()),
-            runtime: Arc::new(Runtime::new(Arc::clone(&config.providers), config.tools)),
-            catalogs: Catalogs::new(config.providers),
+            runtime: Arc::new(Runtime::new(
+                Arc::clone(&config.providers),
+                Arc::clone(&config.tools),
+            )),
+            catalogs: Catalogs::new(
+                config.providers,
+                config.tools,
+                config.resolved,
+                &config.sessions_root,
+                &config.default_provider,
+                &config.default_model,
+                config.max_steps,
+            ),
         }
     }
 
@@ -179,7 +194,7 @@ impl Engine for HarnessEngine {
     }
 
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError> {
-        Err(not_implemented(method::CATALOG_TOOLS))
+        Ok(self.catalogs.tools())
     }
 
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError> {
@@ -187,6 +202,6 @@ impl Engine for HarnessEngine {
     }
 
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError> {
-        Err(not_implemented(method::CONFIG_DUMP))
+        Ok(self.catalogs.dump())
     }
 }

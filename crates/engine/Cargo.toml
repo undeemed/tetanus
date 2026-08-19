@@ -11,6 +11,7 @@ serde_json.workspace = true
 async-trait.workspace = true
 tetanus-protocol = { path = "../protocol" }
 tetanus-core = { path = "../core" }
+tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 
