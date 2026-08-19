@@ -13,3 +13,10 @@ async-trait.workspace = true
 tracing.workspace = true
 tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+async-trait = { workspace = true }

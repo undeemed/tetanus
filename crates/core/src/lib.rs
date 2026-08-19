@@ -1,11 +1,15 @@
-//! Core runtime: plugin registry, typed event bus, effect handles.
-//! Everything the deepseek-harness does, but with compile-time-checked
-//! plugin contracts instead of runtime duck-typing.
+//! Core runtime: plugin registry, typed service registry, typed event bus,
+//! and RAII effect handles. Everything the deepseek-harness does, but with
+//! compile-time-checked contracts instead of runtime duck-typing.
 
-pub mod registry;
-pub mod events;
+pub mod context;
 pub mod effects;
+pub mod events;
+pub mod registry;
+pub mod services;
 
-pub use registry::{Plugin, PluginId, Registry};
-pub use events::{Event, EventBus};
-pub use effects::EffectHandle;
+pub use context::Context;
+pub use effects::{EffectError, EffectHandle};
+pub use events::{BoxFuture, DispatchMode, Event, EventBus, Next, Terminal};
+pub use registry::{Plugin, PluginId, Registry, RegistryError};
+pub use services::{Service, ServiceError, Services};
