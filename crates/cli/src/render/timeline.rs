@@ -1,9 +1,8 @@
 //! A turn's events as something a person reads.
 //!
-//! The input is a stream of contract events (`super::stub`, and
-//! `tetanus-protocol` from M2); the output is lines. Nothing here knows where
-//! the events came from, so the same renderer serves a journal on disk, an
-//! in-process turn, and a WebSocket subscription.
+//! The input is a stream of `tetanus-protocol` events; the output is lines.
+//! Nothing here knows where the events came from, so the same renderer serves
+//! a journal on disk, an in-process turn, and a WebSocket subscription.
 //!
 //! Two rendering decisions worth naming.
 //!
@@ -20,9 +19,8 @@
 
 use std::io::{self, Write};
 
+use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason};
 use tetanus_ui::{truncate, wrap, Role, Ui};
-
-use super::stub::{KnownEvent, SessionEvent};
 
 /// Where a content line starts: two of indent, a five-column label, two more.
 const LABEL: usize = 5;
@@ -46,7 +44,7 @@ fn draw<W: Write>(
     open_call: &mut Option<String>,
 ) -> io::Result<()> {
     match event {
-        KnownEvent::SessionStart { model } => {
+        KnownEvent::SessionStart { model, .. } => {
             let model = ui.paint(Role::Accent, model).to_string();
             ui.line(&format!("session on {model}"))
         }
@@ -58,7 +56,9 @@ fn draw<W: Write>(
             ui.line(&step)
         }
         KnownEvent::UserMessage { content } => said(ui, "you", Role::Accent, content),
-        KnownEvent::AssistantMessage { content, reasoning } => {
+        KnownEvent::AssistantMessage {
+            content, reasoning, ..
+        } => {
             if !reasoning.is_empty() {
                 said(ui, "think", Role::Muted, reasoning)?;
             }
@@ -98,7 +98,7 @@ fn draw<W: Write>(
             stop_veto,
         } => {
             let dot = ui.theme().glyph("·", "-");
-            let reason = ui.paint(Role::Ok, stop_reason.as_str()).to_string();
+            let reason = ui.paint(Role::Ok, &stopped(stop_reason)).to_string();
             ui.blank()?;
             let unit = if *steps == 1 { "step" } else { "steps" };
             ui.line(&format!("turn {turn} {dot} {reason} {dot} {steps} {unit}"))?;
@@ -110,6 +110,23 @@ fn draw<W: Write>(
         // The streaming surface, and the frames of the turn. A finished turn
         // reads better without them.
         KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Ok(()),
+    }
+}
+
+/// Why the turn closed, in a reader's words rather than the wire's.
+///
+/// The contract carries the fact; how it reads is this lane's to choose, which
+/// is why `StopReason` has no such method on it. A reason added after this
+/// build was compiled arrives as `Other` and is shown as the engine spelled
+/// it - rendering the fallback is what lets the engine add one in a minor
+/// version (contract §2).
+fn stopped(reason: &StopReason) -> String {
+    match reason {
+        StopReason::Natural => "natural".into(),
+        StopReason::PreStepRejected => "rejected before the step".into(),
+        StopReason::MaxSteps => "step budget spent".into(),
+        StopReason::Cancelled => "cancelled".into(),
+        StopReason::Other(reason) => reason.clone(),
     }
 }
 
@@ -181,7 +198,9 @@ mod tests {
         SessionEvent {
             ty: ty.into(),
             seq: 0,
+            time: 0,
             data,
+            source_event_seqs: None,
         }
     }
 
@@ -380,6 +399,33 @@ mod tests {
             rendered(&events, Charset::Unicode, 80),
             "colour moved the text"
         );
+    }
+
+    /// TC-CLI-TL-8: every stop reason, including one added after this build.
+    /// Expected: each known reason reads as this lane words it, and an
+    /// unknown one is shown exactly as the engine spelled it rather than
+    /// dropped or reported as an error. Rendering the `Other` fallback is what
+    /// lets the engine add a reason in a minor version (contract §2).
+    #[test]
+    fn a_stop_reason_this_build_never_heard_of_is_still_shown() {
+        for (wire, shown) in [
+            ("natural", "natural"),
+            ("pre-step-rejected", "rejected before the step"),
+            ("max-steps", "step budget spent"),
+            ("cancelled", "cancelled"),
+            ("budget-exhausted", "budget-exhausted"),
+        ] {
+            let out = rendered(
+                &[event(
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 2, "stop_reason": wire }),
+                )],
+                Charset::Unicode,
+                80,
+            );
+
+            assert_eq!(out, format!("\nturn 1 · {shown} · 2 steps\n"), "{wire}");
+        }
     }
 
     /// The same line as a terminal would show it, with the SGR sequences the
