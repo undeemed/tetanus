@@ -33,6 +33,12 @@ impl<'de> Deserialize<'de> for V2 {
 pub enum Id {
     Number(i64),
     Text(String),
+    /// The id a server answers with when the frame it is refusing carried none
+    /// it could read: a frame that is not JSON, or is JSON but not a request.
+    /// JSON-RPC 2.0 requires `null` there, and an error with no id at all
+    /// would be a frame a client cannot match to anything. A client never
+    /// sends it.
+    Null,
 }
 
 /// A call that expects exactly one [`Response`].
