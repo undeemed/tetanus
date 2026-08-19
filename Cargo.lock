@@ -1251,6 +1251,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "serde",
  "serde_json",
  "tempfile",
@@ -1263,6 +1264,7 @@ dependencies = [
  "tetanus-turn",
  "tetanus-ui",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

@@ -89,6 +89,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus models                              which providers are reachable
   tetanus tools                               what the agent is able to call
   tetanus serve                               hand stdout to the protocol
+  tetanus serve --listen 127.0.0.1:8787       serve the protocol on a socket
 
 {environment}
   DEEPSEEK_API_KEY  credential for `--adapter deepseek`

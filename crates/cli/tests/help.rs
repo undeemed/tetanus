@@ -146,7 +146,7 @@ fn every_example_names_something_that_exists() {
         .into_iter()
         .chain(block(&run, "Examples:"))
         .collect();
-    assert!(examples.len() >= 10, "the examples went missing:\n{root}");
+    assert!(examples.len() >= 11, "the examples went missing:\n{root}");
 
     for example in examples {
         let mut words = example.split_whitespace();
@@ -207,7 +207,7 @@ fn every_example_model_is_offered_by_its_adapter() {
 /// the column that made the block scannable in the first place.
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
-    for (args, count) in [(vec!["--help"], 10), (vec!["run", "--help"], 6)] {
+    for (args, count) in [(vec!["--help"], 11), (vec!["run", "--help"], 6)] {
         let page = help_at("80", &args);
         let examples = block(&page, "Examples:");
 

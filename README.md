@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles: dropping a registration unwinds it | Reversible effects beyond registration, live subtree remount |
-| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio carrier. The WebSocket carrier is written and conformance-tested | `tetanus serve` hosting the WebSocket carrier, and the fire UI |
+| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -146,7 +146,7 @@ Without the key the command says so and stops before any network call.
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
 | `tetanus config` | Show resolved config with its provenance layer |
-| `tetanus serve` | Host the JSON-RPC protocol on stdin and stdout, for an editor or a script |
+| `tetanus serve` | Host the JSON-RPC protocol on stdio, or on a socket with `--listen`, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
 `tetanus run` flags: `--prompt <text>`, `--adapter mock|deepseek`, `--model <id>`,
@@ -159,6 +159,10 @@ Run `tetanus --help` or `tetanus run --help` for the authoritative list.
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.
 It takes `--dir <path>`, the directory the journals it writes land in.
+
+`--listen <addr>` serves the WebSocket carrier on a socket instead of on stdio.
+The banner then names the address that was bound rather than the one asked for, so `--listen 127.0.0.1:0` tells you which port the operating system chose.
+That server has no end of file to stop it, so Ctrl-C is the shutdown and it exits 0.
 
 ## Workspace layout
 

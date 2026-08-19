@@ -106,6 +106,9 @@ enum Cmd {
         /// Directory the journals this server writes will land in
         #[arg(long, value_name = "PATH", default_value = "sessions")]
         dir: PathBuf,
+        /// Serve the WebSocket carrier on this address instead of on stdio
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
     },
     /// Print version/build info
     Info,
@@ -366,15 +369,61 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 _ => Ok(()),
             }
         }
-        Cmd::Serve { dir } => {
-            // The one subcommand that writes no page: stdout belongs to the
-            // carrier from here on (contract §4.1), so everything a person
-            // reads goes to stderr and `out` is left untouched.
+        Cmd::Serve { dir, listen } => {
+            // The one subcommand that writes no page: on stdio, stdout belongs
+            // to the carrier from here on (contract §4.1), so everything a
+            // person reads goes to stderr and `out` is left untouched. The
+            // WebSocket carrier does not touch stdout either way, and reads
+            // the same page in the same place.
             let mut err = policy.stderr();
+            // Multi-threaded, because both carriers' properties are
+            // concurrency properties: `agent.interrupt` is answered while the
+            // prompt it interrupts still runs, and a push overtakes the answer
+            // of a call in flight. A current-thread runtime serves frames one
+            // at a time and quietly loses both.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            // Bound before the banner, for two reasons: an address the
+            // operating system chose is not the address that was asked for
+            // and the banner has to print the real one, and a bind that fails
+            // must not have announced a server first.
+            let listener = match &listen {
+                Some(address) => Some(
+                    runtime
+                        .block_on(tokio::net::TcpListener::bind(address))
+                        // The address goes in the message rather than in
+                        // `data`: §4.5 gives `Io` a `path` field "when a path
+                        // is at fault", and an address is not one.
+                        .map_err(|refused| {
+                            fail(
+                                policy,
+                                &RpcError::new(ErrorCode::Io, format!("{address}: {refused}")),
+                            )
+                        })?,
+                ),
+                None => None,
+            };
+            let bound = match &listener {
+                Some(listener) => Some(
+                    listener
+                        .local_addr()
+                        .map_err(|err| {
+                            fail(policy, &RpcError::new(ErrorCode::Io, err.to_string()))
+                        })?
+                        .to_string(),
+                ),
+                None => None,
+            };
+            let carrier = match &bound {
+                Some(address) => render::serve::Carrier::WebSocket(address),
+                None => render::serve::Carrier::Stdio,
+            };
             render::serve::banner(
                 &mut err,
                 &render::serve::Serving {
-                    carrier: "stdio",
+                    carrier,
                     sessions: &dir,
                     protocol: tetanus_protocol::PROTOCOL_VERSION,
                 },
@@ -386,25 +435,29 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                     ..Default::default()
                 }),
             );
-            // Multi-threaded, because the carrier's two properties are
-            // concurrency properties: `agent.interrupt` is answered while the
-            // prompt it interrupts still runs, and a push overtakes the answer
-            // of a call in flight. A current-thread runtime serves frames one
-            // at a time and quietly loses both.
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|err| report(policy, &err.to_string(), None))?;
-            runtime
-                .block_on(tetanus_rpc::stdio::serve(
+            let served = match listener {
+                // A WebSocket server has no end of its own: it accepts until
+                // the accept fails, so the interrupt is the shutdown and not
+                // an abort. That is why it exits 0 and `tetanus run` exits
+                // 130 for the same key - there the interrupt cancels work in
+                // progress, here it is the key the banner told the user to
+                // press.
+                Some(listener) => runtime.block_on(async {
+                    tokio::select! {
+                        served = tetanus_rpc::websocket::serve(engine, listener) => served,
+                        _ = tokio::signal::ctrl_c() => Ok(()),
+                    }
+                }),
+                None => runtime.block_on(tetanus_rpc::stdio::serve(
                     engine,
                     tokio::io::stdin(),
                     tokio::io::stdout(),
-                ))
-                .map_err(|broken| {
-                    fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string()))
-                })?;
-            render::serve::stopped(&mut err).ok();
+                )),
+            };
+            served.map_err(|broken| {
+                fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string()))
+            })?;
+            render::serve::stopped(&mut err, carrier).ok();
             Ok(())
         }
         Cmd::Info => {
