@@ -1,5 +1,6 @@
-//! How the colour policy reaches clap before clap has parsed anything. Two
-//! things happen here that are easy to get wrong.
+//! Help ergonomics: what `tetanus --help` says, and how the colour policy
+//! reaches clap before clap has parsed anything. Two things happen here that
+//! are easy to get wrong.
 //!
 //! Help is printed *during* parsing, so the palette has to be decided before
 //! `Cli::parse()` runs. [`color_from_argv`] pre-scans the raw arguments for
@@ -12,7 +13,7 @@
 //! included.
 
 use clap::builder::styling::Styles;
-use tetanus_ui::{ColorChoice, Role};
+use tetanus_ui::{ColorChoice, Role, Theme};
 
 /// Pre-scan raw arguments for `--color`, before clap owns them.
 ///
@@ -67,4 +68,40 @@ pub fn command_style(color: bool) -> clap::ColorChoice {
     } else {
         clap::ColorChoice::Never
     }
+}
+
+/// The block under the root help: what to type, and what the environment
+/// changes. Upstream `dsh` closes its help with examples too, and it is the
+/// fastest part of a help page to read.
+pub fn root_epilogue(theme: &Theme) -> String {
+    let examples = theme.paint(Role::Heading, "Examples:");
+    let environment = theme.paint(Role::Heading, "Environment:");
+    format!(
+        "\
+{examples}
+  tetanus run                                 one offline turn on the built-in mock adapter
+  tetanus run -p \"list the files\"             ask for something specific
+  tetanus run -a deepseek -m deepseek-v4-pro  a live provider; needs DEEPSEEK_API_KEY
+  tetanus replay sessions/turn.jsonl          re-read the journal a run left behind
+  tetanus config                              every resolved key, and the layer that set it
+
+{environment}
+  DEEPSEEK_API_KEY  credential for `--adapter deepseek`
+  NO_COLOR          set to anything non-empty for plain output
+  CLICOLOR_FORCE    set to keep colour through a pipe
+  COLUMNS           override the detected line width"
+    )
+}
+
+/// The block under `tetanus run --help`.
+pub fn run_epilogue(theme: &Theme) -> String {
+    let examples = theme.paint(Role::Heading, "Examples:");
+    format!(
+        "\
+{examples}
+  tetanus run -p \"run one full turn\"  the default: mock adapter, no key, no network
+  tetanus run --verbose               print each durable event's payload too
+  tetanus run --session /tmp/t.jsonl  choose where the journal lands
+  tetanus run --max-steps 1           stop after one step, whatever the model asks for"
+    )
 }
