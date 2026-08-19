@@ -262,13 +262,16 @@ Two lanes share one binary, so ownership is by file and not by judgement.
 | --- | --- | --- |
 | `crates/core`, `crates/config`, `crates/session`, `crates/turn` | engine | the runtime |
 | `crates/protocol` | engine | this contract, as types |
-| `crates/rpc` | engine | the stdio and WebSocket carriers |
-| `crates/cli/src/commands` | engine | argv to `Engine` call to a contract result type; no printing |
-| `crates/cli/src/render`, `crates/cli/src/main.rs` | presentation | a contract result type to terminal output; clap help text |
+| `crates/engine` | engine | the `Engine` implementation |
+| `crates/rpc` | engine | the JSON-RPC codec and the stdio and WebSocket carriers |
+| `crates/cli` | presentation | the whole binary: argv, rendering, help text, and the wiring to the crates above |
 
-A command layer returns a contract type and never writes to a stream.
-A render layer reads a contract type and never calls the engine.
-Neither lane edits the other's files; a change that seems to need one is a gap in this document, and the fix is a contract pull request.
+The engine lane publishes libraries.
+It writes no `println!` outside a test, and it does not own a binary.
+The presentation lane owns the binary and wires each subcommand to the calls §4.7 lists for it.
+
+Neither lane edits the other's files.
+A change that seems to need one is a gap in this document, and the fix is a contract pull request.
 
 ## 5. Versioning and compatibility
 
