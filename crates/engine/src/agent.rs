@@ -1,17 +1,21 @@
-//! The agent runtime: `agent.prompt`.
+//! The agent runtime: `agent.prompt` and `agent.status`.
 //!
 //! A prompt runs the documented turn flow on the session's own log and bus,
 //! so every durable fact reaches subscribers as a `session/event` push while
-//! the call is still open.
+//! the call is still open. The runtime adds only the one fact the journal
+//! cannot carry: whether a turn is in flight. That is pushed as `agent/status`
+//! on each transition, and read back by `agent.status`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tetanus_protocol::methods::{AgentPromptParams, AgentPromptResult};
+use tetanus_protocol::methods::{
+    AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
+};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
-use tetanus_protocol::types::{TurnSummary, Usage};
+use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
 use tetanus_session::{SessionEvent, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::llm::{mock, LlmAdapter, LlmError};
@@ -21,6 +25,7 @@ use tetanus_turn::{TurnConfig, TurnEngine, TurnError};
 
 use crate::convert::{internal, session_error, stop_reason};
 use crate::session::{LiveSession, SessionStore};
+use crate::subscribe::Hub;
 
 /// Resolves the provider a session's header names to the adapter that serves
 /// it. A session records its provider when it is created, so the runtime does
@@ -86,6 +91,7 @@ impl Runtime {
     pub async fn prompt(
         &self,
         sessions: &SessionStore,
+        hub: &Hub,
         params: AgentPromptParams,
     ) -> Result<AgentPromptResult, RpcError> {
         let session = sessions.open(&params.session_id)?;
@@ -102,13 +108,23 @@ impl Runtime {
         }
         let guard = BusyGuard(&agent.busy);
 
-        let from_seq = session.log.events().len() as u64;
+        let before = session.log.events();
+        let from_seq = before.len() as u64;
+        let turn = turns_in(&before) + 1;
+        hub.agent_status(status(
+            &params.session_id,
+            AgentState::Running,
+            Some(turn),
+            None,
+        ));
+
         let started = Instant::now();
         let ran = agent.engine.run_turn(&params.content).await;
         // The journal is on disk before the summary is answered, so a surface
         // that reads the file next sees the turn the call just reported.
         let flushed = agent.engine.flush().await;
         drop(guard);
+        hub.agent_status(status(&params.session_id, AgentState::Idle, None, None));
 
         let outcome = ran.map_err(|e| turn_error(&session, e))?;
         flushed.map_err(|e| turn_error(&session, e))?;
@@ -124,6 +140,43 @@ impl Runtime {
                 usage: usage_since(&session.log.events(), from_seq),
             },
         })
+    }
+
+    /// The live state of one session. A surface that missed a push
+    /// resynchronises here rather than folding the journal.
+    pub fn status(
+        &self,
+        sessions: &SessionStore,
+        session_id: &str,
+    ) -> Result<AgentStatusResult, RpcError> {
+        let session = sessions.open(session_id)?;
+        Ok(AgentStatusResult {
+            status: self.status_of(&session),
+        })
+    }
+
+    fn status_of(&self, session: &LiveSession) -> AgentStatusPush {
+        let id = &session.header.session_id;
+        if !self.is_busy(id) {
+            return status(id, AgentState::Idle, None, None);
+        }
+        // How far a running turn got is already on the journal: the last
+        // `turn/start` and the last `step/start` are the progress.
+        let events = session.log.events();
+        status(
+            id,
+            AgentState::Running,
+            last_number(&events, topic::TURN_START, "turn"),
+            last_number(&events, topic::STEP_START, "step").map(|step| step as u32),
+        )
+    }
+
+    fn is_busy(&self, session_id: &str) -> bool {
+        self.agents
+            .lock()
+            .expect("agents")
+            .get(session_id)
+            .is_some_and(|agent| agent.busy.load(Ordering::Acquire))
     }
 
     /// The turn engine for one session, booted on first use against the
@@ -170,6 +223,27 @@ impl Runtime {
                 .or_insert(agent),
         ))
     }
+}
+
+fn status(
+    session_id: &str,
+    state: AgentState,
+    turn: Option<u64>,
+    step: Option<u32>,
+) -> AgentStatusPush {
+    AgentStatusPush {
+        session_id: session_id.to_string(),
+        state,
+        turn,
+        step,
+    }
+}
+
+fn turns_in(events: &[SessionEvent]) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.ty == topic::TURN_START)
+        .count() as u64
 }
 
 fn last_number(events: &[SessionEvent], ty: &str, field: &str) -> Option<u64> {

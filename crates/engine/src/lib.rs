@@ -160,11 +160,11 @@ impl Engine for HarnessEngine {
     }
 
     async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {
-        self.runtime.prompt(&self.sessions, params).await
+        self.runtime.prompt(&self.sessions, &self.hub, params).await
     }
 
-    async fn agent_status(&self, _: SessionRef) -> Result<AgentStatusResult, RpcError> {
-        Err(not_implemented(method::AGENT_STATUS))
+    async fn agent_status(&self, params: SessionRef) -> Result<AgentStatusResult, RpcError> {
+        self.runtime.status(&self.sessions, &params.session_id)
     }
 
     async fn agent_interrupt(&self, _: SessionRef) -> Result<Ack, RpcError> {

@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::BTreeMap;
 use tetanus_core::EffectHandle;
 use tetanus_protocol::methods::{
-    Ack, EventSink, SessionEventPush, SessionSubscribeResult, SessionUnsubscribeParams,
+    Ack, AgentStatusPush, EventSink, SessionEventPush, SessionSubscribeResult,
+    SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::RpcError;
 use tetanus_session::{SessionEvent, SessionEventDispatch, SessionLog};
@@ -22,6 +23,11 @@ use crate::session::LiveSession;
 /// A subscription lives until it is closed. Dropping the handle unregisters
 /// the bus listener, which is the whole of the cleanup.
 struct Subscription {
+    /// The session this sink asked for. `session/event` reaches it through
+    /// the bus listener; `agent/status` has no bus behind it, so the hub
+    /// needs to know which subscriptions to hand it to.
+    session_id: String,
+    sink: Arc<dyn EventSink>,
     _listener: EffectHandle,
 }
 
@@ -114,6 +120,8 @@ impl Hub {
         self.live.lock().expect("subscriptions").insert(
             subscription_id.clone(),
             Subscription {
+                session_id: session_id.clone(),
+                sink: Arc::clone(&sink),
                 _listener: listener,
             },
         );
@@ -121,6 +129,24 @@ impl Hub {
         SessionSubscribeResult {
             subscription_id,
             last_seq,
+        }
+    }
+
+    /// Push one session's live state to everything subscribed to it.
+    ///
+    /// The sinks are collected before any is called, so a sink that calls back
+    /// into the hub meets no lock this thread is holding.
+    pub fn agent_status(&self, push: AgentStatusPush) {
+        let sinks: Vec<Arc<dyn EventSink>> = self
+            .live
+            .lock()
+            .expect("subscriptions")
+            .values()
+            .filter(|sub| sub.session_id == push.session_id)
+            .map(|sub| Arc::clone(&sub.sink))
+            .collect();
+        for sink in sinks {
+            sink.agent_status(push.clone());
         }
     }
 
