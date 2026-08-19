@@ -53,9 +53,14 @@
 //! way through a hundred of anything. `/` takes the list down to the journals
 //! whose id or title holds what is typed, and everything else then counts
 //! against what is left: the footer counts matches, PageDown is a screenful of
-//! matches, and Enter opens the match under the cursor. Nothing is highlighted
-//! and nothing is jumped to, because a reader who has typed a word wants the
-//! other ninety-odd rows gone, not coloured.
+//! matches, and Enter opens the match under the cursor. Nothing is jumped to,
+//! because a reader who has typed a word wants the other ninety-odd rows gone
+//! rather than a cursor walked to the first of them.
+//!
+//! The word is marked on the rows that survive all the same. Narrowing says
+//! which journals hold it; the mark says which of the two columns a filter
+//! reads - the id, or the title - is the one that kept each row, which on
+//! three letters is often not the column the reader was thinking of.
 //!
 //! While the filter is being typed, every printable key belongs to it - `q`
 //! included, because a view that quit on `q` in the middle of a word could not
@@ -86,7 +91,9 @@ use std::time::Duration;
 
 use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{SessionEvent, SessionInfo};
-use tetanus_ui::{bar, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View};
+use tetanus_ui::{
+    bar, light, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View,
+};
 
 use super::browse::{Exit, Journal, NAME};
 use super::keys::{self, Row};
@@ -245,10 +252,38 @@ impl<'a> Picker<'a> {
         picker
     }
 
-    /// Compose every shown row again for a terminal `cols` wide.
+    /// Compose every shown row again for a terminal `cols` wide, with the
+    /// filter marked on each of them.
+    ///
+    /// A narrowed list says which journals hold the word; the mark says where
+    /// each of them holds it. The two columns a filter matches are the id and
+    /// the title, and a reader who typed three letters is often looking at a
+    /// row kept by the column they were not thinking of.
     fn fill(&mut self, cols: usize) {
-        self.rows = sessions::rows(&self.theme, cols.saturating_sub(MARK), &self.shown);
+        let rows = sessions::rows(&self.theme, cols.saturating_sub(MARK), &self.shown);
+        self.rows = match self.wanted() {
+            Some(word) => rows.iter().map(|row| light(row, &word)).collect(),
+            None => rows,
+        };
         self.cols = cols;
+    }
+
+    /// The word to mark on the rows the filter kept, if there is one to mark.
+    ///
+    /// Marked as it is typed, unlike a journal's search: the list is already
+    /// composed again on every keystroke because it is narrowing on every
+    /// keystroke, so the mark costs nothing that was not already being spent -
+    /// and while a reader is still typing is exactly when knowing why a row is
+    /// still there is worth something.
+    ///
+    /// With colour off there is nothing to mark with, the same as a journal's
+    /// search: `--color never` is a promise about the bytes.
+    fn wanted(&self) -> Option<String> {
+        let text = self.filter.text();
+        match !text.is_empty() && self.theme.color() {
+            true => Some(text.to_string()),
+            false => None,
+        }
     }
 
     /// Take the list down to the sessions the filter leaves, and compose them.
@@ -539,8 +574,9 @@ impl View for Picker<'_> {
 /// that `q` leaves a journal for the list and only then the list for the
 /// shell; that a journal which will not open, or holds nothing, is reported
 /// without ending the view; that `/` narrows the list to the journals that
-/// match, takes the printable keys while it is being typed, and moves the
-/// cursor and Enter on to the matches; and that `?` spells the list's own keys
+/// match, takes the printable keys while it is being typed, moves the cursor
+/// and Enter on to the matches, and is marked on the rows it kept and only on
+/// a terminal that was given colour; and that `?` spells the list's own keys
 /// out over it, that a journal showing its card keeps the keys that would
 /// close it, and that a footer with no room for the long wording keeps the two
 /// keys a reader cannot do without.
@@ -1050,5 +1086,50 @@ mod tests {
             !footer.contains("filter"),
             "the narrow footer kept the long wording: {footer}"
         );
+    }
+
+    /// TC-CLI-PICK-15: the filter word marked on the rows it kept.
+    /// Expected: every row still on the list has the word marked wherever it
+    /// is drawn - the id column or the title, whichever kept the row - while
+    /// the word is still being typed; the marks come off with the filter; and
+    /// a list with colour off is byte for byte what it was.
+    #[test]
+    fn the_filter_is_marked_on_the_rows_it_kept() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let colour = Theme::new(true, Charset::Unicode);
+        let mut view = Picker::new(colour, &list, false, &open, COLS);
+
+        // Narrowing as it is typed, so the mark is asked for before Enter.
+        typed(&mut view, "s1");
+        let shown = body(&rows(&mut view, COLS, 12));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        // Twice on the one row: the id kept it, and the title says the same.
+        assert_eq!(
+            shown[0].matches("\u{1b}[7ms1\u{1b}[27m").count(),
+            2,
+            "{shown:?}"
+        );
+
+        view.key(Key::Enter);
+        view.key(Key::Esc);
+        let whole = body(&rows(&mut view, COLS, 12));
+        assert_eq!(whole.len(), 3, "{whole:?}");
+        assert!(
+            !whole.iter().any(|row| row.contains("\u{1b}[7m")),
+            "{whole:?}"
+        );
+
+        // The same filter on a terminal that was given no colour.
+        let mut bare = Picker::new(theme(), &list, false, &open, COLS);
+        let before = body(&rows(&mut bare, COLS, 12));
+        typed(&mut bare, "s1");
+        let plain = body(&rows(&mut bare, COLS, 12));
+        assert_eq!(plain.len(), 1, "{plain:?}");
+        // Past the cursor mark: the one row left is the row the cursor is on
+        // now, and the two columns in front of it are not what is being
+        // compared.
+        let past = |row: &str| row.trim_start_matches(['\u{203a}', ' ']).to_string();
+        assert_eq!(past(&plain[0]), past(&before[1]), "a plain list was marked");
     }
 }
