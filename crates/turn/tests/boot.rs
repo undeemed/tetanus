@@ -155,3 +155,28 @@ async fn swapping_the_adapter_is_a_boot_time_change() {
     assert_eq!(outcome.steps, 1);
     assert_eq!(outcome.content, "nothing to add");
 }
+
+/// TC-BOOT-6: an engine built on a journal that already holds turns numbers
+/// the next one after them, because a restart must not reuse turn 1.
+/// Expected: the first engine's turn is 1; a second engine on the same log
+/// opens turn 2.
+#[tokio::test]
+async fn a_resumed_journal_continues_its_turn_numbering() {
+    let (_dir, bus, log) = fixture();
+    let tools = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
+
+    let first = boot(
+        bus.clone(),
+        Arc::new(MockAdapter::new()),
+        Arc::clone(&tools),
+        Arc::clone(&log),
+    )
+    .expect("boot");
+    let engine = TurnEngine::from_context(&first, TurnConfig::default()).expect("engine");
+    assert_eq!(engine.run_turn("first").await.unwrap().turn, 1);
+
+    // A second engine on the same log is what a restart produces.
+    let resumed = boot(bus, Arc::new(MockAdapter::new()), tools, log).expect("boot");
+    let engine = TurnEngine::from_context(&resumed, TurnConfig::default()).expect("engine");
+    assert_eq!(engine.run_turn("second").await.unwrap().turn, 2);
+}

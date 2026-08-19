@@ -99,13 +99,21 @@ impl TurnEngine {
     /// Resolve every component from the typed registry. Nothing here names a
     /// concrete adapter, tool set, or storage backend.
     pub fn from_context(ctx: &Context, config: TurnConfig) -> Result<Self, TurnError> {
+        let log = ctx.services.require::<SessionService>()?;
+        // A resumed journal already holds turns. Numbering continues after
+        // them, so no two turns in one log ever share an id.
+        let turns = log
+            .events()
+            .iter()
+            .filter(|event| event.ty == topic::TURN_START)
+            .count() as u64;
         Ok(Self {
             llm: ctx.services.require::<LlmService>()?,
             tools: ctx.services.require::<ToolsService>()?,
-            log: ctx.services.require::<SessionService>()?,
+            log,
             bus: ctx.bus.clone(),
             config,
-            turns: AtomicU64::new(0),
+            turns: AtomicU64::new(turns),
         })
     }
 
