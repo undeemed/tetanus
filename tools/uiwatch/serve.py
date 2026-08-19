@@ -85,6 +85,8 @@ SCENARIOS = [
              ["run", "--adapter", "deepseek", "--session", "never.jsonl"]),
     Scenario("cargo run --example status", "the status line slowed down: every repaint, one frame per line",
              [], example="status", repaints=True),
+    Scenario("cargo run --example screen", "the live block slowed down: one frame per row, then what it commits",
+             [], example="screen", repaints=True),
     Scenario("tetanus run | cat", "the same run into a pipe: no escape codes, ever",
              ["run", "-p", "hello there", "--session", "p.jsonl"], tty=False),
 ]
@@ -301,7 +303,8 @@ def build_and_render() -> None:
     started = time.monotonic()
     build = subprocess.run(
         ["cargo", "build", "--quiet", "-p", "tetanus-hardness", "--bin", "tetanus",
-         "-p", "tetanus-ui", "--example", "status"],
+         "-p", "tetanus-ui", "--example", "status",
+         "-p", "tetanus-ui", "--example", "screen"],
         cwd=ROOT, capture_output=True, text=True,
         env={**os.environ, "CARGO_TARGET_DIR": str(TARGET)})
     seconds = time.monotonic() - started
