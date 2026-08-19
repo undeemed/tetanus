@@ -316,6 +316,21 @@ about.
 The turn watched live does not answer it yet: it settles its lines as they arrive rather than
 keeping the events, so unfolding there is a recompose it has no store for.
 
+A full-screen view borrows the terminal, and `Held`
+([crates/ui/src/terminal.rs](crates/ui/src/terminal.rs)) gives it back on every path out of the
+scope holding it, an unwind included.
+A signal is not one of those paths: `SIGTERM`, `SIGHUP`, `SIGQUIT` and `SIGINT` end the process
+where it stands, `Drop` never runs, and the person at the terminal keeps raw mode, the alternate
+screen and a hidden cursor - a shell that echoes nothing, over a scrollback they cannot get back to,
+with no way out but to type `reset` blind.
+So each view hangs `when_killed` over a second handle on the same stream just before it takes the
+terminal, and that watch restores and then re-raises with the default handler, so a process that was
+killed still reports itself killed by the signal that did it.
+Just before rather than just after: undoing a mode nothing has entered is what a terminal ignores,
+and the other order leaves a gap in which the screen is entered and no watch will leave it.
+The binary hangs it rather than `Held`, for the reason this crate installs no panic hook - a signal
+handler is process wide, and taking a terminal in a test should not quietly register one.
+
 What a call was given and what it produced are laid out differently, in
 [`timeline.rs`](crates/cli/src/render/timeline.rs) and therefore in every view that reads through
 it.

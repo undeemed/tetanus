@@ -21,8 +21,8 @@ use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 use tetanus_ui::{
-    tame_line, ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Stop, Theme,
-    Tty, Ui, View,
+    tame_line, when_killed, ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen,
+    Stop, Theme, Tty, Ui, View,
 };
 
 use render::help;
@@ -1090,12 +1090,21 @@ where
     // of a stream, and the alternate screen is two escape codes on the way in
     // and two on the way out. Neither interleaves with the frames `out` paints
     // between them, so the two handles on the one terminal cannot cross.
+    // Hung before the terminal is taken rather than after, because the gap
+    // between the two is a real one: a signal that lands in it would find the
+    // alternate screen already entered and no watch yet to leave it. `held`
+    // gives the terminal back on every path out of this function; this gives
+    // it back on the paths that are not this function's.
+    let killed = when_killed(Tty::new(std::io::stdout())).ok();
     let mut held = match Held::take(Tty::new(std::io::stdout())) {
         Ok(held) => held,
         // It said it was a terminal and then would not be taken. The turn is
         // worth more than the view it was going to be watched in, so it runs
         // in the ordinary block instead and the reason goes to stderr.
         Err((_, err)) => {
+            // Nothing was taken, so there is nothing for a signal to give
+            // back, and the run that follows may be writing to a pipe.
+            drop(killed);
             policy
                 .stderr()
                 .warn(&format!("{err}; watching in the ordinary view"))
