@@ -23,6 +23,10 @@ use crate::convert::{session_error, session_event, session_not_found};
 /// The durable header event every journal opens with.
 pub const SESSION_START: &str = "session/start";
 
+/// Longest `SessionInfo.title` the engine reports. A picker gets a line, not
+/// a paragraph; the whole message is one `session.events` call away.
+pub const MAX_TITLE: usize = 80;
+
 /// Largest page `session.events` returns, and the page size when a caller
 /// names none. A caller that wants the whole journal pages to `eof`.
 pub const MAX_PAGE: u32 = 500;
@@ -75,7 +79,19 @@ impl SessionStore {
     /// Open a session, creating its journal when the id is new. An id that
     /// already has a journal is reopened, so a surface can resume.
     pub fn create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
-        let id = match params.session_id {
+        // A named path is opened where it is. Its id then comes from its own
+        // `session/start` line, which is how a path becomes an id for every
+        // other call.
+        let named = params.path.as_deref().map(PathBuf::from);
+        let carried = match &named {
+            Some(path) => header_of(&tetanus_session::replay(path).map_err(|e| {
+                session_error(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""), e)
+            })?)
+            .map(|header| header.session_id),
+            None => None,
+        };
+
+        let id = match carried.or(params.session_id) {
             Some(id) => {
                 validate_id(&id)?;
                 id
@@ -86,7 +102,7 @@ impl SessionStore {
             return Ok(self.info(live));
         }
 
-        let path = self.path_of(&id);
+        let path = named.unwrap_or_else(|| self.path_of(&id));
         let existing = tetanus_session::replay(&path).map_err(|e| session_error(&id, e))?;
 
         let bus = EventBus::new();
@@ -156,8 +172,7 @@ impl SessionStore {
                     model: header.model,
                     created_time: events.first().map_or(0, |e| e.time),
                     last_seq: events.len() as i64 - 1,
-                    // The next slice fills this from the first user message.
-                    title: None,
+                    title: title_of(&events),
                     state: AgentState::Idle,
                 },
             );
@@ -216,7 +231,7 @@ impl SessionStore {
             model: live.header.model.clone(),
             created_time: events.first().map_or(0, |e| e.time),
             last_seq: events.len() as i64 - 1,
-            title: None,
+            title: title_of(&events),
             state: AgentState::Idle,
         }
     }
@@ -265,6 +280,27 @@ fn header_of(events: &[SessionEvent]) -> Option<SessionHeader> {
         return None;
     }
     serde_json::from_value(first.data.clone()).ok()
+}
+
+/// The session's first user message, cut to one line. A picker that had to
+/// page every journal for this would be reading the engine's side of the
+/// boundary, which is why the engine reports it.
+fn title_of(events: &[SessionEvent]) -> Option<String> {
+    let first = events
+        .iter()
+        .find(|e| e.ty == "user/message")?
+        .data
+        .get("content")?
+        .as_str()?
+        .trim();
+    if first.is_empty() {
+        return None;
+    }
+    let line = first.lines().next().unwrap_or(first);
+    match line.char_indices().nth(MAX_TITLE) {
+        Some((cut, _)) => Some(format!("{}...", &line[..cut])),
+        None => Some(line.to_string()),
+    }
 }
 
 fn journal_id(path: &Path) -> Option<String> {
