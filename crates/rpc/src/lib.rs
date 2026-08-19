@@ -11,10 +11,10 @@
 //! differ only in how they move a string.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
-use tetanus_protocol::methods::{method, Engine, EventSink};
+use tetanus_protocol::methods::{method, Engine, EventSink, SessionUnsubscribeParams};
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Request, Response, RpcError, V2};
 
 /// One connection's codec.
@@ -25,6 +25,8 @@ use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Request, Response, 
 pub struct Codec {
     engine: Arc<dyn Engine>,
     greeted: AtomicBool,
+    /// The subscriptions this connection opened and has not closed.
+    open: Mutex<Vec<String>>,
 }
 
 impl Codec {
@@ -32,6 +34,23 @@ impl Codec {
         Self {
             engine,
             greeted: AtomicBool::new(false),
+            open: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Close what this connection left open.
+    ///
+    /// A carrier calls this when the peer is gone. A subscription outlives the
+    /// call that made it, so nothing else would ever end one, and the engine
+    /// would keep pushing into a sink whose socket is shut. Failures are
+    /// dropped on purpose: there is no longer anyone to report them to.
+    pub async fn close(&self) {
+        let open = std::mem::take(&mut *self.open.lock().expect("open"));
+        for subscription_id in open {
+            let _ = self
+                .engine
+                .session_unsubscribe(SessionUnsubscribeParams { subscription_id })
+                .await;
         }
     }
 
@@ -130,10 +149,20 @@ impl Codec {
             method::SESSION_LIST => encode(engine.session_list().await?),
             method::SESSION_EVENTS => encode(engine.session_events(typed(params)?).await?),
             method::SESSION_SUBSCRIBE => {
-                encode(engine.session_subscribe(typed(params)?, sink).await?)
+                let result = engine.session_subscribe(typed(params)?, sink).await?;
+                self.open
+                    .lock()
+                    .expect("open")
+                    .push(result.subscription_id.clone());
+                encode(result)
             }
             method::SESSION_UNSUBSCRIBE => {
-                encode(engine.session_unsubscribe(typed(params)?).await?)
+                let params: SessionUnsubscribeParams = typed(params)?;
+                self.open
+                    .lock()
+                    .expect("open")
+                    .retain(|open| *open != params.subscription_id);
+                encode(engine.session_unsubscribe(params).await?)
             }
             method::AGENT_PROMPT => encode(engine.agent_prompt(typed(params)?).await?),
             method::AGENT_STATUS => encode(engine.agent_status(typed(params)?).await?),

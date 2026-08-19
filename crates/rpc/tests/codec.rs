@@ -8,6 +8,7 @@
 //!
 //! Environmental needs: none. No case opens a file, a socket or a session.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -31,6 +32,9 @@ struct Script {
     fail: Option<RpcError>,
     /// Set when `session.subscribe` was given a sink.
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    /// Subscription ids are handed out one at a time, as a real engine does,
+    /// so a case can tell one subscription from another.
+    subscriptions: AtomicU32,
 }
 
 impl Script {
@@ -120,7 +124,10 @@ impl Engine for Script {
         self.record(method::SESSION_SUBSCRIBE, params)?;
         *self.sink.lock().expect("sink") = Some(sink);
         Ok(SessionSubscribeResult {
-            subscription_id: "sub-1".into(),
+            subscription_id: format!(
+                "sub-{}",
+                self.subscriptions.fetch_add(1, Ordering::Relaxed) + 1
+            ),
             last_seq: 0,
         })
     }
@@ -480,4 +487,47 @@ async fn an_absent_params_and_an_empty_one_are_alike() {
         let answer = send(&codec, frame).await;
         assert_eq!(answer["result"]["session_id"], json!("s1"));
     }
+}
+
+/// TC-RPC-11: a connection closes what it opened. `Codec::close` ends every
+/// subscription the connection still holds, and only those: one already ended
+/// by `session.unsubscribe` is not ended twice.
+#[tokio::test]
+async fn closing_a_connection_ends_its_subscriptions() {
+    let (codec, engine) = greeted().await;
+    for id in [1, 2] {
+        send(
+            &codec,
+            json!({ "jsonrpc": "2.0", "id": id, "method": method::SESSION_SUBSCRIBE,
+                    "params": { "session_id": "s1" } }),
+        )
+        .await;
+    }
+    send(
+        &codec,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": method::SESSION_UNSUBSCRIBE,
+                "params": { "subscription_id": "sub-1" } }),
+    )
+    .await;
+
+    codec.close().await;
+
+    assert_eq!(
+        engine.reached(),
+        vec![
+            method::SESSION_SUBSCRIBE,
+            method::SESSION_SUBSCRIBE,
+            method::SESSION_UNSUBSCRIBE,
+            method::SESSION_UNSUBSCRIBE,
+        ],
+        "the one still open is closed, and the one already closed is not"
+    );
+    assert_eq!(engine.params(), json!({ "subscription_id": "sub-2" }));
+
+    codec.close().await;
+    assert_eq!(
+        engine.reached().len(),
+        4,
+        "a second close has nothing left to end"
+    );
 }
