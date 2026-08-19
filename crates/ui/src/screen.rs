@@ -20,6 +20,10 @@
 //! drawn line is transient and true only until the next frame. A caller that
 //! wants its last frame kept prints it before dropping the screen.
 //!
+//! A terminal can be resized while a block is on it. [`Screen::resize`] is how
+//! a caller says so: the block on screen belongs to the old width, so it is
+//! erased before the first frame of the new one.
+//!
 //! # Limits
 //!
 //! The cursor arithmetic assumes the block did not scroll. A block taller than
@@ -92,6 +96,23 @@ impl<W: Write> Screen<W> {
         }
         self.drawn = lines.len();
         self.ui.flush()
+    }
+
+    /// Draw at a new width from the next frame on.
+    ///
+    /// The block on screen was fitted to the old width, and a terminal that
+    /// reflowed it while narrowing has already put the rows somewhere this
+    /// type cannot compute. So the old block is erased with the arithmetic
+    /// that still describes it, and the next frame starts from a clean row.
+    /// Nothing happens when the width has not moved, which is every frame but
+    /// the one after a resize.
+    pub fn resize(&mut self, width: usize) -> io::Result<()> {
+        if width == self.ui.width() {
+            return Ok(());
+        }
+        self.clear()?;
+        self.ui.set_width(width);
+        Ok(())
     }
 
     /// Erase the block, leaving the cursor where it began.
