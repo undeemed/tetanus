@@ -6,7 +6,8 @@
 //! environment cannot change the bytes of plain output; the shape and exit
 //! status of a reported failure; that a bad `--color` value is a usage error;
 //! which of the two views - the turn, or the raw sequence - a command prints;
-//! and that a model's thinking stays folded until it is asked for. NOT tested
+//! that a model's thinking stays folded until it is asked for; and the shape
+//! of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
@@ -357,4 +358,112 @@ fn thinking_is_folded_until_it_is_asked_for() {
         assert!(opened.contains(line), "`{line}` missing from:\n{opened}");
     }
     assert!(opened.contains("  ai    42\n"), "{opened}");
+}
+
+/// TC-CLI-JSON-1: `tetanus run --json`.
+/// Expected: one JSON object per line and nothing else on stdout - every line
+/// but the last a `SessionEvent`, the last the `agent.prompt` result. A script
+/// reads lines until the stream ends and treats the last one as the answer,
+/// which is only true if no human line is mixed into them.
+#[test]
+fn a_json_run_streams_events_and_ends_with_the_result() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl", "--json"],
+        &[],
+    );
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(!printed.contains(ESC), "{printed:?}");
+    let lines: Vec<&str> = printed.lines().collect();
+    let (last, events) = lines.split_last().expect("at least the result");
+
+    for line in events {
+        let event: serde_json::Value = serde_json::from_str(line).expect(line);
+        assert!(event["type"].is_string(), "{line}");
+        assert!(event["seq"].is_u64(), "{line}");
+    }
+    let result: serde_json::Value = serde_json::from_str(last).expect(last);
+    let summary = &result["summary"];
+    assert_eq!(summary["turn"], 1);
+    assert_eq!(summary["stop_reason"], "natural");
+    assert_eq!(summary["content"], "You said: echo this");
+    assert!(
+        summary["usage"]["prompt_tokens"].as_u64().unwrap() > 0,
+        "{last}"
+    );
+}
+
+/// TC-CLI-JSON-2: what those event lines are.
+/// Expected: the journal's own lines, byte for byte and in order. The contract
+/// says the result types are printed verbatim, so a streamed event and the
+/// durable record of it cannot be two different documents.
+#[test]
+fn the_streamed_events_are_the_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl", "--json"],
+        &[],
+    );
+
+    let printed = stdout(&out);
+    let streamed = printed.lines().collect::<Vec<_>>();
+    let journal = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+
+    assert_eq!(
+        streamed[..streamed.len() - 1].join("\n"),
+        journal.trim_end()
+    );
+}
+
+/// TC-CLI-JSON-3: `tetanus replay --json`.
+/// Expected: exactly one line, the `session.events` page: every event of the
+/// journal, the seq a next page would start at, and `eof`. A read does not
+/// stream, so a script that ran one reads one line.
+#[test]
+fn a_json_replay_is_one_page_on_one_line() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    let out = run(dir.path(), &["replay", "j.jsonl", "--json"], &[]);
+    let printed = stdout(&out);
+
+    assert_eq!(printed.lines().count(), 1, "{printed}");
+    let page: serde_json::Value = serde_json::from_str(printed.trim()).expect(&printed);
+    let events = page["events"].as_array().expect("events");
+    let journal = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+
+    assert_eq!(events.len(), journal.lines().count());
+    assert_eq!(page["eof"], true);
+    assert_eq!(page["next_seq"], events.len() as u64);
+}
+
+/// TC-CLI-JSON-4: contract output asked for beside a human view.
+/// Expected: a usage error, exit 2, from clap. `--json` fixes what stdout is;
+/// a second view on the same stream would make the JSON unreadable to the
+/// script that asked for it, and quietly dropping one of them would be worse.
+#[test]
+fn json_beside_a_human_view_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    for args in [
+        vec!["replay", "j.jsonl", "--json", "--raw"],
+        vec!["replay", "j.jsonl", "--json", "--live"],
+        vec!["run", "--json", "--trace"],
+    ] {
+        let out = run(dir.path(), &args, &[]);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stdout(&out));
+    }
 }
