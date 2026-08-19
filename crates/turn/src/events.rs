@@ -106,6 +106,68 @@ impl Event for LlmStream {
     type Output = Result<ModelResponse, LlmError>;
 }
 
+/// One failed model request, as a recovery policy sees it.
+///
+/// It carries the failure's stable classification and its words rather than
+/// the [`LlmError`] itself, so a listener written against this event keeps
+/// compiling on the day the error enum grows a variant. Upstream passes the
+/// same three fields as its `LlmFailure`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestFailure {
+    /// The stable failure code, from [`LlmError::code`].
+    pub code: String,
+    /// The provider's own words, or the transport's.
+    pub message: String,
+    /// The wait the provider asked for, in milliseconds, when it asked for
+    /// one. No tetanus adapter reads `Retry-After` yet, so it is `None` today
+    /// and a policy falls back to its own backoff.
+    pub provider_retry_after_ms: Option<f64>,
+}
+
+impl From<&LlmError> for RequestFailure {
+    fn from(error: &LlmError) -> Self {
+        Self {
+            code: error.code().to_string(),
+            message: error.to_string(),
+            provider_retry_after_ms: None,
+        }
+    }
+}
+
+/// What a listener asks the driver to do about a failed model request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestErrorAction {
+    /// Send the same request again. The failure is not reported.
+    Retry,
+}
+
+/// `agent/request-error` is the recovery extension point: the provider call
+/// failed, and a listener may ask for another attempt before the turn is
+/// failed with it. The terminal recovers nothing, so a bus with no listener
+/// behaves exactly as it did before - the failure ends the turn.
+///
+/// The event returns a decision and not a delay: any waiting is the
+/// listener's, which is what keeps the driver free of a clock and lets a
+/// policy record its own wait durably before serving it.
+///
+/// Parity: upstream's event of the same name, which its `llm-retry` package
+/// hooks (`packages/llm/llm-retry/src/index.ts`). tetanus's counterpart is a
+/// listener that serves [`crate::llm::retry::RetryPolicy`]; nothing installs
+/// one yet, so the point is live and unoccupied.
+pub struct RequestError {
+    pub turn: u64,
+    pub step: u32,
+    /// The route that failed, so a policy scoped to one provider can tell
+    /// whether the failure is its business.
+    pub provider: String,
+    pub failure: RequestFailure,
+}
+impl Event for RequestError {
+    const TOPIC: &'static str = "agent/request-error";
+    const MODE: DispatchMode = DispatchMode::Waterfall;
+    type Output = Option<RequestErrorAction>;
+}
+
 /// Hooks, permission and sandbox policy run here, before the call starts.
 pub struct ToolsPreExecute {
     pub turn: u64,
