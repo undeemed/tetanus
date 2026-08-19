@@ -9,11 +9,16 @@
 //! Values are printed the way a person writes them into a config file, so a
 //! string loses its JSON quotes. Every other shape keeps its own spelling,
 //! which is what still tells `true` the boolean apart from `"true"` the string.
+//!
+//! A key, its value and the layer that settled it all came out of a file, an
+//! environment or a flag, so all three are tamed before they are drawn. The
+//! value is tamed by the width rule that cuts it; the other two are drawn as
+//! themselves and are tamed here.
 
 use std::io::{self, Write};
 
 use tetanus_protocol::types::{ConfigEntry, ConfigLayer};
-use tetanus_ui::{truncate, Role, Ui};
+use tetanus_ui::{tame, truncate, visible_width, Role, Ui};
 
 /// Space between the key, value and layer columns.
 const GAP: usize = 2;
@@ -30,7 +35,8 @@ pub fn render<W: Write>(ui: &mut Ui<W>, entries: &[ConfigEntry]) -> io::Result<(
     }
 
     let charset = ui.theme().charset();
-    let keys = column(entries.iter().map(|entry| entry.key.as_str()));
+    let named: Vec<String> = entries.iter().map(|entry| tame(&entry.key)).collect();
+    let keys = column(named.iter().map(String::as_str));
     let layers: Vec<String> = entries.iter().map(|entry| layer(&entry.layer)).collect();
 
     // Whatever the two outer columns leave over is the value's. A long value
@@ -46,20 +52,20 @@ pub fn render<W: Write>(ui: &mut Ui<W>, entries: &[ConfigEntry]) -> io::Result<(
         .collect();
     let width = column(values.iter().map(String::as_str));
 
-    for ((entry, value), layer) in entries.iter().zip(&values).zip(&layers) {
+    for ((key, value), layer) in named.iter().zip(&values).zip(&layers) {
         // Both the value and the layer are one column each, so the gap is
-        // measured in characters and the layer is painted afterwards: a
-        // painted string carries escapes a format width would count.
-        let pad = " ".repeat(width.saturating_sub(value.chars().count()) + GAP);
+        // measured here and the layer is painted afterwards: a painted string
+        // carries escapes a format width would count.
+        let pad = " ".repeat(width.saturating_sub(visible_width(value)) + GAP);
         let layer = ui.paint(Role::Muted, layer).to_string();
-        ui.field(&entry.key, keys, &format!("{value}{pad}{layer}"))?;
+        ui.field(key, keys, &format!("{value}{pad}{layer}"))?;
     }
     Ok(())
 }
 
-/// The widest of a set of cells, in characters a terminal draws.
+/// The widest of a set of cells, in the columns a terminal draws them in.
 fn column<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
-    cells.map(|cell| cell.chars().count()).max().unwrap_or(0)
+    cells.map(visible_width).max().unwrap_or(0)
 }
 
 /// A JSON value as a person would have typed it.
@@ -79,15 +85,16 @@ fn layer(layer: &ConfigLayer) -> String {
         ConfigLayer::File => "file".into(),
         ConfigLayer::Env => "env".into(),
         ConfigLayer::Flag => "flag".into(),
-        ConfigLayer::Other(name) => name.clone(),
+        ConfigLayer::Other(name) => tame(name),
     }
 }
 
 /// Test Design Specification: the config table.
 ///
 /// Features tested: column alignment, how a JSON value is spelled, a value too
-/// long for the terminal, a layer this build does not know, and an empty
-/// table. Features NOT tested here: which layer wins a key (owned by
+/// long for the terminal, a layer this build does not know, an empty table, a
+/// key and a layer that carry escape sequences, and a key column beside a key
+/// a terminal draws twice as wide. Features NOT tested here: which layer wins a key (owned by
 /// `tetanus-config`) and the colour policy (owned by `tetanus-ui`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`.
@@ -202,5 +209,50 @@ mod tests {
     #[test]
     fn an_empty_table_says_so() {
         assert_eq!(rendered(&[], 80), "\nconfig\nnothing is set\n");
+    }
+
+    /// TC-CLI-CFG-6: a key and a layer that carry escape sequences.
+    /// Expected: no sequence reaches the page and both are still read. A key
+    /// comes out of a file, an environment or a flag, and a layer this build
+    /// does not know is a word the engine chose - none of the three is ours.
+    #[test]
+    fn a_key_out_of_a_file_is_drawn_and_not_obeyed() {
+        let clear = "\u{1b}[2J";
+        let out = rendered(
+            &[entry(
+                &format!("log{clear}.level"),
+                json!("trace"),
+                ConfigLayer::Other(format!("work{clear}space")),
+            )],
+            80,
+        );
+
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert_eq!(out, "\nconfig\nlog.level  trace  workspace\n");
+    }
+
+    /// TC-CLI-CFG-7: a key in a script a terminal draws twice as wide.
+    /// Expected: both values start at the same column, counted in what the
+    /// terminal draws. A key column padded in characters would put the value
+    /// beside a wide key out of place, and the layer column with it.
+    #[test]
+    fn the_key_column_is_measured_and_padded_in_columns() {
+        let out = rendered(
+            &[
+                entry("\u{65e5}\u{672c}\u{8a9e}", json!("wide"), ConfigLayer::File),
+                entry("log.level", json!("trace"), ConfigLayer::File),
+            ],
+            80,
+        );
+
+        for value in ["wide", "trace"] {
+            let line = out.lines().find(|line| line.contains(value)).expect(value);
+            let at = line.find(value).expect(value);
+            assert_eq!(
+                visible_width(&line[..at]),
+                "log.level".len() + GAP,
+                "the value does not start where the other one does: {line:?}"
+            );
+        }
     }
 }

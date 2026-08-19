@@ -14,6 +14,7 @@ use std::io::{self, IsTerminal, Write};
 use crate::color::{self, ColorChoice, Env};
 use crate::progress::Progress;
 use crate::screen::Screen;
+use crate::text::visible_width;
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -70,12 +71,17 @@ impl<W: Write> Ui<W> {
 
     /// One `label  value` row. `pad` is the shared label column width, so a
     /// caller aligns a block by passing the same number for every row.
+    ///
+    /// The label is padded here rather than by a format width, because a
+    /// format width counts characters: a label in a script a terminal draws
+    /// twice as wide is fewer characters than the columns it takes, and every
+    /// row under it would start somewhere else.
     pub fn field(&mut self, label: &str, pad: usize, value: &str) -> io::Result<()> {
+        let gap = " ".repeat(pad.saturating_sub(visible_width(label)) + 2);
         writeln!(
             self.out,
-            "{:<pad$}  {}",
-            self.theme.paint(Role::Muted, label),
-            value
+            "{}{gap}{value}",
+            self.theme.paint(Role::Muted, label)
         )
     }
 

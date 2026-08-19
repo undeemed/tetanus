@@ -30,7 +30,7 @@ use std::io::{self, Write};
 
 use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{AgentState, SessionInfo};
-use tetanus_ui::{truncate, Role, Theme, Ui};
+use tetanus_ui::{tame, truncate, visible_width, Role, Theme, Ui};
 
 /// Space between two columns of a row.
 const GAP: usize = 2;
@@ -56,29 +56,47 @@ pub fn ordered(list: &SessionListResult) -> Vec<&SessionInfo> {
 /// retype, its size, its state, and what it was about.
 pub fn rows(theme: &Theme, cols: usize, sessions: &[&SessionInfo]) -> Vec<String> {
     let charset = theme.charset();
-    let id = width(sessions.iter().map(|row| row.session_id.chars().count()));
+    // An id is a file's name and a state is a word the engine chose, so both
+    // are tamed once and then measured, drawn and padded as what they became.
+    let ids: Vec<String> = sessions.iter().map(|row| tame(&row.session_id)).collect();
+    let states: Vec<String> = sessions.iter().map(|row| named(row)).collect();
+    let id = width(ids.iter().map(|cell| visible_width(cell)));
     let digits = width(sessions.iter().map(|row| count(row).to_string().len()));
     let size = width(
         sessions
             .iter()
-            .map(|row| measure(row, digits).chars().count()),
+            .map(|row| visible_width(&measure(row, digits))),
     );
-    let state = width(sessions.iter().map(|row| named(row).chars().count()));
+    let state = width(states.iter().map(|cell| visible_width(cell)));
     let room = cols.saturating_sub(id + size + state + GAP * 3).max(1);
     let gap = " ".repeat(GAP);
 
     sessions
         .iter()
-        .map(|row| {
+        .zip(&ids)
+        .zip(&states)
+        .map(|((row, named), word)| {
+            let taken = measure(row, digits);
             format!(
-                "{:<id$}{gap}{:<size$}{gap}{:<state$}{gap}{}",
-                theme.paint(Role::Accent, &row.session_id),
-                theme.paint(Role::Muted, &measure(row, digits)),
-                theme.paint(role(row), &named(row)),
+                "{}{}{gap}{}{}{gap}{}{}{gap}{}",
+                theme.paint(Role::Accent, named),
+                pad(named, id),
+                theme.paint(Role::Muted, &taken),
+                pad(&taken, size),
+                theme.paint(role(row), word),
+                pad(word, state),
                 title(theme, row, room, charset),
             )
         })
         .collect()
+}
+
+/// The spaces that carry a cell out to `width` columns.
+///
+/// A format width would count characters instead, so an id or a state in a
+/// script a terminal draws twice as wide would push every column after it.
+fn pad(cell: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(visible_width(cell)))
 }
 
 /// Print the list under a heading.
@@ -117,7 +135,7 @@ fn named(row: &SessionInfo) -> String {
     match &row.state {
         AgentState::Idle => "idle".to_string(),
         AgentState::Running => "running".to_string(),
-        AgentState::Other(other) => other.clone(),
+        AgentState::Other(other) => tame(other),
     }
 }
 
@@ -142,7 +160,7 @@ fn title(theme: &Theme, row: &SessionInfo, room: usize, charset: tetanus_ui::Cha
     }
 }
 
-/// The widest of a set of cells, in characters a terminal draws.
+/// The widest of a set of cells, in the columns a terminal draws them in.
 fn width(cells: impl Iterator<Item = usize>) -> usize {
     cells.max().unwrap_or(0)
 }
@@ -153,7 +171,8 @@ fn width(cells: impl Iterator<Item = usize>) -> usize {
 /// session is first and a tie is still settled; that an empty journal reads
 /// `0 events` and a one-event journal is singular; that a session with no
 /// prompt yet says so; that a title too long for the terminal is cut while
-/// the id is not; and the empty list.
+/// the id is not; the empty list; an id and a state that carry escape
+/// sequences; and an id a terminal draws twice as wide.
 ///
 /// Features NOT tested here: which sessions this build finds (owned by
 /// `tetanus-engine`, and asserted end to end in `tests/presentation.rs`), the
@@ -269,6 +288,53 @@ mod tests {
         }
         assert!(out.contains(&id), "the id was cut:\n{out}");
         assert!(out.contains('…'), "the title was not cut:\n{out}");
+    }
+
+    /// TC-CLI-SESS-7: an id and a state that carry escape sequences.
+    /// Expected: no sequence reaches the page and both are still read. An id
+    /// is a file's name, which a user chose with `--session`, and a state
+    /// this build does not know is a word the engine chose (contract §2).
+    #[test]
+    fn an_id_and_a_state_off_the_wire_are_drawn_and_not_obeyed() {
+        let clear = "\u{1b}[2J";
+        let out = shown(
+            vec![SessionInfo {
+                state: AgentState::Other(format!("re{clear}trying")),
+                ..session(&format!("s{clear}1"), 1, 2, Some("hi"))
+            }],
+            80,
+        );
+
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(out.contains("s1"), "{out}");
+        assert!(out.contains("retrying"), "{out}");
+    }
+
+    /// TC-CLI-SESS-8: an id in a script a terminal draws twice as wide.
+    /// Expected: both titles start at the same column. Every column on this
+    /// row is padded in what the terminal draws, so one wide id does not push
+    /// the three columns after it out of place on that row alone.
+    #[test]
+    fn every_cell_is_padded_in_the_columns_it_draws() {
+        let out = shown(
+            vec![
+                session("\u{65e5}\u{672c}\u{8a9e}", 2, 2, Some("wide")),
+                session("session-2", 1, 2, Some("plain")),
+            ],
+            80,
+        );
+
+        let starts: Vec<usize> = ["wide", "plain"]
+            .iter()
+            .map(|title| {
+                let line = out.lines().find(|line| line.contains(title)).expect(title);
+                tetanus_ui::visible_width(&line[..line.find(title).expect(title)])
+            })
+            .collect();
+        assert_eq!(
+            starts[0], starts[1],
+            "the titles are not in one column:\n{out}"
+        );
     }
 
     /// TC-CLI-SESS-6: nothing written yet.
