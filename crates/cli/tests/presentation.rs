@@ -463,6 +463,35 @@ fn a_journal_read_full_screen_needs_a_screen() {
     }
 }
 
+/// TC-CLI-UI-16: `tetanus sessions --ui` with nowhere to draw.
+/// Expected: the same answer `run` and `replay` give a piped `--ui` -
+/// `InvalidParams`, exit 2 per contract §4.5, the terminal named, and nothing
+/// on stdout. It is refused before the directory is read, so a `--ui` at a
+/// directory holding no journals says the same thing rather than printing the
+/// empty list. `--json` asks for the opposite of a screen, and clap refuses
+/// that pairing itself.
+#[test]
+fn a_session_picker_needs_a_screen() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "sessions/j.jsonl"],
+        &[],
+    );
+
+    let piped = run(dir.path(), &["sessions", "--ui"], &[]);
+    assert_eq!(piped.status.code(), Some(2), "{}", stdout(&piped));
+    assert!(stderr(&piped).contains("terminal"), "{}", stderr(&piped));
+    assert!(stdout(&piped).is_empty(), "{}", stdout(&piped));
+
+    let nowhere = run(dir.path(), &["sessions", "--dir", "nope", "--ui"], &[]);
+    assert_eq!(nowhere.status.code(), Some(2), "{}", stdout(&nowhere));
+
+    let clash = run(dir.path(), &["sessions", "--ui", "--json"], &[]);
+    assert_eq!(clash.status.code(), Some(2), "{}", stdout(&clash));
+    assert!(stderr(&clash).contains("--json"), "{}", stderr(&clash));
+}
+
 /// TC-CLI-JSON-1: `tetanus run --json`.
 /// Expected: one JSON object per line and nothing else on stdout - every line
 /// but the last a `SessionEvent`, the last the `agent.prompt` result. A script

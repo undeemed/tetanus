@@ -199,6 +199,11 @@ the pace it happened (`--live`), or on a page of its own (`--ui`,
 [crates/cli/src/render/browse.rs](crates/cli/src/render/browse.rs)).
 Its full-screen view is driven by `tetanus_ui::show` rather than by a loop of its own, which is what
 a view over something already finished can do and a view over a turn in flight cannot.
+`tetanus sessions --ui` ([crates/cli/src/render/pick.rs](crates/cli/src/render/pick.rs)) puts a
+cursor on the list that `tetanus sessions` prints, so a directory holding more journals than the
+screen is read a screenful at a time rather than scrolled back through once it has all gone past.
+It composes its own frame rather than reusing `Page`, because a picker's window has to follow the
+cursor and a page's follows the newest line.
 
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,

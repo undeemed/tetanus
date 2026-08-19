@@ -13,6 +13,7 @@ pub mod help;
 pub mod info;
 pub mod json;
 pub mod live;
+pub mod pick;
 pub mod raw;
 pub mod replay;
 pub mod serve;
