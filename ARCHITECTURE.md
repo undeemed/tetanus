@@ -120,6 +120,11 @@ alone, after the pool ahead of it drains and before any call behind it starts.
 Dispatch may overlap but commitment may not: a `tool/result` is appended only once every earlier
 call of the step has been appended, so the journal reads in model order however the calls settled.
 
+A failed call is not a failed turn.
+Whatever a tool returns as an error, a call naming no registered tool, and a panic inside a tool body
+all become one `tool/result` with `ok: false`, which the next request carries to the model.
+A tool body is somebody else's code, and the loop is not its author's to take down.
+
 The engine resolves four services from the registry and names no implementation:
 
 | Service | Key | Provider trait | Phase ① implementations |

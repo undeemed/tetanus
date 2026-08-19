@@ -3,7 +3,10 @@
 //! The scheduler that reads that class is `TurnEngine::run_tool_calls`.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+
+use futures_util::FutureExt;
 
 /// One call the model asked for.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -118,12 +121,51 @@ impl ToolRegistry {
             .map_or(ToolMode::Exclusive, |tool| tool.mode(&call.arguments))
     }
 
+    /// Run one call. A tool that fails, and a call naming no tool at all, both
+    /// come back as a [`ToolError`] the engine turns into a failed result the
+    /// model reads.
     pub async fn execute(&self, call: &ToolCall) -> Result<ToolOutcome, ToolError> {
         match self.tools.get(&call.name) {
-            Some(tool) => tool.execute(&call.arguments).await,
+            Some(tool) => contained(&call.name, tool.execute(&call.arguments)).await,
             None => Err(ToolError::Unknown(call.name.clone())),
         }
     }
+}
+
+/// Run a tool body, and treat a panic in it as that call failing.
+///
+/// A tool body is somebody else's code. A bug in it is one call's failure, told
+/// to the model like any other, never the turn's: the loop is not the tool
+/// author's to take down, and the sibling calls in the same step still owe the
+/// model a result. Upstream contains a thrown value the same way
+/// (`packages/core/tools`, "returns isError results for unknown tools and
+/// throwing tools").
+///
+/// A dispatch listener is the other side of this line: `serial` and `waterfall`
+/// listeners decide, so a panic in one stays loud.
+async fn contained(
+    name: &str,
+    body: impl std::future::Future<Output = Result<ToolOutcome, ToolError>>,
+) -> Result<ToolOutcome, ToolError> {
+    match AssertUnwindSafe(body).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let fault = panicked(payload);
+            tracing::error!(tool = name, %fault, "a tool panicked");
+            Err(ToolError::Failed(name.to_string(), fault))
+        }
+    }
+}
+
+/// What a caught panic was about, as far as the payload says.
+fn panicked(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "<unprintable panic payload>".to_string()
 }
 
 /// The one built-in tool Phase ① ships: enough to drive the documented tool
