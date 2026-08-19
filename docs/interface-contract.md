@@ -319,12 +319,20 @@ The exit-status column is the contract, not a suggestion.
 `ErrorCode::exit_status()` is the single source, so no surface invents its own.
 
 **The mapping from an engine failure to a code is the engine's, and it is published.**
-`tetanus_engine::convert::turn_error` maps a failed turn, and `tetanus_engine::convert::journal_error` maps a journal fault.
+`tetanus_engine::convert::turn_error` maps a failed turn, `tetanus_engine::convert::journal_error` maps a journal fault, and `tetanus_engine::convert::config_error` maps a settings fault.
 A surface calls one of them and renders what it returns.
 It does not match on an engine error type to derive a code of its own.
 Two reasons, and the second is the one that bites.
 Which code a failure deserves is a boundary decision, so two surfaces deriving it separately can disagree about the same failure.
 And an engine error enum is an internal Rust type with no fallback variant, unlike the wire enums of section 7.5, so a match outside the engine crate stops compiling the day the engine names a new failure.
+
+A settings fault is the one of the three a surface meets before any call: booting an engine on a document is not a request, so nothing has an id to fail yet.
+It still takes a code from the table above, because the surface reports it the same way and a script reads the same statuses.
+A document that cannot be turned into settings is `Io` carrying its path: the fault is that file, whether the filesystem refused it or its own text did.
+A document that was read and holds one value the key does not take is `InvalidParams` carrying the dotted key as `field`, because the key is what the reader edits.
+
+Neither adds a code.
+A surface's match on `ErrorCode` is exhaustive on purpose, so a new code is a change both lanes land together, and these two failures need none: the rows above already carry the path, the key and the exit status each case wants.
 
 A failed tool call is not an error.
 It is a `tool/result` with `ok: false`, because it is a binding rejection the model sees, not a failure of the call the surface made.
@@ -464,6 +472,8 @@ Those that hold the published failure mapping to §4.5 live in `crates/engine/te
 | §4.5 a corrupt journal carries `session_id` and `line` | TC-FAULT-5 |
 | §4.5 `Io` carries the path when the caller knows one | TC-FAULT-6 |
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
+| §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
+| §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
 
 ## 7. Design rationale
 
@@ -535,3 +545,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Publishes two durable types the engine is about to write (§4.3.2): `llm/retry` before a policy's wait and `llm/retry-started` when the wait is over, so a surface can say a request is being retried instead of showing a stalled turn. No type changes, no version bump and nothing to recompile: `type` is a free string by §4.3, and the two are deliberately not `KnownEvent` variants, because that enum has no fallback and growing it stops a consumer's build. §4.3.2 states the two-step rule that follows from that; the presentation lane decides when to take the variants, and that step is the minor bump. TC-PROTO-16 pins the staged behaviour. |
 | 1.0 | No boundary change, and no type changes: states in section 3 that a surface matches the wire types with a fallback arm, and never matches an engine enum such as `tetanus_turn::StopReason` (issue #142). Section 4.5 said this for engine error types only, so a growable enum that is not an error was left unstated, and every added variant is a build break in the consuming lane rather than the minor change section 5 promises. `KnownEvent` is named too: an open match on it is what would let section 4.3.2's two steps become one. The rule is a promise here rather than a compiler error, because `#[non_exhaustive]` on those enums would fail the build of a surface that has not adopted it yet; the marker lands with the adoption, in its own row. |
 | 1.0 | Adds a ninth subcommand to §4.7: `tetanus chat`, an interactive conversation defined as `session.create`, `session.subscribe`, then one `agent.prompt` per message typed. No new calls, no new types, no version bump - the table is the closed list of what a subcommand may call, so a subcommand that calls nothing new still lands here to keep that list true. Section 4.7 states why a conversation needs no call of its own: a session is already the conversation, so many turns typed into one is the mechanism two `tetanus run --session <path>` invocations already use. |
+| 1.0 | Publishes the third failure mapping (§4.5): `tetanus_engine::convert::config_error`, for the settings document a surface boots on. No code is added and no type changes - a document that cannot be turned into settings is `Io` with its path, and one value its key does not take is `InvalidParams` with that key as `field`. The rule against a surface deriving its own code applies to `tetanus_config::ConfigError` for the reason it applies to the others: it is an internal enum with no fallback, and it grew a variant in the change that gave the engine a settings boot. Issue #157 asked which code a settings fault takes; this is the answer, so the presentation lane's wiring of `tetanus_engine::boot` needs no decision of its own. |

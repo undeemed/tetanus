@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use tetanus_config::ConfigError;
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as wire;
 use tetanus_session::SessionError;
@@ -118,6 +119,41 @@ pub fn turn_error(
             format!("provider `{provider}` failed: {other}"),
         )
         .with_data(serde_json::json!({ "provider": provider })),
+    }
+}
+
+/// Contract section 4.5: why the settings document could not be booted on, in
+/// the code a surface acts on.
+///
+/// This is the third published mapping, and it exists for the reason the other
+/// two do: `ConfigError` is an internal enum with no fallback variant, so a
+/// surface that matched it to pick a code would stop compiling the day the
+/// engine names a new fault - as it just did, for a value that is wrong rather
+/// than a document that is.
+///
+/// The split is what the reader has to fix. A document that could not be
+/// turned into settings is `Io` with its path, whether the filesystem refused
+/// the file or its own text did; a value the key does not take is
+/// `InvalidParams` with the key, because the key is the thing to edit. The
+/// message drops the key that [`ConfigError`]'s own wording repeats, since
+/// `field` already carries it and a surface prints both.
+pub fn config_error(error: &ConfigError) -> RpcError {
+    match error {
+        ConfigError::BadValue {
+            key,
+            expected,
+            found,
+        } => RpcError::new(
+            ErrorCode::InvalidParams,
+            format!("must be {expected}, not {found}"),
+        )
+        .with_data(serde_json::json!({ "field": key })),
+        ConfigError::UnsupportedExtension { path, .. }
+        | ConfigError::IsADirectory { path }
+        | ConfigError::Unreadable { path, .. }
+        | ConfigError::Malformed { path, .. }
+        | ConfigError::NotAMap { path } => RpcError::new(ErrorCode::Io, error.to_string())
+            .with_data(serde_json::json!({ "path": path.display().to_string() })),
     }
 }
 

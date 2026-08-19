@@ -1,7 +1,8 @@
 //! Test Design Specification: the published failure mapping.
 //!
-//! Feature under test: [`tetanus_engine::convert::turn_error`] and
-//! [`tetanus_engine::convert::journal_error`], the one implementation of
+//! Feature under test: [`tetanus_engine::convert::turn_error`],
+//! [`tetanus_engine::convert::journal_error`] and
+//! [`tetanus_engine::convert::config_error`], the one implementation of
 //! section 4.5 of `docs/interface-contract.md`. The contract now says a
 //! surface calls this mapping rather than deriving a code from an engine error
 //! type, so what it returns is a boundary promise and not an internal detail.
@@ -21,7 +22,8 @@
 
 use std::path::Path;
 
-use tetanus_engine::convert::{journal_error, turn_error};
+use tetanus_config::ConfigError;
+use tetanus_engine::convert::{config_error, journal_error, turn_error};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_session::SessionError;
 use tetanus_turn::llm::LlmError;
@@ -161,6 +163,70 @@ fn every_shape_a_turn_can_fail_in_has_a_known_code() {
         assert!(fault.kind().is_some(), "{fault:?}");
         assert!(!fault.message.is_empty(), "{fault:?}");
     }
+}
+
+/// TC-FAULT-8: a settings document that cannot be booted on names its path.
+///
+/// Input: each `ConfigError` whose subject is the document - an extension the
+/// reader does not take, a directory where a file was named, a file the
+/// filesystem refused, text that does not parse, and a root that is not a map.
+/// Expected: all five are `Io` carrying `path`, and exit 1. They are one code
+/// because the reader's next move is the same for all five: go and look at
+/// that file. No case invents a `field`, because no key is at fault when the
+/// document as a whole could not be read.
+#[test]
+fn a_document_that_cannot_be_booted_on_names_its_path_and_exits_one() {
+    let path = std::path::PathBuf::from("/tmp/settings.toml");
+    let documents = [
+        ConfigError::UnsupportedExtension {
+            path: path.clone(),
+            extension: "toml".to_string(),
+        },
+        ConfigError::IsADirectory { path: path.clone() },
+        ConfigError::Unreadable {
+            path: path.clone(),
+            source: std::io::Error::other("refused"),
+        },
+        ConfigError::Malformed {
+            path: path.clone(),
+            message: "expected value".to_string(),
+        },
+        ConfigError::NotAMap { path: path.clone() },
+    ];
+
+    for document in documents {
+        let fault = config_error(&document);
+
+        assert_eq!(fault.kind(), Some(ErrorCode::Io), "{fault:?}");
+        assert_eq!(data(&fault)["path"], "/tmp/settings.toml", "{fault:?}");
+        assert_eq!(data(&fault).get("field"), None, "{fault:?}");
+    }
+    assert_eq!(ErrorCode::Io.exit_status(), 1);
+}
+
+/// TC-FAULT-9: a value the key does not take names the key.
+///
+/// Input: a `BadValue` for `agent.max_steps`.
+/// Expected: `InvalidParams` carrying the dotted key as `field`, and exit 2 -
+/// not `Io`, because the document was read and one line in it is wrong. The
+/// message states what the key takes without repeating the key, which the
+/// enum's own `Display` does and `field` already carries.
+#[test]
+fn a_value_the_key_does_not_take_names_the_key_and_exits_two() {
+    let fault = config_error(&ConfigError::BadValue {
+        key: "agent.max_steps".to_string(),
+        expected: "a whole number of steps, at least 1".to_string(),
+        found: "0".to_string(),
+    });
+
+    assert_eq!(fault.kind(), Some(ErrorCode::InvalidParams));
+    assert_eq!(data(&fault)["field"], "agent.max_steps");
+    assert_eq!(data(&fault).get("path"), None, "{fault:?}");
+    assert_eq!(
+        fault.message,
+        "must be a whole number of steps, at least 1, not 0"
+    );
+    assert_eq!(ErrorCode::InvalidParams.exit_status(), 2);
 }
 
 fn mapped(error: TurnError) -> RpcError {
