@@ -5,5 +5,6 @@
 //! two halves in separate directories is what lets the engine lane and the
 //! presentation lane change the binary without reviewing each other's work.
 
+pub mod config;
 pub mod help;
 pub mod timeline;
