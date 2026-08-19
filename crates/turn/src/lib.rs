@@ -5,6 +5,7 @@
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
+//! - [`prompt`] is the named section registry the assembly starts from.
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
@@ -17,6 +18,7 @@ pub mod engine;
 pub mod events;
 pub mod llm;
 pub mod log;
+pub mod prompt;
 pub mod repair;
 pub mod tokens;
 pub mod tools;

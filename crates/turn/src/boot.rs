@@ -10,6 +10,7 @@ use tetanus_core::{Context, EventBus, Plugin, PluginId, Registry, RegistryError,
 use tetanus_session::SessionLog;
 
 use crate::llm::LlmAdapter;
+use crate::prompt::PromptRegistry;
 use crate::tools::ToolRegistry;
 
 /// The model-provider seam.
@@ -26,6 +27,13 @@ impl Service for ToolsService {
     type Provider = ToolRegistry;
 }
 
+/// The named prompt-section registry the assembly starts from.
+pub struct PromptService;
+impl Service for PromptService {
+    const KEY: &'static str = "system-prompt";
+    type Provider = PromptRegistry;
+}
+
 /// The durable session log.
 pub struct SessionService;
 impl Service for SessionService {
@@ -38,6 +46,9 @@ pub fn llm_plugin_id() -> PluginId {
 }
 pub fn tools_plugin_id() -> PluginId {
     PluginId::from("tools")
+}
+pub fn prompt_plugin_id() -> PluginId {
+    PluginId::from("system-prompt")
 }
 pub fn session_plugin_id() -> PluginId {
     PluginId::from("session")
@@ -74,6 +85,20 @@ impl Plugin for ToolsPlugin {
     }
 }
 
+pub struct PromptPlugin {
+    pub sections: Arc<PromptRegistry>,
+}
+impl Plugin for PromptPlugin {
+    fn id(&self) -> PluginId {
+        prompt_plugin_id()
+    }
+    fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
+        ctx.services
+            .provide::<PromptService>(Arc::clone(&self.sections))
+            .map_err(|e| EffectError::Failed(e.to_string()))
+    }
+}
+
 pub struct SessionPlugin {
     pub log: Arc<dyn SessionLog>,
 }
@@ -97,7 +122,12 @@ impl Plugin for AgentLoopPlugin {
         agent_loop_plugin_id()
     }
     fn deps(&self) -> Vec<PluginId> {
-        vec![llm_plugin_id(), tools_plugin_id(), session_plugin_id()]
+        vec![
+            llm_plugin_id(),
+            tools_plugin_id(),
+            prompt_plugin_id(),
+            session_plugin_id(),
+        ]
     }
     fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
         let missing = [
@@ -107,6 +137,10 @@ impl Plugin for AgentLoopPlugin {
                 .map(|e| e.to_string()),
             ctx.services
                 .require::<ToolsService>()
+                .err()
+                .map(|e| e.to_string()),
+            ctx.services
+                .require::<PromptService>()
                 .err()
                 .map(|e| e.to_string()),
             ctx.services
@@ -124,7 +158,7 @@ impl Plugin for AgentLoopPlugin {
     }
 }
 
-/// Compose the Phase ① tree: three providers plus the driver, mounted in
+/// Compose the Phase ① tree: four providers plus the driver, mounted in
 /// dependency order onto one shared context.
 pub fn boot(
     bus: EventBus,
@@ -135,6 +169,9 @@ pub fn boot(
     let mut registry = Registry::new();
     registry.insert(Box::new(LlmPlugin { adapter }))?;
     registry.insert(Box::new(ToolsPlugin { tools }))?;
+    registry.insert(Box::new(PromptPlugin {
+        sections: PromptRegistry::new(),
+    }))?;
     registry.insert(Box::new(SessionPlugin { log }))?;
     registry.insert(Box::new(AgentLoopPlugin))?;
 

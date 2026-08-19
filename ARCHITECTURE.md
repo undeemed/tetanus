@@ -113,17 +113,24 @@ The canonical sequence, each event's dispatch mode and output type, and the rati
 are in [docs/turn-flow.md](docs/turn-flow.md).
 The live extension points are declared in [crates/turn/src/events.rs](crates/turn/src/events.rs).
 
-The engine resolves three services from the registry and names no implementation:
+The engine resolves four services from the registry and names no implementation:
 
 | Service | Key | Provider trait | Phase ① implementations |
 | --- | --- | --- | --- |
 | `LlmService` | `llm` | `dyn LlmAdapter` | `MockAdapter`, `DeepSeekAdapter` |
 | `ToolsService` | `tools` | `ToolRegistry` | `EchoTool` |
 | `SessionService` | `sessions` | `dyn SessionLog` | `JsonlSessionLog` |
+| `PromptService` | `system-prompt` | `PromptRegistry` | the engine's own base section |
 
-`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the three providers plus
-`AgentLoopPlugin`, which provides nothing and declares the other three as dependencies, so a missing
+`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the four providers plus
+`AgentLoopPlugin`, which provides nothing and declares the other four as dependencies, so a missing
 provider fails at boot naming `agent-loop` rather than mid-turn.
+
+`PromptRegistry` ([crates/turn/src/prompt.rs](crates/turn/src/prompt.rs)) is what one assembly
+starts from. A section has a unique name, an explicit order, and text that is either fixed or asked
+for at each assembly; registration returns an effect handle, so a plugin's prompt text dies with the
+plugin. The engine fills one reserved slot, `base`, from `TurnConfig::base_prompt`, and the
+`system-prompt/assemble` waterfall still has the last word over what the registry produced.
 
 ### 4.5 Information view - the session log
 
