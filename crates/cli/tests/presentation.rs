@@ -625,3 +625,42 @@ fn a_finished_turn_still_exits_zero() {
 
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
+
+/// TC-CLI-INFO-3: the build page against the catalogues and the contract.
+/// Expected: the counts equal the lengths of the two `--json` catalogues, and
+/// the protocol equals the version the contract crate publishes. The page is
+/// what a bug report quotes, so a count assembled by hand here and a list
+/// printed there must not be able to disagree.
+#[test]
+fn the_build_page_counts_agree_with_the_catalogues() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    fn listed(dir: &Path, args: &[&str], field: &str) -> usize {
+        let printed = stdout(&run(dir, args, &[]));
+        let parsed: serde_json::Value = serde_json::from_str(printed.trim()).expect("JSON");
+        parsed[field].as_array().expect("a list").len()
+    }
+
+    fn value(page: &str, label: &str) -> String {
+        page.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no `{label}` row:\n{page}"))
+            .split_whitespace()
+            .nth(1)
+            .expect("a value")
+            .to_string()
+    }
+
+    let page = stdout(&run(dir.path(), &["info"], &[]));
+    let providers = listed(dir.path(), &["models", "--json"], "providers");
+    let tools = listed(dir.path(), &["tools", "--json"], "tools");
+
+    assert_eq!(value(&page, "providers"), providers.to_string(), "{page}");
+    assert_eq!(value(&page, "tools"), tools.to_string(), "{page}");
+    assert_eq!(
+        value(&page, "protocol"),
+        tetanus_protocol::PROTOCOL_VERSION,
+        "{page}"
+    );
+    assert!(page.starts_with("\ntetanus "), "{page}");
+}

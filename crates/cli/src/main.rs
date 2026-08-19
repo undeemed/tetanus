@@ -314,11 +314,17 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             }
         }
         Cmd::Info => {
-            let theme = *out.theme();
-            let version = theme
-                .paint(Role::Accent, env!("CARGO_PKG_VERSION"))
-                .to_string();
-            out.line(&format!("tetanus {version} - phase 1 core")).ok();
+            // Counted from the same two functions the catalogue pages print,
+            // so the number here and the list there cannot disagree.
+            let build = render::info::Build {
+                version: env!("CARGO_PKG_VERSION"),
+                protocol: tetanus_protocol::PROTOCOL_VERSION,
+                providers: providers().providers.len(),
+                tools: catalog().tools.len(),
+                os: std::env::consts::OS,
+                arch: std::env::consts::ARCH,
+            };
+            render::info::render(&mut out, &build).ok();
             Ok(())
         }
     }
