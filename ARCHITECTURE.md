@@ -59,7 +59,8 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/config   tetanus-config    layered config with provenance
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
-  -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, full-screen view loop
+  -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
+                                       full-screen view loop
 
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```
