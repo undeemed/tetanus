@@ -6,14 +6,24 @@
 //! case offline and free of a clock: the delay is returned rather than slept,
 //! and jitter is one number the caller hands in.
 //!
+//! [`install`] is the caller that runs it against a live route: a listener on
+//! `agent/request-error` that answers a failed request with another attempt,
+//! and records each scheduled retry on the journal before it waits.
+//!
 //! Parity: upstream `packages/llm/llm/src/retry-policy.ts` for the shape and
-//! the defaults, and the decision half of `packages/llm/llm-retry/src/index.ts`
-//! for what is retried and for how long. Resolving a policy out of a settings
-//! document is not here: nothing reads settings into the turn engine yet, and
-//! validating a value no one can configure would be a contract with no
-//! consumer. That gap is a row in `docs/parity.md`.
+//! the defaults, and `packages/llm/llm-retry/src/index.ts` for the executor.
+//! Resolving a policy out of a settings document is not here: nothing reads
+//! settings into the turn engine yet, and validating a value no one can
+//! configure would be a contract with no consumer. That gap is a row in
+//! `docs/parity.md`.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tetanus_core::{EffectHandle, EventBus};
+use tetanus_session::SessionLog;
+
+use crate::events::{RequestError, RequestErrorAction};
 
 /// Retries allowed after the first attempt, in `normal` mode.
 pub const DEFAULT_MAX_RETRIES: u32 = 2;
@@ -164,6 +174,134 @@ impl RetryPolicy {
         };
         RetryDecision::Wait { retry, delay }
     }
+}
+
+/// The durable record of a scheduled retry, written before the wait
+/// (`docs/interface-contract.md` section 4.3.2).
+pub const RETRY_EVENT: &str = "llm/retry";
+/// The durable record that the wait is over and the request is going out
+/// again (section 4.3.2).
+pub const RETRY_STARTED_EVENT: &str = "llm/retry-started";
+
+/// Where jitter comes from: one sample in the zero-to-one range per decision.
+pub type Jitter = Arc<dyn Fn() -> f64 + Send + Sync>;
+
+/// The jitter source a route uses when the caller has no opinion.
+///
+/// Jitter exists to spread the retries of many callers apart, not to be
+/// unguessable, so the low bits of the clock are enough and the workspace
+/// stays free of a random-number dependency.
+pub fn clock_jitter() -> Jitter {
+    Arc::new(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        f64::from(nanos % 1_000_000) / 1_000_000.0
+    })
+}
+
+/// Run `policy` for one provider route: a failed request on that route is
+/// retried, and every scheduled retry is durable before its wait.
+///
+/// Scoped to a route because a policy belongs to a provider and not to the
+/// engine - upstream reads it from each provider's own configuration - so a
+/// failure from another route is delegated on untouched. Nothing resolves a
+/// policy out of settings yet, so a composer passes one in.
+///
+/// The returned handle removes the listener, as every registration does.
+pub fn install(
+    bus: &EventBus,
+    log: Arc<dyn SessionLog>,
+    provider: impl Into<String>,
+    policy: RetryPolicy,
+    jitter: Jitter,
+) -> EffectHandle {
+    let route = provider.into();
+    bus.on_waterfall::<RequestError, _>(move |ev, next| {
+        let log = Arc::clone(&log);
+        let route = route.clone();
+        let policy = policy.clone();
+        let jitter = Arc::clone(&jitter);
+        Box::pin(async move {
+            if ev.provider != route {
+                return next.run(ev).await;
+            }
+            let Some((retry, delay)) = schedule(log.as_ref(), &policy, ev, jitter()) else {
+                return next.run(ev).await;
+            };
+            tokio::time::sleep(delay).await;
+            let started = serde_json::json!({ "turn": ev.turn, "step": ev.step, "retry": retry });
+            if let Err(refused) = log.append(RETRY_STARTED_EVENT, started) {
+                // The journal is the count. An attempt it cannot record would
+                // be invisible to the next decision, which would then allow
+                // one retry too many, so the failure stands instead.
+                tracing::warn!(%refused, "the journal refused a retry record; not retrying");
+                return next.run(ev).await;
+            }
+            Some(RequestErrorAction::Retry)
+        })
+    })
+}
+
+/// Decide the next attempt and make it durable, or answer `None` when this
+/// failure is not one to retry.
+fn schedule(
+    log: &dyn SessionLog,
+    policy: &RetryPolicy,
+    ev: &RequestError,
+    jitter: f64,
+) -> Option<(u32, Duration)> {
+    let RetryDecision::Wait { retry, delay } = policy.decide(
+        prior_retries(log, ev),
+        &ev.failure.code,
+        ev.failure.provider_retry_after_ms,
+        jitter,
+    ) else {
+        return None;
+    };
+    let record = serde_json::json!({
+        "turn": ev.turn,
+        "step": ev.step,
+        "provider": ev.provider,
+        "code": ev.failure.code,
+        "message": ev.failure.message,
+        "retry": retry,
+        // An unbounded policy has no ceiling to report, and says so rather
+        // than reporting a number a reader would take for a limit.
+        "max_retries": match policy {
+            RetryPolicy::Normal { max_retries, .. } => serde_json::json!(max_retries),
+            RetryPolicy::Always { .. } => serde_json::Value::Null,
+        },
+        "delay_ms": delay.as_millis() as u64,
+    });
+    match log.append(RETRY_EVENT, record) {
+        Ok(_) => Some((retry, delay)),
+        Err(refused) => {
+            tracing::warn!(%refused, "the journal refused a retry record; not retrying");
+            None
+        }
+    }
+}
+
+/// How many retries this step has already spent on this route, read back from
+/// the journal.
+///
+/// The count is durable rather than kept in the listener, so a resumed session
+/// continues the chain instead of starting a new one, and the record a reader
+/// sees is the record the policy counted. Upstream counts the same way, from
+/// its own `llm/retry` entries.
+fn prior_retries(log: &dyn SessionLog, ev: &RequestError) -> u32 {
+    log.events()
+        .iter()
+        .rev()
+        .find(|event| {
+            event.ty == RETRY_EVENT
+                && event.data["turn"] == serde_json::json!(ev.turn)
+                && event.data["step"] == serde_json::json!(ev.step)
+                && event.data["provider"] == serde_json::json!(ev.provider)
+        })
+        .and_then(|event| event.data["retry"].as_u64())
+        .unwrap_or(0) as u32
 }
 
 /// A duration from a millisecond count that may be anything at all: a negative
