@@ -224,7 +224,7 @@ The binary is `tetanus`; the publishable umbrella crate is `tetanus-hardness`, b
 cargo test --workspace
 ```
 
-46 tests, every one offline.
+Every case runs offline, and no case needs a key.
 The one live provider case reports itself skipped unless `DEEPSEEK_API_KEY` is set.
 The suite is the merge gate: it asserts the whole documented event sequence by equality.
 [CONTRIBUTING.md](CONTRIBUTING.md) explains how to change that sequence on purpose.
