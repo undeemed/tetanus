@@ -8,6 +8,7 @@
 //! presentation lane owns the binary and wires each subcommand to the calls
 //! section 4.7 of the contract lists for it.
 
+pub mod agent;
 pub mod convert;
 pub mod session;
 pub mod subscribe;
@@ -24,13 +25,15 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::SessionInfo;
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
+use tetanus_turn::tools::{EchoTool, ToolRegistry};
 
+use crate::agent::{MockProviders, Providers, Runtime};
 use crate::convert::not_implemented;
 use crate::session::{SessionDefaults, SessionStore};
 use crate::subscribe::Hub;
 
 /// Everything the engine needs that is not a call.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EngineConfig {
     /// Directory holding one JSONL journal per session.
     pub sessions_root: PathBuf,
@@ -39,6 +42,10 @@ pub struct EngineConfig {
     /// Model a `session.create` with no override resolves to.
     pub default_model: String,
     pub max_steps: u32,
+    /// The adapter behind each provider a session may name.
+    pub providers: Arc<dyn Providers>,
+    /// The tools every turn on this engine can call.
+    pub tools: Arc<ToolRegistry>,
 }
 
 impl Default for EngineConfig {
@@ -48,6 +55,10 @@ impl Default for EngineConfig {
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
+            // Offline by default: a build with no configuration still runs a
+            // full documented turn, with no key and no network.
+            providers: Arc::new(MockProviders),
+            tools: Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
         }
     }
 }
@@ -55,20 +66,22 @@ impl Default for EngineConfig {
 pub struct HarnessEngine {
     sessions: Arc<SessionStore>,
     hub: Arc<Hub>,
+    runtime: Arc<Runtime>,
 }
 
 impl HarnessEngine {
     pub fn new(config: EngineConfig) -> Self {
         Self {
             sessions: Arc::new(SessionStore::new(
-                config.sessions_root,
+                config.sessions_root.clone(),
                 SessionDefaults {
-                    provider: config.default_provider,
-                    model: config.default_model,
+                    provider: config.default_provider.clone(),
+                    model: config.default_model.clone(),
                     max_steps: config.max_steps,
                 },
             )),
             hub: Arc::new(Hub::new()),
+            runtime: Arc::new(Runtime::new(config.providers, config.tools)),
         }
     }
 
@@ -146,8 +159,8 @@ impl Engine for HarnessEngine {
         self.hub.unsubscribe(params)
     }
 
-    async fn agent_prompt(&self, _: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {
-        Err(not_implemented(method::AGENT_PROMPT))
+    async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {
+        self.runtime.prompt(&self.sessions, params).await
     }
 
     async fn agent_status(&self, _: SessionRef) -> Result<AgentStatusResult, RpcError> {
