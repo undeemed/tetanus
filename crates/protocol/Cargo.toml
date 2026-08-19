@@ -1,0 +1,14 @@
+[package]
+name = "tetanus-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tetanus engine<->presentation contract: wire types, JSON-RPC envelope, and the facade every surface drives."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

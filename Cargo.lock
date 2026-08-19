@@ -1110,6 +1110,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tetanus-session"
 version = "0.1.0"
 dependencies = [
