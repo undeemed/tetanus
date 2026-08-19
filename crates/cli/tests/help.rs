@@ -203,7 +203,7 @@ fn every_example_model_is_offered_by_its_adapter() {
 /// the column that made the block scannable in the first place.
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
-    for (args, count) in [(vec!["--help"], 6), (vec!["run", "--help"], 5)] {
+    for (args, count) in [(vec!["--help"], 6), (vec!["run", "--help"], 6)] {
         let page = help_at("80", &args);
         let examples = block(&page, "Examples:");
 
