@@ -165,6 +165,7 @@ An empty prompt is refused before the journal is opened, with the exit status [d
 
 `--ui` watches the turn on a screen of its own instead of in a block under the shell prompt.
 Up and Down move a row, PageUp and PageDown a screenful, Home goes to the first line of the turn and End back to following the newest, and `q`, Esc or Ctrl-C closes the view.
+`?` spells out every key the view you are in answers, and any key goes back to what you were reading; on a terminal too narrow for the whole footer, `? keys` and the way out are what is kept.
 The transcript is kept whole, so a turn can be read back from its first line while it is still running, and the block showing what is arriving stays at the foot of the screen however far back you have scrolled.
 The view outlives the turn: it stays up until you close it, because the moment to look back over a turn is after it has finished.
 Closing it before the turn finishes stops the turn, and a stopped turn has no result to report.

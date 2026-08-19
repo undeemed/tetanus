@@ -336,11 +336,7 @@ impl Journal {
     fn hint(&self) -> String {
         let dot = self.theme.glyph("·", "-");
         match &self.find {
-            Find::Off => format!(
-                "{} scroll {dot} / find {dot} ? keys {dot} q {}",
-                self.theme.glyph("↑↓", "up/dn"),
-                self.exit.word()
-            ),
+            Find::Off => self.reading(),
             Find::Typing(text) => self
                 .theme
                 .paint(Role::Accent, &format!("/{text}"))
@@ -358,6 +354,25 @@ impl Journal {
                 )
             }
         }
+    }
+
+    /// The footer while the reader is reading rather than searching, in the
+    /// longest wording this terminal has room for.
+    ///
+    /// The short one names the two keys a reader cannot do without: the card
+    /// that says the rest, and the way out. Everything it drops is on the
+    /// card, which is what lets it be dropped.
+    fn reading(&self) -> String {
+        let dot = self.theme.glyph("·", "-");
+        let out = self.exit.word();
+        keys::hint(
+            self.cols,
+            &format!(
+                "{} scroll {dot} / find {dot} ? keys {dot} q {out}",
+                self.theme.glyph("↑↓", "up/dn")
+            ),
+            &format!("? keys {dot} q {out}"),
+        )
     }
 
     /// Every key this view answers, in the order a reader meets them.
@@ -485,8 +500,9 @@ impl View for Journal {
 /// two keys that end the view; that `/` reaches the line holding a word, that
 /// `n` walks the rest of them, that the prompt takes the printable keys while
 /// it is open, and that a word no line holds is said rather than acted on; and
-/// that `?` spells the keys out over the transcript, and that any key takes
-/// the card down again.
+/// that `?` spells the keys out over the transcript, that any key takes the
+/// card down again, and that a footer with no room for the long wording keeps
+/// the two keys a reader cannot do without.
 ///
 /// Features NOT tested here: the wording of a line (owned by `timeline.rs`),
 /// the arrangement of a frame (owned by `tetanus_ui::Page`), the loop and its
@@ -869,6 +885,40 @@ mod tests {
         assert!(
             shown[shown.len() - 1].contains("/ec?"),
             "the ? did not go into the word: {shown:?}"
+        );
+    }
+
+    /// TC-CLI-BROWSE-12: the footer on a terminal too narrow for its keys.
+    /// Expected: at 60 columns the whole key list is on it; at 30 the two keys
+    /// that cannot be lost are, and nothing is cut mid-word.
+    #[test]
+    fn a_narrow_footer_keeps_the_card_and_the_way_out() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        let wide = rows(&mut view, COLS, 12);
+        let footer = wide[wide.len() - 1].clone();
+        assert!(
+            footer.contains("scroll"),
+            "the wide footer lost the keys: {footer}"
+        );
+        assert!(
+            footer.contains("? keys"),
+            "the wide footer never says `?`: {footer}"
+        );
+
+        let narrow = rows(&mut view, 30, 12);
+        let footer = narrow[narrow.len() - 1].clone();
+        assert!(
+            footer.contains("? keys"),
+            "the narrow footer lost the card: {footer}"
+        );
+        assert!(
+            footer.contains("q quit"),
+            "the narrow footer lost the way out: {footer}"
+        );
+        assert!(
+            !footer.contains("scroll"),
+            "the narrow footer kept the long wording: {footer}"
         );
     }
 }
