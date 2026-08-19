@@ -57,7 +57,7 @@ pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
 pub use frame::Frame;
-pub use page::Page;
+pub use page::{bar, Page};
 pub use progress::Progress;
 pub use screen::Screen;
 pub use terminal::{Console, Held, Key, Keys, Tty};

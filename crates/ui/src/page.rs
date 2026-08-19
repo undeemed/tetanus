@@ -176,7 +176,11 @@ impl Page {
 ///
 /// Measured by what a terminal draws, not by bytes, so the SGR codes a theme
 /// wrote do not push the right end off the screen.
-fn bar(cols: usize, left: &str, right: &str) -> String {
+///
+/// Public because a page is not the only full-screen view that wants this row:
+/// a view arranging its own body still wants a heading and a footer that agree
+/// with the ones a page draws, and two of them would eventually disagree.
+pub fn bar(cols: usize, left: &str, right: &str) -> String {
     let room = visible_width(left) + visible_width(right) + 1;
     match cols.checked_sub(room) {
         Some(gap) => format!("{left}{}{right}", " ".repeat(gap + 1)),

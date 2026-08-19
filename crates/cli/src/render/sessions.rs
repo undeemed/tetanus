@@ -30,13 +30,58 @@ use std::io::{self, Write};
 
 use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{AgentState, SessionInfo};
-use tetanus_ui::{truncate, Role, Ui};
+use tetanus_ui::{truncate, Role, Theme, Ui};
 
 /// Space between two columns of a row.
 const GAP: usize = 2;
 
-/// Render one row per session: the id to retype, its size, its state, and
-/// what it was about.
+/// The sessions in the order a person reads them, newest first.
+///
+/// Separate from [`rows`] because the picker needs both halves and needs them
+/// apart: which session a row stands for is what Enter opens, and it would
+/// have to find that out again from a string if this returned only the text.
+pub fn ordered(list: &SessionListResult) -> Vec<&SessionInfo> {
+    let mut rows: Vec<&SessionInfo> = list.sessions.iter().collect();
+    // Reverse by time, then forward by id, so two sessions created inside the
+    // same millisecond still print in one settled order every run.
+    rows.sort_by(|a, b| {
+        b.created_time
+            .cmp(&a.created_time)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    rows
+}
+
+/// One row per session, composed for a terminal `cols` wide: the id to
+/// retype, its size, its state, and what it was about.
+pub fn rows(theme: &Theme, cols: usize, sessions: &[&SessionInfo]) -> Vec<String> {
+    let charset = theme.charset();
+    let id = width(sessions.iter().map(|row| row.session_id.chars().count()));
+    let digits = width(sessions.iter().map(|row| count(row).to_string().len()));
+    let size = width(
+        sessions
+            .iter()
+            .map(|row| measure(row, digits).chars().count()),
+    );
+    let state = width(sessions.iter().map(|row| named(row).chars().count()));
+    let room = cols.saturating_sub(id + size + state + GAP * 3).max(1);
+    let gap = " ".repeat(GAP);
+
+    sessions
+        .iter()
+        .map(|row| {
+            format!(
+                "{:<id$}{gap}{:<size$}{gap}{:<state$}{gap}{}",
+                theme.paint(Role::Accent, &row.session_id),
+                theme.paint(Role::Muted, &measure(row, digits)),
+                theme.paint(role(row), &named(row)),
+                title(theme, row, room, charset),
+            )
+        })
+        .collect()
+}
+
+/// Print the list under a heading.
 pub fn render<W: Write>(ui: &mut Ui<W>, list: &SessionListResult) -> io::Result<()> {
     ui.heading("sessions")?;
     if list.sessions.is_empty() {
@@ -46,34 +91,9 @@ pub fn render<W: Write>(ui: &mut Ui<W>, list: &SessionListResult) -> io::Result<
         return ui.line(&empty);
     }
 
-    let mut rows: Vec<&SessionInfo> = list.sessions.iter().collect();
-    // Reverse by time, then forward by id, so two sessions created inside the
-    // same millisecond still print in one settled order every run.
-    rows.sort_by(|a, b| {
-        b.created_time
-            .cmp(&a.created_time)
-            .then_with(|| a.session_id.cmp(&b.session_id))
-    });
-
-    let charset = ui.theme().charset();
-    let id = width(rows.iter().map(|row| row.session_id.chars().count()));
-    let digits = width(rows.iter().map(|row| count(row).to_string().len()));
-    let size = width(rows.iter().map(|row| measure(row, digits).chars().count()));
-    let state = width(rows.iter().map(|row| named(row).chars().count()));
-    let room = ui
-        .width()
-        .saturating_sub(id + size + state + GAP * 3)
-        .max(1);
-
-    for row in rows {
-        let gap = " ".repeat(GAP);
-        ui.line(&format!(
-            "{:<id$}{gap}{:<size$}{gap}{:<state$}{gap}{}",
-            ui.paint(Role::Accent, &row.session_id),
-            ui.paint(Role::Muted, &measure(row, digits)),
-            ui.paint(role(row), &named(row)),
-            title(ui, row, room, charset),
-        ))?;
+    let composed = rows(ui.theme(), ui.width(), &ordered(list));
+    for row in composed {
+        ui.line(&row)?;
     }
     Ok(())
 }
@@ -113,15 +133,10 @@ fn role(row: &SessionInfo) -> Role {
 }
 
 /// The session's first prompt, cut to the room the fixed columns left.
-fn title<W: Write>(
-    ui: &Ui<W>,
-    row: &SessionInfo,
-    room: usize,
-    charset: tetanus_ui::Charset,
-) -> String {
+fn title(theme: &Theme, row: &SessionInfo, room: usize, charset: tetanus_ui::Charset) -> String {
     match &row.title {
         Some(title) => truncate(title, room, charset),
-        None => ui
+        None => theme
             .paint(Role::Muted, &truncate("no prompt yet", room, charset))
             .to_string(),
     }
