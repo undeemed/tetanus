@@ -65,6 +65,9 @@ enum Cmd {
         /// How much faster than the recorded pace to play. Default 1.
         #[arg(long, value_name = "N", requires = "live", value_parser = playback_speed)]
         speed: Option<f64>,
+        /// Print the model's thinking in full, not folded to its first line
+        #[arg(long)]
+        think: bool,
     },
     /// Print version/build info
     Info,
@@ -98,6 +101,9 @@ struct RunArgs {
     /// With `--trace`, print each event's payload next to its topic
     #[arg(long)]
     verbose: bool,
+    /// Print the model's thinking in full, not folded to its first line
+    #[arg(long)]
+    think: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -192,6 +198,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             raw,
             live,
             speed,
+            think,
         } => {
             let events = tetanus_session::replay(&path)
                 .map_err(|err| report(policy, &err.to_string(), None))?;
@@ -210,7 +217,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             }
             let events = boundary(events);
             if !live {
-                render::timeline::render(&mut out, &events).ok();
+                render::timeline::render(&mut out, &events, think).ok();
                 return Ok(());
             }
             // One thread is enough: the playback is a clock and a writer.
@@ -223,6 +230,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 policy.stdout_is_terminal,
                 &events,
                 speed.unwrap_or(1.0),
+                think,
                 interrupt(),
             ));
             match played {
@@ -352,10 +360,11 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     out: &mut Ui<W>,
     log: &JsonlSessionLog,
     phase: &str,
+    think: bool,
     work: F,
 ) -> Option<F::Output> {
     let (theme, width) = (*out.theme(), out.width());
-    let mut view = Live::new(theme, width, phase);
+    let mut view = Live::new(theme, width, phase, think);
     let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
     let mut status = match policy.stdout_is_terminal {
         true => None,
@@ -479,7 +488,7 @@ async fn run<W: std::io::Write>(
         // The trace prints the sequence afterwards, so nothing may be written
         // above it while the turn runs.
         true => Some(with_progress(policy, &phase, turn).await),
-        false => with_live(policy, out, &log, &phase, turn).await,
+        false => with_live(policy, out, &log, &phase, args.think, turn).await,
     };
     let Some(outcome) = finished else {
         // Stopped by the user. The journal is still worth naming: it holds

@@ -5,8 +5,9 @@
 //! well as the lines this crate writes itself; that a colour-hostile
 //! environment cannot change the bytes of plain output; the shape and exit
 //! status of a reported failure; that a bad `--color` value is a usage error;
-//! and which of the two views - the turn, or the raw sequence - a command
-//! prints. NOT tested here: the resolution rules themselves (owned by
+//! which of the two views - the turn, or the raw sequence - a command prints;
+//! and that a model's thinking stays folded until it is asked for. NOT tested
+//! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
 //!
@@ -326,4 +327,34 @@ fn a_playback_that_cannot_happen_is_a_usage_error() {
         "{}",
         stderr(&zero)
     );
+}
+
+/// TC-CLI-UI-13: a journal whose model thought before it answered.
+/// Expected: `replay` shows one folded line naming what is behind it, and
+/// `replay --think` shows every line of it. The mock adapter never thinks, so
+/// this case states the journal itself - a reasoning model's journal is an
+/// ordinary journal, and the surface must read one written by any adapter.
+#[test]
+fn thinking_is_folded_until_it_is_asked_for() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let journal = [
+        r#"{"type":"turn/start","seq":0,"time":10,"data":{"turn":1}}"#,
+        r#"{"type":"assistant/message","seq":1,"time":20,"data":{"content":"42","reasoning":"Work it out.\nSix by seven.\nThat is 42."}}"#,
+        r#"{"type":"turn/end","seq":2,"time":30,"data":{"turn":1,"steps":1,"stop_reason":"natural"}}"#,
+    ]
+    .join("\n");
+    std::fs::write(dir.path().join("t.jsonl"), format!("{journal}\n")).expect("journal");
+
+    let folded = stdout(&run(dir.path(), &["replay", "t.jsonl"], &[]));
+    assert!(
+        folded.contains("  think Work it out.  +2 lines\n"),
+        "not folded:\n{folded}"
+    );
+    assert!(!folded.contains("Six by seven"), "{folded}");
+
+    let opened = stdout(&run(dir.path(), &["replay", "t.jsonl", "--think"], &[]));
+    for line in ["Work it out.", "Six by seven.", "That is 42."] {
+        assert!(opened.contains(line), "`{line}` missing from:\n{opened}");
+    }
+    assert!(opened.contains("  ai    42\n"), "{opened}");
 }

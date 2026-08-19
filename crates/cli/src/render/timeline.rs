@@ -23,6 +23,12 @@
 //! arrival order, per contract §4.3.1. When the pairing is not the obvious one
 //! the line says which call it answers, so two tool calls in flight stay
 //! readable.
+//!
+//! Thinking is folded to one line. A reasoning model spends hundreds of lines
+//! deciding, and printing all of them buries the answer it decided on -
+//! upstream's conversation view collapses the same text behind a disclosure
+//! row, and shows the first line of it. `--think` is the CLI's way of opening
+//! that row.
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -38,6 +44,9 @@ pub(super) const INDENT: &str = "  ";
 /// for its result, and what the turn has spent so far.
 #[derive(Default)]
 pub struct Reader {
+    /// Whether the reasoning of a message is printed in full. Folded to its
+    /// first line otherwise, which is what a reader of the answer wants.
+    think: bool,
     open_call: Option<String>,
     /// Tokens billed by every step of the turn in progress. `None` until a
     /// message carries usage, because a build that does not measure tokens
@@ -48,6 +57,14 @@ pub struct Reader {
 }
 
 impl Reader {
+    /// A reader of a stream, told how much of the thinking to print.
+    pub fn new(think: bool) -> Self {
+        Self {
+            think,
+            ..Self::default()
+        }
+    }
+
     /// The lines one event produces, in order, and none for an event a
     /// finished turn does not show.
     pub fn lines(&mut self, theme: &Theme, width: usize, event: &SessionEvent) -> Vec<String> {
@@ -90,9 +107,9 @@ impl Reader {
                     spent.prompt_tokens += step.prompt_tokens;
                     spent.completion_tokens += step.completion_tokens;
                 }
-                let mut lines = match reasoning.is_empty() {
-                    true => Vec::new(),
-                    false => said(theme, width, "think", Role::Muted, reasoning),
+                let mut lines = match self.think {
+                    true => said(theme, width, "think", Role::Muted, reasoning),
+                    false => folded(theme, width, reasoning),
                 };
                 lines.extend(said(theme, width, "ai", Role::Topic, content));
                 lines
@@ -200,9 +217,9 @@ fn tokens(count: u64) -> String {
 }
 
 /// Render a whole event stream, as a reader of a finished turn sees it.
-pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent]) -> io::Result<()> {
+pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent], think: bool) -> io::Result<()> {
     let (theme, width) = (*ui.theme(), ui.width());
-    let mut reader = Reader::default();
+    let mut reader = Reader::new(think);
     for event in events {
         for line in reader.lines(&theme, width, event) {
             ui.line(&line)?;
@@ -248,6 +265,35 @@ pub(super) fn said(theme: &Theme, width: usize, who: &str, role: Role, text: &st
         .collect()
 }
 
+/// The thinking as the one line a collapsed disclosure row shows: what the
+/// model opened with, and how much more there is behind it.
+///
+/// The first line is the summary because that is the line upstream shows once
+/// a block has finished streaming. The count is this lane's addition: a
+/// terminal has no chevron to say that something is folded, so the line says
+/// it in words.
+fn folded(theme: &Theme, width: usize, reasoning: &str) -> Vec<String> {
+    let mut said = reasoning
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(first) = said.next() else {
+        return Vec::new();
+    };
+    let more = match said.count() {
+        0 => String::new(),
+        1 => "  +1 line".to_string(),
+        rest => format!("  +{rest} lines"),
+    };
+    let pad = INDENT.len() + LABEL + 1;
+    let room = width.saturating_sub(pad + more.chars().count());
+    let summary = truncate(first, room, theme.charset());
+    let label = theme.paint(Role::Muted, "think");
+    let body = format!("{summary}{more}");
+    let text = theme.paint(Role::Muted, &body);
+    vec![format!("{INDENT}{label} {text}")]
+}
+
 /// One tool line: a glyph, the tool's name, and a value it authored.
 pub(super) fn tool(
     theme: &Theme,
@@ -282,8 +328,8 @@ fn raw(theme: &Theme, width: usize, event: &SessionEvent) -> String {
 /// Test Design Specification: the timeline renderer.
 ///
 /// Features tested: the shape of a whole turn, that streaming events are
-/// silent, correlation by `call_id`, a failed tool, an unknown type, and the
-/// width rules. Features NOT tested here: the colour policy (owned by
+/// silent, correlation by `call_id`, a failed tool, an unknown type, the
+/// folding of a model's thinking, and the width rules. Features NOT tested here: the colour policy (owned by
 /// `tetanus-ui`) and the journal (owned by `tetanus-session`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`.
@@ -313,9 +359,22 @@ mod tests {
     }
 
     fn rendered(events: &[SessionEvent], charset: Charset, width: usize) -> String {
+        thought(events, charset, width, false)
+    }
+
+    /// The same, with the thinking asked for or folded.
+    fn thought(events: &[SessionEvent], charset: Charset, width: usize, think: bool) -> String {
         let mut ui = buffered(Theme::new(false, charset), width);
-        render(&mut ui, events).expect("render");
+        render(&mut ui, events, think).expect("render");
         ui.contents()
+    }
+
+    /// A message that thought about it first.
+    fn reasoned(reasoning: &str) -> Vec<SessionEvent> {
+        vec![event(
+            "assistant/message",
+            json!({ "content": "42", "reasoning": reasoning }),
+        )]
     }
 
     /// TC-CLI-TL-1: one whole turn.
@@ -495,7 +554,7 @@ mod tests {
         ];
 
         let mut painted = buffered(Theme::new(true, Charset::Unicode), 80);
-        render(&mut painted, &events).expect("render");
+        render(&mut painted, &events, false).expect("render");
         let painted = painted.contents();
 
         assert!(
@@ -730,5 +789,77 @@ mod tests {
         ] {
             assert_eq!(tokens(count), shown, "{count}");
         }
+    }
+
+    /// TC-CLI-TL-15: a long think, with nothing asked for.
+    /// Expected: one line - the first thing the model said to itself, and a
+    /// count of what is folded behind it. A reasoning model spends more lines
+    /// deciding than answering, and a transcript that prints all of them has
+    /// buried the answer it was written to show.
+    #[test]
+    fn thinking_is_folded_to_its_first_line() {
+        let out = thought(
+            &reasoned("Work it out.\nSix by seven.\nThat is 42."),
+            Charset::Unicode,
+            80,
+            false,
+        );
+
+        assert_eq!(out, "  think Work it out.  +2 lines\n  ai    42\n");
+    }
+
+    /// TC-CLI-TL-16: the same think, asked for.
+    /// Expected: every line of it, under the same label and aligned under the
+    /// first, with the model's own line breaks kept. `--think` is the
+    /// disclosure row upstream opens on a click, and opening it must not
+    /// reword what it opens.
+    #[test]
+    fn think_prints_the_whole_of_it() {
+        let out = thought(
+            &reasoned("Work it out.\nSix by seven.\nThat is 42."),
+            Charset::Unicode,
+            80,
+            true,
+        );
+
+        assert_eq!(
+            out,
+            "  think Work it out.\n        Six by seven.\n        That is 42.\n  ai    42\n"
+        );
+    }
+
+    /// TC-CLI-TL-17: a think of exactly one line, and a message with none.
+    /// Expected: no count on the first - there is nothing behind it to count -
+    /// and not a line of any kind on the second. A label naming an empty
+    /// thought is a lie about what the model did.
+    #[test]
+    fn a_fold_counts_only_what_it_hides() {
+        let one = thought(&reasoned("Six by seven."), Charset::Unicode, 80, false);
+        assert_eq!(one, "  think Six by seven.\n  ai    42\n");
+
+        let none = thought(&reasoned(""), Charset::Unicode, 80, false);
+        assert_eq!(none, "  ai    42\n");
+    }
+
+    /// TC-CLI-TL-18: a folded think too wide for the terminal.
+    /// Expected: the summary gives way, the count does not. The count is the
+    /// part a reader cannot guess, and a line that wraps has stopped being a
+    /// fold.
+    #[test]
+    fn a_fold_is_one_line_however_narrow_the_terminal() {
+        let out = thought(
+            &reasoned("A first line with a great many words in it indeed.\nAnd a second."),
+            Charset::Unicode,
+            40,
+            false,
+        );
+        let folded = out.lines().next().expect("a line");
+
+        assert_eq!(folded.chars().count(), 40);
+        assert!(
+            folded.ends_with("+1 line"),
+            "the count went missing: {folded:?}"
+        );
+        assert!(folded.contains('\u{2026}'), "nothing was cut: {folded:?}");
     }
 }

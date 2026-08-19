@@ -81,10 +81,11 @@ pub async fn play<W: Write>(
     animated: bool,
     events: &[SessionEvent],
     speed: f64,
+    think: bool,
     stop: impl Future<Output = ()>,
 ) -> io::Result<Ended> {
     let (theme, width) = (*ui.theme(), ui.width());
-    let mut view = Live::new(theme, width, "replaying");
+    let mut view = Live::new(theme, width, "replaying", think);
     let mut screen = Screen::new(Ui::new(ui.out(), theme, width), animated);
     let mut stop = std::pin::pin!(stop);
 
@@ -248,13 +249,13 @@ mod tests {
     async fn a_piped_playback_is_the_timeline() {
         let events = turn();
         let mut played = buffered(theme(), 80);
-        let ended = play(&mut played, false, &events, 1.0, never())
+        let ended = play(&mut played, false, &events, 1.0, false, never())
             .await
             .expect("play");
         assert_eq!(ended, Ended::Finished);
 
         let mut printed = buffered(theme(), 80);
-        super::super::timeline::render(&mut printed, &events).expect("render");
+        super::super::timeline::render(&mut printed, &events, false).expect("render");
 
         assert_eq!(played.contents(), printed.contents());
         assert!(!played.contents().contains('\u{1b}'), "escapes in a pipe");
@@ -267,7 +268,9 @@ mod tests {
     #[tokio::test]
     async fn an_empty_journal_plays_as_nothing() {
         let mut ui = buffered(theme(), 80);
-        let ended = play(&mut ui, false, &[], 1.0, never()).await.expect("play");
+        let ended = play(&mut ui, false, &[], 1.0, false, never())
+            .await
+            .expect("play");
         assert_eq!(ended, Ended::Finished);
         assert_eq!(ui.contents(), "");
     }
@@ -282,9 +285,16 @@ mod tests {
     async fn ctrl_c_stops_the_playback_and_hands_the_terminal_back() {
         let events = turn();
         let mut ui = buffered(theme(), 80);
-        let ended = play(&mut ui, true, &events, 1_000.0, std::future::ready(()))
-            .await
-            .expect("play");
+        let ended = play(
+            &mut ui,
+            true,
+            &events,
+            1_000.0,
+            false,
+            std::future::ready(()),
+        )
+        .await
+        .expect("play");
 
         assert_eq!(ended, Ended::Interrupted);
         let shown = ui.contents();
