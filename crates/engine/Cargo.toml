@@ -10,6 +10,10 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 tetanus-protocol = { path = "../protocol" }
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+tetanus-turn = { path = "../turn" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }
