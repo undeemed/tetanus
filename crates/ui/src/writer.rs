@@ -12,6 +12,7 @@
 use std::io::{self, IsTerminal, Write};
 
 use crate::color::{self, ColorChoice, Env};
+use crate::progress::Progress;
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -112,6 +113,10 @@ pub struct Policy {
     pub stdout: Theme,
     pub stderr: Theme,
     pub width: usize,
+    /// Whether stderr is a terminal. Colour does not answer this: `--color
+    /// never` at a terminal is still a terminal, and progress may still
+    /// repaint in place.
+    pub stderr_is_terminal: bool,
 }
 
 impl Policy {
@@ -120,6 +125,7 @@ impl Policy {
     pub fn resolve(choice: ColorChoice, env: &Env) -> Self {
         let charset = color::charset(env);
         let terminal_width = terminal_size::terminal_size().map(|(w, _)| w.0);
+        let stderr_is_terminal = io::stderr().is_terminal();
         Self {
             stdout: Theme::new(
                 color::color_enabled(choice, env, io::stdout().is_terminal()),
@@ -130,6 +136,7 @@ impl Policy {
                 charset,
             ),
             width: color::width(env, terminal_width),
+            stderr_is_terminal,
         }
     }
 
@@ -144,6 +151,11 @@ impl Policy {
 
     pub fn stderr(&self) -> Ui<io::Stderr> {
         Ui::new(io::stderr(), self.stderr, self.width)
+    }
+
+    /// The progress line, on stderr, animated only at a terminal.
+    pub fn stderr_progress(&self) -> Progress<io::Stderr> {
+        Progress::new(self.stderr(), self.stderr_is_terminal)
     }
 }
 

@@ -210,6 +210,27 @@ fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
     Reported(1)
 }
 
+/// Run `work` behind the status line, ticking the animation while it waits.
+///
+/// A live model call can hold for a long time with nothing to print, and a
+/// surface that prints nothing looks hung. The line is on stderr and is erased
+/// before anything else is written, so stdout is unchanged either way.
+async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, work: F) -> F::Output {
+    let mut progress = policy.stderr_progress();
+    progress.set(label).ok();
+
+    let mut work = std::pin::pin!(work);
+    let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
+    let done = loop {
+        tokio::select! {
+            done = &mut work => break done,
+            _ = frames.tick() => { progress.tick().ok(); }
+        }
+    };
+    progress.finish().ok();
+    done
+}
+
 async fn run<W: std::io::Write>(
     policy: &Policy,
     out: &mut Ui<W>,
@@ -264,17 +285,18 @@ async fn run<W: std::io::Write>(
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {
-            model,
+            model: model.clone(),
             max_steps: args.max_steps,
             ..TurnConfig::default()
         },
     )
     .map_err(|err| report(policy, &err.to_string(), None))?;
 
-    let outcome = engine
-        .run_turn(&args.prompt)
-        .await
-        .map_err(|err| report(policy, &err.to_string(), None))?;
+    let outcome = with_progress(policy, &format!("running the turn on {model}"), async {
+        engine.run_turn(&args.prompt).await
+    })
+    .await
+    .map_err(|err| report(policy, &err.to_string(), None))?;
     engine
         .flush()
         .await
