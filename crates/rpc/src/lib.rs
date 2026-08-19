@@ -10,6 +10,8 @@
 //! and writes what comes back, so the stdio carrier and the WebSocket carrier
 //! differ only in how they move a string.
 
+pub mod stdio;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
