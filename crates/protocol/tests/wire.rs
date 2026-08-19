@@ -7,7 +7,9 @@
 use serde_json::json;
 use tetanus_protocol::methods::{AgentStatusPush, SessionEventPush};
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
-use tetanus_protocol::types::{AgentState, SessionEvent, StopReason};
+use tetanus_protocol::types::{
+    AgentState, Chunk, KnownEvent, SessionEvent, StopReason, TurnSummary, Usage,
+};
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
 /// TC-PROTO-1: a request, a response and a notification demultiplex to the
@@ -179,4 +181,157 @@ fn every_code_maps_to_the_documented_exit_status() {
     assert_eq!(ErrorCode::ProviderError.exit_status(), 6);
     assert_eq!(ErrorCode::Cancelled.exit_status(), 130);
     assert_eq!(ErrorCode::Internal.exit_status(), 1);
+}
+
+/// TC-PROTO-10: section 4.3.1. Each durable type parses from the payload the
+/// journal actually holds, asserted from literal JSON so the case fails if the
+/// engine's payload and the contract's table ever disagree.
+#[test]
+fn known_payloads_parse_from_the_journal_shape() {
+    let cases = vec![
+        (
+            "session/start",
+            json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        ),
+        ("turn/start", json!({ "turn": 1 })),
+        ("step/start", json!({ "turn": 1, "step": 1 })),
+        ("user/message", json!({ "content": "hi" })),
+        (
+            "assistant/chunk",
+            json!({ "chunk": "text", "delta": "he", "turn": 1, "step": 1 }),
+        ),
+        (
+            "assistant/message",
+            json!({
+                "content": "hello",
+                "reasoning": "",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
+            }),
+        ),
+        (
+            "tool/call",
+            json!({ "id": "c1", "name": "echo", "arguments": { "text": "hi" } }),
+        ),
+        (
+            "tool/result",
+            json!({ "call_id": "c1", "name": "echo", "ok": true, "content": "hi" }),
+        ),
+        ("step/end", json!({ "turn": 1, "step": 1 })),
+        (
+            "turn/end",
+            json!({ "turn": 1, "steps": 1, "stop_reason": "natural", "stop_veto": null }),
+        ),
+    ];
+
+    for (ty, data) in cases {
+        let event = SessionEvent {
+            ty: ty.to_string(),
+            seq: 0,
+            time: 0,
+            data,
+            source_event_seqs: None,
+        };
+        assert!(
+            event.parse().is_some(),
+            "`{ty}` must parse into a KnownEvent"
+        );
+    }
+}
+
+/// TC-PROTO-11: parsing is a fast path, not a closed vocabulary. An unknown
+/// type gives `None`, and the caller still holds the whole raw event.
+#[test]
+fn an_unknown_type_parses_to_none_and_keeps_its_data() {
+    let event = SessionEvent {
+        ty: "something/new".into(),
+        seq: 4,
+        time: 1,
+        data: json!({ "whatever": true }),
+        source_event_seqs: None,
+    };
+    assert!(event.parse().is_none());
+    assert_eq!(event.data["whatever"], json!(true));
+}
+
+/// TC-PROTO-12: a tool result names the call it answers, so a surface pairs
+/// them by id and never by arrival order.
+#[test]
+fn a_tool_result_carries_the_id_of_its_call() {
+    let call = SessionEvent {
+        ty: "tool/call".into(),
+        seq: 7,
+        time: 0,
+        data: json!({ "id": "call-2", "name": "echo", "arguments": {} }),
+        source_event_seqs: None,
+    };
+    let result = SessionEvent {
+        ty: "tool/result".into(),
+        seq: 9,
+        time: 0,
+        data: json!({ "call_id": "call-2", "name": "echo", "ok": false, "content": "no" }),
+        source_event_seqs: Some(vec![7]),
+    };
+
+    let Some(KnownEvent::ToolCall { id, .. }) = call.parse() else {
+        panic!("a tool/call must parse");
+    };
+    let Some(KnownEvent::ToolResult { call_id, ok, .. }) = result.parse() else {
+        panic!("a tool/result must parse");
+    };
+    assert_eq!(call_id, id);
+    assert!(!ok, "a refused call is still a result, not an error");
+}
+
+/// TC-PROTO-13: a chunk keeps its variant tag, so a surface can tell visible
+/// text from thinking text without inspecting field names.
+#[test]
+fn a_chunk_keeps_its_variant() {
+    let reasoning = SessionEvent {
+        ty: "assistant/chunk".into(),
+        seq: 2,
+        time: 0,
+        data: json!({ "chunk": "reasoning", "delta": "hmm", "turn": 1, "step": 1 }),
+        source_event_seqs: None,
+    };
+    let Some(KnownEvent::AssistantChunk { chunk, .. }) = reasoning.parse() else {
+        panic!("a chunk must parse");
+    };
+    assert_eq!(
+        chunk,
+        Chunk::Reasoning {
+            delta: "hmm".into()
+        }
+    );
+}
+
+/// TC-PROTO-14: the fields reserved for the presentation lane are optional on
+/// the wire, so a build that does not measure them omits them rather than
+/// reporting a zero a surface would render as a fact.
+#[test]
+fn unmeasured_facts_are_absent_not_zero() {
+    let summary = TurnSummary {
+        turn: 1,
+        steps: 1,
+        stop_reason: StopReason::Natural,
+        stop_veto: None,
+        content: "done".into(),
+        duration_ms: None,
+        usage: None,
+    };
+    let json = serde_json::to_value(&summary).expect("serialize");
+    assert!(json.get("duration_ms").is_none());
+    assert!(json.get("usage").is_none());
+
+    let measured = TurnSummary {
+        duration_ms: Some(120),
+        usage: Some(Usage {
+            prompt_tokens: 3,
+            completion_tokens: 4,
+        }),
+        ..summary
+    };
+    let json = serde_json::to_value(&measured).expect("serialize");
+    assert_eq!(json["usage"]["prompt_tokens"], json!(3));
 }

@@ -2,6 +2,8 @@
 //! facade both surfaces drive. One method per call, so the RPC server and the
 //! in-process CLI client cannot diverge.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::rpc::RpcError;
@@ -69,6 +71,12 @@ pub struct SessionCreateParams {
     /// Reuse an existing journal under this id, or omit for a fresh one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Open the journal at this path instead of the server's own directory.
+    /// The id is then read from the journal's `session/start` line, which is
+    /// how a path becomes an id for every other call. A path with no file yet
+    /// is created; a path whose file is not a journal is `LogCorrupt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Provider route. Omit for the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -132,9 +140,17 @@ pub struct SessionSubscribeParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSubscribeResult {
+    /// Names this subscription for `session.unsubscribe`. One caller may hold
+    /// several, and closing one never closes another.
+    pub subscription_id: String,
     /// Seq of the last event the subscription starts after; `-1` for an empty
     /// log. Every event with a higher seq arrives as a `session/event` push.
     pub last_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionUnsubscribeParams {
+    pub subscription_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,6 +223,20 @@ pub struct AskResult {
 /// The whole client-to-server surface, as Rust. The JSON-RPC server is a thin
 /// codec over this trait, and the CLI calls it in process, so the two cannot
 /// serve different contracts.
+/// Where a subscription's pushes go.
+///
+/// This is what makes one contract serve three carriers. The stdio and
+/// WebSocket carriers implement it as "serialize and write a frame"; the
+/// in-process caller implements it as "hand to the renderer". Neither the
+/// engine nor a renderer has to know which it is talking to.
+///
+/// Delivery is fire and forget: a sink that is gone is dropped by the engine
+/// rather than failing the turn that pushed to it.
+pub trait EventSink: Send + Sync {
+    fn session_event(&self, push: SessionEventPush);
+    fn agent_status(&self, push: AgentStatusPush);
+}
+
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
     async fn hello(&self, params: HelloParams) -> Result<HelloResult, RpcError>;
@@ -216,6 +246,14 @@ pub trait Engine: Send + Sync {
         &self,
         params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError>;
+    /// The one call whose trait form takes an argument the wire does not
+    /// carry: where the carrier wants its pushes delivered.
+    async fn session_subscribe(
+        &self,
+        params: SessionSubscribeParams,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<SessionSubscribeResult, RpcError>;
+    async fn session_unsubscribe(&self, params: SessionUnsubscribeParams) -> Result<Ack, RpcError>;
     async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError>;
     async fn agent_status(&self, params: SessionRef) -> Result<AgentStatusResult, RpcError>;
     async fn agent_interrupt(&self, params: SessionRef) -> Result<Ack, RpcError>;

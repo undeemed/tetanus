@@ -57,6 +57,11 @@ The envelope is JSON-RPC 2.0 exactly: `jsonrpc`, `id`, `method`, `params`, `resu
 A frame whose `jsonrpc` is absent or is not the string `"2.0"` is rejected, not guessed at.
 Batch arrays are not part of contract 1.0.
 
+Pushes reach all three carriers the same way.
+`session.subscribe` takes an `EventSink` alongside its params, supplied by the carrier and never by the wire.
+The stdio and WebSocket carriers implement `EventSink` as "serialize and write a frame"; the in-process caller implements it as "hand to the renderer".
+So one renderer serves every carrier, and no surface has to reach past `tetanus-protocol` to see a chunk arrive.
+
 Both peers demultiplex incoming frames with `rpc::Message`, because the server may also call the client (§4.4.3).
 
 ### 4.2 Interface view: the calls
@@ -73,8 +78,8 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `session.create` | `SessionCreateParams` | `SessionInfo` | always | Served |
 | `session.list` | none | `SessionListResult` | always | Served |
 | `session.events` | `SessionEventsParams` | `SessionEventsResult` | always | Served |
-| `session.subscribe` | `SessionSubscribeParams` | `SessionSubscribeResult` | `session.subscribe` | Served on a carrier that can push |
-| `session.unsubscribe` | `SessionRef` | `Ack` | `session.subscribe` | Served on a carrier that can push |
+| `session.subscribe` | `SessionSubscribeParams` | `SessionSubscribeResult` | `session.subscribe` | Served |
+| `session.unsubscribe` | `SessionUnsubscribeParams` | `Ack` | `session.subscribe` | Served |
 | `agent.prompt` | `AgentPromptParams` | `AgentPromptResult` | always | Served |
 | `agent.status` | `SessionRef` | `AgentStatusResult` | always | Served |
 | `agent.interrupt` | `SessionRef` | `Ack` | `agent.interrupt` | Served |
@@ -84,8 +89,10 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 
 A call with no params accepts an absent `params`, or `{}`, and treats them alike.
 
-`session.subscribe` and `session.unsubscribe` are the only calls absent from the `Engine` trait.
-They bind a stream to one connection, which an in-process caller does not have; that caller listens on the event bus directly.
+Every call is on the `Engine` trait, `session.subscribe` included.
+Its trait form takes one extra argument the wire does not carry: an `Arc<dyn EventSink>`, which is where the carrier wants its pushes delivered.
+`SessionSubscribeResult.subscription_id` is what `session.unsubscribe` names, so one caller may hold several subscriptions, and closing one never closes another.
+A carrier that drops a connection unsubscribes its sinks; a sink that is gone is dropped by the engine rather than erroring a turn.
 
 #### Server to client
 
@@ -115,13 +122,44 @@ The durable vocabulary a surface renders today: `session/start`, `turn/start`, `
 Raw chunks stay on the log, so a surface replays a stream exactly as it arrived rather than re-deriving it.
 There is no separate progress event: progress is `step/start`, the chunks, `tool/call`, `tool/result` and `step/end`, in order.
 
+#### 4.3.1 What `data` carries
+
+`SessionEvent.data` is `Value` because the vocabulary grows.
+For the ten types above it is not arbitrary, and this table is the boundary promise.
+`SessionEvent::parse()` returns `KnownEvent` for these and `None` for anything else, so a surface gets a compiler-checked path for what it knows and still renders what it does not.
+
+| `type` | `data` |
+| --- | --- |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps` |
+| `turn/start` | `turn` |
+| `step/start` | `turn`, `step` |
+| `user/message` | `content` |
+| `assistant/chunk` | `chunk` (`text` \| `reasoning` \| `tool_call`), plus `delta` for the first two and `call` for the third, plus `turn` and `step` |
+| `assistant/message` | `content`, `reasoning`, `tool_calls`, `finish_reason`, `usage` |
+| `tool/call` | `id`, `name`, `arguments` |
+| `tool/result` | `call_id`, `name`, `ok`, `content` |
+| `step/end` | `turn`, `step` |
+| `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
+
+**`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
+A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
+`tool/result` also cites its `tool/call` in `sourceEventSeqs`, so the pairing survives a journal read that starts mid-turn.
+
+Adding a field to one of these payloads is a minor change; removing or renaming one is major.
+
 **`AgentState`**, **`StopReason`** and **`ConfigLayer`** each carry an `Other(String)` fallback.
 A surface renders the fallback rather than failing, and that is exactly what lets the engine add a variant in a minor version.
 
-**`SessionInfo`** answers a list view without reading a journal: id, journal path, provider, model, creation time, `last_seq` (`-1` for an empty log), and live state.
+**`SessionInfo`** answers a list view without reading a journal: id, journal path, provider, model, creation time, `last_seq` (`-1` for an empty log), live state, and `title`.
+`title` is the session's first user message, truncated by the engine, or `None` when there is none yet.
+The engine already holds the journal open when it lists; a picker paging every journal to find that line would be the wrong side of this boundary.
 
 **`TurnSummary`** is the closing shape of one turn.
-Every field is also reconstructable from the journal; the summary is the convenience form.
+Most of it is reconstructable from the journal; the summary is the convenience form.
+`duration_ms` and `usage` are the two exceptions worth stating.
+Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once.
+`usage` is **not** derivable from anything else here, so it is named now even where a provider does not report it: both fields are `Option`, and `None` means "this build did not measure it", never zero.
+`Usage` uses the provider's own words, `prompt_tokens` and `completion_tokens`, because the same object is what `assistant/message.usage` carries in the journal.
 
 **`ToolDescriptor`**, **`ProviderDescriptor`** and **`ConfigEntry`** are what a help surface, a model picker and `tetanus config` render.
 `ProviderDescriptor.available` is false when a provider is registered but its credential is absent, so a picker can grey the entry instead of failing at the first turn.
@@ -242,8 +280,8 @@ Each subcommand is defined as the calls it makes, and makes no others.
 
 | Subcommand | Calls |
 | --- | --- |
-| `tetanus run` | `session.create`, `agent.prompt`, and the event bus for live rendering |
-| `tetanus replay <path>` | `session.events` |
+| `tetanus run` | `session.create`, `session.subscribe`, `agent.prompt` |
+| `tetanus replay <path>` | `session.create` with `path`, then `session.events` |
 | `tetanus sessions` | `session.list` |
 | `tetanus tools` | `catalog.tools` |
 | `tetanus models` | `catalog.models` |
@@ -251,8 +289,16 @@ Each subcommand is defined as the calls it makes, and makes no others.
 | `tetanus serve` | hosts the stdio and WebSocket carriers |
 | `tetanus info` | none; build metadata only |
 
+A journal is addressed by id, never by path, because an id is what every other call takes.
+`SessionCreateParams.path` is the bridge: naming a path opens the journal there and returns its `SessionInfo`, with the id read from the journal's own `session/start` line.
+So `tetanus replay <path>` and `tetanus run --session <path>` are both `session.create` with a `path`, and neither needs a second call form.
+A path with no file yet is created; a path whose file is not a journal is `LogCorrupt`.
+
 Machine-readable output is contract output.
 `--json` prints the call's result type verbatim, one JSON object per line, with no added fields and no colour.
+A subcommand that streams prints each pushed `SessionEvent` as its own line as it arrives, and the call's result as the last line.
+A subcommand that does not stream prints exactly one line.
+So a script reads lines until the stream ends and treats the last one as the answer, whichever subcommand it ran.
 Human-readable output is the presentation lane's, and this document says nothing about it beyond the exit statuses in §4.5.
 
 #### File ownership
@@ -312,6 +358,11 @@ The cases live in `crates/protocol/tests/wire.rs` and run offline.
 | §4.2 pushes name their session | TC-PROTO-7 |
 | §5 compatibility is decided by major alone | TC-PROTO-8 |
 | §4.5 exit statuses | TC-PROTO-9 |
+| §4.3.1 every durable payload parses from the journal shape | TC-PROTO-10 |
+| §4.3.1 an unknown type parses to `None` and keeps its data | TC-PROTO-11 |
+| §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
+| §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
+| §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
 
 ## 7. Design rationale
 
@@ -323,6 +374,14 @@ That surface is powerful and undocumented as a protocol, and every upstream rele
 
 JSON-RPC 2.0 was picked over a bespoke framing because it already answers request correlation, one-way notifications, bidirectional calls and a structured error object, and because a presentation surface can drive it from any language without a generator.
 The cost is that it says nothing about streams; §4.4.2 answers that by streaming durable session events as notifications instead of inventing a stream type.
+
+### 7.1.1 One sink, three carriers
+
+The first draft left `session.subscribe` off the `Engine` trait, on the reasoning that a subscription binds to a connection and an in-process caller has none.
+The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by importing `tetanus-core` and `tetanus-turn`, which is the lane boundary §3 draws.
+
+`EventSink` is the fix. The subscription binds to a sink rather than to a connection, the carrier supplies the sink, and the wire never carries it.
+The alternative was a second in-process-only call, which would have meant two code paths to keep in step and a renderer that behaves differently depending on how it was launched.
 
 ### 7.2 Streaming is the session log, not a second channel
 
@@ -363,3 +422,4 @@ Every boundary change adds a row here, in its own pull request.
 | Version | Change |
 | --- | --- |
 | 1.0 | First contract: envelope, error codes and exit statuses, session and agent calls, tool, model and config catalogues, `session/event` and `agent/status` pushes, `ui/ask` reserved. |
+| 1.0 | Reconciles the presentation lane's consumer review, before 1.0 is served: `EventSink` puts `session.subscribe` on the `Engine` trait so every carrier feeds one renderer (§4.1, §4.2); §4.3.1 fixes the `data` payload of each durable type and `SessionEvent::parse()` makes it compiler-checked; `SessionCreateParams.path` addresses a journal by path (§4.7); `--json` streaming is stated (§4.7); `TurnSummary.duration_ms` and `usage`, and `SessionInfo.title`, are named. |
