@@ -50,6 +50,13 @@
 //! The line landed on goes to the top of the window rather than the bottom,
 //! because what a reader wants after finding a line is the lines under it.
 //!
+//! The word itself is marked on every line drawing it, not only on the one the
+//! window landed on. Moving the window says which line; on the long lines a
+//! turn writes it does not say where, and the lines around a match are the
+//! reason the window did not narrow to it in the first place. Marking only the
+//! match the reader is on would undo that: the eye would be told where to look
+//! on one line and left to search the rest.
+//!
 //! Nothing moves until Enter. A page that jumped on every keystroke would take
 //! the reader off the line they were reading before they had finished saying
 //! where they wanted to go, which is the opposite of what the picker wants and
@@ -75,7 +82,7 @@ use std::time::Duration;
 
 use tetanus_protocol::types::SessionEvent;
 use tetanus_ui::{
-    plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
+    light, plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
 };
 
 use super::keys::{self, Row};
@@ -241,8 +248,16 @@ impl Journal {
     }
 
     /// Compose every line again at `cols`, keeping how far back the reader is.
+    ///
+    /// This is also where a search is marked, because the mark goes into the
+    /// line itself: the page is handed finished strings and does not know a
+    /// search happened. So every way the mark can change - the word, the
+    /// width, or there being one at all - comes back through here.
     fn fill(&mut self, cols: usize) {
         let back = self.page.back();
+        // Cloned rather than borrowed, because the loop below borrows the rest
+        // of `self` to compose with. A search is a word long.
+        let wanted = self.wanted();
         let mut page = Page::new(self.theme, NAME, &self.title);
         let mut reader = Reader::new(self.think);
         let mut plains = Vec::new();
@@ -251,7 +266,13 @@ impl Journal {
             for line in &lines {
                 plains.push(plain(line));
             }
-            page.settle(lines);
+            // Marked after the plain text is taken, which is what the search
+            // is made against: the mark is escapes only, so it would not
+            // change the answer, but it would be work done to be undone.
+            page.settle(match &wanted {
+                Some(word) => lines.iter().map(|line| light(line, word)).collect(),
+                None => lines,
+            });
         }
         page.scroll(isize::try_from(back).unwrap_or(isize::MAX));
         self.page = page;
@@ -263,6 +284,22 @@ impl Journal {
         // lose their search, and the match is what they were looking at.
         self.seek();
         self.land();
+    }
+
+    /// The word to mark on every line holding it, if there is one to mark.
+    ///
+    /// A search still being spelled is not one: marking it would mean
+    /// composing the whole journal again on every keystroke, and the reader
+    /// spelling a word is looking at the prompt they are spelling it into.
+    ///
+    /// With colour off there is nothing to mark with. A plain theme adds no
+    /// bytes anywhere else either, and a page that answered `--color never`
+    /// with escapes would be the one place the flag did not hold.
+    fn wanted(&self) -> Option<String> {
+        match &self.find {
+            Find::On { text, .. } if self.theme.color() => Some(text.clone()),
+            _ => None,
+        }
     }
 
     /// Find the lines holding the current search, and keep the reader on the
@@ -289,8 +326,9 @@ impl Journal {
             hits: Vec::new(),
             at: 0,
         };
-        self.seek();
-        self.land();
+        // Filled again rather than sought: the word has to be marked on the
+        // lines, and `fill` seeks and lands at the end of it.
+        self.fill(self.cols);
     }
 
     /// Go to the next match, or the one before, wrapping at either end.
@@ -429,6 +467,7 @@ impl Journal {
             // without moving the page.
             Key::Enter | Key::Esc => {
                 self.find = Find::Off;
+                self.fill(self.cols);
                 return Flow::Go;
             }
             _ => return Flow::Go,
@@ -470,7 +509,13 @@ impl View for Journal {
         let found = matches!(self.find, Find::On { .. });
         match key {
             Key::Char('q') | Key::Esc => return Flow::Stop,
-            Key::Char('/') => self.find = Find::Typing(String::new()),
+            // The marks of the search being replaced come off now rather than
+            // when the new word is accepted: a word being spelled under the
+            // marks of the last one reads as a search that has already run.
+            Key::Char('/') => {
+                self.find = Find::Typing(String::new());
+                self.fill(self.cols);
+            }
             Key::Char('?') => self.help = true,
             // `n` and `N` mean nothing until a search has been made. A letter
             // that moved the page before then would be a trap in a view whose
@@ -499,7 +544,9 @@ impl View for Journal {
 /// the new width without losing the reader's place; the key map, including the
 /// two keys that end the view; that `/` reaches the line holding a word, that
 /// `n` walks the rest of them, that the prompt takes the printable keys while
-/// it is open, and that a word no line holds is said rather than acted on; and
+/// it is open, that a word no line holds is said rather than acted on, and
+/// that the word found is marked wherever it is drawn and only on a terminal
+/// that was given colour; and
 /// that `?` spells the keys out over the transcript, that any key takes the
 /// card down again, and that a footer with no room for the long wording keeps
 /// the two keys a reader cannot do without.
@@ -563,6 +610,19 @@ mod tests {
         let mut ui = buffered(theme(), cols);
         super::super::timeline::render(&mut ui, events, false).expect("render");
         ui.contents().lines().map(str::to_string).collect()
+    }
+
+    /// The same journal on a terminal that has colour, which is the only kind
+    /// a mark is written for.
+    fn painted(events: &[SessionEvent], cols: usize) -> Journal {
+        Journal::new(
+            Theme::new(true, Charset::Unicode),
+            "j.jsonl",
+            events.to_vec(),
+            false,
+            Exit::Quit,
+            (cols, 0),
+        )
     }
 
     fn journal(events: &[SessionEvent], cols: usize) -> Journal {
@@ -920,5 +980,72 @@ mod tests {
             !footer.contains("scroll"),
             "the narrow footer kept the long wording: {footer}"
         );
+    }
+
+    /// TC-CLI-BROWSE-13: the word a search found, marked where it is drawn.
+    /// Expected: every line on the page that draws the word has it marked, not
+    /// only the line the window landed on, and in whatever case it was
+    /// written; the marks come off when the search is dropped; and what the
+    /// page draws underneath is the same text throughout - a mark is escapes,
+    /// and a mark that changed a line would move every line under it.
+    #[test]
+    fn a_search_marks_the_word_where_it_is_drawn() {
+        let events = turn();
+        // Tall enough to hold the whole transcript, so the window cannot move
+        // under the comparison: what changes here is the marks and nothing else.
+        let tall = timeline(&events, COLS).len() + 6;
+        let mut view = painted(&events, COLS);
+        let before: Vec<String> = body(&rows(&mut view, COLS, tall))
+            .iter()
+            .map(|row| plain(row))
+            .collect();
+
+        typed(&mut view, "echo");
+        view.key(Key::Enter);
+        let found = body(&rows(&mut view, COLS, tall));
+        let marked = found
+            .iter()
+            .filter(|row| row.contains("\u{1b}[7mecho\u{1b}[27m"))
+            .count();
+        let holding = found
+            .iter()
+            .filter(|row| plain(row).to_lowercase().contains("echo"))
+            .count();
+        assert!(marked > 1, "one line marked at most: {found:?}");
+        assert_eq!(marked, holding, "a line holds the word unmarked: {found:?}");
+        let after: Vec<String> = found.iter().map(|row| plain(row)).collect();
+        assert_eq!(after, before, "the mark changed what the page draws");
+
+        // Dropped: the prompt opened and abandoned takes the marks with it.
+        view.key(Key::Char('/'));
+        view.key(Key::Esc);
+        let dropped = body(&rows(&mut view, COLS, tall));
+        assert!(
+            !dropped.iter().any(|row| row.contains("\u{1b}[7m")),
+            "{dropped:?}"
+        );
+        assert_eq!(
+            dropped.iter().map(|row| plain(row)).collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    /// TC-CLI-BROWSE-14: a search on a terminal that was given no colour.
+    /// Expected: the search still works and the footer still counts it, and
+    /// the page is byte for byte what it was - not one escape. `--color never`
+    /// is a promise about the bytes, and a mark is the one thing on the page
+    /// that a renderer writes rather than a theme.
+    #[test]
+    fn a_plain_terminal_is_never_marked() {
+        let events = turn();
+        let tall = timeline(&events, COLS).len() + 6;
+        let mut view = journal(&events, COLS);
+        let before = body(&rows(&mut view, COLS, tall));
+
+        typed(&mut view, "echo");
+        view.key(Key::Enter);
+        let found = rows(&mut view, COLS, tall);
+        assert!(found[found.len() - 1].contains("match 1 of"), "{found:?}");
+        assert_eq!(body(&found), before);
     }
 }

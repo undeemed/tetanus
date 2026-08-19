@@ -219,3 +219,96 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     lines
 }
+
+/// Reverse video on, and reverse video off.
+///
+/// Written here as codes rather than asked of a `Theme`, which is the one
+/// place in the crate that happens: a mark inside a line the theme has already
+/// painted has to end without ending what it interrupted. `27` turns reverse
+/// off and touches nothing else, where a theme's reset closes every attribute
+/// on the line and every word after the match would come back plain.
+const MARK: (&str, &str) = ("\u{1b}[7m", "\u{1b}[27m");
+
+/// Mark every place `word` is drawn in a painted `line`.
+///
+/// A search that moves the window to the line holding a word has said which
+/// line, not where on it. On the long lines a turn writes - a prompt, an
+/// answer, a tool's arguments - that is the difference between finding a word
+/// and starting to look for it.
+///
+/// Reverse video rather than a colour, because the line already has colours of
+/// its own and a mark that competed with them would be one more thing to read.
+/// It is also the one attribute that means the same on every palette: a
+/// terminal's own selection looks like this.
+///
+/// Folded the way a search folds, so whatever the terminal draws is marked in
+/// any case. A `word` that is empty, or that the line does not hold, gives the
+/// line back character for character - and so does a caller with colour off,
+/// who has no business writing escapes at all and should not call this.
+pub fn light(line: &str, word: &str) -> String {
+    let wanted = word.to_lowercase();
+    if wanted.is_empty() {
+        return line.to_string();
+    }
+
+    // What the terminal draws, folded, beside where each byte of it came from.
+    // A match is found in what is drawn and marked in what was given, so the
+    // two have to be built together: an escape between two letters is no gap
+    // on the screen and five bytes in the string.
+    let (mut drawn, mut from, mut upto) = (String::new(), Vec::new(), Vec::new());
+    let mut chars = line.char_indices();
+    while let Some((at, char)) = chars.next() {
+        if char != '\u{1b}' {
+            drawn.extend(char.to_lowercase());
+            from.resize(drawn.len(), at);
+            upto.resize(drawn.len(), at + char.len_utf8());
+            continue;
+        }
+        // The same rule as `plain`: every escape a `Theme` writes is
+        // `ESC [ ... m`, and it is drawn as nothing at all.
+        for (_, escape) in chars.by_ref() {
+            if escape == 'm' {
+                break;
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let mut written = 0;
+    for (hit, _) in drawn.match_indices(&wanted) {
+        let (start, end) = (from[hit], upto[hit + wanted.len() - 1]);
+        out.push_str(&line[written..start]);
+        out.push_str(MARK.0);
+        out.push_str(&armed(&line[start..end]));
+        out.push_str(MARK.1);
+        written = end;
+    }
+    out.push_str(&line[written..]);
+    out
+}
+
+/// Copy a stretch of a painted line, arming the mark again after every escape
+/// in it.
+///
+/// A word can be painted in the middle - `tool` and its name are one match and
+/// two colours - and the sequence between them may be a reset, which would
+/// take the mark off halfway through the word it is marking. Cheaper to arm it
+/// again after every sequence than to work out which ones would have mattered.
+fn armed(span: &str) -> String {
+    let mut out = String::new();
+    let mut chars = span.chars();
+    while let Some(char) = chars.next() {
+        out.push(char);
+        if char != '\u{1b}' {
+            continue;
+        }
+        for escape in chars.by_ref() {
+            out.push(escape);
+            if escape == 'm' {
+                break;
+            }
+        }
+        out.push_str(MARK.0);
+    }
+    out
+}

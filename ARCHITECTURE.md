@@ -262,6 +262,9 @@ while the prompt is open every printable key belongs to it - `q` included, becau
 on `q` could not be used to look for `quota`.
 In a journal `/` moves the window to the line holding the word instead of narrowing to it, because a
 line of a turn is not an answer without the turn around it, and `n` walks the rest of the matches.
+The word is then marked wherever the page draws it, in reverse video rather than a colour
+([`light`](crates/ui/src/text.rs)), because the line it lands on already carries colours of its own
+and the mark has to end without ending them.
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
