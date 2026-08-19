@@ -65,10 +65,10 @@ const IDLE: Duration = Duration::from_secs(3600);
 
 /// Rows a PageUp keeps: the four the page spends on furniture, and one line of
 /// what was on screen, so the reader does not lose their place between screens.
-const KEPT: usize = 5;
+pub(super) const KEPT: usize = 5;
 
 /// The left of the heading, so a screen with nothing else on it says what it is.
-const NAME: &str = "tetanus";
+pub(super) const NAME: &str = "tetanus";
 
 /// Read `events` back on the alternate screen, and say how the reader left.
 ///
@@ -87,23 +87,12 @@ pub fn browse<W: Write>(
     }
     let theme = *out.theme();
     let (cols, rows) = size();
-    let mut journal = Journal {
-        events,
-        theme,
-        think,
-        title: title.to_string(),
-        page: Page::new(theme, NAME, title),
-        keys: format!(
-            "{} scroll {} q quit",
-            theme.glyph("↑↓", "up/dn"),
-            theme.glyph("·", "-")
-        ),
-        // Not `cols`: the fill below is what makes the page true at a width,
-        // and starting them equal would be a claim it had already happened.
-        cols: 0,
-        rows,
-    };
-    journal.fill(cols);
+    let keys = format!(
+        "{} scroll {} q quit",
+        theme.glyph("↑↓", "up/dn"),
+        theme.glyph("·", "-")
+    );
+    let mut journal = Journal::new(theme, title, events.to_vec(), think, keys, (cols, rows));
     show(
         Tty::new(io::stdout()),
         out,
@@ -116,9 +105,14 @@ pub fn browse<W: Write>(
 }
 
 /// A journal on a page, and the keys that move through it.
-struct Journal<'a> {
+///
+/// It owns its events rather than borrowing them because a surface that picks
+/// a journal loads one while the view is already running: a borrow would have
+/// to come from something outliving the view, and there is nothing there to
+/// hold it.
+pub(super) struct Journal {
     /// Kept, not just read once, because a resize composes them again.
-    events: &'a [SessionEvent],
+    events: Vec<SessionEvent>,
     theme: Theme,
     think: bool,
     title: String,
@@ -130,13 +124,38 @@ struct Journal<'a> {
     rows: usize,
 }
 
-impl Journal<'_> {
+impl Journal {
+    /// A journal filled and ready to draw at `size`.
+    pub(super) fn new(
+        theme: Theme,
+        title: &str,
+        events: Vec<SessionEvent>,
+        think: bool,
+        keys: String,
+        size: (usize, usize),
+    ) -> Self {
+        let mut journal = Self {
+            events,
+            theme,
+            think,
+            title: title.to_string(),
+            page: Page::new(theme, NAME, title),
+            keys,
+            // Not `size.0`: the fill below is what makes the page true at a
+            // width, and starting them equal would claim it already had.
+            cols: 0,
+            rows: size.1,
+        };
+        journal.fill(size.0);
+        journal
+    }
+
     /// Compose every line again at `cols`, keeping how far back the reader is.
     fn fill(&mut self, cols: usize) {
         let back = self.page.back();
         let mut page = Page::new(self.theme, NAME, &self.title);
         let mut reader = Reader::new(self.think);
-        for event in self.events {
+        for event in &self.events {
             page.settle(reader.lines(&self.theme, cols, event));
         }
         page.scroll(isize::try_from(back).unwrap_or(isize::MAX));
@@ -145,7 +164,7 @@ impl Journal<'_> {
     }
 }
 
-impl View for Journal<'_> {
+impl View for Journal {
     fn frame(&mut self, cols: usize, rows: usize) -> Frame {
         if cols != self.cols {
             self.fill(cols);
@@ -243,19 +262,15 @@ mod tests {
         ui.contents().lines().map(str::to_string).collect()
     }
 
-    fn journal(events: &[SessionEvent], cols: usize) -> Journal<'_> {
-        let mut journal = Journal {
-            events,
-            theme: theme(),
-            think: false,
-            title: "j.jsonl".into(),
-            page: Page::new(theme(), NAME, "j.jsonl"),
-            keys: "up/dn scroll".into(),
-            cols: 0,
-            rows: 0,
-        };
-        journal.fill(cols);
-        journal
+    fn journal(events: &[SessionEvent], cols: usize) -> Journal {
+        Journal::new(
+            theme(),
+            "j.jsonl",
+            events.to_vec(),
+            false,
+            "up/dn scroll".into(),
+            (cols, 0),
+        )
     }
 
     /// One frame, as rows of text, with the terminal's own control codes gone.
