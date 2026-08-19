@@ -26,7 +26,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason};
+use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason, Usage};
 use tetanus_ui::{truncate, wrap, Role, Theme, Ui};
 
 /// Where a content line starts: two of indent, a five-column label, two more.
@@ -34,10 +34,14 @@ pub(super) const LABEL: usize = 5;
 pub(super) const INDENT: &str = "  ";
 
 /// What a reader has to remember between events: the tool call still waiting
-/// for its result.
+/// for its result, and what the turn has spent so far.
 #[derive(Default)]
 pub struct Reader {
     open_call: Option<String>,
+    /// Tokens billed by every step of the turn in progress. `None` until a
+    /// message carries usage, because a build that does not measure tokens
+    /// must not be reported as a turn that spent none.
+    spent: Option<Usage>,
 }
 
 impl Reader {
@@ -56,7 +60,10 @@ impl Reader {
                 vec![format!("session on {}", theme.paint(Role::Accent, model))]
             }
             KnownEvent::TurnStart { turn } => vec![
-                String::new(),
+                {
+                    self.spent = None;
+                    String::new()
+                },
                 theme
                     .paint(Role::Heading, &format!("turn {turn}"))
                     .to_string(),
@@ -66,8 +73,19 @@ impl Reader {
                 .to_string()],
             KnownEvent::UserMessage { content } => said(theme, width, "you", Role::Accent, content),
             KnownEvent::AssistantMessage {
-                content, reasoning, ..
+                content,
+                reasoning,
+                usage,
+                ..
             } => {
+                if let Some(step) = usage {
+                    // Each step is billed for the whole prompt it resent, so
+                    // the turn's cost is the sum of its requests, not of its
+                    // last one.
+                    let spent = self.spent.get_or_insert_with(Usage::default);
+                    spent.prompt_tokens += step.prompt_tokens;
+                    spent.completion_tokens += step.completion_tokens;
+                }
                 let mut lines = match reasoning.is_empty() {
                     true => Vec::new(),
                     false => said(theme, width, "think", Role::Muted, reasoning),
@@ -120,10 +138,13 @@ impl Reader {
                 let shown = stopped(stop_reason);
                 let reason = theme.paint(Role::Ok, &shown);
                 let unit = if *steps == 1 { "step" } else { "steps" };
-                let mut lines = vec![
-                    String::new(),
-                    format!("turn {turn} {dot} {reason} {dot} {steps} {unit}"),
-                ];
+                let mut closing = format!("turn {turn} {dot} {reason} {dot} {steps} {unit}");
+                if let Some(spent) = self.spent.take() {
+                    let total = spent.prompt_tokens + spent.completion_tokens;
+                    let noun = if total == 1 { "token" } else { "tokens" };
+                    closing.push_str(&format!(" {dot} {} {noun}", tokens(total)));
+                }
+                let mut lines = vec![String::new(), closing];
                 if let Some(veto) = stop_veto {
                     lines.push(format!("{INDENT}held open by {veto}"));
                 }
@@ -133,6 +154,21 @@ impl Reader {
             // turn reads better without them.
             KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
         }
+    }
+}
+
+/// A token count the way upstream's conversation UI writes one: `517`,
+/// `12.2K`, `1.2M`. One decimal until the figure reaches three digits, then
+/// whole numbers - a turn's cost is read at a glance, not audited.
+fn tokens(count: u64) -> String {
+    let scaled = |value: f64| match value >= 100.0 {
+        true => format!("{}", value.round()),
+        false => format!("{}", (value * 10.0).round() / 10.0),
+    };
+    match count {
+        count if count < 1_000 => count.to_string(),
+        count if count < 1_000_000 => format!("{}K", scaled(count as f64 / 1_000.0)),
+        count => format!("{}M", scaled(count as f64 / 1_000_000.0)),
     }
 }
 
@@ -515,5 +551,94 @@ mod tests {
             format!("{}\n", composed.join("\n")),
             rendered(&events, Charset::Unicode, 80)
         );
+    }
+
+    /// TC-CLI-TL-10: what a turn was billed.
+    /// Expected: the closing line reports the sum over every step, because a
+    /// step is billed for the whole prompt it resent. A turn whose messages
+    /// carry no usage says nothing about tokens - a build that does not
+    /// measure them must not be reported as a turn that spent none.
+    #[test]
+    fn the_closing_line_reports_what_the_turn_spent() {
+        let mut events = vec![
+            event("turn/start", json!({ "turn": 1 })),
+            event(
+                "assistant/message",
+                json!({ "content": "one", "usage": { "prompt_tokens": 20, "completion_tokens": 5 } }),
+            ),
+            event(
+                "assistant/message",
+                json!({ "content": "two", "usage": { "prompt_tokens": 28, "completion_tokens": 4 } }),
+            ),
+            event(
+                "turn/end",
+                json!({ "turn": 1, "steps": 2, "stop_reason": "natural" }),
+            ),
+        ];
+        let told = rendered(&events, Charset::Unicode, 80);
+        assert!(
+            told.ends_with("turn 1 \u{b7} natural \u{b7} 2 steps \u{b7} 57 tokens\n"),
+            "{told}"
+        );
+
+        events[1] = event("assistant/message", json!({ "content": "one" }));
+        events[2] = event("assistant/message", json!({ "content": "two" }));
+        let silent = rendered(&events, Charset::Unicode, 80);
+        assert!(
+            silent.ends_with("turn 1 \u{b7} natural \u{b7} 2 steps\n"),
+            "{silent}"
+        );
+    }
+
+    /// TC-CLI-TL-11: a second turn in the same journal.
+    /// Expected: each closing line reports its own turn. A tally that carried
+    /// over would make every turn after the first look more expensive than it
+    /// was, and a resumed session is the normal case, not the odd one.
+    #[test]
+    fn each_turn_is_billed_for_itself() {
+        let mut events = Vec::new();
+        for turn in 1..=2 {
+            events.push(event("turn/start", json!({ "turn": turn })));
+            events.push(event(
+                "assistant/message",
+                json!({ "content": "hi", "usage": { "prompt_tokens": 10, "completion_tokens": 2 } }),
+            ));
+            events.push(event(
+                "turn/end",
+                json!({ "turn": turn, "steps": 1, "stop_reason": "natural" }),
+            ));
+        }
+        let told = rendered(&events, Charset::Unicode, 80);
+        assert_eq!(
+            told.matches("\u{b7} 12 tokens").count(),
+            2,
+            "a tally carried over:\n{told}"
+        );
+        assert!(
+            told.contains("turn 2 \u{b7} natural \u{b7} 1 step \u{b7} 12 tokens"),
+            "{told}"
+        );
+    }
+
+    /// TC-CLI-TL-12: the compact figure, at every scale.
+    /// Expected: upstream's own rule - plain under a thousand, one decimal
+    /// until the figure reaches three digits, then whole numbers. A turn's
+    /// cost is read at a glance; `1234567 tokens` is not read at all.
+    #[test]
+    fn a_token_count_is_written_the_way_upstream_writes_one() {
+        for (count, shown) in [
+            (0, "0"),
+            (1, "1"),
+            (999, "999"),
+            (1_000, "1K"),
+            (1_050, "1.1K"),
+            (12_150, "12.2K"),
+            (517_000, "517K"),
+            (999_999, "1000K"),
+            (1_234_567, "1.2M"),
+            (150_000_000, "150M"),
+        ] {
+            assert_eq!(tokens(count), shown, "{count}");
+        }
     }
 }
