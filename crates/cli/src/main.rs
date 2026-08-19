@@ -165,21 +165,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
         Cmd::Config => {
             let mut config = tetanus_config::Config::default();
             config.set("log.level", "info".into(), tetanus_config::Layer::Default);
-            let theme = *out.theme();
-            let entries: Vec<_> = config
-                .provenance()
-                .map(|(key, resolved)| (key.clone(), resolved.clone()))
-                .collect();
-            let pad = entries.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
-            out.heading("config").ok();
-            for (key, resolved) in &entries {
-                let layer = format!("{:?}", resolved.layer).to_lowercase();
-                // `serde_json::Value` ignores a format width, so pad the
-                // string, not the value.
-                let rendered = resolved.value.to_string();
-                let value = format!("{rendered:<24}{}", theme.paint(Role::Muted, &layer));
-                out.field(key, pad, &value).ok();
-            }
+            render::config::render(&mut out, &settings(&config)).ok();
             Ok(())
         }
         Cmd::Replay { path, raw } => {
@@ -228,6 +214,27 @@ fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<protocol::Session
             time: event.time,
             data: event.data,
             source_event_seqs: event.source_event_seqs,
+        })
+        .collect()
+}
+
+/// Carry resolved config across to the contract shape the view reads.
+///
+/// The second and last crossing, and the same story as [`boundary`]: the
+/// layers agree one for one, so this is a copy. It goes when the engine serves
+/// `config.dump`, and `render::config` does not notice.
+fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
+    config
+        .provenance()
+        .map(|(key, resolved)| protocol::ConfigEntry {
+            key: key.clone(),
+            value: resolved.value.clone(),
+            layer: match resolved.layer {
+                tetanus_config::Layer::Default => protocol::ConfigLayer::Default,
+                tetanus_config::Layer::File => protocol::ConfigLayer::File,
+                tetanus_config::Layer::Env => protocol::ConfigLayer::Env,
+                tetanus_config::Layer::Flag => protocol::ConfigLayer::Flag,
+            },
         })
         .collect()
 }

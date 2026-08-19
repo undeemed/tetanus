@@ -254,3 +254,17 @@ fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
     assert!(traced.starts_with("   0     0  turn/start"), "{traced}");
     assert!(traced.contains("You said: echo this\n"), "{traced}");
 }
+
+/// TC-CLI-UI-10: `tetanus config` end to end.
+/// Expected: one row per resolved key, carrying the value without its JSON
+/// quotes and the layer that settled it. The provenance column is the reason
+/// the command exists, so a build that printed the values alone has failed
+/// even though it printed something.
+#[test]
+fn config_shows_what_set_each_key() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(dir.path(), &["config", "--color", "never"], &[]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "\nconfig\nlog.level  info  default\n");
+}
