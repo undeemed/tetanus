@@ -20,7 +20,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_ui::{truncate, Role, Ui};
+use tetanus_ui::{truncate, wrap, Role, Ui};
 
 use super::stub::{KnownEvent, SessionEvent};
 
@@ -113,13 +113,19 @@ fn draw<W: Write>(
     }
 }
 
-/// A labelled block of text. Continuation lines align under the first.
+/// A labelled block of text, folded to the width. Continuation lines align
+/// under the first.
 fn said<W: Write>(ui: &mut Ui<W>, who: &str, role: Role, text: &str) -> io::Result<()> {
+    // The label is padded by the columns it occupies, not by the bytes it
+    // takes: painted, it carries escape sequences that `{:<5}` would count.
     let label = ui.paint(role, who).to_string();
+    let gap = " ".repeat(LABEL.saturating_sub(who.chars().count()));
     let pad = " ".repeat(INDENT.len() + LABEL + 1);
-    for (i, line) in text.lines().enumerate() {
+    let room = ui.width().saturating_sub(pad.chars().count());
+
+    for (i, line) in wrap(text, room).into_iter().enumerate() {
         match i {
-            0 => ui.line(&format!("{INDENT}{label:<width$} {line}", width = LABEL))?,
+            0 => ui.line(&format!("{INDENT}{label}{gap} {line}"))?,
             _ => ui.line(&format!("{pad}{line}"))?,
         }
     }
@@ -322,5 +328,76 @@ mod tests {
             out.ends_with("turn 2 - step budget spent - 1 step\n"),
             "{out}"
         );
+    }
+    /// TC-CLI-TL-6: a message longer than the terminal is wide.
+    /// Expected: it is folded at the width, and every continuation line starts
+    /// in the text column, not in column zero. Left to the terminal, a long
+    /// answer stops looking like it belongs to the speaker who said it.
+    #[test]
+    fn a_long_message_folds_under_its_label() {
+        let text = "the agent claims your prompt, assembles a prompt and a tool catalogue";
+        let out = rendered(
+            &[event("assistant/message", json!({ "content": text }))],
+            Charset::Unicode,
+            40,
+        );
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() > 1, "nothing was folded:\n{out}");
+        assert!(lines[0].starts_with("  ai    the agent"), "{out}");
+        for line in &lines[1..] {
+            assert!(line.starts_with("        "), "`{line}` lost the column");
+            assert!(line.chars().count() <= 40, "`{line}` overruns 40");
+        }
+        assert_eq!(
+            out.split_whitespace().collect::<Vec<_>>()[1..].join(" "),
+            text
+        );
+    }
+
+    /// TC-CLI-TL-7: the same block with colour switched on.
+    /// Expected: with the escape sequences taken out, the coloured rendering
+    /// is the plain rendering, character for character. A label is painted, so
+    /// it carries escapes that a width-padded format counts as characters -
+    /// which would sit `ai` one column off and `you` three.
+    #[test]
+    fn colour_does_not_move_the_text_column() {
+        let events = [
+            event("user/message", json!({ "content": "echo this" })),
+            event("assistant/message", json!({ "content": "on it" })),
+        ];
+
+        let mut painted = buffered(Theme::new(true, Charset::Unicode), 80);
+        render(&mut painted, &events).expect("render");
+        let painted = painted.contents();
+
+        assert!(
+            painted.contains('\u{1b}'),
+            "nothing was painted:\n{painted:?}"
+        );
+        assert_eq!(
+            unpainted(&painted),
+            rendered(&events, Charset::Unicode, 80),
+            "colour moved the text"
+        );
+    }
+
+    /// The same line as a terminal would show it, with the SGR sequences the
+    /// theme wrote taken back out.
+    fn unpainted(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(char) = chars.next() {
+            if char != '\u{1b}' {
+                out.push(char);
+                continue;
+            }
+            for escape in chars.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        }
+        out
     }
 }
