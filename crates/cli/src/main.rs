@@ -5,6 +5,7 @@ mod render;
 use tetanus_protocol::methods::{
     AgentPromptResult, ConfigDumpResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
 };
+use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as protocol;
 
 use std::path::PathBuf;
@@ -263,7 +264,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             json,
         } => {
             let events = tetanus_session::replay(&path)
-                .map_err(|err| report(policy, &err.to_string(), None))?;
+                .map_err(|err| fail(policy, &journal_fault(&err, std::path::Path::new(&path))))?;
             if raw {
                 let theme = *out.theme();
                 for event in events {
@@ -469,8 +470,10 @@ async fn interrupt() {
 /// 128 plus SIGINT. Not an error - the user asked for this - so it is a
 /// warning, and whatever was written before it stands.
 fn stopped(policy: &Policy) -> Reported {
+    // A warning and not an error: the user asked for this. Only the status
+    // comes from the contract, where an interrupted call is `Cancelled`.
     policy.stderr().warn("interrupted").ok();
-    Reported(130)
+    Reported(ErrorCode::Cancelled.exit_status())
 }
 
 /// Write a diagnostic, with an optional next step, and pick an exit status.
@@ -480,7 +483,73 @@ fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
     if let Some(hint) = hint {
         err.note(hint).ok();
     }
-    Reported(1)
+    // A failure with no contract code behind it is this build's own: §4.5
+    // gives `Internal` the status, and nothing here invents another.
+    Reported(ErrorCode::Internal.exit_status())
+}
+
+/// The same, for a failure that does carry a contract code.
+///
+/// The wording is `render::fault`'s and the status is the contract's table,
+/// so a script can branch on `$?` and read the same number from any tetanus
+/// surface (§4.5).
+fn fail(policy: &Policy, error: &RpcError) -> Reported {
+    let (message, hint) = render::fault::wording(error);
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if let Some(hint) = hint {
+        err.note(&hint).ok();
+    }
+    Reported(render::fault::status(error))
+}
+
+/// Carry a journal failure across to the contract's error view. A corrupt
+/// journal and an unreadable one are different codes, because they are
+/// different things for the user to do.
+fn journal_fault(error: &tetanus_session::SessionError, path: &std::path::Path) -> RpcError {
+    match error {
+        tetanus_session::SessionError::Corrupt(line) => {
+            RpcError::new(ErrorCode::LogCorrupt, error.to_string())
+                .with_data(serde_json::json!({ "line": line }))
+        }
+        tetanus_session::SessionError::Io(io) => RpcError::new(ErrorCode::Io, io.to_string())
+            .with_data(serde_json::json!({ "path": path.display().to_string() })),
+        other => RpcError::new(ErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// Carry a turn failure across. A provider that refused the call is the
+/// provider's failure and not this build's, which is why it exits `6` and not
+/// `1`: a script retries one and reports the other.
+fn turn_fault(
+    error: &tetanus_turn::TurnError,
+    provider: &str,
+    session: &std::path::Path,
+) -> RpcError {
+    use tetanus_turn::llm::LlmError;
+    match error {
+        tetanus_turn::TurnError::Session(inner) => journal_fault(inner, session),
+        tetanus_turn::TurnError::Service(inner) => {
+            RpcError::new(ErrorCode::Internal, inner.to_string())
+        }
+        tetanus_turn::TurnError::Llm(inner) => match inner {
+            LlmError::MissingCredential(env) | LlmError::InvalidCredential(env) => {
+                RpcError::new(ErrorCode::MissingCredential, inner.to_string())
+                    .with_data(serde_json::json!({ "provider": provider, "env": env }))
+            }
+            LlmError::Provider { status, .. } => {
+                RpcError::new(ErrorCode::ProviderError, inner.to_string())
+                    .with_data(serde_json::json!({ "provider": provider, "status": status }))
+            }
+            // No HTTP status to report, so the field the code carries is
+            // omitted rather than filled with a number nothing returned.
+            LlmError::Transport(_) | LlmError::Protocol(_) => {
+                RpcError::new(ErrorCode::ProviderError, inner.to_string())
+                    .with_data(serde_json::json!({ "provider": provider }))
+            }
+            LlmError::Sink(_) => RpcError::new(ErrorCode::Internal, inner.to_string()),
+        },
+    }
 }
 
 /// Run `work` behind the status line, ticking the animation while it waits.
@@ -661,11 +730,15 @@ async fn run<W: std::io::Write>(
                 .unwrap_or_default()
                 .is_empty()
             {
-                return Err(report(
-                    policy,
-                    &format!("{} is not set", config.api_key_env),
-                    Some("run with `--adapter mock` for an offline turn"),
-                ));
+                let missing = RpcError::new(
+                    ErrorCode::MissingCredential,
+                    format!("{} is not set", config.api_key_env),
+                )
+                .with_data(serde_json::json!({
+                    "provider": args.adapter.route(),
+                    "env": config.api_key_env,
+                }));
+                return Err(fail(policy, &missing));
             }
             (
                 Arc::new(deepseek::DeepSeekAdapter::with_http(config)),
@@ -676,17 +749,18 @@ async fn run<W: std::io::Write>(
     let model = match args.model.or_else(|| catalog.first().cloned()) {
         Some(model) => model,
         None => {
-            return Err(report(
-                policy,
-                "no model id and the adapter has an empty catalog",
-                Some("name one with `--model <ID>`"),
-            ))
+            let unusable = RpcError::new(
+                ErrorCode::InvalidParams,
+                "the adapter advertises no models, so there is nothing to default to",
+            )
+            .with_data(serde_json::json!({ "field": "model" }));
+            return Err(fail(policy, &unusable));
         }
     };
 
     let bus = EventBus::new();
     let log = JsonlSessionLog::create("cli", &args.session, bus.clone())
-        .map_err(|err| report(policy, &err.to_string(), None))?;
+        .map_err(|err| fail(policy, &journal_fault(&err, &args.session)))?;
 
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
@@ -721,7 +795,12 @@ async fn run<W: std::io::Write>(
         }
         return Err(stopped(policy));
     };
-    let outcome = outcome.map_err(|err| report(policy, &err.to_string(), None))?;
+    let outcome = outcome.map_err(|err| {
+        fail(
+            policy,
+            &turn_fault(&err, args.adapter.route(), &args.session),
+        )
+    })?;
     engine
         .flush()
         .await

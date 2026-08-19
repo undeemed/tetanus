@@ -24,7 +24,13 @@ const ESC: &str = "\u{1b}";
 fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tetanus"));
     cmd.current_dir(dir).args(args);
-    for name in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "DEEPSEEK_API_KEY"] {
+    for name in [
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+    ] {
         cmd.env_remove(name);
     }
     cmd.env("TERM", "xterm-256color").env("COLUMNS", "100");
@@ -140,7 +146,8 @@ fn plain_output_is_byte_identical_however_it_was_declined() {
 
 /// TC-CLI-UI-5: a real provider with no credential.
 /// Expected: the failure is tagged `error:` and followed by a `note:` naming
-/// the way out; both land on stderr; stdout stays empty; the exit is non-zero.
+/// the way out; both land on stderr; stdout stays empty; and the status is 5,
+/// which is what contract §4.5 gives `MissingCredential`.
 #[test]
 fn a_reported_failure_names_its_way_out() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -150,14 +157,15 @@ fn a_reported_failure_names_its_way_out() {
         &[],
     );
 
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
     assert_eq!(stdout(&out), "", "a failure wrote to stdout");
     let err = stderr(&out);
     assert!(
         err.starts_with("error: DEEPSEEK_API_KEY is not set"),
         "{err}"
     );
-    assert!(err.contains("note: run with `--adapter mock`"), "{err}");
+    assert!(err.contains("note: "), "{err}");
+    assert!(err.contains("`--adapter mock`"), "{err}");
     assert!(!dir.path().join("never.jsonl").exists());
 }
 
@@ -555,4 +563,65 @@ fn the_tool_page_lists_what_a_turn_can_call() {
     for tool in called {
         assert!(page.contains(&tool), "`{tool}` is not on the page:\n{page}");
     }
+}
+
+/// TC-CLI-ERR-5: a provider that answers nothing.
+/// Expected: exit 6, `ProviderError` in the contract's table - not the 1 a
+/// build failure would exit with, and not the 5 a missing key exits with. The
+/// key is present here and the endpoint is a closed local port, so nothing
+/// leaves the machine. A script that retries a flaky provider and reports a
+/// broken installation needs those three to be three different numbers.
+#[test]
+fn a_provider_that_cannot_be_reached_exits_six() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "--adapter", "deepseek", "--session", "p.jsonl"],
+        &[
+            ("DEEPSEEK_API_KEY", "sk-not-a-real-key"),
+            ("DEEPSEEK_BASE_URL", "http://127.0.0.1:1"),
+        ],
+    );
+
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("deepseek could not be reached"), "{err}");
+    assert!(err.contains("note: try again"), "{err}");
+}
+
+/// TC-CLI-ERR-6: a journal whose sequence numbers do not follow.
+/// Expected: exit 1, `LogCorrupt`, the line named, and a note pointing at the
+/// one command that still reads a broken journal. Naming the line is the
+/// difference between a file a user can repair and a file they delete.
+#[test]
+fn a_corrupt_journal_names_the_line_it_stopped_at() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("bad.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"turn/start\",\"seq\":7,\"time\":1,\"data\":{}}\n",
+    )
+    .expect("write");
+
+    let out = run(dir.path(), &["replay", "bad.jsonl"], &[]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("the journal is not readable at line 1"),
+        "{err}"
+    );
+    assert!(err.contains("--raw"), "{err}");
+}
+
+/// TC-CLI-ERR-7: a turn that ends normally.
+/// Expected: exit 0. The statuses above are only worth anything if success is
+/// still zero, and a renderer that writes to a closed pipe must not turn a
+/// finished turn into a failure.
+#[test]
+fn a_finished_turn_still_exits_zero() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(dir.path(), &["run", "--session", "j.jsonl"], &[]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
