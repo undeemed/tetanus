@@ -107,6 +107,10 @@ impl LlmAdapter for DeepSeekAdapter {
         self.config.models.clone()
     }
 
+    fn credential_env(&self) -> Option<&str> {
+        Some(&self.config.api_key_env)
+    }
+
     async fn stream(
         &self,
         request: &ModelRequest,

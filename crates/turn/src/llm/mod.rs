@@ -167,6 +167,13 @@ pub trait LlmAdapter: Send + Sync {
     fn models(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Environment variable holding this provider's credential, when it needs
+    /// one. `None` for an adapter that runs with no key, such as the mock, so
+    /// a catalog can report which providers are usable without asking each
+    /// one to fail first.
+    fn credential_env(&self) -> Option<&str> {
+        None
+    }
     /// Make exactly one provider request, streaming chunks into `sink`.
     async fn stream(
         &self,

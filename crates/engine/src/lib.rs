@@ -9,6 +9,7 @@
 //! section 4.7 of the contract lists for it.
 
 pub mod agent;
+pub mod catalog;
 pub mod convert;
 pub mod session;
 pub mod subscribe;
@@ -28,6 +29,7 @@ use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 
 use crate::agent::{MockProviders, Providers, Runtime};
+use crate::catalog::Catalogs;
 use crate::convert::not_implemented;
 use crate::session::{SessionDefaults, SessionStore};
 use crate::subscribe::Hub;
@@ -67,6 +69,7 @@ pub struct HarnessEngine {
     sessions: Arc<SessionStore>,
     hub: Arc<Hub>,
     runtime: Arc<Runtime>,
+    catalogs: Catalogs,
 }
 
 impl HarnessEngine {
@@ -81,7 +84,8 @@ impl HarnessEngine {
                 },
             )),
             hub: Arc::new(Hub::new()),
-            runtime: Arc::new(Runtime::new(config.providers, config.tools)),
+            runtime: Arc::new(Runtime::new(Arc::clone(&config.providers), config.tools)),
+            catalogs: Catalogs::new(config.providers),
         }
     }
 
@@ -179,7 +183,7 @@ impl Engine for HarnessEngine {
     }
 
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError> {
-        Err(not_implemented(method::CATALOG_MODELS))
+        Ok(self.catalogs.models())
     }
 
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError> {
