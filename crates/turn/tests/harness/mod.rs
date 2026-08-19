@@ -8,8 +8,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::{boot, PromptService};
 use tetanus_turn::llm::mock::MockAdapter;
+use tetanus_turn::prompt::PromptRegistry;
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 
@@ -55,6 +56,11 @@ pub const MOCK_TURN_FLOW: &[&str] = &[
 pub struct Harness {
     pub engine: TurnEngine,
     pub log_path: PathBuf,
+    /// The prompt-section registry the engine assembles from. Only the
+    /// system-prompt suite reaches for it, and a test binary lints the parts
+    /// of a shared fixture it does not use.
+    #[allow(dead_code)]
+    pub sections: Arc<PromptRegistry>,
     trace: TurnTrace,
     bus: EventBus,
     _dir: TempDir,
@@ -83,11 +89,13 @@ impl Harness {
         .expect("boot");
 
         let trace = TurnTrace::attach(&bus);
+        let sections = ctx.services.require::<PromptService>().expect("sections");
         let engine = TurnEngine::from_context(&ctx, TurnConfig::default()).expect("engine");
 
         Self {
             engine,
             log_path,
+            sections,
             trace,
             bus,
             _dir: dir,

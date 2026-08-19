@@ -10,9 +10,11 @@ use std::sync::Arc;
 use tetanus_core::{Context, EventBus, Registry, Service};
 use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::{
-    boot, AgentLoopPlugin, LlmPlugin, LlmService, SessionService, ToolsPlugin, ToolsService,
+    boot, AgentLoopPlugin, LlmPlugin, LlmService, PromptPlugin, PromptService, SessionService,
+    ToolsPlugin, ToolsService,
 };
 use tetanus_turn::llm::mock::MockAdapter;
+use tetanus_turn::prompt::{AssembleAt, PromptRegistry};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine};
 
@@ -25,9 +27,10 @@ fn fixture() -> (tempfile::TempDir, EventBus, Arc<dyn SessionLog>) {
     (dir, bus, log)
 }
 
-/// TC-BOOT-1: a full boot provides the three services under their documented
+/// TC-BOOT-1: a full boot provides the four services under their documented
 /// keys and yields an engine.
-/// Expected: keys `["llm", "sessions", "tools"]`; the engine resolves and runs.
+/// Expected: keys `["llm", "sessions", "system-prompt", "tools"]`; the engine
+/// resolves, fills the base prompt slot, and runs.
 #[tokio::test]
 async fn boot_provides_every_service_the_loop_needs() {
     let (_dir, bus, log) = fixture();
@@ -37,7 +40,7 @@ async fn boot_provides_every_service_the_loop_needs() {
 
     assert_eq!(
         ctx.services.keys().collect::<Vec<_>>(),
-        vec!["llm", "sessions", "tools"]
+        vec!["llm", "sessions", "system-prompt", "tools"]
     );
     assert_eq!(
         ctx.services.require::<LlmService>().unwrap().provider(),
@@ -56,7 +59,18 @@ async fn boot_provides_every_service_the_loop_needs() {
         "boot"
     );
 
+    let sections = ctx.services.require::<PromptService>().unwrap();
+    assert!(
+        sections
+            .assemble(&AssembleAt { turn: 0, step: 0 })
+            .is_empty(),
+        "the registry starts empty; the engine is what fills the base slot"
+    );
+
     let engine = TurnEngine::from_context(&ctx, TurnConfig::default()).expect("engine");
+    let assembled = sections.assemble(&AssembleAt { turn: 1, step: 1 });
+    assert_eq!(assembled.len(), 1);
+    assert_eq!(assembled[0].id, tetanus_turn::prompt::BASE_SECTION);
     assert_eq!(engine.run_turn("hello").await.unwrap().steps, 2);
 }
 
@@ -76,6 +90,11 @@ fn plugins_mount_in_dependency_order() {
     registry
         .insert(Box::new(ToolsPlugin {
             tools: Arc::new(ToolRegistry::new()),
+        }))
+        .unwrap();
+    registry
+        .insert(Box::new(PromptPlugin {
+            sections: PromptRegistry::new(),
         }))
         .unwrap();
     registry

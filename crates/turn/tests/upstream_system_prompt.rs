@@ -6,11 +6,13 @@
 //! case names the upstream case it comes from.
 //!
 //! Approach: the same offline fixture the turn-flow suite uses, driven through
-//! the bus only. Upstream's assembly carries surfaces tetanus has not built -
-//! a named section registry with an explicit order, prompt variables and
-//! `{{name}}` interpolation, runtime-context providers, and "complete"
-//! sections that replace the assembly. Cases that only exist because of those
-//! are not restated here as passing tests; they stay rows in `docs/parity.md`.
+//! the bus, plus a bare registry where a case is about registration alone.
+//! Upstream's assembly still carries surfaces tetanus has not built - prompt
+//! variables and `{{name}}` interpolation, runtime-context providers, scoped
+//! layers, and "complete" sections that replace the assembly. Cases that only
+//! exist because of those are not restated here as passing tests; they stay
+//! rows in `docs/parity.md`. Upstream's non-finite order is unrepresentable in
+//! an `i32`, so that case has nothing to restate.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
@@ -27,6 +29,7 @@ use harness::Harness;
 use tetanus_core::{EffectHandle, EventBus};
 use tetanus_turn::events::{AgentRequest, AssemblePrompt, PromptSection, SystemPrompt};
 use tetanus_turn::llm::{ModelRequest, Role};
+use tetanus_turn::prompt::{AssembleAt, PromptError, PromptRegistry, Section, SectionText};
 
 /// TC-PORT-PROMPT-1: sections reach the model in the order they were
 /// contributed, joined by a blank line, and the registry's tool schemas ride
@@ -308,6 +311,147 @@ async fn every_step_assembles_afresh() {
         !second.contains("STEP 1"),
         "step 1's mutation did not survive into step 2: {second:?}"
     );
+}
+
+/// TC-PORT-PROMPT-8: registered sections reach the model in ascending order,
+/// whatever order they were registered in, and a tie keeps registration order.
+///
+/// Upstream: "registers the harness identity and the configured deployment
+/// persona" and "assembles sections in order with context-resolved text".
+///
+/// Translation: upstream seeds two built-in slots from its own config; tetanus
+/// seeds one, `TurnConfig::base_prompt`, at [`BASE_ORDER`]. Both are the same
+/// rule - the harness's own text is a registered section like any other, so a
+/// plugin can speak before it or after it by number rather than by luck.
+///
+/// Expected: the system message is `EARLY`, the base, then `LATE-A`, `LATE-B`.
+#[tokio::test]
+async fn registered_sections_render_in_ascending_order() {
+    let h = Harness::new("prompt-registry-order").await;
+    let (requests, _record) = record_requests(h.bus());
+
+    // Registered back to front, and two at one order, to prove neither the
+    // registration order nor the tie decides the render order alone.
+    let _b = h
+        .sections
+        .section(Section::new("late-b", 10, "LATE-B"))
+        .expect("late-b");
+    let _a = h
+        .sections
+        .section(Section::new("late-a", 10, "LATE-A"))
+        .expect("late-a");
+    let _early = h
+        .sections
+        .section(Section::new("early", -500, "EARLY"))
+        .expect("early");
+
+    h.engine.run_turn("order").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    let base = tetanus_turn::TurnConfig::default().base_prompt;
+    assert_eq!(
+        system_message(&requests[0]),
+        format!("EARLY\n\n{base}\n\nLATE-B\n\nLATE-A")
+    );
+}
+
+/// TC-PORT-PROMPT-9: a section's provider is asked at every assembly, and is
+/// told which assembly is asking.
+///
+/// Upstream: "resolves section text providers against the assemble context, at
+/// each assemble call".
+///
+/// Expected: two assemblies produce two different texts, each naming its own
+/// turn and step, so nothing is cached across a step.
+#[test]
+fn a_section_provider_is_asked_at_every_assembly() {
+    let sections = PromptRegistry::new();
+    let _live = sections
+        .section(Section::new(
+            "coordinates",
+            0,
+            SectionText::provided(|at| format!("turn {} step {}", at.turn, at.step)),
+        ))
+        .expect("coordinates");
+
+    let first = sections.assemble(&AssembleAt { turn: 1, step: 1 });
+    let second = sections.assemble(&AssembleAt { turn: 1, step: 2 });
+
+    assert_eq!(first[0].text, "turn 1 step 1");
+    assert_eq!(second[0].text, "turn 1 step 2");
+}
+
+/// TC-PORT-PROMPT-10: a duplicate section name is refused, and the text that
+/// was already registered stands.
+///
+/// Upstream: "rejects a duplicate section name (a double-loaded plugin must
+/// fail, not double its text)".
+///
+/// Expected: the second registration is `PromptError::Duplicate` naming the
+/// section, and one assembly still holds exactly one `persona`, the first.
+#[test]
+fn a_duplicate_section_name_is_refused() {
+    let sections = PromptRegistry::new();
+    let _first = sections
+        .section(Section::new("persona", 0, "FIRST"))
+        .expect("persona");
+
+    let Err(err) = sections.section(Section::new("persona", 0, "SECOND")) else {
+        panic!("a double-loaded plugin must fail, not double its text");
+    };
+
+    assert!(
+        matches!(err, PromptError::Duplicate(ref id) if id == "persona"),
+        "{err}"
+    );
+    let assembled = sections.assemble(&AssembleAt { turn: 1, step: 1 });
+    assert_eq!(assembled.len(), 1);
+    assert_eq!(assembled[0].text, "FIRST");
+}
+
+/// TC-PORT-PROMPT-11: the engine's own slot cannot be taken by a plugin.
+///
+/// Upstream has no counterpart: its built-in sections are ordinary names, so a
+/// plugin that registers `deployment:persona` collides with the deployment.
+/// tetanus reserves the one name the engine fills from `TurnConfig`, so the
+/// failure names the reason instead of reading as an accident.
+///
+/// Expected: `PromptError::Reserved`, and the registry is unchanged.
+#[test]
+fn the_base_slot_is_reserved_for_the_engine() {
+    let sections = PromptRegistry::new();
+
+    let Err(err) = sections.section(Section::new(tetanus_turn::prompt::BASE_SECTION, 0, "MINE"))
+    else {
+        panic!("the base slot belongs to the engine");
+    };
+
+    assert!(matches!(err, PromptError::Reserved(_)), "{err}");
+    assert!(sections
+        .assemble(&AssembleAt { turn: 1, step: 1 })
+        .is_empty());
+}
+
+/// TC-PORT-PROMPT-12: dropping the handle takes the section back out.
+///
+/// Upstream: "removes section when returned disposer is called directly" and
+/// "removes contributions when the contributing fiber is disposed".
+///
+/// Expected: the section is in the assembly before the drop and gone after it,
+/// so a plugin's prompt text dies with the plugin.
+#[test]
+fn dropping_the_handle_removes_the_section() {
+    let sections = PromptRegistry::new();
+    let live = sections
+        .section(Section::new("temporary", 0, "HERE"))
+        .expect("temporary");
+
+    assert_eq!(sections.assemble(&AssembleAt { turn: 1, step: 1 }).len(), 1);
+    drop(live);
+
+    assert!(sections
+        .assemble(&AssembleAt { turn: 1, step: 2 })
+        .is_empty());
 }
 
 /// Record every model request the driver builds, in order.

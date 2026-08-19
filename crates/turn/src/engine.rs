@@ -26,18 +26,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tetanus_core::events::Terminal;
-use tetanus_core::{Context, EventBus, ServiceError};
+use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
 use tetanus_session::{SessionError, SessionLog};
 
-use crate::boot::{LlmService, SessionService, ToolsService};
+use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
 use crate::events::{
-    AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, PromptSection, StopReason,
-    SystemPrompt, ToolsExecute, ToolsPostExecute, ToolsPreExecute, TurnStopping,
+    AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, StopReason, SystemPrompt,
+    ToolsExecute, ToolsPostExecute, ToolsPreExecute, TurnStopping,
 };
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, Message, ModelRequest, ModelResponse, StreamChunk,
 };
 use crate::log::{derive_messages, topic, with_system};
+use crate::prompt::{AssembleAt, PromptRegistry};
 use crate::tools::{ToolCall, ToolOutcome, ToolRegistry};
 
 #[derive(Debug, thiserror::Error)]
@@ -57,8 +58,9 @@ pub struct TurnConfig {
     /// the turn with [`StopReason::MaxSteps`] instead of running forever.
     pub max_steps: u32,
     pub max_tokens: Option<u32>,
-    /// The base system-prompt section. Plugins add more through
-    /// `system-prompt/assemble`.
+    /// The engine's own system-prompt section, registered under
+    /// [`prompt::BASE_SECTION`](crate::prompt::BASE_SECTION). Plugins add more
+    /// through the registry, or rewrite the lot in `system-prompt/assemble`.
     pub base_prompt: String,
 }
 
@@ -91,6 +93,10 @@ pub struct TurnEngine {
     tools: Arc<ToolRegistry>,
     log: Arc<dyn SessionLog>,
     bus: EventBus,
+    prompt: Arc<PromptRegistry>,
+    /// The engine's own section, held for as long as the engine: dropping the
+    /// handle takes the base prompt back out of the registry.
+    _base: EffectHandle,
     config: TurnConfig,
     turns: AtomicU64,
     /// Set by [`TurnEngine::cancel`], read at each step boundary. An
@@ -111,11 +117,15 @@ impl TurnEngine {
             .iter()
             .filter(|event| event.ty == topic::TURN_START)
             .count() as u64;
+        let prompt = ctx.services.require::<PromptService>()?;
+        let base = prompt.seed_base(config.base_prompt.clone());
         Ok(Self {
             llm: ctx.services.require::<LlmService>()?,
             tools: ctx.services.require::<ToolsService>()?,
             log,
             bus: ctx.bus.clone(),
+            prompt,
+            _base: base,
             config,
             turns: AtomicU64::new(turns),
             cancelled: AtomicBool::new(false),
@@ -201,10 +211,7 @@ impl TurnEngine {
             let mut assemble = AssemblePrompt {
                 turn,
                 step,
-                sections: vec![PromptSection {
-                    id: "base".into(),
-                    text: self.config.base_prompt.clone(),
-                }],
+                sections: self.prompt.assemble(&AssembleAt { turn, step }),
                 tools: self.tools.schemas(),
             };
             let prompt = self.bus.waterfall(&mut assemble, assemble_prompt()).await;
