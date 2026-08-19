@@ -1,0 +1,15 @@
+[package]
+name = "tetanus-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tetanus Engine implementation: the contract in docs/interface-contract.md, served."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tetanus-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tokio = { workspace = true }
