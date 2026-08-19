@@ -5,6 +5,7 @@ members = [
   "crates/config",
   "crates/session",
   "crates/cli",
+  "crates/ui",
   "crates/turn",
 ]
 
