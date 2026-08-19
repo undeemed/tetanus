@@ -13,10 +13,9 @@
 //! `docs/parity.md` instead.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
-//! Fail criteria: any other observed value, or a panic outside TC-PORT-STORE-4,
-//! which provokes one deliberately.
+//! Fail criteria: any other observed value, or a panic escaping a case.
+//! TC-PORT-STORE-4 provokes one deliberately and the bus contains it.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
@@ -168,20 +167,22 @@ async fn a_bare_create_takes_the_whole_header_from_the_defaults() {
 }
 
 /// TC-PORT-STORE-4: an observer that fails cannot lose an event the log has
-/// already committed.
+/// committed, nor keep it from the observers behind it.
 ///
 /// Upstream: `session.spec.ts`, "contains session/event observer failures
 /// after the append commit point".
 ///
-/// The commit point is what ports: the journal is written and fsynced, and the
-/// in-memory log is grown, before any observer is told. tetanus does not also
-/// isolate the failing observer - the panic reaches the caller of `append`,
-/// and peer observers after it are skipped - which is the `docs/parity.md` gap
-/// this case fixes the boundary of.
+/// Two rules meet here. The commit point: the journal is written and fsynced,
+/// and the in-memory log is grown, before any observer is told. Containment:
+/// the bus catches a panicking `emit` observer, so `append` returns normally
+/// and the observers behind it still run. `crates/core/tests/containment.rs`
+/// states the second rule at bus level; this case states it at the seam that
+/// has something durable to lose.
 ///
-/// Input: an `on_emit` observer that panics, then one append.
-/// Expected: the append panics, and the event is nonetheless on the journal,
-/// in memory, and readable after a replay.
+/// Input: an observer that panics, a second observer registered behind it,
+/// then one append.
+/// Expected: the append returns `Ok`, the second observer saw the event, and
+/// the event is in memory and on the journal after a replay.
 #[tokio::test]
 async fn an_observer_failure_cannot_lose_a_committed_event() {
     let dir = TempDir::new().expect("temp dir");
@@ -198,19 +199,28 @@ async fn an_observer_failure_cannot_lose_a_committed_event() {
     let _boom = live
         .bus
         .on_emit::<SessionEventDispatch>(|_| panic!("an observer failed"));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let peer = Arc::clone(&seen);
+    let _watch = live.bus.on_emit::<SessionEventDispatch>(move |ev| {
+        peer.lock().expect("seen").push(ev.event.ty.clone())
+    });
 
+    // The contained panic still runs the default hook, which would print.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        live.log
-            .append("user/message", serde_json::json!({ "content": "kept" }))
-    }));
+    live.log
+        .append("user/message", serde_json::json!({ "content": "kept" }))
+        .expect("the append is not the observer's to fail");
     std::panic::set_hook(hook);
 
-    assert!(outcome.is_err(), "the failure is not swallowed either");
+    assert_eq!(
+        seen.lock().expect("seen").clone(),
+        vec!["user/message".to_string()],
+        "the observer behind the failing one was still told"
+    );
 
     let events = live.log.events();
-    assert_eq!(events.len(), 2, "the append had committed before the panic");
+    assert_eq!(events.len(), 2, "the append committed");
     assert_eq!(events[1].ty, "user/message");
 
     let replayed = tetanus_session::replay(&live.path).expect("replay");

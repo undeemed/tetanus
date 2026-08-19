@@ -16,13 +16,24 @@
 //! The dispatch mode is part of an event's public contract: it is a `const` on
 //! the [`Event`] impl, and registering or dispatching through the wrong mode
 //! panics instead of silently doing nothing.
+//!
+//! An observer is contained; a listener that produces a value is not. `emit`
+//! and `parallel` return nothing to the dispatching component, so one of their
+//! listeners panicking is that listener's fault alone: the panic is logged
+//! against the topic and its peers still run. `serial` and `waterfall` hand
+//! their value back to the component that dispatched, so a panic there is a
+//! failure of the operation itself and stays loud. Upstream draws the same
+//! line, with a throw where Rust has a panic.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use futures_util::FutureExt;
 
 use crate::effects::EffectHandle;
 
@@ -139,16 +150,29 @@ impl EventBus {
     }
 
     /// Run listeners in registration order, ignoring their return values.
+    ///
+    /// A listener that panics is contained: the panic is logged and the
+    /// listeners after it still run. An observer of a durable fact must not be
+    /// able to unmake the fact by having a bug.
     pub fn emit<E: Event>(&self, ev: &E) {
         for listener in self.snapshot::<E, EmitFn<E>>(DispatchMode::Emit) {
-            listener(ev);
+            contain::<E>(std::panic::catch_unwind(AssertUnwindSafe(|| listener(ev))));
         }
     }
 
     /// Run every listener concurrently and resolve once all have settled.
+    ///
+    /// Contained exactly as [`EventBus::emit`] is, and for the same reason:
+    /// settled includes a listener that panicked.
     pub async fn parallel<E: Event>(&self, ev: &E) {
         let listeners = self.snapshot::<E, ParallelFn<E>>(DispatchMode::Parallel);
-        futures_util::future::join_all(listeners.iter().map(|l| l(ev))).await;
+        let settled = futures_util::future::join_all(
+            listeners
+                .iter()
+                .map(|l| AssertUnwindSafe(l(ev)).catch_unwind()),
+        )
+        .await;
+        settled.into_iter().for_each(contain::<E>);
     }
 
     /// Await listeners in registration order until one bails; that bail value
@@ -227,6 +251,30 @@ impl EventBus {
             .map(|list| list.iter().map(|(_, l)| l.clone()).collect())
             .unwrap_or_default()
     }
+}
+
+/// Report a contained panic and carry on.
+///
+/// The default panic hook has already printed the location by the time this
+/// runs; the log line is what names the topic the panic reached, which is the
+/// part a reader needs to find the listener.
+fn contain<E: Event>(outcome: Result<(), Box<dyn Any + Send>>) {
+    if let Err(payload) = outcome {
+        tracing::warn!(
+            topic = E::TOPIC,
+            panic = message(payload.as_ref()),
+            "an observer panicked; its peers still ran"
+        );
+    }
+}
+
+/// The text of a panic payload, for the two payload types `panic!` produces.
+fn message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic carrying no message")
 }
 
 fn assert_mode<E: Event>(used: DispatchMode) {
