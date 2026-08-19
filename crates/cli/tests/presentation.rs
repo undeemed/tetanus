@@ -4,8 +4,9 @@
 //! Features tested: that the resolved palette reaches clap's own rendering as
 //! well as the lines this crate writes itself; that a colour-hostile
 //! environment cannot change the bytes of plain output; the shape and exit
-//! status of a reported failure; and that a bad `--color` value is a usage
-//! error. NOT tested here: the resolution rules themselves (owned by
+//! status of a reported failure; that a bad `--color` value is a usage error;
+//! and which of the two views - the turn, or the raw sequence - a command
+//! prints. NOT tested here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
 //!
@@ -220,4 +221,36 @@ fn replay_reads_as_a_conversation() {
 
     let raw = stdout(&run(dir.path(), &["replay", "j.jsonl", "--raw"], &[]));
     assert!(raw.starts_with("   0  turn/start"), "{raw}");
+}
+
+/// TC-CLI-UI-9: what `tetanus run` prints by default, and what `--trace` adds.
+/// Expected: the default is the turn as a conversation, read back from the
+/// journal the run just wrote; `--trace` replaces it with the raw sequence and
+/// still ends on the answer. Both close on the journal path, so a user always
+/// knows where the durable record went.
+#[test]
+fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let args = &["run", "-p", "echo this", "--session", "j.jsonl"];
+
+    let told = stdout(&run(dir.path(), args, &[]));
+    assert!(
+        told.contains("\nturn 1\n  step 1\n  you   echo this\n"),
+        "{told}"
+    );
+    assert!(told.contains("  ai    You said: echo this\n"), "{told}");
+    assert!(
+        !told.contains("turn/start"),
+        "the raw topics leaked:\n{told}"
+    );
+    assert!(told.ends_with("journal  j.jsonl\n"), "{told}");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let traced = stdout(&run(
+        dir.path(),
+        &["run", "--trace", "-p", "echo this"],
+        &[],
+    ));
+    assert!(traced.starts_with("   0     0  turn/start"), "{traced}");
+    assert!(traced.contains("You said: echo this\n"), "{traced}");
 }

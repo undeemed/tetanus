@@ -100,7 +100,7 @@ pub fn run_epilogue(theme: &Theme) -> String {
         "\
 {examples}
   tetanus run -p \"run one full turn\"  the default: mock adapter, no key, no network
-  tetanus run --verbose               print each durable event's payload too
+  tetanus run --trace                 the raw event sequence instead of the turn
   tetanus run --session /tmp/t.jsonl  choose where the journal lands
   tetanus run --max-steps 1           stop after one step, whatever the model asks for"
     )
