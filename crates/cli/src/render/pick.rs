@@ -1,16 +1,16 @@
-//! The journals this build has written, as a page with a cursor on it.
+//! The journals this build has written, as a page you pick one from.
 //!
 //! `tetanus sessions` prints a list whose only use is to be read an id or a
 //! path out of. A directory with a hundred journals in it prints as a hundred
 //! lines poured into the scrollback, and the one wanted is somewhere in the
 //! middle of them. This module is the other view of the same list: the
-//! alternate screen, a window on as much of it as fits, and a cursor to move
-//! through it with.
+//! alternate screen, a window on as much of it as fits, a cursor to move
+//! through it with, and Enter to read the journal under the cursor.
 //!
 //! # Stakeholders and concerns
 //!
-//! - *A person looking for a turn from earlier*: can I find it without
-//!   scrolling my shell back through everything else I have run?
+//! - *A person looking for a turn from earlier*: can I find it and read it
+//!   without leaving the screen or retyping anything?
 //! - *The presentation lane*: is there one composer of a session row, or two?
 //! - *A reviewer of the crate seam*: what does this add to `tetanus-ui`?
 //!
@@ -18,14 +18,16 @@
 //!
 //! ```text
 //! pick   ── composes the list, hands it to the loop, answers how it ended
-//! Picker ── the View: the rows, a window on them, and a cursor
+//! Picker ── the View: the rows, a cursor, and a Journal when one is open
 //! ```
 //!
 //! Nothing here composes a row. Every row comes from
 //! [`sessions::rows`](super::sessions::rows), the ones `tetanus sessions`
 //! prints, so the picker cannot disagree with the command about what it is
-//! showing. Nothing here holds the terminal or reads a key either: [`show`]
-//! does both, and this module is the view it drives.
+//! showing. Nothing here composes a journal line either: an opened journal is
+//! [`Journal`](super::browse::Journal), the reader `tetanus replay --ui` uses.
+//! Nothing here holds the terminal or reads a key either: [`show`] does both,
+//! and this module is the view it drives.
 //!
 //! # Rationale: the window follows the cursor
 //!
@@ -43,15 +45,33 @@
 //! two columns narrower to leave room for it. A row that can only be found by
 //! its colour cannot be found under `--color never`, on a terminal that has no
 //! colour, or by a reader who cannot tell two of them apart.
+//!
+//! # Rationale: one view, not two
+//!
+//! Opening a journal could have been a second [`show`] over a second view, run
+//! after this one returned. It is one view in two states instead, because the
+//! alternate screen is then entered and left once rather than three times: a
+//! nested `show` gives the terminal back and takes it again between the list
+//! and the journal, which a reader sees as their own shell flashing up in the
+//! middle of a keypress. The cost is that this view answers `q` in two places,
+//! which is stated once in [`Picker::key`].
+//!
+//! # Rationale: a journal that will not open is not a failure of the picker
+//!
+//! Reading a file can fail, and the reader is holding the terminal when it
+//! does. Ending the view to report that would throw away the list they were
+//! working through for the sake of what may be the one bad journal in it. So
+//! the reason goes on the footer, in the warning colour, the cursor stays where
+//! it was, and the next key clears it.
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use tetanus_protocol::methods::SessionListResult;
-use tetanus_protocol::types::SessionInfo;
+use tetanus_protocol::types::{SessionEvent, SessionInfo};
 use tetanus_ui::{bar, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View};
 
-use super::browse::NAME;
+use super::browse::{Journal, NAME};
 use super::sessions;
 
 /// How long the loop waits for a keystroke before painting again.
@@ -68,19 +88,31 @@ const CHROME: usize = 4;
 /// Columns the cursor mark takes, on the row it is on and on every other.
 const MARK: usize = 2;
 
+/// Reads a journal by path, or says in one line why it could not.
+///
+/// Taken as a closure rather than done here so that opening a journal, and the
+/// wording of every way that fails, stays in the one place the binary already
+/// does both. This module knows about screens, not about files.
+pub type Open<'a> = dyn Fn(&str) -> Result<Vec<SessionEvent>, String> + 'a;
+
 /// Show `list` on the alternate screen, and say how the reader left.
 ///
 /// An empty list never opens a screen: `tetanus sessions`' own line - that
 /// nothing has been written yet, and what writes one - is the whole message,
 /// and a blank page with a cursor on nothing is a worse way to say it.
-pub fn pick<W: Write>(out: &mut Ui<W>, list: &SessionListResult) -> io::Result<Stop> {
+pub fn pick<W: Write>(
+    out: &mut Ui<W>,
+    list: &SessionListResult,
+    think: bool,
+    open: &Open<'_>,
+) -> io::Result<Stop> {
     if list.sessions.is_empty() {
         sessions::render(out, list)?;
         return Ok(Stop::Quit);
     }
     let theme = *out.theme();
     let (cols, rows) = size();
-    let mut picker = Picker::new(theme, list, cols);
+    let mut picker = Picker::new(theme, list, think, open, cols);
     show(
         Tty::new(io::stdout()),
         out,
@@ -92,7 +124,7 @@ pub fn pick<W: Write>(out: &mut Ui<W>, list: &SessionListResult) -> io::Result<S
     )
 }
 
-/// A list of journals, and a cursor on one of them.
+/// A list of journals, and whichever one of them the reader has opened.
 struct Picker<'a> {
     theme: Theme,
     /// The sessions in the order they are shown, newest first.
@@ -109,11 +141,23 @@ struct Picker<'a> {
     /// in. Zero until the first frame, so no key moves further than one row
     /// before the view has been drawn once.
     room: usize,
+    think: bool,
+    open: &'a Open<'a>,
+    /// The journal being read, if the reader has opened one.
+    reading: Option<Journal>,
+    /// Why the last journal would not open, until the next key.
+    fault: Option<String>,
 }
 
 impl<'a> Picker<'a> {
     /// A picker over `list`, its rows composed for a terminal `cols` wide.
-    fn new(theme: Theme, list: &'a SessionListResult, cols: usize) -> Self {
+    fn new(
+        theme: Theme,
+        list: &'a SessionListResult,
+        think: bool,
+        open: &'a Open<'a>,
+        cols: usize,
+    ) -> Self {
         let mut picker = Self {
             theme,
             sessions: sessions::ordered(list),
@@ -124,6 +168,10 @@ impl<'a> Picker<'a> {
             at: 0,
             top: 0,
             room: 0,
+            think,
+            open,
+            reading: None,
+            fault: None,
         };
         picker.fill(cols);
         picker
@@ -148,27 +196,33 @@ impl<'a> Picker<'a> {
         self.top = self.top.min(self.rows.len().saturating_sub(self.room));
     }
 
-    /// The keys on the left, where the cursor is on the right.
+    /// The keys on the left, or what went wrong; where the cursor is, right.
     ///
     /// Counted against the whole list rather than against the part of it on
     /// screen, because "4 of 27" is the answer to the question a reader has.
     fn footer(&self, cols: usize) -> String {
-        let keys = format!(
-            "{} move {} q quit",
-            self.theme.glyph("↑↓", "up/dn"),
-            self.theme.glyph("·", "-"),
-        );
+        let left = match &self.fault {
+            Some(why) => self.theme.paint(Role::Warn, why).to_string(),
+            None => {
+                let keys = format!(
+                    "{} move {} enter read {} q quit",
+                    self.theme.glyph("↑↓", "up/dn"),
+                    self.theme.glyph("·", "-"),
+                    self.theme.glyph("·", "-"),
+                );
+                self.theme.paint(Role::Muted, &keys).to_string()
+            }
+        };
         let here = format!("{} of {}", self.at + 1, self.rows.len());
         bar(
             cols,
-            &self.theme.paint(Role::Muted, &keys).to_string(),
+            &left,
             &self.theme.paint(Role::Accent, &here).to_string(),
         )
     }
-}
 
-impl View for Picker<'_> {
-    fn frame(&mut self, cols: usize, rows: usize) -> Frame {
+    /// The list itself: a cursor on a row, and the rest of the rows around it.
+    fn list(&mut self, cols: usize, rows: usize) -> Frame {
         if cols != self.cols {
             self.fill(cols);
         }
@@ -203,7 +257,9 @@ impl View for Picker<'_> {
         frame
     }
 
-    fn key(&mut self, key: Key) -> Flow {
+    /// Answer a key while the list is the thing on screen.
+    fn choose(&mut self, key: Key) -> Flow {
+        self.fault = None;
         // One row less than a screenful, so the row the reader was looking at
         // is still on the screen they land on.
         let screenful = self.room.saturating_sub(1).max(1);
@@ -216,30 +272,97 @@ impl View for Picker<'_> {
             Key::PageDown => self.at = (self.at + screenful).min(last),
             Key::Home => self.at = 0,
             Key::End => self.at = last,
+            Key::Enter => self.read(),
             _ => {}
         }
         Flow::Go
     }
+
+    /// Open the journal the cursor is on, or say why not.
+    fn read(&mut self) {
+        let Some(chosen) = self.sessions.get(self.at) else {
+            return;
+        };
+        match (self.open)(&chosen.path) {
+            // A session with a header and nothing after it is a real thing to
+            // find - `session.create` writes one - and a page holding no rows
+            // does not say that, it looks like a view that failed to draw.
+            Ok(events) if events.is_empty() => {
+                self.fault = Some(format!("{} holds nothing to read", chosen.session_id));
+            }
+            Ok(events) => {
+                let keys = format!(
+                    "{} scroll {} q back",
+                    self.theme.glyph("↑↓", "up/dn"),
+                    self.theme.glyph("·", "-"),
+                );
+                // Headed by the id, not the path: the id is what the reader
+                // picked and what every other command takes, and an absolute
+                // path is mostly the part of itself that is the same for all
+                // of them.
+                self.reading = Some(Journal::new(
+                    self.theme,
+                    &chosen.session_id,
+                    events,
+                    self.think,
+                    keys,
+                    (self.cols, self.room + CHROME),
+                ));
+            }
+            Err(why) => self.fault = Some(why),
+        }
+    }
 }
 
-/// Test Design Specification: the session list on a screen of its own.
+impl View for Picker<'_> {
+    fn frame(&mut self, cols: usize, rows: usize) -> Frame {
+        match &mut self.reading {
+            Some(journal) => journal.frame(cols, rows),
+            None => self.list(cols, rows),
+        }
+    }
+
+    fn key(&mut self, key: Key) -> Flow {
+        let Some(journal) = &mut self.reading else {
+            return self.choose(key);
+        };
+        // The keys that close a journal close it back to the list, not out to
+        // the shell. The reader came from somewhere, and that is what "back"
+        // means to them; leaving the whole view here would make Enter a key
+        // worth pressing only once.
+        if matches!(key, Key::Char('q') | Key::Esc) {
+            self.reading = None;
+            return Flow::Go;
+        }
+        journal.key(key)
+    }
+}
+
+/// Test Design Specification: the session list on a screen of its own, and
+/// the journal opened from it.
 ///
 /// Features tested: that the page holds the rows `tetanus sessions` prints, in
 /// its order, with a cursor findable without colour; that the window follows
 /// the cursor through a list taller than the screen and the footer counts
 /// against the whole of it; the key map, including the two keys that close the
-/// view; and that a resize composes the rows again at the new width.
+/// view; that a resize composes the rows again at the new width; that Enter
+/// opens the journal the cursor is on, by that session's own path and headed by
+/// its id; that `q` leaves a journal for the list and only then the list for the
+/// shell; and that a journal which will not open, or holds nothing, is reported
+/// without ending the view.
 ///
 /// Features NOT tested here: the wording and widths of a row (owned by
 /// `sessions.rs`), the arrangement of a frame (owned by `tetanus_ui::Frame`),
-/// the loop and its handling of Ctrl-C and resize (owned by
-/// `tetanus_ui::show`), and the refusal of `--ui` with no terminal (owned by
-/// `main.rs`, asserted end to end by TC-CLI-UI-16).
+/// the reading of a journal (owned by `browse.rs`), the loop and its handling
+/// of Ctrl-C and resize (owned by `tetanus_ui::show`), and the refusal of
+/// `--ui` with no terminal (owned by `main.rs`, asserted end to end by
+/// TC-CLI-UI-16).
 ///
-/// Environmental needs: none. Every case is a pure function of the sessions it
-/// states and the size it asks for. No case opens a terminal.
+/// Environmental needs: none. The journal reader is a closure each case states,
+/// so no case touches the filesystem, and no case opens a terminal.
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use tetanus_protocol::types::AgentState;
     use tetanus_ui::{buffered, Charset};
 
@@ -273,8 +396,19 @@ mod tests {
         }
     }
 
+    /// One event, so a journal that opens has something on its page.
+    fn journal() -> Vec<SessionEvent> {
+        vec![SessionEvent {
+            ty: "user/message".into(),
+            seq: 0,
+            time: 0,
+            data: json!({ "content": "echo this" }),
+            source_event_seqs: None,
+        }]
+    }
+
     /// One frame, as rows of text, with the terminal's own control codes gone.
-    fn rows(view: &mut Picker, cols: usize, rows: usize) -> Vec<String> {
+    fn rows<V: View>(view: &mut V, cols: usize, rows: usize) -> Vec<String> {
         let frame = view.frame(cols, rows);
         let mut ui = buffered(theme(), cols);
         frame.paint(&mut ui).expect("paint");
@@ -303,7 +437,8 @@ mod tests {
     #[test]
     fn what_the_page_holds_is_the_session_list() {
         let list = list(3);
-        let mut view = Picker::new(theme(), &list, COLS);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
         let want = sessions::rows(&theme(), COLS - MARK, &sessions::ordered(&list));
 
         let shown = body(&rows(&mut view, COLS, 12));
@@ -324,7 +459,8 @@ mod tests {
     #[test]
     fn the_window_follows_the_cursor() {
         let list = list(8);
-        let mut view = Picker::new(theme(), &list, COLS);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
 
         let shown = rows(&mut view, COLS, 8);
         assert_eq!(body(&shown).len(), 4);
@@ -357,7 +493,8 @@ mod tests {
     #[test]
     fn the_keys_move_the_cursor_by_what_they_say() {
         let list = list(8);
-        let mut view = Picker::new(theme(), &list, COLS);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
         rows(&mut view, COLS, 8);
 
         view.key(Key::PageDown);
@@ -382,7 +519,8 @@ mod tests {
     #[test]
     fn a_resize_composes_the_rows_again() {
         let list = list(3);
-        let mut view = Picker::new(theme(), &list, 70);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, 70);
 
         assert_eq!(body(&rows(&mut view, 70, 12)).len(), 3);
         let narrow = rows(&mut view, 40, 12);
@@ -396,5 +534,87 @@ mod tests {
                 sessions::rows(&theme(), 40 - MARK, &sessions::ordered(&list))[0]
             )
         );
+    }
+
+    /// TC-CLI-PICK-5: Enter on the second row.
+    /// Expected: the page becomes that journal, headed by its id, and the path
+    /// the reader is handed is the one that session names - a picker that
+    /// opened the wrong file would still look like it had worked.
+    #[test]
+    fn enter_opens_the_journal_the_cursor_is_on() {
+        let list = list(3);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let open = |path: &str| {
+            asked.borrow_mut().push(path.to_string());
+            Ok(journal())
+        };
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+
+        view.key(Key::Down);
+        view.key(Key::Enter);
+
+        assert_eq!(asked.borrow().as_slice(), ["sessions/s1.jsonl"]);
+        let shown = rows(&mut view, COLS, 12);
+        assert!(
+            shown[0].contains("s1"),
+            "the journal is not headed: {shown:?}"
+        );
+        assert!(
+            body(&shown).iter().any(|row| row.contains("echo this")),
+            "the journal is not on the page: {shown:?}"
+        );
+    }
+
+    /// TC-CLI-PICK-6: `q` inside a journal, then `q` on the list.
+    /// Expected: the first goes back to the list with the cursor where it was
+    /// left, and only the second ends the view. Esc does the same, because a
+    /// key this view does not name arrives as Esc and must not close a journal
+    /// and the list with one press.
+    #[test]
+    fn q_leaves_a_journal_for_the_list_and_the_list_for_the_shell() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+        view.key(Key::Down);
+        view.key(Key::Enter);
+
+        assert_eq!(view.key(Key::Esc), Flow::Go);
+        let shown = rows(&mut view, COLS, 12);
+        assert!(body(&shown)[1].starts_with('›'), "{shown:?}");
+        assert_eq!(view.key(Key::Char('q')), Flow::Stop);
+    }
+
+    /// TC-CLI-PICK-7: a journal that will not open, and one that is empty.
+    /// Expected: the reason is on the footer, the view carries on, the cursor
+    /// has not moved, and the list is still under it. A reader who hit one bad
+    /// journal keeps the list they were working through.
+    #[test]
+    fn a_journal_that_will_not_open_is_said_on_the_footer() {
+        let list = list(3);
+        let open = |path: &str| {
+            if path.ends_with("s2.jsonl") {
+                Err("s2.jsonl: line 3 is not a journal line".into())
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+
+        view.key(Key::Enter);
+        let shown = rows(&mut view, COLS, 12);
+        assert!(shown[shown.len() - 1].contains("line 3"), "{shown:?}");
+        assert!(body(&shown)[0].starts_with('›'), "{shown:?}");
+
+        view.key(Key::Down);
+        view.key(Key::Enter);
+        let shown = rows(&mut view, COLS, 12);
+        assert!(
+            shown[shown.len() - 1].contains("holds nothing to read"),
+            "{shown:?}"
+        );
+        assert_eq!(body(&shown).len(), 3, "the list went away: {shown:?}");
     }
 }

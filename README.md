@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn, live or replayed, and of the session list; `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
+| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -141,7 +141,7 @@ Without the key the command says so and stops before any network call.
 | Command | What it does |
 | --- | --- |
 | `tetanus run` | Run one turn and print it as a conversation, or watch it full-screen with `--ui` |
-| `tetanus sessions` | List the journals in a directory, newest first, or move a cursor down them with `--ui` |
+| `tetanus sessions` | List the journals in a directory, newest first, or pick one to read with `--ui` |
 | `tetanus replay <path>` | Read a session journal back: at once, `--live`, or full-screen with `--ui` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
@@ -177,9 +177,10 @@ Nothing is arriving in that view, so the foot of the screen says `end` rather th
 It cannot be combined with `--raw`, `--live` or `--json`, and like `run --ui` it needs a terminal.
 
 `tetanus sessions --ui` puts a cursor on that list instead of printing it, so a directory holding more journals than the screen is read a screenful at a time.
-Up and Down move the cursor, PageUp and PageDown a screenful, Home and End reach the newest and the oldest, and `q` or Esc leaves.
-The foot of the screen counts where the cursor is, so a long list says how much of it is still below.
-Like the other two full-screen views it needs a terminal, and it cannot be combined with `--json`.
+Up and Down move the cursor, PageUp and PageDown a screenful, Home and End reach the newest and the oldest, and Enter reads the journal the cursor is on with the same keys `replay --ui` uses.
+`q` or Esc closes a journal back to the list and closes the list to the shell, so Enter is a key you can afford to press.
+A journal that will not open says why at the foot of the list and leaves the cursor where it was; the list is not worth losing over one bad file.
+`--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.

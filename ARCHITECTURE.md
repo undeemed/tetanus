@@ -204,6 +204,13 @@ cursor on the list that `tetanus sessions` prints, so a directory holding more j
 screen is read a screenful at a time rather than scrolled back through once it has all gone past.
 It composes its own frame rather than reusing `Page`, because a picker's window has to follow the
 cursor and a page's follows the newest line.
+Enter opens the journal under the cursor in that same reader, so finding a turn and reading it are
+one screen rather than two commands and a copied path.
+It is one view in two states rather than two views in sequence, because entering and leaving the
+alternate screen between the list and the journal is visible to the reader as their shell flashing up.
+The journal is read through the closure the binary hands in, which is the read `tetanus replay`
+already does, so a journal that will not open is worded once and reported on the footer rather than
+costing the reader the list.
 
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,
