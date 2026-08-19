@@ -365,3 +365,72 @@ fn a_frame_the_server_cannot_correlate_is_answered_with_a_null_id() {
         Message::Response(_)
     ));
 }
+
+/// TC-PROTO-16: contract section 4.3.2. A durable type this version stages -
+/// `llm/retry` and `llm/retry-started` - carries every key the section fixes,
+/// and still parses to `None`, so a surface renders it raw rather than
+/// matching a `KnownEvent` variant that does not exist yet.
+#[test]
+fn a_staged_type_parses_to_none_and_keeps_every_documented_key() {
+    let retry = SessionEvent {
+        ty: "llm/retry".into(),
+        seq: 11,
+        time: 0,
+        data: json!({
+            "turn": 1,
+            "step": 2,
+            "provider": "deepseek-official",
+            "code": "RATE_LIMIT",
+            "message": "429 slow down",
+            "retry": 1,
+            "max_retries": 2,
+            "delay_ms": 500,
+        }),
+        source_event_seqs: None,
+    };
+    let started = SessionEvent {
+        ty: "llm/retry-started".into(),
+        seq: 12,
+        time: 0,
+        data: json!({ "turn": 1, "step": 2, "retry": 1 }),
+        source_event_seqs: None,
+    };
+
+    for (event, keys) in [
+        (
+            &retry,
+            vec![
+                "turn",
+                "step",
+                "provider",
+                "code",
+                "message",
+                "retry",
+                "max_retries",
+                "delay_ms",
+            ],
+        ),
+        (&started, vec!["turn", "step", "retry"]),
+    ] {
+        assert!(
+            event.parse().is_none(),
+            "`{}` is staged, not a KnownEvent variant",
+            event.ty
+        );
+        for key in keys {
+            assert!(
+                event.data.get(key).is_some(),
+                "`{}` must carry `{key}`",
+                event.ty
+            );
+        }
+    }
+
+    // An unbounded policy has no ceiling to report, and says so rather than
+    // reporting a number a reader would take for a limit.
+    let unbounded = SessionEvent {
+        data: json!({ "max_retries": null }),
+        ..retry
+    };
+    assert_eq!(unbounded.data["max_retries"], json!(null));
+}

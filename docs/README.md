@@ -9,7 +9,7 @@ This directory holds the documents that go deeper than the root files.
 | Document | Type | Status |
 | --- | --- | --- |
 | [turn-flow.md](turn-flow.md) | Design description (IEEE 1016) of the turn: canonical sequence, dispatch modes, durable log, rationale | Current, matches the code |
-| [interface-contract.md](interface-contract.md) | The engine/presentation boundary: JSON-RPC envelope, calls, wire types, versioning. Its machine-readable half is `crates/protocol` | Current, contract version 1.0. No carrier serves it yet |
+| [interface-contract.md](interface-contract.md) | The engine/presentation boundary: JSON-RPC envelope, calls, wire types, versioning. Its machine-readable half is `crates/protocol` | Current, contract version 1.0. `tetanus serve` hosts both carriers |
 | [parity.md](parity.md) | Gap list: what upstream deepseek-harness does that tetanus does not do yet, and the phase that closes each gap | Current, against upstream `0.1.0-rc.7` |
 | [PLAN.md](PLAN.md) | Decision document: parity scope, options considered, phase plan | Current, decision closed 2026-08-18 |
 | [plan-visual.html](plan-visual.html) | The option diff behind PLAN.md, as a diagram. Open it in a browser | Historical, matches PLAN.md |

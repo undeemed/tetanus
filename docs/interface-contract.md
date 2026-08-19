@@ -122,6 +122,8 @@ The crate is authoritative for field-level detail; this section states the invar
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
+Two more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again (§4.3.2).
+A surface renders them raw until it takes them, which is what "the vocabulary grows" means in practice.
 `session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
 `assistant/chunk` is the streaming surface.
 Raw chunks stay on the log, so a surface replays a stream exactly as it arrived rather than re-deriving it.
@@ -147,6 +149,27 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `tool/result` | `call_id`, `name`, `ok`, `content` |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
+
+#### 4.3.2 Types that are durable but not yet parsed
+
+`KnownEvent` has no fallback variant, deliberately: `parse()` returns `Option`, so an unknown type is `None` rather than a variant to match.
+The cost is that adding a variant is a breaking change for every consumer that matches the enum exhaustively.
+A new durable type therefore lands in two steps: this section fixes its payload and the engine starts writing it, and the variant joins `KnownEvent` and the §4.3.1 table in the later version the presentation lane takes.
+Until then `parse()` returns `None` for it and a surface renders it raw, which is the behaviour §4.3.1 already promises for a type a build does not know.
+
+| `type` | `data` |
+| --- | --- |
+| `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
+| `llm/retry-started` | `turn`, `step`, `retry` |
+
+`llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
+`llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
+`retry` counts from one and is the attempt about to be made, not the one that failed.
+`code` is the stable failure classification of §4.5, and `message` is the provider's own words.
+
+This step is not a version bump.
+`SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
+The second step is the minor bump, because a `KnownEvent` variant is an addition under §5.
 
 **`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
 A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
@@ -414,6 +437,7 @@ Those that hold the published failure mapping to §4.5 live in `crates/engine/te
 | §4.3.1 `TurnSummary.content` restates the last `assistant/message` | TC-CONTRACT-3 |
 | §4.3.1 `assistant/chunk` names the step it belongs to | TC-CONTRACT-4 |
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
+| §4.3.2 a staged type parses to `None` and keeps every documented key | TC-PROTO-16 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
 | §4.1 stdio: one JSON object per line, correlated by id | TC-STDIO-1 |
 | §4.1 WebSocket: one JSON object per text frame, correlated by id | TC-WS-1 |
@@ -498,3 +522,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | No boundary change. Records in §6 that §4.3.1 is now verified against the engine's own output, not only against the boundary type: `crates/engine/tests/contract_events.rs` runs a real turn and parses every event it wrote (TC-CONTRACT-1..4). A renamed durable field used to fail no test. |
 | 1.0 | No boundary change. Records in §6 that §4.1's "one contract, three carriers" is now verified against two of them: `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs` assert the same claims against the same engine double (TC-STDIO-1..5, TC-WS-1..7). The WebSocket carrier is served; no subcommand hosts it yet. |
 | 1.0 | Names who maps an engine failure to a code (§4.5): the engine does, in `tetanus_engine::convert::turn_error` and `convert::journal_error`, which this change publishes. A surface must not match on an engine error type to derive a code of its own, because an engine error enum has no fallback variant and a surface that matches one stops compiling the day the engine names a new failure. No wire types change. Two mapping fixes travel with it: `Io` now carries the `path` the table already asked for, and a session log that refused a chunk is `Internal` rather than `ProviderError`, since nothing about the provider was wrong and retrying it cannot help. The presentation lane's own copy of the mapping in `crates/cli` is redundant from this version; removing it is that lane's change. |
+| 1.0 | Publishes two durable types the engine is about to write (§4.3.2): `llm/retry` before a policy's wait and `llm/retry-started` when the wait is over, so a surface can say a request is being retried instead of showing a stalled turn. No type changes, no version bump and nothing to recompile: `type` is a free string by §4.3, and the two are deliberately not `KnownEvent` variants, because that enum has no fallback and growing it stops a consumer's build. §4.3.2 states the two-step rule that follows from that; the presentation lane decides when to take the variants, and that step is the minor bump. TC-PROTO-16 pins the staged behaviour. |
