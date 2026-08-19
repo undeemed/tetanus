@@ -209,14 +209,26 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 return Ok(());
             }
             let events = boundary(events);
-            let animated = policy.stdout_is_terminal;
-            match live {
-                true => {
-                    render::replay::play(&mut out, animated, &events, speed.unwrap_or(1.0)).ok()
-                }
-                false => render::timeline::render(&mut out, &events).ok(),
-            };
-            Ok(())
+            if !live {
+                render::timeline::render(&mut out, &events).ok();
+                return Ok(());
+            }
+            // One thread is enough: the playback is a clock and a writer.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let played = runtime.block_on(render::replay::play(
+                &mut out,
+                policy.stdout_is_terminal,
+                &events,
+                speed.unwrap_or(1.0),
+                interrupt(),
+            ));
+            match played {
+                Ok(render::replay::Ended::Interrupted) => Err(stopped(policy)),
+                _ => Ok(()),
+            }
         }
         Cmd::Info => {
             let theme = *out.theme();
@@ -272,6 +284,23 @@ fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
         .collect()
 }
 
+/// Ctrl-C, as a future that resolves when it arrives.
+///
+/// Only the two surfaces that draw a block in place wait on this. Everywhere
+/// else the default disposition stands, which is what a user expects from a
+/// program that is only printing.
+async fn interrupt() {
+    tokio::signal::ctrl_c().await.ok();
+}
+
+/// Report a run the user stopped, with the status a shell expects from one:
+/// 128 plus SIGINT. Not an error - the user asked for this - so it is a
+/// warning, and whatever was written before it stands.
+fn stopped(policy: &Policy) -> Reported {
+    policy.stderr().warn("interrupted").ok();
+    Reported(130)
+}
+
 /// Write a diagnostic, with an optional next step, and pick an exit status.
 fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
     let mut err = policy.stderr();
@@ -314,13 +343,17 @@ async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, wor
 /// The status line is for a piped run only. At a terminal the block's own
 /// footer says what a status line would, and two spinners at once read as two
 /// programs.
+///
+/// Returns `None` when the user stopped the turn with Ctrl-C. The turn is
+/// dropped where it stands; the block still comes off the screen, and the
+/// journal keeps every event that had already been written to it.
 async fn with_live<W: std::io::Write, F: std::future::Future>(
     policy: &Policy,
     out: &mut Ui<W>,
     log: &JsonlSessionLog,
     phase: &str,
     work: F,
-) -> F::Output {
+) -> Option<F::Output> {
     let (theme, width) = (*out.theme(), out.width());
     let mut view = Live::new(theme, width, phase);
     let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
@@ -337,9 +370,11 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     let mut seen = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
+    let mut stop = std::pin::pin!(interrupt());
     let done = loop {
         tokio::select! {
-            done = &mut work => break done,
+            done = &mut work => break Some(done),
+            _ = &mut stop => break None,
             _ = frames.tick() => {
                 seen = settle(&mut view, &mut screen, log, seen);
                 view.tick();
@@ -440,13 +475,19 @@ async fn run<W: std::io::Write>(
 
     let phase = format!("running the turn on {model}");
     let turn = engine.run_turn(&args.prompt);
-    let outcome = match args.trace {
+    let finished = match args.trace {
         // The trace prints the sequence afterwards, so nothing may be written
         // above it while the turn runs.
-        true => with_progress(policy, &phase, turn).await,
+        true => Some(with_progress(policy, &phase, turn).await),
         false => with_live(policy, out, &log, &phase, turn).await,
-    }
-    .map_err(|err| report(policy, &err.to_string(), None))?;
+    };
+    let Some(outcome) = finished else {
+        // Stopped by the user. The journal is still worth naming: it holds
+        // every event the turn managed before it was stopped.
+        journal(out, &log);
+        return Err(stopped(policy));
+    };
+    let outcome = outcome.map_err(|err| report(policy, &err.to_string(), None))?;
     engine
         .flush()
         .await
@@ -479,8 +520,14 @@ async fn run<W: std::io::Write>(
         out.line(&outcome.content).ok();
     }
 
+    journal(out, &log);
+    Ok(())
+}
+
+/// Where the durable record went. The last thing a run says, however it ended,
+/// because it is the one thing the user cannot work out from the screen.
+fn journal<W: std::io::Write>(out: &mut Ui<W>, log: &JsonlSessionLog) {
     out.blank().ok();
     out.field("journal", 7, &log.path().display().to_string())
         .ok();
-    Ok(())
 }
