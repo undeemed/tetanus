@@ -31,6 +31,7 @@ fn runs_one_full_turn_offline() {
         dir.path(),
         &[
             "run",
+            "--trace",
             "--prompt",
             "run one full turn",
             "--session",
@@ -81,39 +82,24 @@ fn runs_one_full_turn_offline() {
     assert_eq!(events.last().expect("last").ty, "turn/end");
 }
 
-/// TC-CLI-2: the same run is reproducible, so two runs print the same sequence.
-/// Expected: byte-identical event sections.
+/// TC-CLI-2: the same run is reproducible, so two runs print the same turn.
+/// Expected: byte-identical stdout. Each run gets its own directory and the
+/// same journal name, so even the path the summary echoes is the same.
 #[test]
 fn the_offline_run_is_reproducible() {
-    let dir = tempfile::tempdir().expect("temp dir");
     let args = [
         "run",
         "--prompt",
         "same in, same out",
         "--session",
-        "a.jsonl",
+        "j.jsonl",
     ];
-    let first = run(dir.path(), &args, None);
-    let second = run(
-        dir.path(),
-        &[
-            "run",
-            "--prompt",
-            "same in, same out",
-            "--session",
-            "b.jsonl",
-        ],
-        None,
-    );
+    let first = tempfile::tempdir().expect("temp dir");
+    let second = tempfile::tempdir().expect("temp dir");
 
-    let section = |out: &std::process::Output| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .take_while(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    assert_eq!(section(&first), section(&second));
+    let stdout = |dir: &Path| String::from_utf8(run(dir, &args, None).stdout).expect("utf-8");
+
+    assert_eq!(stdout(first.path()), stdout(second.path()));
 }
 
 /// TC-CLI-3: a real provider with no credential.
