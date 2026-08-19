@@ -141,6 +141,7 @@ Without the key the command says so and stops before any network call.
 | Command | What it does |
 | --- | --- |
 | `tetanus run` | Run one turn and print it as a conversation |
+| `tetanus sessions` | List the journals in a directory, newest first |
 | `tetanus replay <path>` | Read a session journal back, at once or `--live` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |

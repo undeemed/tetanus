@@ -82,6 +82,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus run                                 one offline turn, mock adapter
   tetanus run -p \"list the files\"             ask for something specific
   tetanus run -a deepseek -m deepseek-v4-pro  needs DEEPSEEK_API_KEY
+  tetanus sessions                            every journal, newest first
   tetanus replay sessions/turn.jsonl          re-read a journal from before
   tetanus replay sessions/turn.jsonl --live   watch that turn arrive again
   tetanus config                              every key, and what set it

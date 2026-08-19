@@ -71,6 +71,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List the session journals this build has written
+    Sessions {
+        /// Directory the journals live in
+        #[arg(long, value_name = "PATH", default_value = "sessions")]
+        dir: PathBuf,
+        /// Print the call's result as JSON: one object, per contract §4.7
+        #[arg(long)]
+        json: bool,
+    },
     /// Replay a session journal
     Replay {
         /// Path to a JSONL journal a previous run wrote
@@ -253,6 +262,29 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                     .map_err(|err| report(policy, &err.to_string(), None));
             }
             render::catalog::tools(&mut out, &catalog).ok();
+            Ok(())
+        }
+        Cmd::Sessions { dir, json } => {
+            // A listing is the store's own view of a directory: what ids it
+            // holds, and which of them a turn is running on. No surface can
+            // assemble that from a path, which is why this is the first
+            // subcommand whose whole answer comes from the engine.
+            let engine = tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
+                sessions_root: dir,
+                ..Default::default()
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let list = runtime
+                .block_on(tetanus_protocol::methods::Engine::session_list(&engine))
+                .map_err(|err| fail(policy, &err))?;
+            if json {
+                return render::json::line(&mut out, &list)
+                    .map_err(|err| report(policy, &err.to_string(), None));
+            }
+            render::sessions::render(&mut out, &list).ok();
             Ok(())
         }
         Cmd::Replay {
@@ -877,6 +909,15 @@ async fn run<W: std::io::Write>(
 /// journal open while it writes the header, and the turn opens the same file
 /// again to append to it. That is the seam this slice leaves - the call is the
 /// contract's, the turn under it is not yet.
+///
+/// # Why the file name is offered as the id
+///
+/// A store resolves an id to `<root>/<id>.jsonl`, so a journal whose name is
+/// not its id can be listed but not reopened by id. Offering the file name
+/// keeps the id `tetanus sessions` prints an id the store answers to. A name
+/// the store will not accept as an id is not an error - the run is about the
+/// turn, not about the name - so the call is made again without it and the
+/// store mints its own.
 async fn session(
     path: &std::path::Path,
     provider: &str,
@@ -894,17 +935,26 @@ async fn session(
             .unwrap_or_else(|| PathBuf::from(".")),
         ..Default::default()
     });
-    tetanus_protocol::methods::Engine::session_create(
-        &engine,
-        tetanus_protocol::methods::SessionCreateParams {
-            session_id: None,
-            path: Some(path.display().to_string()),
-            provider: Some(provider.to_string()),
-            model: Some(model.to_string()),
-            max_steps: Some(max_steps),
-        },
-    )
-    .await
+    let named = tetanus_protocol::methods::SessionCreateParams {
+        session_id: path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
+        path: Some(path.display().to_string()),
+        provider: Some(provider.to_string()),
+        model: Some(model.to_string()),
+        max_steps: Some(max_steps),
+    };
+    let anonymous = tetanus_protocol::methods::SessionCreateParams {
+        session_id: None,
+        ..named.clone()
+    };
+    match tetanus_protocol::methods::Engine::session_create(&engine, named).await {
+        Err(rejected) if rejected.kind() == Some(ErrorCode::InvalidParams) => {
+            tetanus_protocol::methods::Engine::session_create(&engine, anonymous).await
+        }
+        settled => settled,
+    }
 }
 
 /// Where the durable record went. The last thing a run says, however it ended,

@@ -61,7 +61,7 @@ fn the_root_page_is_complete() {
     ] {
         assert!(page.contains(expected), "`{expected}` missing:\n{page}");
     }
-    for command in ["run", "config", "replay", "info"] {
+    for command in ["run", "config", "sessions", "replay", "info"] {
         assert!(
             block(&page, "Commands:")
                 .iter()
@@ -121,6 +121,7 @@ fn nothing_overruns_the_width_cap() {
         vec!["replay", "--help"],
         vec!["models", "--help"],
         vec!["tools", "--help"],
+        vec!["sessions", "--help"],
     ] {
         for line in help(&args).lines() {
             assert!(
@@ -144,7 +145,7 @@ fn every_example_names_something_that_exists() {
         .into_iter()
         .chain(block(&run, "Examples:"))
         .collect();
-    assert!(examples.len() >= 8, "the examples went missing:\n{root}");
+    assert!(examples.len() >= 9, "the examples went missing:\n{root}");
 
     for example in examples {
         let mut words = example.split_whitespace();
@@ -205,7 +206,7 @@ fn every_example_model_is_offered_by_its_adapter() {
 /// the column that made the block scannable in the first place.
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
-    for (args, count) in [(vec!["--help"], 8), (vec!["run", "--help"], 6)] {
+    for (args, count) in [(vec!["--help"], 9), (vec!["run", "--help"], 6)] {
         let page = help_at("80", &args);
         let examples = block(&page, "Examples:");
 

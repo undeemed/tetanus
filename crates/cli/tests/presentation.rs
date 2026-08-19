@@ -7,8 +7,9 @@
 //! status of a reported failure; that a bad `--color` value is a usage error;
 //! which of the two views - the turn, or the raw sequence - a command prints;
 //! that a model's thinking stays folded until it is asked for; that the
-//! journal a run leaves behind says what it ran under; and the shape of the
-//! machine-readable output the interface contract fixes. NOT tested
+//! journal a run leaves behind says what it ran under; that the session list
+//! finds those journals and names each by the id its store answers to; and
+//! the shape of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
@@ -623,6 +624,80 @@ fn the_tool_page_lists_what_a_turn_can_call() {
     for tool in called {
         assert!(page.contains(&tool), "`{tool}` is not on the page:\n{page}");
     }
+}
+
+/// TC-CLI-SESS-7: `tetanus sessions` on a directory two runs wrote into.
+/// Expected: one row per journal, newest first, each carrying the size of the
+/// journal and the prompt that opened it. This is the page a user reads an id
+/// out of, so it is asserted against journals a real run wrote and not
+/// against a fixture.
+#[test]
+fn sessions_lists_what_the_runs_wrote() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (prompt, path) in [
+        ("echo this", "sessions/a.jsonl"),
+        ("and again", "sessions/b.jsonl"),
+    ] {
+        let out = run(dir.path(), &["run", "-p", prompt, "--session", path], &[]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let told = stdout(&run(dir.path(), &["sessions", "--color", "never"], &[]));
+    let rows: Vec<&str> = told.lines().skip(2).collect();
+
+    assert_eq!(rows.len(), 2, "{told}");
+    assert!(
+        rows[0].starts_with("b  "),
+        "the newest is not first:\n{told}"
+    );
+    assert!(rows[0].ends_with("idle  and again"), "{told}");
+    assert!(rows[1].starts_with("a  "), "{told}");
+    assert!(rows[1].ends_with("idle  echo this"), "{told}");
+    assert!(rows[0].contains("18 events"), "{told}");
+}
+
+/// TC-CLI-SESS-8: the id the page prints against the journal it names.
+/// Expected: the id is the journal's file name, because a store resolves an
+/// id to `<root>/<id>.jsonl` and an id that resolves to nothing is worth
+/// nothing to the reader who retypes it. `--json` carries both, verbatim.
+#[test]
+fn the_id_a_session_is_listed_under_names_its_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "sessions/kept.jsonl"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let listed = stdout(&run(dir.path(), &["sessions", "--json"], &[]));
+    let page: serde_json::Value = serde_json::from_str(listed.trim()).expect("one json object");
+    let session = &page["sessions"][0];
+
+    assert_eq!(session["session_id"], "kept");
+    assert_eq!(session["path"], "sessions/kept.jsonl");
+    assert_eq!(session["model"], "mock-echo-1");
+    assert_eq!(session["state"], "idle");
+    assert_eq!(listed.lines().count(), 1, "not one line: {listed:?}");
+}
+
+/// TC-CLI-SESS-9: `tetanus sessions` before anything has been run.
+/// Expected: exit 0 and a page that says what writes one. An empty store is
+/// not a failure, and a missing directory is the ordinary first-run state.
+#[test]
+fn an_empty_store_is_not_a_failure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(dir.path(), &["sessions", "--color", "never"], &[]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "\nsessions\nno sessions yet - tetanus run writes one\n"
+    );
+    assert_eq!(
+        stdout(&run(dir.path(), &["sessions", "--json"], &[])),
+        "{\"sessions\":[]}\n"
+    );
 }
 
 /// TC-CLI-ERR-5: a provider that answers nothing.
