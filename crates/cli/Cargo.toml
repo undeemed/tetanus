@@ -17,6 +17,7 @@ tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+tetanus-ui = { path = "../ui" }
 
 [dev-dependencies]
 tempfile.workspace = true

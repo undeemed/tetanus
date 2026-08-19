@@ -66,7 +66,13 @@ fn runs_one_full_turn_offline() {
             "{expected} is missing from:\n{stdout}"
         );
     }
-    assert!(stdout.contains("stop    natural"), "{stdout}");
+    // Column widths belong to the presentation suite; this case only cares
+    // that the summary reports the stop reason.
+    let stop = stdout.lines().find(|line| line.starts_with("stop"));
+    assert!(
+        stop.is_some_and(|line| line.ends_with("natural")),
+        "{stdout}"
+    );
     assert!(stdout.contains("You said: run one full turn"), "{stdout}");
 
     let journal = dir.path().join("journal.jsonl");
