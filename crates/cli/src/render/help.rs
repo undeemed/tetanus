@@ -104,6 +104,7 @@ pub fn run_epilogue(theme: &Theme) -> String {
   tetanus run --trace                 the raw event sequence instead
   tetanus run --session /tmp/t.jsonl  choose where the journal lands
   tetanus run --max-steps 1           stop after one step
-  tetanus run --think                 unfold what the model thought"
+  tetanus run --think                 unfold what the model thought
+  tetanus run --json                  JSONL for a script, not for a person"
     )
 }

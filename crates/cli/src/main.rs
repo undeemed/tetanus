@@ -2,6 +2,7 @@
 
 mod render;
 
+use tetanus_protocol::methods::{AgentPromptResult, SessionEventsResult};
 use tetanus_protocol::types as protocol;
 
 use std::path::PathBuf;
@@ -68,6 +69,9 @@ enum Cmd {
         /// Print the model's thinking in full, not folded to its first line
         #[arg(long)]
         think: bool,
+        /// Print the call's result as JSON: one object, per contract §4.7
+        #[arg(long, conflicts_with_all = ["raw", "live"])]
+        json: bool,
     },
     /// Print version/build info
     Info,
@@ -104,6 +108,9 @@ struct RunArgs {
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
     think: bool,
+    /// Print the events and the summary as JSON, per contract §4.7
+    #[arg(long, conflicts_with = "trace")]
+    json: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -199,6 +206,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             live,
             speed,
             think,
+            json,
         } => {
             let events = tetanus_session::replay(&path)
                 .map_err(|err| report(policy, &err.to_string(), None))?;
@@ -216,6 +224,18 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 return Ok(());
             }
             let events = boundary(events);
+            if json {
+                // `session.events` answers with one page. A journal read from
+                // disk is the whole of it, so the page is too.
+                let page = SessionEventsResult {
+                    next_seq: events.last().map(|event| event.seq + 1).unwrap_or_default(),
+                    eof: true,
+                    events,
+                };
+                render::json::line(&mut out, &page)
+                    .map_err(|err| report(policy, &err.to_string(), None))?;
+                return Ok(());
+            }
             if !live {
                 render::timeline::render(&mut out, &events, think).ok();
                 return Ok(());
@@ -268,6 +288,31 @@ fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
         time: event.time,
         data: event.data.clone(),
         source_event_seqs: event.source_event_seqs.clone(),
+    }
+}
+
+/// Carry a stop reason across. The third and last crossing, and the one place
+/// neither enum contains the other: the contract names reasons only a served
+/// call can produce, and the engine names `Interrupted`, which the contract
+/// carries as a value of the growable `StopReason` rather than as a variant.
+///
+/// The match has no wildcard arm on purpose. A reason the engine adds stops
+/// this crate from compiling until someone decides how it crosses, which is
+/// the cheapest moment to decide it.
+fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
+    match reason {
+        tetanus_turn::StopReason::Natural => protocol::StopReason::Natural,
+        tetanus_turn::StopReason::PreStepRejected => protocol::StopReason::PreStepRejected,
+        tetanus_turn::StopReason::MaxSteps => protocol::StopReason::MaxSteps,
+        tetanus_turn::StopReason::Cancelled => protocol::StopReason::Cancelled,
+        // Written by crash repair when a later run finds a journal left open,
+        // never by a turn this process ran. Contract §4.4.4 makes it a value
+        // of the growable enum and §7.5 fixes what a surface does with one, so
+        // it crosses as `Other` carrying the engine's own word for it - the
+        // same word the journal holds, and the one the timeline then prints.
+        tetanus_turn::StopReason::Interrupted => {
+            protocol::StopReason::Other(reason.as_str().to_string())
+        }
     }
 }
 
@@ -413,6 +458,61 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     done
 }
 
+/// Stream the journal as contract output while the turn runs.
+///
+/// The same poll as [`with_live`], reporting to a script instead of a person:
+/// every event lands on stdout as its own line as it arrives, and the caller
+/// writes the result last. Nothing is drawn, so nothing has to be erased.
+async fn with_json<W: std::io::Write, F: std::future::Future>(
+    policy: &Policy,
+    out: &mut Ui<W>,
+    log: &JsonlSessionLog,
+    phase: &str,
+    work: F,
+) -> Option<F::Output> {
+    let mut status = match policy.stderr_is_terminal {
+        false => None,
+        true => {
+            let mut status = policy.stderr_progress();
+            status.set(phase).ok();
+            Some(status)
+        }
+    };
+    let mut seen = 0;
+    let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
+    let mut work = std::pin::pin!(work);
+    let mut stop = std::pin::pin!(interrupt());
+    let done = loop {
+        tokio::select! {
+            done = &mut work => break Some(done),
+            _ = &mut stop => break None,
+            _ = frames.tick() => {
+                seen = flush(out, log, seen);
+                if let Some(status) = &mut status {
+                    status.tick().ok();
+                }
+            }
+        }
+    };
+    // Whatever the last poll did not catch. Every offline turn ends inside one
+    // frame interval, so for those this is the whole stream.
+    flush(out, log, seen);
+    if let Some(status) = status {
+        status.finish().ok();
+    }
+    done
+}
+
+/// Write every event the log gained since the last look, and report how many
+/// it now holds.
+fn flush<W: std::io::Write>(out: &mut Ui<W>, log: &JsonlSessionLog, seen: usize) -> usize {
+    let events = log.events();
+    for event in events.iter().skip(seen) {
+        render::json::line(out, &crossing(event)).ok();
+    }
+    events.len()
+}
+
 /// Commit every event written since the last look, and report how many events
 /// the log now holds.
 fn settle<W: std::io::Write>(
@@ -492,16 +592,20 @@ async fn run<W: std::io::Write>(
 
     let phase = format!("running the turn on {model}");
     let turn = engine.run_turn(&args.prompt);
-    let finished = match args.trace {
+    let finished = match (args.trace, args.json) {
         // The trace prints the sequence afterwards, so nothing may be written
         // above it while the turn runs.
-        true => Some(with_progress(policy, &phase, turn).await),
-        false => with_live(policy, out, &log, &phase, args.think, turn).await,
+        (true, _) => Some(with_progress(policy, &phase, turn).await),
+        (_, true) => with_json(policy, out, &log, &phase, turn).await,
+        _ => with_live(policy, out, &log, &phase, args.think, turn).await,
     };
     let Some(outcome) = finished else {
         // Stopped by the user. The journal is still worth naming: it holds
-        // every event the turn managed before it was stopped.
-        journal(out, &log);
+        // every event the turn managed before it was stopped. A script asked
+        // for result types and gets none, because the call did not return one.
+        if !args.json {
+            journal(out, &log);
+        }
         return Err(stopped(policy));
     };
     let outcome = outcome.map_err(|err| report(policy, &err.to_string(), None))?;
@@ -535,6 +639,24 @@ async fn run<W: std::io::Write>(
         // A debugging view still owes the user the answer they asked for.
         out.blank().ok();
         out.line(&outcome.content).ok();
+    }
+
+    if args.json {
+        // The last line is the call's result, which is where a script stops
+        // reading. Nothing else may follow it on stdout.
+        let events: Vec<protocol::SessionEvent> = log.events().iter().map(crossing).collect();
+        let result = AgentPromptResult {
+            summary: render::json::summary(
+                &events,
+                outcome.turn,
+                outcome.steps,
+                reason(outcome.reason),
+                outcome.stop_veto,
+                outcome.content,
+            ),
+        };
+        return render::json::line(out, &result)
+            .map_err(|err| report(policy, &err.to_string(), None));
     }
 
     journal(out, &log);
