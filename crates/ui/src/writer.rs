@@ -37,6 +37,12 @@ impl<W: Write> Ui<W> {
         self.width
     }
 
+    /// Draw at a new width. For a surface that repaints: the terminal a block
+    /// is being drawn on can be resized while it is on screen.
+    pub fn set_width(&mut self, width: usize) {
+        self.width = width;
+    }
+
     /// Style `text` as `role` for use inside a `write!` on this `Ui`.
     pub fn paint<'a>(&self, role: Role, text: &'a str) -> Painted<'a> {
         self.theme.paint(role, text)
@@ -169,6 +175,20 @@ impl Policy {
     pub fn stdout_screen(&self) -> Screen<io::Stdout> {
         Screen::new(self.stdout(), self.stdout_is_terminal)
     }
+}
+
+/// The width right now, asked again rather than remembered.
+///
+/// [`Policy`] resolves a width once, which is all a command that prints and
+/// exits needs. A block that stays on screen outlives that answer: the window
+/// it is drawn in can be resized under it, and a block still fitted to the old
+/// width wraps and takes the frame after it out of place.
+///
+/// The rules are the ones the policy used, so `COLUMNS` still wins - a user
+/// who exports it means it, and a resize does not change their mind.
+pub fn measure() -> usize {
+    let terminal = terminal_size::terminal_size().map(|(w, _)| w.0);
+    color::width(&Env::from_process(), terminal)
 }
 
 /// A `Ui` over an in-memory buffer, for tests and doc examples.

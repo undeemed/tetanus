@@ -52,4 +52,4 @@ pub use progress::Progress;
 pub use screen::Screen;
 pub use text::{fit, truncate, visible_width, wrap};
 pub use theme::{Painted, Role, Theme};
-pub use writer::{buffered, Policy, Ui};
+pub use writer::{buffered, measure, Policy, Ui};

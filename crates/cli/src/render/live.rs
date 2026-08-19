@@ -94,6 +94,11 @@ impl Live {
         self.reader.lines(&self.theme, self.width, event)
     }
 
+    /// Compose at a new width, after the terminal was resized under the block.
+    pub fn resize(&mut self, width: usize) {
+        self.width = width;
+    }
+
     /// Advance the spinner. Called on the caller's frame interval, not on an
     /// event, so a long silence still looks alive.
     pub fn tick(&mut self) {
@@ -163,7 +168,8 @@ impl Live {
 ///
 /// Features tested: that the settled half is the timeline byte for byte, that
 /// chunks settle nothing, what the block holds while an answer arrives, its
-/// height, its footer, and that it empties when the turn ends.
+/// height, its footer, that it follows a resize, and that it empties when the
+/// turn ends.
 ///
 /// Features NOT tested here: drawing (owned by `tetanus-ui`'s `screen.rs`),
 /// the wording of a settled line (owned by `timeline.rs`), and the polling
@@ -175,7 +181,7 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tetanus_ui::{buffered, Charset};
+    use tetanus_ui::{buffered, visible_width, Charset};
 
     use super::*;
 
@@ -354,5 +360,36 @@ mod tests {
         let block = live.block(Duration::ZERO);
         assert_eq!(block[0], "  think the user wants an echo");
         assert!(block[1].contains("thinking"), "{block:?}");
+    }
+
+    /// TC-CLI-LIVE-8: the window is made narrower mid-answer.
+    /// Expected: the block is composed at the new width from then on. The view
+    /// is told the width rather than asking for it, so a resize is one call
+    /// and this case needs no terminal.
+    #[test]
+    fn the_block_is_composed_at_the_width_it_was_last_told() {
+        let mut live = view(80);
+        live.push(&event(
+            "assistant/chunk",
+            json!({ "chunk": "text", "delta": "a fairly long answer that fits in eighty columns", "turn": 1, "step": 1 }),
+        ));
+        assert_eq!(
+            live.block(Duration::ZERO).len(),
+            2,
+            "one answer row, one footer"
+        );
+
+        live.resize(30);
+        let narrow = live.block(Duration::ZERO);
+
+        assert!(narrow.len() > 2, "it did not re-wrap: {narrow:?}");
+        // The footer is one line by construction and is cut to the terminal by
+        // `Screen`, so the wrapping this case is about is the answer's.
+        for line in &narrow[..narrow.len() - 1] {
+            assert!(
+                visible_width(line) <= 30,
+                "`{line}` overruns thirty columns"
+            );
+        }
     }
 }

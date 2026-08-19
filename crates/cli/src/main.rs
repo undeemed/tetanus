@@ -386,6 +386,14 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
             _ = &mut stop => break None,
             _ = frames.tick() => {
                 seen = settle(&mut view, &mut screen, log, seen);
+                // The window can be resized while the turn runs. Asked once,
+                // the block would keep drawing at a width that stopped being
+                // true, and every frame after the resize would land wrong.
+                if policy.stdout_is_terminal {
+                    let width = tetanus_ui::measure();
+                    screen.resize(width).ok();
+                    view.resize(width);
+                }
                 view.tick();
                 screen.draw(&view.block(started.elapsed())).ok();
                 if let Some(status) = &mut status {
