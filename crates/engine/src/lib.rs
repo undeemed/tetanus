@@ -98,7 +98,10 @@ impl HarnessEngine {
     /// absence as an error.
     pub fn capabilities(&self) -> Vec<String> {
         // A capability is a promise that the call behind it is served.
-        vec![capability::SESSION_SUBSCRIBE.to_string()]
+        vec![
+            capability::SESSION_SUBSCRIBE.to_string(),
+            capability::AGENT_INTERRUPT.to_string(),
+        ]
     }
 }
 
@@ -167,8 +170,8 @@ impl Engine for HarnessEngine {
         self.runtime.status(&self.sessions, &params.session_id)
     }
 
-    async fn agent_interrupt(&self, _: SessionRef) -> Result<Ack, RpcError> {
-        Err(not_implemented(method::AGENT_INTERRUPT))
+    async fn agent_interrupt(&self, params: SessionRef) -> Result<Ack, RpcError> {
+        self.runtime.interrupt(&self.sessions, &params.session_id)
     }
 
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError> {

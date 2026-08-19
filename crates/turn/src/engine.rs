@@ -22,7 +22,7 @@
 //! which places it inside the step. See `docs/turn-flow.md` for the full
 //! reconciliation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tetanus_core::events::Terminal;
@@ -93,6 +93,10 @@ pub struct TurnEngine {
     bus: EventBus,
     config: TurnConfig,
     turns: AtomicU64,
+    /// Set by [`TurnEngine::cancel`], read at each step boundary. An
+    /// in-flight provider call is never aborted: the turn closes the way any
+    /// other turn closes, so the journal stays a record of what happened.
+    cancelled: AtomicBool,
 }
 
 impl TurnEngine {
@@ -114,7 +118,14 @@ impl TurnEngine {
             bus: ctx.bus.clone(),
             config,
             turns: AtomicU64::new(turns),
+            cancelled: AtomicBool::new(false),
         })
+    }
+
+    /// Ask the running turn to stop at its next step boundary. Answering
+    /// `false` means there was nothing to ask: no turn is running.
+    pub fn cancel(&self) -> bool {
+        !self.cancelled.swap(true, Ordering::AcqRel)
     }
 
     pub fn bus(&self) -> &EventBus {
@@ -139,6 +150,9 @@ impl TurnEngine {
 
     /// Run one turn to completion.
     pub async fn run_turn(&self, input: &str) -> Result<TurnOutcome, TurnError> {
+        // An interrupt that arrived while the session was idle stops nothing;
+        // it must not stop the turn that starts next.
+        self.cancelled.store(false, Ordering::Release);
         let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         self.log
             .append(topic::TURN_START, serde_json::json!({ "turn": turn }))?;
@@ -249,6 +263,12 @@ impl TurnEngine {
             // Tools owe another request -> claim -> next step. Phase ① has one
             // inbox holding one turn's input, so nothing new is claimed here.
             if response.tool_calls.is_empty() {
+                break;
+            }
+            // The step boundary is where an interrupt lands. A turn that was
+            // finished anyway is not reported as cancelled.
+            if self.cancelled.load(Ordering::Acquire) {
+                reason = StopReason::Cancelled;
                 break;
             }
             if steps >= self.config.max_steps {

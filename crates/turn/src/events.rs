@@ -157,6 +157,8 @@ pub enum StopReason {
     PreStepRejected,
     /// The step budget ran out before the model settled.
     MaxSteps,
+    /// `TurnEngine::cancel` asked the turn to stop at a step boundary.
+    Cancelled,
 }
 
 impl StopReason {
@@ -165,6 +167,7 @@ impl StopReason {
             StopReason::Natural => "natural",
             StopReason::PreStepRejected => "pre-step-rejected",
             StopReason::MaxSteps => "max-steps",
+            StopReason::Cancelled => "cancelled",
         }
     }
 }
