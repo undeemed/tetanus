@@ -988,13 +988,15 @@ async fn with_page<W: std::io::Write, F: std::future::Future>(
         log,
         live: Live::new(theme, cols, phase, think),
         page: Page::new(theme, "tetanus", title),
+        theme,
         keys: format!(
-            "{} scroll {} q quit",
+            "{} scroll {dot} ? keys {dot} q quit",
             theme.glyph("↑↓", "up/dn"),
-            theme.glyph("·", "-")
+            dot = theme.glyph("·", "-")
         ),
         size: (cols, rows),
         seen: 0,
+        help: false,
         started: std::time::Instant::now(),
     };
     // One frame before the loop. Entering the alternate screen and leaving it
@@ -1043,6 +1045,7 @@ struct Watch<'a> {
     /// The journal the turn is writing, polled rather than subscribed to, for
     /// the reason [`with_live`] gives.
     log: &'a JsonlSessionLog,
+    theme: Theme,
     live: Live,
     page: Page,
     /// The left of the footer. Built once, because a charset does not change
@@ -1052,7 +1055,31 @@ struct Watch<'a> {
     size: (usize, usize),
     /// Journal events already settled onto the page.
     seen: usize,
+    /// Whether the key card is up in place of the turn.
+    help: bool,
     started: std::time::Instant,
+}
+
+impl Watch<'_> {
+    /// Every key this view answers, in the order a reader meets them.
+    ///
+    /// The turn's own card. A journal's says how to search, which a turn
+    /// arriving has no answer for; this one says how to stop it, which a
+    /// journal on disk has no need of.
+    fn map(&self) -> Vec<render::keys::Row> {
+        vec![
+            (
+                self.theme.glyph("↑ ↓", "up dn"),
+                "one line back, one line on",
+            ),
+            ("pgup pgdn", "a screenful either way"),
+            ("home", "the first line of the turn"),
+            ("end", "follow the turn again, as it arrives"),
+            ("ctrl-c", "stop the turn, and the view with it"),
+            ("q", "close the view; a turn still running is dropped"),
+            ("?", "this card; any key goes back"),
+        ]
+    }
 }
 
 impl View for Watch<'_> {
@@ -1072,16 +1099,29 @@ impl View for Watch<'_> {
         }
         self.seen = events.len();
 
+        // Composed after the events above are settled, so the transcript the
+        // card is hiding is still up to date the moment it comes down.
+        if self.help {
+            return render::keys::card(&self.theme, cols, rows, "turn", &self.map());
+        }
         let block = self.live.block(self.started.elapsed());
         self.page.frame(cols, rows, &block, &self.keys)
     }
 
     fn key(&mut self, key: Key) -> Flow {
+        // The card is read, not worked in: the next key takes it down, and
+        // that is all it does. Ctrl-C is answered before this, in `beat`, so
+        // the card cannot hold up a turn the reader wants stopped.
+        if self.help {
+            self.help = false;
+            return Flow::Go;
+        }
         // A page is the body, less a row so the reader keeps their place in
         // the transcript, and never nothing on a small terminal.
         let page = self.size.1.saturating_sub(5).max(1) as isize;
         match key {
             Key::Char('q') | Key::Esc => return Flow::Stop,
+            Key::Char('?') => self.help = true,
             Key::Up => self.page.scroll(1),
             Key::Down => self.page.scroll(-1),
             Key::PageUp => self.page.scroll(page),
