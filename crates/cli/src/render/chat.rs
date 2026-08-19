@@ -74,12 +74,22 @@ fn turns(turns: usize) -> String {
     }
 }
 
-/// The marker a chat waits at. No newline: the reader types on this line, and
-/// it is flushed because nothing else will flush it before they do.
-pub fn prompt<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
+/// The marker a chat waits at, painted, with the space the reader types after.
+///
+/// Returned rather than written, because the row it opens is redrawn on every
+/// keystroke by [`tetanus_ui::read`], which runs on a thread of its own and
+/// has no writer to paint with.
+pub fn marker<W: Write>(ui: &mut Ui<W>) -> String {
     let glyph = ui.theme().glyph("›", ">").to_string();
-    let marker = ui.paint(Role::Accent, &glyph).to_string();
-    write!(ui.out(), "\n{marker} ")?;
+    format!("{} ", ui.paint(Role::Accent, &glyph))
+}
+
+/// The blank row between the turn above and the marker under it.
+///
+/// It is written through the writer and flushed, because the editor draws the
+/// row after it and the two must not arrive out of order.
+pub fn space<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
+    ui.blank()?;
     ui.flush()
 }
 
@@ -235,15 +245,21 @@ mod tests {
         );
     }
 
-    /// TC-CLI-CHAT-PAGE-3: the marker.
-    /// Expected: a blank line, the glyph and one space, with no newline after
-    /// it, so the reader types on that line. In the ASCII charset it is `>`,
-    /// because a terminal that cannot draw `›` draws a replacement glyph in a
-    /// column the marker was measured without.
+    /// TC-CLI-CHAT-PAGE-3: the marker, and the row it sits on.
+    /// Expected: the glyph and one space, with nothing around it - the editor
+    /// puts it at the start of a row it redraws, so a newline inside it would
+    /// be redrawn too. In the ASCII charset it is `>`, because a terminal that
+    /// cannot draw `›` draws a replacement glyph in a column the marker was
+    /// measured without. The blank row above it is written separately, because
+    /// it belongs to the transcript and not to the line being typed.
     #[test]
-    fn the_marker_leaves_the_cursor_on_its_own_line() {
-        assert_eq!(rendered(Charset::Unicode, |ui| prompt(ui).unwrap()), "\n› ");
-        assert_eq!(rendered(Charset::Ascii, |ui| prompt(ui).unwrap()), "\n> ");
+    fn the_marker_is_a_glyph_and_the_room_to_type_after_it() {
+        let mut ui = buffered(Theme::new(false, Charset::Unicode), 80);
+        assert_eq!(marker(&mut ui), "› ");
+        let mut ui = buffered(Theme::new(false, Charset::Ascii), 80);
+        assert_eq!(marker(&mut ui), "> ");
+
+        assert_eq!(rendered(Charset::Unicode, |ui| space(ui).unwrap()), "\n");
     }
 
     /// TC-CLI-CHAT-PAGE-4: the card.

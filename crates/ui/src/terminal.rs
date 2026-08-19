@@ -152,6 +152,38 @@ impl<W: Write> Console for Tty<W> {
     }
 }
 
+/// The terminal in raw mode, and nothing else.
+///
+/// [`Tty`] takes three things at once: raw mode, the alternate screen and the
+/// cursor. A prompt wants one of the three. It is drawn on the reader's own
+/// scrollback, where the conversation above it has to stay, and the cursor is
+/// the whole point of a line being edited.
+///
+/// It holds no stream because it writes none: raw mode is a property of the
+/// process's controlling terminal, and everything this mode is taken for is
+/// drawn by the caller on the stream it already has.
+#[derive(Debug, Clone, Copy)]
+pub struct Typing;
+
+impl Console for Typing {
+    fn take(&mut self) -> io::Result<()> {
+        terminal::enable_raw_mode()
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        terminal::disable_raw_mode()
+    }
+}
+
+impl Keys for Typing {
+    fn key(&mut self, wait: Duration) -> io::Result<Option<Key>> {
+        if !event::poll(wait)? {
+            return Ok(None);
+        }
+        Ok(key_of(event::read()?))
+    }
+}
+
 /// The terminal, held.
 ///
 /// Construction takes it and dropping gives it back, so the give-back cannot

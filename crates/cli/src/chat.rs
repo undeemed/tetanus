@@ -173,6 +173,10 @@ pub async fn chat<W: Write>(
     // in gets the transcript and nothing else, so its output is the journal
     // it just wrote and not a page with markers through it.
     let typing = std::io::stdin().is_terminal();
+    // Painted once, and drawn on every keystroke by the editor that owns the
+    // row. It is a string and not a call because the thread that draws it is
+    // not the one holding the writer.
+    let marker = render::chat::marker(out);
     // The same name as the banner drew, tamed for the line that says it -
     // `tetanus run` words its phase line from a tamed name for the same
     // reason. What was given still selects the adapter; what is drawn is
@@ -180,10 +184,13 @@ pub async fn chat<W: Write>(
     let phase = format!("running the turn on {}", tame_line(&model));
 
     loop {
+        // The blank line that separates the prompt from the turn above it goes
+        // through the writer, before the terminal is taken: it is an ordinary
+        // row of the transcript, and only the row under it is the editor's.
         if typing {
-            render::chat::prompt(out).ok();
+            render::chat::space(out).ok();
         }
-        let asked = match typed().await {
+        let asked = match typed(typing, &marker, policy.width).await {
             Ok(Typed::Line(line)) => line,
             // Both ways out land here: the journal is named, and the status
             // says which of them it was.
@@ -275,7 +282,51 @@ fn turns_on(log: &JsonlSessionLog) -> usize {
 /// The blocking read outlives an interrupt - nothing can cancel a thread
 /// parked in `read(2)` - so the caller ends the process rather than dropping
 /// the runtime, which would wait for a line nobody is going to type.
-async fn typed() -> std::io::Result<Typed> {
+async fn typed(typing: bool, marker: &str, width: usize) -> std::io::Result<Typed> {
+    if !typing {
+        return piped().await;
+    }
+    let marker = marker.to_string();
+    tokio::task::spawn_blocking(move || edited(&marker, width))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// One line from a terminal, with the editing keys a shell has.
+///
+/// It runs on a blocking thread because that is what it is: a person typing.
+/// Raw mode is held for exactly as long as the line takes, and given back
+/// before anything else is printed - the transcript above the prompt is the
+/// reader's own scrollback, and a turn that drew into a raw terminal would
+/// leave every row of it starting where the last one ended.
+///
+/// Ctrl-C is a keystroke here rather than a signal, because raw mode is what
+/// turns the one into the other. It comes back as [`Typed::Interrupted`], which
+/// is the same answer the signal gives on the other path, so the loop above
+/// does not know which kind of terminal it is talking to.
+fn edited(marker: &str, width: usize) -> std::io::Result<Typed> {
+    // Armed before the terminal is taken and dropped after it is given back,
+    // so there is no moment in which the terminal is raw and nothing would
+    // undo it.
+    let killed = tetanus_ui::when_killed(tetanus_ui::Typing).ok();
+    let mut held = tetanus_ui::Held::take(tetanus_ui::Typing).map_err(|(_, err)| err)?;
+    let read = tetanus_ui::read(held.console(), &mut std::io::stdout(), marker, width);
+    let given = held.release();
+    drop(killed);
+    given.and(read).map(|typed| match typed {
+        tetanus_ui::Typed::Asked(line) => Typed::Line(line),
+        tetanus_ui::Typed::Interrupted => Typed::Interrupted,
+        // `read` returns on the three keys that end a line and on nothing
+        // else. If a later one ever arrives here, ending the chat is the
+        // answer that loses nothing: the journal holds every turn already.
+        _ => Typed::Eof,
+    })
+}
+
+/// One line from something that is not a terminal: a pipe, a here-document, a
+/// test. There is nobody to draw a row for, so the line is read as a line and
+/// Ctrl-C is a signal again.
+async fn piped() -> std::io::Result<Typed> {
     let line = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         std::io::stdin()
