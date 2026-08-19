@@ -47,6 +47,6 @@ pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
 pub use progress::Progress;
-pub use text::truncate;
+pub use text::{truncate, wrap};
 pub use theme::{Painted, Role, Theme};
 pub use writer::{buffered, Policy, Ui};
