@@ -767,7 +767,7 @@ fn an_empty_store_is_not_a_failure() {
     );
 }
 
-/// TC-CLI-ERR-5: a provider that answers nothing.
+/// TC-CLI-ERR-12: a provider that answers nothing.
 /// Expected: exit 6, `ProviderError` in the contract's table - not the 1 a
 /// build failure would exit with, and not the 5 a missing key exits with. The
 /// key is present here and the endpoint is a closed local port, so nothing
@@ -788,6 +788,48 @@ fn a_provider_that_cannot_be_reached_exits_six() {
     assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
     let err = stderr(&out);
     assert!(err.contains("deepseek could not be reached"), "{err}");
+    assert!(err.contains("note: try again"), "{err}");
+}
+
+/// TC-CLI-ERR-13: a provider that answers a status.
+/// Expected: exit 6 again, and the status said out loud - `deepseek answered
+/// 503`, not the sentence a provider that never answered gets. The two are one
+/// code and two different situations, and the number is the difference between
+/// "wait and retry" and "something here is wrong". It is also the only arm of
+/// the mapping that carries a number into `data`, so it is the one that proves
+/// the page reads `data` and not the message it arrived with.
+///
+/// Environmental needs: none. The provider is a socket on a loopback port this
+/// case opens itself, so nothing leaves the machine and no key is used.
+#[test]
+fn a_provider_that_answers_a_status_says_the_status() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let base = format!("http://{}", listener.local_addr().expect("an address"));
+    // Every attempt is answered, because the route may make more than one.
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
+            let _ = std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+        }
+    });
+
+    let out = run(
+        dir.path(),
+        &["run", "--adapter", "deepseek", "--session", "p.jsonl"],
+        &[
+            ("DEEPSEEK_API_KEY", "sk-not-a-real-key"),
+            ("DEEPSEEK_BASE_URL", &base),
+        ],
+    );
+
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("deepseek answered 503"), "{err}");
     assert!(err.contains("note: try again"), "{err}");
 }
 

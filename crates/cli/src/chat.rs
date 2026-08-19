@@ -230,7 +230,12 @@ pub async fn chat<W: Write>(
                 outcome.map_err(|err| {
                     crate::fail(
                         policy,
-                        &crate::turn_fault(&err, args.adapter.route(), &args.session),
+                        &crate::turn_fault(
+                            &err,
+                            &opened.session_id,
+                            args.adapter.route(),
+                            &args.session,
+                        ),
                     )
                 })?;
                 engine
