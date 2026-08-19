@@ -271,6 +271,8 @@ line of a turn is not an answer without the turn around it, and `n` walks the re
 The word is then marked wherever the page draws it, in reverse video rather than a colour
 ([`light`](crates/ui/src/text.rs)), because the line it lands on already carries colours of its own
 and the mark has to end without ending them.
+The list marks its filter the same way, on the rows it kept, so that a row says which of the two
+columns a filter reads is the one holding the word.
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
