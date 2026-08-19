@@ -8,7 +8,7 @@
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{fit, truncate, visible_width, wrap, Charset};
+use tetanus_ui::{fit, plain, truncate, visible_width, wrap, Charset};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -122,4 +122,18 @@ fn fit_leaves_a_line_that_fits_and_marks_an_ascii_cut() {
     let painted = "\u{1b}[1mshort\u{1b}[0m";
     assert_eq!(fit(painted, 40, Charset::Unicode), painted);
     assert_eq!(fit("four five six", 8, Charset::Ascii), "four ...");
+}
+
+/// TC-UI-TEXT-10: the visible text of a painted line.
+/// Expected: the characters the terminal draws, in order, with the sequences
+/// gone and nothing else touched. A renderer that searches a line it did not
+/// compose asks for this first: two words either side of a colour change are
+/// one string on the screen and two with an escape between them in memory, and
+/// a search that could not find them would be a search nobody could trust.
+#[test]
+fn a_painted_line_reads_back_as_what_it_draws() {
+    assert_eq!(plain("plain"), "plain");
+    assert_eq!(plain("\u{1b}[1mbold\u{1b}[0m"), "bold");
+    assert_eq!(plain("\u{1b}[36mtool\u{1b}[0m echo"), "tool echo");
+    assert_eq!(plain(""), "");
 }

@@ -222,6 +222,8 @@ costing the reader the list.
 `/` narrows the list to the journals whose id or title holds what is typed, as it is typed, and
 while the prompt is open every printable key belongs to it - `q` included, because a view that quit
 on `q` could not be used to look for `quota`.
+In a journal `/` moves the window to the line holding the word instead of narrowing to it, because a
+line of a turn is not an answer without the turn around it, and `n` walks the rest of the matches.
 
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,

@@ -61,7 +61,7 @@ pub use page::{bar, Page};
 pub use progress::Progress;
 pub use screen::Screen;
 pub use terminal::{Console, Held, Key, Keys, Tty};
-pub use text::{fit, truncate, visible_width, wrap};
+pub use text::{fit, plain, truncate, visible_width, wrap};
 pub use theme::{Painted, Role, Theme};
 pub use view::{show, size, Flow, Show, Stop, View};
 pub use writer::{buffered, measure, Policy, Ui};

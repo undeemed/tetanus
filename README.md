@@ -181,6 +181,7 @@ Up and Down move the cursor, PageUp and PageDown a screenful, Home and End reach
 `q` or Esc closes a journal back to the list and closes the list to the shell, so Enter is a key you can afford to press.
 A journal that will not open says why at the foot of the list and leaves the cursor where it was; the list is not worth losing over one bad file.
 `/` narrows the list to the journals whose id or title holds what you type, as you type it; Enter accepts the word and gives the cursor back, and Esc gives the whole list back.
+Inside a journal, in `replay --ui` as well, `/` and a word move the page to the line that holds it and `n` walks the rest; the footer says which match you are on.
 `--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
 
 `tetanus serve` is the one subcommand that prints no page.

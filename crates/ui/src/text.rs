@@ -49,6 +49,31 @@ pub fn visible_width(text: &str) -> usize {
     columns
 }
 
+/// The text a terminal draws, with the SGR sequences a theme wrote taken out.
+///
+/// [`visible_width`] counts what is drawn; this returns it. A renderer that
+/// searches, sorts or compares a line it did not compose has to ask for this
+/// first: a painted line holds escape codes between its words, so `contains`
+/// against the painted form answers no to questions whose answer is yes.
+pub fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(char) = chars.next() {
+        if char != '\u{1b}' {
+            out.push(char);
+            continue;
+        }
+        // The same rule as `visible_width`: every escape a `Theme` writes is
+        // `ESC [ ... m`, and skipping to the `m` is enough for those.
+        for escape in chars.by_ref() {
+            if escape == 'm' {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Cut a possibly painted `text` to `width` columns.
 ///
 /// [`truncate`] counts characters, so it would spend the width on escape

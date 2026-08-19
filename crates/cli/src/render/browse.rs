@@ -5,8 +5,8 @@
 //! with sixty tool calls in it arrives as a wall the reader then scrolls their
 //! shell back through, mixed in with whatever was on the screen before. This
 //! module is the other view of the same lines: the alternate screen, one page
-//! at a time, with keys to move through it, and the scrollback left exactly as
-//! it was found.
+//! at a time, with keys to move through it, `/` to reach the line that holds a
+//! word, and the scrollback left exactly as it was found.
 //!
 //! # Stakeholders and concerns
 //!
@@ -37,6 +37,25 @@
 //! drive. So the loop the crate already ships is exactly the loop this needs,
 //! and this view is a key map rather than a second driver.
 //!
+//! # Rationale: `/` moves the window, it does not narrow the page
+//!
+//! The session picker's `/` takes rows off the list, because there a row is
+//! the whole answer. A line of a turn is not: "ok" means nothing without the
+//! tool call over it, and a transcript cut down to the lines holding a word is
+//! a grep of a conversation rather than a reading of one. So here `/` moves
+//! the window to the first line that holds what was typed and leaves the turn
+//! around it intact, `n` walks the rest, and the footer says which match the
+//! reader is on.
+//!
+//! The line landed on goes to the top of the window rather than the bottom,
+//! because what a reader wants after finding a line is the lines under it.
+//!
+//! Nothing moves until Enter. A page that jumped on every keystroke would take
+//! the reader off the line they were reading before they had finished saying
+//! where they wanted to go, which is the opposite of what the picker wants and
+//! for the same reason: there, what is under the cursor is the answer being
+//! narrowed; here, it is the place being left.
+//!
 //! # Rationale: a resize refills the page
 //!
 //! A [`Page`] never rewraps a line it has been given, because a live view must
@@ -46,13 +65,18 @@
 //! widened still wrapped for the screen they widened it from. So a resize
 //! refills, keeping how far back the reader had scrolled. That distance is in
 //! rows and rows mean something slightly different after a rewrap, which is
-//! the price of the alternative being visibly wrong.
+//! the price of the alternative being visibly wrong. A search open at the time
+//! keeps its match instead of that distance, because the line the reader was
+//! taken to is the thing they were looking at, and a line can be found again
+//! exactly where a row count cannot.
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use tetanus_protocol::types::SessionEvent;
-use tetanus_ui::{show, size, Flow, Frame, Key, Page, Show, Stop, Theme, Tty, Ui, View};
+use tetanus_ui::{
+    plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
+};
 
 use super::timeline::Reader;
 
@@ -88,9 +112,9 @@ pub fn browse<W: Write>(
     let theme = *out.theme();
     let (cols, rows) = size();
     let keys = format!(
-        "{} scroll {} q quit",
+        "{} scroll {dot} / find {dot} q quit",
         theme.glyph("↑↓", "up/dn"),
-        theme.glyph("·", "-")
+        dot = theme.glyph("·", "-")
     );
     let mut journal = Journal::new(theme, title, events.to_vec(), think, keys, (cols, rows));
     show(
@@ -102,6 +126,22 @@ pub fn browse<W: Write>(
             wait: IDLE,
         },
     )
+}
+
+/// Whether the keys are moving the window or spelling a search.
+enum Find {
+    /// No search: the keys move the window.
+    Off,
+    /// Being typed, and nothing has moved yet.
+    Typing(String),
+    /// Done. `hits` are the lines holding `text`, oldest first, and `at` is
+    /// the one the window was put on. An empty `hits` is an answer, not a
+    /// state to leave: the reader is told, and the page has not moved.
+    On {
+        text: String,
+        hits: Vec<usize>,
+        at: usize,
+    },
 }
 
 /// A journal on a page, and the keys that move through it.
@@ -122,6 +162,13 @@ pub(super) struct Journal {
     cols: usize,
     /// The height of the last frame, which is what a PageUp is measured in.
     rows: usize,
+    /// The visible text of every settled line, in the page's own order, which
+    /// is what a search is made against. Kept beside the page rather than
+    /// asked of it, because a painted line holds the codes the theme wrote
+    /// between its words and a reader looking for two of them either side of a
+    /// colour change would not find them.
+    plain: Vec<String>,
+    find: Find,
 }
 
 impl Journal {
@@ -145,6 +192,8 @@ impl Journal {
             // width, and starting them equal would claim it already had.
             cols: 0,
             rows: size.1,
+            plain: Vec::new(),
+            find: Find::Off,
         };
         journal.fill(size.0);
         journal
@@ -155,30 +204,184 @@ impl Journal {
         let back = self.page.back();
         let mut page = Page::new(self.theme, NAME, &self.title);
         let mut reader = Reader::new(self.think);
+        let mut plains = Vec::new();
         for event in &self.events {
-            page.settle(reader.lines(&self.theme, cols, event));
+            let lines = reader.lines(&self.theme, cols, event);
+            for line in &lines {
+                plains.push(plain(line));
+            }
+            page.settle(lines);
         }
         page.scroll(isize::try_from(back).unwrap_or(isize::MAX));
         self.page = page;
+        self.plain = plains;
         self.cols = cols;
+        // A rewrap moves every line, so the lines a search found are not the
+        // lines holding it any more. Found again rather than dropped, and
+        // landed on again: a reader who widened the terminal did not ask to
+        // lose their search, and the match is what they were looking at.
+        self.seek();
+        self.land();
+    }
+
+    /// Find the lines holding the current search, and keep the reader on the
+    /// same match number where there is still one there.
+    fn seek(&mut self) {
+        let Find::On { text, hits, at } = &mut self.find else {
+            return;
+        };
+        let wanted = text.to_lowercase();
+        *hits = self
+            .plain
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.to_lowercase().contains(&wanted))
+            .map(|(line, _)| line)
+            .collect();
+        *at = (*at).min(hits.len().saturating_sub(1));
+    }
+
+    /// Search for `text`, and go to the first line holding it.
+    fn accept(&mut self, text: String) {
+        self.find = Find::On {
+            text,
+            hits: Vec::new(),
+            at: 0,
+        };
+        self.seek();
+        self.land();
+    }
+
+    /// Go to the next match, or the one before, wrapping at either end.
+    fn walk(&mut self, forward: bool) {
+        let Find::On { hits, at, .. } = &mut self.find else {
+            return;
+        };
+        if hits.is_empty() {
+            return;
+        }
+        // Round rather than stopping: a reader who reaches the last match and
+        // presses `n` again is asking to go round, not to be told they cannot.
+        *at = if forward {
+            (*at + 1) % hits.len()
+        } else {
+            (*at + hits.len() - 1) % hits.len()
+        };
+        self.land();
+    }
+
+    /// Put the window on the match the reader is on, that line at the top.
+    fn land(&mut self) {
+        let Find::On { hits, at, .. } = &self.find else {
+            return;
+        };
+        let Some(line) = hits.get(*at).copied() else {
+            return;
+        };
+        // The body is the frame less its furniture, which is `KEPT` less the
+        // one line of their place a PageUp holds on to for the reader.
+        let room = self.rows.saturating_sub(KEPT - 1).max(1);
+        let back = self.plain.len().saturating_sub(room + line);
+        self.page.follow();
+        self.page
+            .scroll(isize::try_from(back).unwrap_or(isize::MAX));
+    }
+
+    /// The left of the footer: the caller's keys, or the search over them.
+    ///
+    /// `Page` paints whatever it is handed in the muted role, and a span
+    /// painted here keeps its own colour inside that, which is how the prompt
+    /// stays the one thing on the footer the eye lands on.
+    fn hint(&self) -> String {
+        let dot = self.theme.glyph("·", "-");
+        match &self.find {
+            Find::Off => self.keys.clone(),
+            Find::Typing(text) => self
+                .theme
+                .paint(Role::Accent, &format!("/{text}"))
+                .to_string(),
+            Find::On { text, hits, .. } if hits.is_empty() => self
+                .theme
+                .paint(Role::Warn, &format!("no line holds {text}"))
+                .to_string(),
+            Find::On { text, hits, at } => {
+                let count = format!("match {} of {} {dot} n next", at + 1, hits.len());
+                format!(
+                    "{} {dot} {}",
+                    self.theme.paint(Role::Accent, &format!("/{text}")),
+                    self.theme.paint(Role::Muted, &count),
+                )
+            }
+        }
+    }
+
+    /// Whether a word is being spelled into this journal's search prompt.
+    ///
+    /// Asked by a surface that opened this journal inside a view of its own:
+    /// while a word is being typed the keys that would close a journal are
+    /// letters, so its owner has to know not to answer them.
+    pub(super) fn typing(&self) -> bool {
+        matches!(self.find, Find::Typing(_))
+    }
+
+    /// Answer a key while the search prompt is open.
+    fn spell(&mut self, key: Key) -> Flow {
+        // Copied out rather than borrowed, because the arms below call back
+        // into `self`. A search is a word long, so the copy costs nothing.
+        let Find::Typing(current) = &self.find else {
+            return Flow::Go;
+        };
+        let mut text = current.clone();
+        match key {
+            Key::Char(typed) => text.push(typed),
+            Key::Backspace => {
+                text.pop();
+            }
+            Key::Enter if !text.is_empty() => {
+                self.accept(text);
+                return Flow::Go;
+            }
+            // Enter on an empty prompt, and Esc, both hand the keys back
+            // without moving the page.
+            Key::Enter | Key::Esc => {
+                self.find = Find::Off;
+                return Flow::Go;
+            }
+            _ => return Flow::Go,
+        }
+        self.find = Find::Typing(text);
+        Flow::Go
     }
 }
 
 impl View for Journal {
     fn frame(&mut self, cols: usize, rows: usize) -> Frame {
+        // Set before the refill below, because a search that lands again
+        // after a rewrap measures the window it lands in with it.
+        self.rows = rows;
         if cols != self.cols {
             self.fill(cols);
         }
-        self.rows = rows;
+        let keys = self.hint();
         // No block: a journal on disk has nothing arriving, which is what the
         // footer reads back as `end` rather than `live`.
-        self.page.frame(cols, rows, &[], &self.keys)
+        self.page.frame(cols, rows, &[], &keys)
     }
 
     fn key(&mut self, key: Key) -> Flow {
+        if self.typing() {
+            return self.spell(key);
+        }
         let screenful = isize::try_from(self.rows.saturating_sub(KEPT).max(1)).unwrap_or(1);
+        let found = matches!(self.find, Find::On { .. });
         match key {
             Key::Char('q') | Key::Esc => return Flow::Stop,
+            Key::Char('/') => self.find = Find::Typing(String::new()),
+            // `n` and `N` mean nothing until a search has been made. A letter
+            // that moved the page before then would be a trap in a view whose
+            // whole content is letters.
+            Key::Char('n') if found => self.walk(true),
+            Key::Char('N') if found => self.walk(false),
             Key::Up => self.page.scroll(1),
             Key::Down => self.page.scroll(-1),
             Key::PageUp => self.page.scroll(screenful),
@@ -198,8 +401,11 @@ impl View for Journal {
 /// Features tested: that the page holds the timeline's own lines and no
 /// others; that a journal taller than the screen shows its tail and can be
 /// walked back to its first line; that a resize composes the lines again at
-/// the new width without losing the reader's place; and the key map, including
-/// the two keys that end the view.
+/// the new width without losing the reader's place; the key map, including the
+/// two keys that end the view; and that `/` reaches the line holding a word,
+/// that `n` walks the rest of them, that the prompt takes the printable keys
+/// while it is open, and that a word no line holds is said rather than acted
+/// on.
 ///
 /// Features NOT tested here: the wording of a line (owned by `timeline.rs`),
 /// the arrangement of a frame (owned by `tetanus_ui::Page`), the loop and its
@@ -284,6 +490,14 @@ mod tests {
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").trim_end().to_string())
             .collect()
+    }
+
+    /// Open the search prompt and type `text` into it, one key at a time.
+    fn typed(view: &mut Journal, text: &str) {
+        view.key(Key::Char('/'));
+        for letter in text.chars() {
+            view.key(Key::Char(letter));
+        }
     }
 
     /// The body of a frame: everything between the heading's blank and the
@@ -386,5 +600,124 @@ mod tests {
         assert_eq!(view.key(Key::Char('x')), Flow::Go);
         assert_eq!(view.key(Key::Char('q')), Flow::Stop);
         assert_eq!(view.key(Key::Esc), Flow::Stop);
+    }
+    /// The plain text of a frame's body, which is what a reader sees.
+    fn text(rows: &[String]) -> String {
+        body(rows).join("\n")
+    }
+
+    /// TC-CLI-BROWSE-6: `/`, a word two lines hold, and Enter; then `n`.
+    /// Expected: the window moves to the first line holding the word and puts
+    /// it at the top, so what follows the match is what the reader gets; the
+    /// footer counts the matches; `n` reaches the second and wraps back round
+    /// to the first. The window is asserted by what is on the page rather than
+    /// by `back`, because where the reader lands is the promise.
+    #[test]
+    fn a_search_reaches_the_line_that_holds_it() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        rows(&mut view, COLS, 8);
+
+        typed(&mut view, "echo");
+        view.key(Key::Enter);
+        let first = rows(&mut view, COLS, 8);
+        assert!(body(&first)[0].contains("echo"), "{first:?}");
+        assert!(first[first.len() - 1].contains("match 1 of"), "{first:?}");
+
+        view.key(Key::Char('n'));
+        let second = rows(&mut view, COLS, 8);
+        assert!(text(&second).contains("echo"), "{second:?}");
+        assert_ne!(body(&second), body(&first), "`n` stayed put");
+        assert!(
+            second[second.len() - 1].contains("match 2 of"),
+            "{second:?}"
+        );
+
+        // Round the end and back to the first, which is the whole reason the
+        // count is on the footer: without it a wrap looks like a view stuck.
+        let hits = match &view.find {
+            Find::On { hits, .. } => hits.len(),
+            _ => 0,
+        };
+        for _ in 1..hits {
+            view.key(Key::Char('n'));
+        }
+        assert_eq!(body(&rows(&mut view, COLS, 8))[0], body(&first)[0]);
+    }
+
+    /// TC-CLI-BROWSE-7: the keys while the prompt is open.
+    /// Expected: `q` is a letter and does not close the view, Backspace takes
+    /// one back, Esc puts the keys back without having moved the page, and
+    /// nothing moves until Enter - a page that jumped on each keystroke would
+    /// take the reader off the line they were reading to find it.
+    #[test]
+    fn the_prompt_takes_the_printable_keys_while_it_is_open() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        let before = rows(&mut view, COLS, 8);
+
+        view.key(Key::Char('/'));
+        assert_eq!(view.key(Key::Char('q')), Flow::Go, "`q` closed the view");
+        view.key(Key::Backspace);
+        for letter in "echo".chars() {
+            view.key(Key::Char(letter));
+        }
+        assert!(view.typing(), "the prompt closed under a word");
+        assert_eq!(body(&rows(&mut view, COLS, 8)), body(&before), "it moved");
+
+        view.key(Key::Esc);
+        assert!(!view.typing());
+        assert_eq!(body(&rows(&mut view, COLS, 8)), body(&before));
+        assert_eq!(
+            view.key(Key::Char('q')),
+            Flow::Stop,
+            "`q` is a letter still"
+        );
+    }
+
+    /// TC-CLI-BROWSE-8: a word no line holds, and `n` before any search.
+    /// Expected: the footer says so, the page has not moved, and the view is
+    /// still open - a search that found nothing is an answer, not a failure.
+    /// `n` with no search behind it is ignored like any other unknown key.
+    #[test]
+    fn a_word_no_line_holds_is_said_rather_than_acted_on() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        let before = rows(&mut view, COLS, 8);
+
+        assert_eq!(view.key(Key::Char('n')), Flow::Go);
+        assert_eq!(body(&rows(&mut view, COLS, 8)), body(&before));
+
+        typed(&mut view, "zebra");
+        view.key(Key::Enter);
+        let after = rows(&mut view, COLS, 8);
+        assert!(
+            after[after.len() - 1].contains("no line holds zebra"),
+            "{after:?}"
+        );
+        assert_eq!(body(&after), body(&before), "the page moved on no match");
+    }
+
+    /// TC-CLI-BROWSE-9: the terminal is made narrower with a search on.
+    /// Expected: the search is made again against the lines as they are now,
+    /// so the match the footer counts is a line that holds the word at the new
+    /// width. A rewrap moves every line, and hit numbers kept over one would
+    /// point at whatever had slid into their place.
+    #[test]
+    fn a_resize_finds_the_lines_again() {
+        let events = turn();
+        let mut view = journal(&events, 70);
+        rows(&mut view, 70, 8);
+
+        typed(&mut view, "echo");
+        view.key(Key::Enter);
+        assert!(text(&rows(&mut view, 70, 8)).contains("echo"));
+
+        let narrow = rows(&mut view, 34, 8);
+        assert!(body(&narrow)[0].contains("echo"), "{narrow:?}");
+        assert!(
+            narrow[narrow.len() - 1].contains("match 1 of"),
+            "{narrow:?}"
+        );
     }
 }
