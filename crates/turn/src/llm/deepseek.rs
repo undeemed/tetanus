@@ -96,14 +96,8 @@ impl DeepSeekAdapter {
     /// Resolve the key from the trusted environment layer. Phase ② adds the
     /// credential seam that can answer before the environment does.
     fn api_key(&self) -> Result<String, LlmError> {
-        let key = std::env::var(&self.config.api_key_env)
-            .ok()
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| LlmError::MissingCredential(self.config.api_key_env.clone()))?;
-        if key.chars().any(|c| c.is_control() || !c.is_ascii()) {
-            return Err(LlmError::InvalidCredential(self.config.api_key_env.clone()));
-        }
-        Ok(key)
+        let raw = std::env::var(&self.config.api_key_env).unwrap_or_default();
+        normalize_api_key(&raw, &self.config.api_key_env)
     }
 }
 
@@ -146,6 +140,26 @@ impl LlmAdapter for DeepSeekAdapter {
         }
         Ok(response)
     }
+}
+
+/// Judge a stored credential and return the form that goes on the wire.
+///
+/// Trimming happens before judging, so a key pasted with a trailing newline
+/// works and a key of nothing but spaces reads as absent rather than as
+/// present and wrong. What survives has to be carriable in an `Authorization`
+/// header verbatim, which is printable ASCII with no space: an interior space
+/// is a second header token, and anything above ASCII is not header-safe at
+/// all. The error names the configuration entry the key came from and never
+/// any part of the key.
+pub fn normalize_api_key(raw: &str, reference: &str) -> Result<String, LlmError> {
+    let key = raw.trim();
+    if key.is_empty() {
+        return Err(LlmError::MissingCredential(reference.to_string()));
+    }
+    if !key.chars().all(|c| ('!'..='~').contains(&c)) {
+        return Err(LlmError::InvalidCredential(reference.to_string()));
+    }
+    Ok(key.to_string())
 }
 
 /// Serialize a [`ModelRequest`] into the official wire body. Pure, so the
