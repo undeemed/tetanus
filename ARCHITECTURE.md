@@ -246,6 +246,11 @@ still running.
 `--json` prints the contract's own result types and draws nothing.
 All three read their events from the session log the engine is writing rather than from the bus: the
 journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
+Which is also why the `--ui` view has to be told when the turn is over: a turn that fails writes no
+closing event, so the only record of the failure is the value the future returned, and a view left
+polling a journal that stopped growing would keep saying the turn was running.
+The reason is settled onto the page in the wording [crates/cli/src/render/fault.rs](crates/cli/src/render/fault.rs)
+gives every other surface, because stderr is behind the alternate screen until the reader gives up.
 
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
