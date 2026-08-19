@@ -52,6 +52,18 @@ fn status_of(args: &[&str]) -> i32 {
         .expect("it exited rather than being signalled")
 }
 
+/// The examples of a page wide enough for two columns, split back into the
+/// command and what it is for. What a narrow page has to say the same way.
+fn wide_pairs(page: &str) -> Vec<(String, String)> {
+    block(page, "Examples:")
+        .iter()
+        .filter_map(|line| {
+            let (command, what) = line.trim().split_once("  ")?;
+            Some((command.trim().to_string(), what.trim_start().to_string()))
+        })
+        .collect()
+}
+
 /// The rows of the exit-status block, as the number and the words beside it.
 ///
 /// A folded meaning continues in the number column's own width, so its first
@@ -334,5 +346,75 @@ fn the_statuses_the_page_words_are_the_ones_it_exits_with() {
             rows.iter().any(|(worded, _)| i32::from(*worded) == status),
             "`{args:?}` exits {status}, which the page does not word:\n{page}"
         );
+    }
+}
+
+/// TC-CLI-HELP-10: the examples in a window with no room for two columns.
+/// Expected: on each of the three blocks, at every sampled width under the one
+/// its two columns need, every command is on a line of its own and what it is
+/// for is under it, indented past it, and nothing else is in the block; and at
+/// the width they need, the two columns are back. clap folds a row it is
+/// handed that does not fit, and it continues it in the command column - where
+/// the rest of a description reads as the start of another command.
+///
+/// 44 is where the widest example command itself stops fitting. Under that,
+/// the `Policy` floor of 40 leaves that one command to clap, which is the only
+/// case on the page this layout cannot rescue.
+///
+/// The width each block needs is measured from the block rather than written
+/// down here, because a row added to one moves it: the root block needs 79
+/// today and needed 76 before `chat` was on it.
+#[test]
+fn the_examples_stack_where_two_columns_do_not_fit() {
+    for (args, count) in [
+        (vec!["--help"], 15),
+        (vec!["run", "--help"], 9),
+        (vec!["chat", "--help"], 5),
+    ] {
+        let pairs = wide_pairs(&help_at("100", &args));
+        assert_eq!(pairs.len(), count, "the examples went missing");
+
+        let widest = |of: fn(&(String, String)) -> &String| {
+            pairs
+                .iter()
+                .map(|pair| of(pair).chars().count())
+                .max()
+                .unwrap_or(0)
+        };
+        let fits = 2 + widest(|pair| &pair.0) + 2 + widest(|pair| &pair.1);
+
+        for columns in ["44", "48", "56", "66", "72"]
+            .into_iter()
+            .filter(|columns| columns.parse::<usize>().unwrap() < fits)
+        {
+            let page = help_at(columns, &args);
+            let rows = block(&page, "Examples:");
+
+            for (command, what) in &pairs {
+                assert!(
+                    rows.iter()
+                        .any(|line| line.trim_end() == format!("  {command}")),
+                    "`{command}` is not on a line of its own at {columns}:\n{page}"
+                );
+                assert!(
+                    rows.iter()
+                        .any(|line| line.trim_end() == format!("      {what}")),
+                    "`{what}` is not under its command at {columns}:\n{page}"
+                );
+            }
+            for line in &rows {
+                assert!(
+                    line.starts_with("  tetanus ")
+                        || (line.starts_with("      ") && !line[6..].starts_with(' ')),
+                    "`{line}` is neither a command nor a description at {columns}"
+                );
+            }
+        }
+
+        // The width the second column fits in again, and the layout every
+        // wider window has been reading for as long as the page has existed.
+        let page = help_at(&fits.to_string(), &args);
+        let back = block(&page, "Examples:");
+        assert_eq!(back.len(), count, "{fits} columns did not go back to two");
     }
 }
