@@ -9,6 +9,7 @@
 //! section 4.7 of the contract lists for it.
 
 pub mod agent;
+pub mod boot;
 pub mod catalog;
 pub mod convert;
 pub mod session;

@@ -174,6 +174,12 @@ It holds sections, and resolution is flat, so a section reads as its leaves unde
 `log: {level: debug}` resolves `log.level`.
 An absent document is a first run, not a fault; every other fault is loud, because a document the
 harness silently ignored would leave the user configured on paper and unconfigured in fact.
+The engine turns that document into the settings it runs on
+([crates/engine/src/boot.rs](crates/engine/src/boot.rs)), over its own compiled defaults, so the keys
+`config.dump` reports and the keys a document may set are one list rather than two.
+A value of the wrong type fails the boot for the same reason: a refused setting is visible, and an
+ignored one is not.
+Which binary calls it, and with which flags, is the presentation lane's wiring.
 
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.

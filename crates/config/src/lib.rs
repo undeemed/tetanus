@@ -17,7 +17,9 @@ pub mod recompose;
 ///
 /// Every variant names the path, because a harness that reports "could not read
 /// settings" without saying which file leaves the user guessing which of the
-/// candidate homes it looked in.
+/// candidate homes it looked in. [`ConfigError::BadValue`] names the key
+/// instead: the document was read, and one value in it is not what that key
+/// takes.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{}: a settings document is .json, .yaml or .yml, not .{extension}", path.display())]
@@ -38,6 +40,13 @@ pub enum ConfigError {
 
     #[error("{}: the root must be a map of sections", path.display())]
     NotAMap { path: PathBuf },
+
+    #[error("{key}: must be {expected}, not {found}")]
+    BadValue {
+        key: String,
+        expected: String,
+        found: String,
+    },
 }
 
 /// Where a resolved value came from.
