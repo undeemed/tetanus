@@ -45,6 +45,7 @@
 //! keeps the presentation lane and the engine lane independently reviewable.
 
 pub mod color;
+pub mod edit;
 pub mod frame;
 pub mod page;
 pub mod progress;
@@ -56,6 +57,7 @@ pub mod view;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
+pub use edit::{Line, Typed};
 pub use frame::Frame;
 pub use page::{bar, Page};
 pub use progress::Progress;
