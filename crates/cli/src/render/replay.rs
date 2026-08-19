@@ -32,6 +32,11 @@
 //! The caller passes the real signal; a test passes a future it controls,
 //! which is why the case below needs no terminal and no signal.
 //!
+//! # A window that changes size
+//!
+//! The width is asked for again on every frame, not once at the start: a
+//! playback is watched, and a watcher may resize the window while watching.
+//!
 //! # Into a pipe
 //!
 //! Nothing waits when the stream is not a terminal, and `Screen` draws nothing
@@ -125,6 +130,7 @@ async fn hold<W: Write>(
 ) -> io::Result<bool> {
     let until = Instant::now() + gap;
     loop {
+        follow(screen, view)?;
         view.tick();
         screen.draw(&view.block(elapsed))?;
         let left = until.saturating_duration_since(Instant::now());
@@ -139,6 +145,15 @@ async fn hold<W: Write>(
 }
 
 /// What one recorded gap becomes on the playback clock.
+/// Take the window's current size, if it has changed. A playback is watched,
+/// and a watcher may resize the window while watching.
+fn follow<W: Write>(screen: &mut Screen<W>, view: &mut Live) -> io::Result<()> {
+    let width = tetanus_ui::measure();
+    screen.resize(width)?;
+    view.resize(width);
+    Ok(())
+}
+
 fn pace(gap: u64, speed: f64) -> Duration {
     Duration::from_millis(gap)
         .clamp(FLOOR, CEILING)
