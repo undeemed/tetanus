@@ -80,7 +80,7 @@
 use std::io::{self, Write};
 use std::time::Duration;
 
-use tetanus_protocol::types::SessionEvent;
+use tetanus_protocol::types::{KnownEvent, SessionEvent};
 use tetanus_ui::{
     light, plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
 };
@@ -403,10 +403,20 @@ impl Journal {
     fn reading(&self) -> String {
         let dot = self.theme.glyph("·", "-");
         let out = self.exit.word();
+        // `t` is named on the footer as well as the card, and only by a
+        // journal that holds thinking. The folded row says a count of lines
+        // nothing else on the screen offers to open, so a reader who is
+        // looking at one is exactly the reader who needs the key - and a
+        // footer that named it in every journal would be spending its narrow
+        // room on a key most journals do not answer.
+        let think = match self.thoughtful() {
+            true => format!(" {dot} t think"),
+            false => String::new(),
+        };
         keys::hint(
             self.cols,
             &format!(
-                "{} scroll {dot} / find {dot} ? keys {dot} q {out}",
+                "{} scroll {dot} / find{think} {dot} ? keys {dot} q {out}",
                 self.theme.glyph("↑↓", "up/dn")
             ),
             &format!("? keys {dot} q {out}"),
@@ -414,8 +424,12 @@ impl Journal {
     }
 
     /// Every key this view answers, in the order a reader meets them.
+    ///
+    /// `t` is listed only by a journal that holds thinking, because a card is
+    /// read as a promise: a key on it that redraws the same page is worse than
+    /// a key the reader never knew about.
     fn map(&self) -> Vec<Row> {
-        vec![
+        let mut map = vec![
             (
                 self.theme.glyph("↑ ↓", "up dn"),
                 "one line back, one line on",
@@ -425,9 +439,36 @@ impl Journal {
             ("/", "a word, then enter: go to the line holding it"),
             ("n N", "the next line holding it, the one before"),
             ("esc", "while spelling: drop the word, move nothing"),
-            ("q", self.exit.what()),
-            ("?", "this card; any key goes back"),
-        ]
+        ];
+        if self.thoughtful() {
+            map.push(("t", self.unfolds()));
+        }
+        map.push(("q", self.exit.what()));
+        map.push(("?", "this card; any key goes back"));
+        map
+    }
+
+    /// What `t` would do from here, which is the opposite of what is drawn.
+    fn unfolds(&self) -> &'static str {
+        match self.think {
+            true => "fold the thinking back to its first line",
+            false => "unfold what the model thought",
+        }
+    }
+
+    /// Whether any answer in this journal was thought about.
+    ///
+    /// Asked of the journal rather than of the page, because a page composed
+    /// with the thinking folded has one line of it and a page composed without
+    /// any has none - and told apart, they are the difference between a key
+    /// that does something and a key that lies.
+    fn thoughtful(&self) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event.parse(),
+                Some(KnownEvent::AssistantMessage { reasoning, .. }) if !reasoning.is_empty()
+            )
+        })
     }
 
     /// Whether a word is being spelled into this journal's search prompt.
@@ -517,6 +558,12 @@ impl View for Journal {
                 self.fill(self.cols);
             }
             Key::Char('?') => self.help = true,
+            // Only where there is something to unfold. A key that redrew the
+            // same page would read as a view that had stopped answering.
+            Key::Char('t') if self.thoughtful() => {
+                self.think = !self.think;
+                self.fill(self.cols);
+            }
             // `n` and `N` mean nothing until a search has been made. A letter
             // that moved the page before then would be a trap in a view whose
             // whole content is letters.
@@ -549,7 +596,8 @@ impl View for Journal {
 /// that was given colour; and
 /// that `?` spells the keys out over the transcript, that any key takes the
 /// card down again, and that a footer with no room for the long wording keeps
-/// the two keys a reader cannot do without.
+/// the two keys a reader cannot do without; and that `t` unfolds the thinking
+/// and folds it back, and is offered only by a journal that holds any.
 ///
 /// Features NOT tested here: the wording of a line (owned by `timeline.rs`),
 /// the arrangement of a frame (owned by `tetanus_ui::Page`), the loop and its
@@ -1047,5 +1095,87 @@ mod tests {
         let found = rows(&mut view, COLS, tall);
         assert!(found[found.len() - 1].contains("match 1 of"), "{found:?}");
         assert_eq!(body(&found), before);
+    }
+
+    /// A turn whose answer was thought about, which is what `--think` folds.
+    fn thought() -> Vec<SessionEvent> {
+        vec![
+            event("session/start", json!({ "model": "deepseek-reasoner" })),
+            event("turn/start", json!({ "turn": 1 })),
+            event("step/start", json!({ "turn": 1, "step": 1 })),
+            event("user/message", json!({ "content": "why" })),
+            event(
+                "assistant/message",
+                json!({
+                    "content": "because",
+                    "reasoning": "First a reason.\nThen another reason.\nThen a third.",
+                }),
+            ),
+            event("step/end", json!({ "turn": 1, "step": 1 })),
+            event(
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            ),
+        ]
+    }
+
+    /// TC-CLI-BROWSE-15: `t` on a journal that holds thinking.
+    /// Expected: the folded row and its count of what is behind it are
+    /// replaced by the thinking itself, `t` again puts the fold back exactly
+    /// as it was, and both the footer and the key card name the key. Without
+    /// it the only way to read what a reasoning model thought is to close the
+    /// view and run the command again.
+    #[test]
+    fn t_unfolds_the_thinking_and_folds_it_again() {
+        let events = thought();
+        let tall = timeline(&events, COLS).len() + 8;
+        let mut view = journal(&events, COLS);
+
+        let folded = rows(&mut view, COLS, tall);
+        assert!(
+            body(&folded).iter().any(|row| row.contains("+2 lines")),
+            "{folded:?}"
+        );
+        assert!(folded[folded.len() - 1].contains("t think"), "{folded:?}");
+
+        view.key(Key::Char('t'));
+        let open = rows(&mut view, COLS, tall);
+        let read = body(&open).join("\n");
+        assert!(read.contains("Then another reason."), "{open:?}");
+        assert!(read.contains("Then a third."), "{open:?}");
+        assert!(!read.contains("+2 lines"), "{open:?}");
+
+        // The card says what the key would do from here, which is the
+        // opposite of what is drawn.
+        view.key(Key::Char('?'));
+        let card = rows(&mut view, COLS, tall).join("\n");
+        assert!(card.contains("fold the thinking back"), "{card}");
+        view.key(Key::Char('?'));
+
+        view.key(Key::Char('t'));
+        assert_eq!(rows(&mut view, COLS, tall), folded);
+    }
+
+    /// TC-CLI-BROWSE-16: `t` on a journal that holds no thinking.
+    /// Expected: neither the footer nor the card names it, and pressing it
+    /// leaves the page exactly as it was. A key card is read as a promise, so
+    /// a key on it that redraws the same page is worse than one the reader
+    /// never knew about.
+    #[test]
+    fn a_journal_with_nothing_to_unfold_does_not_offer_to() {
+        let events = turn();
+        let tall = timeline(&events, COLS).len() + 6;
+        let mut view = journal(&events, COLS);
+
+        let before = rows(&mut view, COLS, tall);
+        assert!(!before[before.len() - 1].contains("t think"), "{before:?}");
+
+        view.key(Key::Char('?'));
+        let card = rows(&mut view, COLS, tall).join("\n");
+        assert!(!card.contains("unfold"), "{card}");
+        view.key(Key::Char('?'));
+
+        view.key(Key::Char('t'));
+        assert_eq!(rows(&mut view, COLS, tall), before);
     }
 }
