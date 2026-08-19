@@ -1,8 +1,9 @@
-//! What this build can call: the model providers, and what they advertise.
+//! What this build can call: model providers, and tools.
 //!
-//! `tetanus models` answers the question a user has before their first run -
-//! what can I point `--model` at, and will it work - so the view is written
-//! for someone who has not run anything yet.
+//! `tetanus models` and `tetanus tools` answer the two questions a user has
+//! before their first run - what can I point `--model` at, and what can the
+//! agent actually do - so both views are written for someone who has not run
+//! anything yet.
 //!
 //! # Why availability is on the provider row
 //!
@@ -22,11 +23,20 @@
 //! An unlisted model id still passes through to the provider - the catalog is
 //! advisory (contract §4.3) - so this view never reads as a whitelist.
 //!
+//! # Why parameters are unpacked
+//!
+//! A tool's parameters are JSON Schema, and printing the schema would answer
+//! the question with a document. The three facts a caller needs are the name,
+//! the type and whether it is required, so those are lifted out and the rest
+//! of the schema is left where it is. A schema this view cannot read is not an
+//! error either: the tool is still listed, just without its parameter rows,
+//! because a tool you cannot see is worse than a tool you cannot fully read.
+
 use std::io::{self, Write};
 
-use tetanus_protocol::methods::ModelCatalogResult;
-use tetanus_protocol::types::ProviderDescriptor;
-use tetanus_ui::{Role, Ui};
+use tetanus_protocol::methods::{ModelCatalogResult, ToolCatalogResult};
+use tetanus_protocol::types::{ProviderDescriptor, ToolDescriptor};
+use tetanus_ui::{truncate, Role, Ui};
 
 /// Indent of a row that belongs to the entry above it.
 const INDENT: &str = "  ";
@@ -83,26 +93,91 @@ fn state<W: Write>(ui: &Ui<W>, provider: &ProviderDescriptor) -> String {
     }
 }
 
+/// Render every tool, what it does, and the arguments it takes.
+pub fn tools<W: Write>(ui: &mut Ui<W>, catalog: &ToolCatalogResult) -> io::Result<()> {
+    ui.heading("tools")?;
+    if catalog.tools.is_empty() {
+        let empty = ui.paint(Role::Muted, "no tools are registered").to_string();
+        return ui.line(&empty);
+    }
+
+    let charset = ui.theme().charset();
+    let pad = column(catalog.tools.iter().map(|tool| tool.name.as_str()));
+    let room = ui.width().saturating_sub(pad + GAP);
+    for (place, tool) in catalog.tools.iter().enumerate() {
+        if place > 0 {
+            ui.blank()?;
+        }
+        let said = truncate(&tool.description, room, charset);
+        ui.line(&format!(
+            "{:<pad$}{}{said}",
+            ui.paint(Role::Tool, &tool.name),
+            " ".repeat(GAP)
+        ))?;
+        // The parameters line up under the description, not under the name:
+        // they belong to the sentence above them, not to the column of names.
+        for argument in arguments(tool) {
+            let text = ui.paint(Role::Muted, &argument).to_string();
+            ui.line(&format!("{}{text}", " ".repeat(pad + GAP)))?;
+        }
+    }
+    Ok(())
+}
+
+/// The `name (type, required)` rows of one tool, read out of its schema.
+///
+/// Order is the schema's own, which is stable for a given build, so two runs
+/// of `tetanus tools` print the same bytes.
+fn arguments(tool: &ToolDescriptor) -> Vec<String> {
+    let Some(properties) = tool
+        .parameters
+        .get("properties")
+        .and_then(|p| p.as_object())
+    else {
+        return Vec::new();
+    };
+    let required = tool.parameters.get("required").and_then(|r| r.as_array());
+    properties
+        .iter()
+        .map(|(name, spec)| {
+            let kind = spec
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .unwrap_or("any");
+            let needed = required
+                .map(|list| list.iter().any(|held| held.as_str() == Some(name)))
+                .unwrap_or(false);
+            match needed {
+                true => format!("{name} ({kind}, required)"),
+                false => format!("{name} ({kind})"),
+            }
+        })
+        .collect()
+}
+
 /// The widest of a set of cells, in characters a terminal draws.
 fn column<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
     cells.map(|cell| cell.chars().count()).max().unwrap_or(0)
 }
 
-/// Test Design Specification: the provider view.
+/// Test Design Specification: the catalogue views.
 ///
 /// Features tested: the provider block and its three states; the tag on the
-/// model a bare `--adapter` would pick; a provider that advertises nothing;
-/// and an empty catalogue.
+/// model a bare `--adapter` would pick; a provider that advertises nothing; a
+/// tool's parameters lifted out of its JSON Schema, including a schema this
+/// view cannot read; a description too long for the terminal; and both empty
+/// catalogues.
 ///
-/// Features NOT tested here: which providers this build registers (owned by
-/// `main.rs`, and asserted end to end in `tests/presentation.rs`), the JSON
-/// form (owned by `render::json`), and the colour policy (owned by
+/// Features NOT tested here: which providers and tools this build registers
+/// (owned by `main.rs`, and asserted end to end in `tests/presentation.rs`),
+/// the JSON forms (owned by `render::json`), and the colour policy (owned by
 /// `tetanus-ui`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`, so no case
 /// reads an environment variable or needs a credential.
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use tetanus_ui::{buffered, Charset, Theme};
 
     use super::*;
@@ -121,9 +196,23 @@ mod tests {
         }
     }
 
+    fn tool(name: &str, description: &str, parameters: serde_json::Value) -> ToolDescriptor {
+        ToolDescriptor {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+
     fn shown(providers: Vec<ProviderDescriptor>, width: usize) -> String {
         let mut ui = buffered(Theme::new(false, Charset::Unicode), width);
         models(&mut ui, &ModelCatalogResult { providers }).expect("render");
+        ui.contents()
+    }
+
+    fn listed(tools: Vec<ToolDescriptor>, width: usize) -> String {
+        let mut ui = buffered(Theme::new(false, Charset::Unicode), width);
+        super::tools(&mut ui, &ToolCatalogResult { tools }).expect("render");
         ui.contents()
     }
 
@@ -187,5 +276,69 @@ mod tests {
             shown(Vec::new(), 80),
             "\nmodels\nno providers are registered\n"
         );
+    }
+
+    /// TC-CLI-CAT-5: a tool whose schema names one required and one optional
+    /// argument.
+    /// Expected: one row per argument, under the description, each carrying
+    /// its type and whether it is required. That is what a caller needs to
+    /// write the call; the rest of the schema is not.
+    #[test]
+    fn every_argument_carries_its_type_and_whether_it_is_required() {
+        let out = listed(
+            vec![tool(
+                "echo",
+                "Return the given text unchanged.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "times": { "type": "integer" }
+                    },
+                    "required": ["text"],
+                }),
+            )],
+            80,
+        );
+
+        assert_eq!(
+            out,
+            "\ntools\n\
+             echo  Return the given text unchanged.\n\
+             \x20     text (string, required)\n\
+             \x20     times (integer)\n"
+        );
+    }
+
+    /// TC-CLI-CAT-6: a schema that is not an object with `properties`.
+    /// Expected: the tool is still listed, with no argument rows and no panic.
+    /// A tool a user cannot see at all is worse than one whose arguments this
+    /// build could not read, and the schema is the engine's to shape.
+    #[test]
+    fn a_schema_this_view_cannot_read_still_lists_its_tool() {
+        for schema in [json!({}), json!("free text"), json!({ "type": "string" })] {
+            let out = listed(vec![tool("odd", "Takes something else.", schema)], 80);
+            assert_eq!(out, "\ntools\nodd  Takes something else.\n");
+        }
+    }
+
+    /// TC-CLI-CAT-7: a description wider than the terminal.
+    /// Expected: the row is cut to the terminal. A description that wrapped
+    /// would land under the name column and read as another tool.
+    #[test]
+    fn a_long_description_is_cut_to_the_terminal() {
+        let out = listed(vec![tool("read", &"y".repeat(90), json!({}))], 40);
+
+        for row in out.lines() {
+            assert!(row.chars().count() <= 40, "`{row}` overruns 40");
+        }
+        assert!(out.contains('…'), "the description was not cut:\n{out}");
+    }
+
+    /// TC-CLI-CAT-8: no tools at all.
+    /// Expected: the view says so rather than printing a bare heading.
+    #[test]
+    fn an_empty_tool_list_says_so() {
+        assert_eq!(listed(Vec::new(), 80), "\ntools\nno tools are registered\n");
     }
 }

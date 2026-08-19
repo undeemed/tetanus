@@ -496,28 +496,63 @@ fn the_model_page_answers_whether_a_provider_can_be_reached() {
     );
 }
 
-/// TC-CLI-CAT-10: `tetanus models --json`.
-/// Expected: exactly one line, parsing as `ModelCatalogResult`, with its one
-/// documented field and no escape bytes even when colour is forced. Contract
-/// §4.7: a subcommand that does not stream prints exactly one line, and
-/// machine-readable output is never coloured.
+/// TC-CLI-CAT-10: the three subcommands that do not stream, with `--json`.
+/// Expected: exactly one line each, parsing as the call's result type, with
+/// its one documented field and no escape bytes even when colour is forced.
+/// Contract §4.7: a subcommand that does not stream prints exactly one line,
+/// so a script reads one line whichever of them it ran.
 #[test]
 fn a_read_only_subcommand_prints_exactly_one_result_line() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let out = run(
-        dir.path(),
-        &["models", "--json"],
-        &[("CLICOLOR_FORCE", "1")],
-    );
-    assert!(out.status.success(), "{}", stderr(&out));
 
-    let printed = stdout(&out);
-    let lines: Vec<&str> = printed.lines().collect();
-    assert_eq!(lines.len(), 1, "more than one line:\n{printed}");
-    assert!(!printed.contains(ESC), "it was coloured:\n{printed}");
+    for (args, field) in [
+        (["models", "--json"], "providers"),
+        (["tools", "--json"], "tools"),
+        (["config", "--json"], "entries"),
+    ] {
+        let out = run(dir.path(), &args, &[("CLICOLOR_FORCE", "1")]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let printed = stdout(&out);
 
-    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("one JSON object");
-    let object = parsed.as_object().expect("an object");
-    assert_eq!(object.keys().collect::<Vec<_>>(), vec!["providers"]);
-    assert!(object["providers"].is_array(), "`providers` is not a list");
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(lines.len(), 1, "`{args:?}` printed:\n{printed}");
+        assert!(
+            !printed.contains(ESC),
+            "`{args:?}` was coloured:\n{printed}"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("one JSON object");
+        let object = parsed.as_object().expect("an object");
+        assert_eq!(
+            object.keys().collect::<Vec<_>>(),
+            vec![field],
+            "`{args:?}` added a field"
+        );
+        assert!(object[field].is_array(), "`{field}` is not a list");
+    }
+}
+
+/// TC-CLI-CAT-11: `tetanus tools` against the tools a turn really calls.
+/// Expected: every tool named by a `tool/call` in the journal of an offline
+/// run is on the page. The page is built from the registry the turn is booted
+/// with, and this is the case that keeps that true: a tool a run can call and
+/// the page does not list is a tool nobody can discover.
+#[test]
+fn the_tool_page_lists_what_a_turn_can_call() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(dir.path(), &["run", "--session", "j.jsonl"], &[]);
+    let journal = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+
+    let called: Vec<String> = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["type"] == "tool/call")
+        .filter_map(|event| event["data"]["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(!called.is_empty(), "the turn called no tool:\n{journal}");
+
+    let page = stdout(&run(dir.path(), &["tools"], &[]));
+    for tool in called {
+        assert!(page.contains(&tool), "`{tool}` is not on the page:\n{page}");
+    }
 }

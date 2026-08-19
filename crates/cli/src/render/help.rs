@@ -86,6 +86,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus replay sessions/turn.jsonl --live   watch that turn arrive again
   tetanus config                              every key, and what set it
   tetanus models                              which providers are reachable
+  tetanus tools                               what the agent is able to call
 
 {environment}
   DEEPSEEK_API_KEY  credential for `--adapter deepseek`
