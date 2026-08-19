@@ -25,11 +25,24 @@ use crate::writer::Ui;
 const SPIN_UNICODE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_ASCII: &[&str] = &["-", "\\", "|", "/"];
 
+/// One frame of the spinner, for a surface that has to say "still working"
+/// inside a layout of its own rather than on the status line.
+///
+/// The frames live here because there is one spinner in this binary, not one
+/// per view: a live block and a status line that disagreed about what waiting
+/// looks like would read as two programs.
+pub fn frame(charset: Charset, tick: usize) -> &'static str {
+    let frames = match charset {
+        Charset::Unicode => SPIN_UNICODE,
+        Charset::Ascii => SPIN_ASCII,
+    };
+    frames[tick % frames.len()]
+}
+
 /// A single status line over a stream.
 pub struct Progress<W: Write> {
     ui: Ui<W>,
     animated: bool,
-    frames: &'static [&'static str],
     frame: usize,
     label: Option<String>,
     /// Columns currently dirty on the terminal line, to be erased on redraw.
@@ -40,14 +53,9 @@ impl<W: Write> Progress<W> {
     /// Wrap a stream. `animated` is "this stream is a terminal", which the
     /// caller resolves once - see `Policy::stderr_progress`.
     pub fn new(ui: Ui<W>, animated: bool) -> Self {
-        let frames = match ui.theme().charset() {
-            Charset::Unicode => SPIN_UNICODE,
-            Charset::Ascii => SPIN_ASCII,
-        };
         Self {
             ui,
             animated,
-            frames,
             frame: 0,
             label: None,
             dirty: 0,
@@ -104,8 +112,8 @@ impl<W: Write> Progress<W> {
         let Some(label) = self.label.clone() else {
             return Ok(());
         };
-        let glyph = self.frames[self.frame % self.frames.len()];
         let charset = self.ui.theme().charset();
+        let glyph = frame(charset, self.frame);
         let text = truncate(&format!("{glyph} {label}"), self.ui.width(), charset);
         let cols = text.chars().count();
         let painted = self.ui.paint(Role::Accent, &text).to_string();
