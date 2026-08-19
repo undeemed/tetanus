@@ -18,6 +18,7 @@
 use std::io::{self, Write};
 
 use crate::color::Charset;
+use crate::text::truncate;
 use crate::theme::Role;
 use crate::writer::Ui;
 
@@ -105,7 +106,7 @@ impl<W: Write> Progress<W> {
         };
         let glyph = self.frames[self.frame % self.frames.len()];
         let charset = self.ui.theme().charset();
-        let text = fit(&format!("{glyph} {label}"), self.ui.width(), charset);
+        let text = truncate(&format!("{glyph} {label}"), self.ui.width(), charset);
         let cols = text.chars().count();
         let painted = self.ui.paint(Role::Accent, &text).to_string();
 
@@ -117,20 +118,4 @@ impl<W: Write> Progress<W> {
         self.dirty = cols;
         self.ui.flush()
     }
-}
-
-/// Cut `text` to `width` columns, marking that it was cut.
-///
-/// A status line that wraps is worse than one that is too short: the terminal
-/// scrolls, and the repaint then lands on the wrong row.
-fn fit(text: &str, width: usize, charset: Charset) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let mark = match charset {
-        Charset::Unicode => "…",
-        Charset::Ascii => "...",
-    };
-    let keep = width.saturating_sub(mark.chars().count());
-    text.chars().take(keep).chain(mark.chars()).collect()
 }
