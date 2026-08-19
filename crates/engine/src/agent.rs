@@ -18,12 +18,12 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
 use tetanus_session::{SessionEvent, SessionLog};
 use tetanus_turn::boot::boot;
-use tetanus_turn::llm::{mock, LlmAdapter, LlmError};
+use tetanus_turn::llm::{mock, LlmAdapter};
 use tetanus_turn::log::topic;
 use tetanus_turn::tools::ToolRegistry;
 use tetanus_turn::{TurnConfig, TurnEngine, TurnError};
 
-use crate::convert::{internal, session_error, stop_reason};
+use crate::convert::{internal, stop_reason};
 use crate::session::{LiveSession, SessionStore};
 use crate::subscribe::Hub;
 
@@ -133,8 +133,8 @@ impl Runtime {
         drop(guard);
         hub.agent_status(status(&params.session_id, AgentState::Idle, None, None));
 
-        let outcome = ran.map_err(|e| turn_error(&session, e))?;
-        flushed.map_err(|e| turn_error(&session, e))?;
+        let outcome = ran.map_err(|e| turn_error(&session, &e))?;
+        flushed.map_err(|e| turn_error(&session, &e))?;
 
         Ok(AgentPromptResult {
             summary: TurnSummary {
@@ -324,29 +324,11 @@ fn unknown_provider(provider: &str) -> RpcError {
 /// Contract section 4.5. A turn that failed reports why in the provider's own
 /// terms, because the surface's next move differs: a missing key is fixed by
 /// the human, a provider error by retrying.
-fn turn_error(session: &LiveSession, error: TurnError) -> RpcError {
-    let provider = session.header.provider.clone();
-    match error {
-        TurnError::Session(e) => session_error(&session.header.session_id, e),
-        TurnError::Service(e) => internal(e),
-        TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
-            RpcError::new(
-                ErrorCode::MissingCredential,
-                format!("provider `{provider}` has no usable credential at {env}"),
-            )
-            .with_data(serde_json::json!({ "provider": provider, "env": env }))
-        }
-        TurnError::Llm(LlmError::Provider { status, message }) => RpcError::new(
-            ErrorCode::ProviderError,
-            format!("provider `{provider}` answered {status}: {message}"),
-        )
-        .with_data(serde_json::json!({ "provider": provider, "status": status })),
-        // No status: the provider never answered, so the field the table
-        // names is absent rather than invented.
-        TurnError::Llm(other) => RpcError::new(
-            ErrorCode::ProviderError,
-            format!("provider `{provider}` failed: {other}"),
-        )
-        .with_data(serde_json::json!({ "provider": provider })),
-    }
+fn turn_error(session: &LiveSession, error: &TurnError) -> RpcError {
+    crate::convert::turn_error(
+        &session.header.session_id,
+        &session.header.provider,
+        Some(&session.path),
+        error,
+    )
 }
