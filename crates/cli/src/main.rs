@@ -1,5 +1,6 @@
 //! The `tetanus` binary: run one documented turn headlessly.
 
+mod prompt;
 mod render;
 
 use tetanus_protocol::methods::{
@@ -116,9 +117,12 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// What to ask the agent
-    #[arg(short, long, value_name = "TEXT", default_value = "run one full turn")]
-    prompt: String,
+    /// What to ask the agent. `-` reads it from standard input.
+    #[arg(value_name = "PROMPT")]
+    ask: Option<String>,
+    /// What to ask the agent, named rather than positional
+    #[arg(short, long, value_name = "TEXT", conflicts_with = "ask")]
+    prompt: Option<String>,
     /// Which model provider to resolve into the registry
     #[arg(short, long, value_enum, default_value_t = AdapterChoice::Mock)]
     adapter: AdapterChoice,
@@ -909,6 +913,11 @@ async fn run<W: std::io::Write>(
     out: &mut Ui<W>,
     args: RunArgs,
 ) -> Result<(), Reported> {
+    // First, before the journal exists: a prompt this build will not send is
+    // a mistake to report at the point it was made, not one to record.
+    let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
+        .map_err(|err| fail(policy, &err))?;
+
     let (adapter, catalog): (Arc<dyn LlmAdapter>, Vec<String>) = match args.adapter {
         AdapterChoice::Mock => (Arc::new(mock::MockAdapter::new()), advertised(args.adapter)),
         AdapterChoice::Deepseek => {
@@ -975,7 +984,7 @@ async fn run<W: std::io::Write>(
     .map_err(|err| report(policy, &err.to_string(), None))?;
 
     let phase = format!("running the turn on {model}");
-    let turn = engine.run_turn(&args.prompt);
+    let turn = engine.run_turn(&asked);
     let finished = match (args.trace, args.json) {
         // The trace prints the sequence afterwards, so nothing may be written
         // above it while the turn runs.
