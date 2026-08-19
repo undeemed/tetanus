@@ -267,6 +267,15 @@ polling a journal that stopped growing would keep saying the turn was running.
 The reason is settled onto the page in the wording [crates/cli/src/render/fault.rs](crates/cli/src/render/fault.rs)
 gives every other surface, because stderr is behind the alternate screen until the reader gives up.
 
+Whichever of those a run was asked for, stderr is told the same thing by the same rule
+(`status_line` in [crates/cli/src/main.rs](crates/cli/src/main.rs)).
+The four ways of running a turn once held three answers between them and one of them held none, so
+`tetanus run --json > events 2> log` left `log` empty while dropping `--json` filled it.
+The rule asks one question - does this view already show the turn on stdout - and writes the status
+unless that would put a second spinner on a screen that already has one.
+A stderr that is not a terminal never can, so it always gets the line, degraded to one plain
+sentence: which human view stdout was asked for is not a reason to write a different log.
+
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
