@@ -109,6 +109,11 @@ impl SessionStore {
         let log =
             JsonlSessionLog::create(&id, &path, bus.clone()).map_err(|e| session_error(&id, e))?;
 
+        // A turn a crash left open is closed before anything derives history
+        // from this journal: a dangling tool call is not a history a provider
+        // accepts. A balanced journal is untouched.
+        tetanus_turn::repair::repair(log.as_ref()).map_err(|e| session_error(&id, e))?;
+
         // A reopened journal keeps the header it was created with: the model a
         // turn already ran under is a fact of the log, not of this call.
         let header = match header_of(&existing) {
