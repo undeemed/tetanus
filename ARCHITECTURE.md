@@ -371,6 +371,19 @@ Each page therefore writes the spaces it measured itself, and
 [`Ui::field`](crates/ui/src/writer.rs) does the same for the label column it owns, which is the one
 column a renderer hands over rather than composing.
 
+A failure report is tamed at one seam rather than at each site
+([`fault.rs`](crates/cli/src/render/fault.rs)).
+Every arm of the wording match composes its sentence out of something the engine sent - its own
+message, or a value out of the error's `data`: a path, a session id, a tool, a method, a provider,
+the protocol version a server speaks - so `wording` tames what the match returned, where a code
+added to the contract cannot get past it.
+The way out beside it is this module's own words and is left alone.
+The same seam folds the sentence onto one line, because it is drawn after the `error:` tag on a stream and
+as a single row of a frame: a newline puts a second line on stderr that reads like a report of its
+own - a message ending in `note: run this` would be read as this build's advice - and inside a
+frame it is a line feed with no carriage return, which is the one thing
+[`Frame`](crates/ui/src/frame.rs) is careful never to write.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
