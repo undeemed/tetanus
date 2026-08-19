@@ -20,6 +20,7 @@ tetanus-engine = { path = "../engine" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 tetanus-protocol = { path = "../protocol" }
+tetanus-rpc = { path = "../rpc" }
 tetanus-ui = { path = "../ui" }
 
 [dev-dependencies]

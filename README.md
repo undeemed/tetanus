@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles: dropping a registration unwinds it | Reversible effects beyond registration, live subtree remount |
-| Surfaces | `tetanus` CLI, headless. The engine/presentation contract is published as types and a trait, not yet served | A JSON-RPC server over stdio and WebSocket, and the fire UI |
+| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio carrier | The WebSocket carrier, and the fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -146,6 +146,7 @@ Without the key the command says so and stops before any network call.
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
 | `tetanus config` | Show resolved config with its provenance layer |
+| `tetanus serve` | Host the JSON-RPC protocol on stdin and stdout, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
 `tetanus run` flags: `--prompt <text>`, `--adapter mock|deepseek`, `--model <id>`,
@@ -154,6 +155,10 @@ Without the key the command says so and stops before any network call.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
+
+`tetanus serve` is the one subcommand that prints no page.
+Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.
+It takes `--dir <path>`, the directory the journals it writes land in.
 
 ## Workspace layout
 

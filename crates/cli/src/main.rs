@@ -101,6 +101,12 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["raw", "live"])]
         json: bool,
     },
+    /// Host the JSON-RPC protocol on stdin and stdout
+    Serve {
+        /// Directory the journals this server writes will land in
+        #[arg(long, value_name = "PATH", default_value = "sessions")]
+        dir: PathBuf,
+    },
     /// Print version/build info
     Info,
 }
@@ -359,6 +365,47 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 Ok(render::replay::Ended::Interrupted) => Err(stopped(policy)),
                 _ => Ok(()),
             }
+        }
+        Cmd::Serve { dir } => {
+            // The one subcommand that writes no page: stdout belongs to the
+            // carrier from here on (contract §4.1), so everything a person
+            // reads goes to stderr and `out` is left untouched.
+            let mut err = policy.stderr();
+            render::serve::banner(
+                &mut err,
+                &render::serve::Serving {
+                    carrier: "stdio",
+                    sessions: &dir,
+                    protocol: tetanus_protocol::PROTOCOL_VERSION,
+                },
+            )
+            .ok();
+            let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
+                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
+                    sessions_root: dir,
+                    ..Default::default()
+                }),
+            );
+            // Multi-threaded, because the carrier's two properties are
+            // concurrency properties: `agent.interrupt` is answered while the
+            // prompt it interrupts still runs, and a push overtakes the answer
+            // of a call in flight. A current-thread runtime serves frames one
+            // at a time and quietly loses both.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            runtime
+                .block_on(tetanus_rpc::stdio::serve(
+                    engine,
+                    tokio::io::stdin(),
+                    tokio::io::stdout(),
+                ))
+                .map_err(|broken| {
+                    fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string()))
+                })?;
+            render::serve::stopped(&mut err).ok();
+            Ok(())
         }
         Cmd::Info => {
             // Counted from the same two functions the catalogue pages print,
