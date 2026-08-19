@@ -22,8 +22,12 @@
 //! which places it inside the step. See `docs/turn-flow.md` for the full
 //! reconciliation.
 
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use tetanus_core::events::Terminal;
 use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
@@ -39,7 +43,7 @@ use crate::llm::{
 };
 use crate::log::{derive_messages, topic, with_system};
 use crate::prompt::{AssembleAt, PromptRegistry};
-use crate::tools::{ToolCall, ToolOutcome, ToolRegistry};
+use crate::tools::{ToolCall, ToolMode, ToolOutcome, ToolRegistry};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
@@ -62,6 +66,10 @@ pub struct TurnConfig {
     /// [`prompt::BASE_SECTION`](crate::prompt::BASE_SECTION). Plugins add more
     /// through the registry, or rewrite the lot in `system-prompt/assemble`.
     pub base_prompt: String,
+    /// How many parallel-safe tool calls of one step may be in flight at once.
+    /// A cap of one is fully serial dispatch. It cannot be zero, because a pool
+    /// that may start nothing never finishes.
+    pub max_parallel_tool_calls: NonZeroUsize,
 }
 
 impl Default for TurnConfig {
@@ -73,9 +81,14 @@ impl Default for TurnConfig {
             base_prompt:
                 "You are tetanus, a headless coding agent. Answer with the tools you have."
                     .to_string(),
+            max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
         }
     }
 }
+
+/// The default parallel cap, as upstream's `DEFAULT_MAX_PARALLEL_TOOL_CALLS`.
+pub const DEFAULT_MAX_PARALLEL_TOOL_CALLS: NonZeroUsize =
+    NonZeroUsize::new(10).expect("ten is not zero");
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {
@@ -258,9 +271,7 @@ impl TurnEngine {
             )?;
             content = response.content.clone();
 
-            for call in &response.tool_calls {
-                self.run_tool_call(turn, call).await?;
-            }
+            self.run_tool_calls(turn, &response.tool_calls).await?;
 
             self.log.append(
                 topic::STEP_END,
@@ -318,7 +329,86 @@ impl TurnEngine {
         })
     }
 
-    async fn run_tool_call(&self, turn: u64, call: &ToolCall) -> Result<(), TurnError> {
+    /// Run one step's tool calls: an exclusive call is a barrier, parallel-safe
+    /// siblings share a bounded pool, and every result commits in model order.
+    ///
+    /// Parity: upstream `packages/core/agent-loop/src/tool-calls.ts`, pinned by
+    /// its `tool-calls.spec.ts`.
+    async fn run_tool_calls(&self, turn: u64, calls: &[ToolCall]) -> Result<(), TurnError> {
+        let mut next = 0;
+        while next < calls.len() {
+            // Classify the head of the rest, not the whole list: a call is
+            // classified as late as possible, just before it could start.
+            let group = match self.tools.mode(&calls[next]) {
+                ToolMode::Exclusive => &calls[next..next + 1],
+                ToolMode::Parallel => &calls[next..],
+            };
+            next += self.run_tool_group(turn, group).await?;
+        }
+        Ok(())
+    }
+
+    /// Run one barrier or one parallel pool.
+    ///
+    /// Returns how many calls it consumed. A call the pool reclassifies as
+    /// exclusive before starting it is not consumed: the pool drains, and that
+    /// call opens the next group as its own barrier.
+    ///
+    /// Dispatch may overlap; commitment may not. A result is appended only when
+    /// every earlier call of the step has been appended, so the journal reads
+    /// in model order however the calls settled.
+    async fn run_tool_group(&self, turn: u64, group: &[ToolCall]) -> Result<usize, TurnError> {
+        let cap = self.config.max_parallel_tool_calls.get();
+        let mut in_flight = FuturesUnordered::new();
+        let mut settled: BTreeMap<usize, Settled> = BTreeMap::new();
+        let mut started = 0;
+        let mut committed = 0;
+        // The first fault stops new dispatches. The calls already in flight are
+        // still drained, because a started call has already had its effect.
+        let mut failure: Option<TurnError> = None;
+
+        loop {
+            while failure.is_none() && started < group.len() && in_flight.len() < cap {
+                if started > 0 && self.tools.mode(&group[started]) == ToolMode::Exclusive {
+                    break;
+                }
+                in_flight.push(self.dispatch_tool_call(turn, started, &group[started]));
+                started += 1;
+            }
+            let Some(dispatched) = in_flight.next().await else {
+                break;
+            };
+            match dispatched {
+                Ok((index, outcome)) => {
+                    settled.insert(index, outcome);
+                }
+                Err(error) => failure = Some(failure.unwrap_or(error)),
+            }
+            while failure.is_none() {
+                let Some(ready) = settled.remove(&committed) else {
+                    break;
+                };
+                if let Err(error) = self.commit_tool_result(ready) {
+                    failure = Some(error);
+                }
+                committed += 1;
+            }
+        }
+
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(started),
+        }
+    }
+
+    /// Take one call through the documented pipeline, up to but not including
+    /// its `tool/result`: that is the caller's, to append in model order.
+    async fn dispatch_tool_call(
+        &self,
+        turn: u64,
+        index: usize,
+        call: &ToolCall,
+    ) -> Result<(usize, Settled), TurnError> {
         let logged = self.log.append(
             topic::TOOL_CALL,
             serde_json::json!({
@@ -352,15 +442,28 @@ impl TurnEngine {
         };
         let outcome = self.bus.waterfall(&mut post, pass_outcome()).await;
 
+        Ok((
+            index,
+            Settled {
+                call,
+                outcome,
+                call_seq: logged.seq,
+            },
+        ))
+    }
+
+    /// Append one settled call's `tool/result`, citing the `tool/call` it
+    /// answers.
+    fn commit_tool_result(&self, settled: Settled) -> Result<(), TurnError> {
         self.log.append_with_sources(
             topic::TOOL_RESULT,
             serde_json::json!({
-                "call_id": call.id,
-                "name": call.name,
-                "ok": outcome.ok,
-                "content": outcome.content,
+                "call_id": settled.call.id,
+                "name": settled.call.name,
+                "ok": settled.outcome.ok,
+                "content": settled.outcome.content,
             }),
-            vec![logged.seq],
+            vec![settled.call_seq],
         )?;
         Ok(())
     }
@@ -383,6 +486,16 @@ impl TurnEngine {
             Box::pin(async move { tools.execute(&ev.call).await })
         })
     }
+}
+
+/// One dispatched call, waiting for its turn to be committed.
+struct Settled {
+    /// The call as the pipeline left it: `tools/pre-execute` may have rewritten
+    /// it, and the result must name what actually ran.
+    call: ToolCall,
+    outcome: ToolOutcome,
+    /// The `tool/call` this result will cite.
+    call_seq: u64,
 }
 
 fn enter_claimed() -> Terminal<PreStep> {

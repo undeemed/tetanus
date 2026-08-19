@@ -74,6 +74,12 @@ impl Harness {
     /// The same fixture with a caller-supplied registry, for cases about what
     /// the model is offered and what a call actually runs.
     pub async fn with_tools(name: &str, tools: ToolRegistry) -> Self {
+        Self::with_config(name, tools, TurnConfig::default()).await
+    }
+
+    /// The same fixture with a caller-chosen turn config, for cases about a
+    /// budget the default hides, such as the parallel tool-call cap.
+    pub async fn with_config(name: &str, tools: ToolRegistry, config: TurnConfig) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let log_path = dir.path().join(format!("{name}.jsonl"));
 
@@ -90,7 +96,7 @@ impl Harness {
 
         let trace = TurnTrace::attach(&bus);
         let sections = ctx.services.require::<PromptService>().expect("sections");
-        let engine = TurnEngine::from_context(&ctx, TurnConfig::default()).expect("engine");
+        let engine = TurnEngine::from_context(&ctx, config).expect("engine");
 
         Self {
             engine,
