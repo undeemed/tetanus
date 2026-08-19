@@ -2,7 +2,9 @@
 
 mod render;
 
-use tetanus_protocol::methods::{AgentPromptResult, ModelCatalogResult, SessionEventsResult};
+use tetanus_protocol::methods::{
+    AgentPromptResult, ConfigDumpResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
+};
 use tetanus_protocol::types as protocol;
 
 use std::path::PathBuf;
@@ -51,9 +53,19 @@ enum Cmd {
     /// Run one full turn and print the event sequence it emitted
     Run(RunArgs),
     /// Show resolved config with provenance
-    Config,
+    Config {
+        /// Print the call's result as JSON: one object, per contract §4.7
+        #[arg(long)]
+        json: bool,
+    },
     /// List model providers, the models they advertise, and what is reachable
     Models {
+        /// Print the call's result as JSON: one object, per contract §4.7
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the tools an agent can call, and the arguments each one takes
+    Tools {
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -211,10 +223,17 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 .map_err(|err| report(policy, &err.to_string(), None))?;
             runtime.block_on(run(policy, &mut out, args))
         }
-        Cmd::Config => {
+        Cmd::Config { json } => {
             let mut config = tetanus_config::Config::default();
             config.set("log.level", "info".into(), tetanus_config::Layer::Default);
-            render::config::render(&mut out, &settings(&config)).ok();
+            let dump = ConfigDumpResult {
+                entries: settings(&config),
+            };
+            if json {
+                return render::json::line(&mut out, &dump)
+                    .map_err(|err| report(policy, &err.to_string(), None));
+            }
+            render::config::render(&mut out, &dump.entries).ok();
             Ok(())
         }
         Cmd::Models { json } => {
@@ -224,6 +243,15 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                     .map_err(|err| report(policy, &err.to_string(), None));
             }
             render::catalog::models(&mut out, &catalog).ok();
+            Ok(())
+        }
+        Cmd::Tools { json } => {
+            let catalog = catalog();
+            if json {
+                return render::json::line(&mut out, &catalog)
+                    .map_err(|err| report(policy, &err.to_string(), None));
+            }
+            render::catalog::tools(&mut out, &catalog).ok();
             Ok(())
         }
         Cmd::Replay {
@@ -383,6 +411,28 @@ fn advertised(choice: AdapterChoice) -> Vec<String> {
         .find(|provider| provider.provider == choice.route())
         .map(|provider| provider.models)
         .unwrap_or_default()
+}
+
+/// The tools an agent may call. Built from the registry a turn is booted with,
+/// so `tetanus tools` cannot list a tool a run does not have. It answers
+/// `catalog.tools`.
+fn catalog() -> ToolCatalogResult {
+    ToolCatalogResult {
+        tools: registry()
+            .schemas()
+            .into_iter()
+            .map(|schema| protocol::ToolDescriptor {
+                name: schema.name,
+                description: schema.description,
+                parameters: schema.parameters,
+            })
+            .collect(),
+    }
+}
+
+/// The one registry, so what is listed and what is callable are one thing.
+fn registry() -> ToolRegistry {
+    ToolRegistry::new().with(Arc::new(EchoTool))
 }
 
 /// Carry resolved config across to the contract shape the view reads.
@@ -641,13 +691,8 @@ async fn run<W: std::io::Write>(
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
 
-    let ctx = boot(
-        bus,
-        adapter,
-        Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
-        log.clone(),
-    )
-    .map_err(|err| report(policy, &err.to_string(), None))?;
+    let ctx = boot(bus, adapter, Arc::new(registry()), log.clone())
+        .map_err(|err| report(policy, &err.to_string(), None))?;
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {
