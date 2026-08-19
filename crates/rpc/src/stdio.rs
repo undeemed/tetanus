@@ -12,13 +12,12 @@
 use std::io;
 use std::sync::Arc;
 
-use tetanus_protocol::methods::{push, AgentStatusPush, Engine, EventSink, SessionEventPush};
-use tetanus_protocol::rpc::{Notification, V2};
+use tetanus_protocol::methods::{Engine, EventSink};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinSet;
 
-use crate::Codec;
+use crate::{Codec, Frames};
 
 /// Serve one connection until its peer stops writing.
 ///
@@ -95,32 +94,4 @@ async fn write_frames<W: AsyncWrite + Unpin>(
         output.flush().await?;
     }
     Ok(())
-}
-
-/// The connection's [`EventSink`]: serialize the push, write it as a frame.
-struct Frames(UnboundedSender<Option<String>>);
-
-impl Frames {
-    fn notify<T: serde::Serialize>(&self, method: &str, params: T) {
-        let frame = Notification {
-            jsonrpc: V2,
-            method: method.to_string(),
-            params: Some(serde_json::to_value(params).expect("a push serializes")),
-        };
-        // A send that fails means the peer is gone, which is not this side's
-        // problem to report: the carrier is already on its way out.
-        let _ = self.0.send(Some(
-            serde_json::to_string(&frame).expect("a frame serializes"),
-        ));
-    }
-}
-
-impl EventSink for Frames {
-    fn session_event(&self, event: SessionEventPush) {
-        self.notify(push::SESSION_EVENT, event);
-    }
-
-    fn agent_status(&self, status: AgentStatusPush) {
-        self.notify(push::AGENT_STATUS, status);
-    }
 }
