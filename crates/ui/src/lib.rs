@@ -21,6 +21,7 @@
 //! theme   ── palette: Role → anstyle::Style, gated by that policy
 //! writer  ── Ui<W>: the only place a line is written; owns stream + theme + width
 //! progress ─ Progress<W>: the one status line, animated only at a terminal
+//! screen  ── Screen<W>: a block of lines redrawn in place, at a terminal only
 //! ```
 //!
 //! Landing in the following slices of this lane: the help-text surface, and
@@ -41,12 +42,14 @@
 
 pub mod color;
 pub mod progress;
+pub mod screen;
 pub mod text;
 pub mod theme;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
 pub use progress::Progress;
-pub use text::{truncate, wrap};
+pub use screen::Screen;
+pub use text::{fit, truncate, visible_width, wrap};
 pub use theme::{Painted, Role, Theme};
 pub use writer::{buffered, Policy, Ui};
