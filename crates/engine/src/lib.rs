@@ -10,14 +10,15 @@
 
 pub mod convert;
 pub mod session;
+pub mod subscribe;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tetanus_protocol::methods::{
-    method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult, ConfigDumpResult, Engine,
-    EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo, SessionCreateParams,
-    SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
+    capability, method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult,
+    ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
+    SessionCreateParams, SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
     SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
@@ -26,6 +27,7 @@ use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
 use crate::convert::not_implemented;
 use crate::session::{SessionDefaults, SessionStore};
+use crate::subscribe::Hub;
 
 /// Everything the engine needs that is not a call.
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ impl Default for EngineConfig {
 
 pub struct HarnessEngine {
     sessions: Arc<SessionStore>,
+    hub: Arc<Hub>,
 }
 
 impl HarnessEngine {
@@ -65,6 +68,7 @@ impl HarnessEngine {
                     max_steps: config.max_steps,
                 },
             )),
+            hub: Arc::new(Hub::new()),
         }
     }
 
@@ -72,13 +76,16 @@ impl HarnessEngine {
         &self.sessions
     }
 
+    pub fn hub(&self) -> &Arc<Hub> {
+        &self.hub
+    }
+
     /// The optional calls this build actually serves. A surface hides an
     /// affordance whose capability is absent, rather than discovering the
     /// absence as an error.
     pub fn capabilities(&self) -> Vec<String> {
-        // A capability is a promise that the call behind it is served. This
-        // build serves no optional call yet, so it promises nothing.
-        Vec::new()
+        // A capability is a promise that the call behind it is served.
+        vec![capability::SESSION_SUBSCRIBE.to_string()]
     }
 }
 
@@ -128,14 +135,15 @@ impl Engine for HarnessEngine {
 
     async fn session_subscribe(
         &self,
-        _: SessionSubscribeParams,
-        _: Arc<dyn EventSink>,
+        params: SessionSubscribeParams,
+        sink: Arc<dyn EventSink>,
     ) -> Result<SessionSubscribeResult, RpcError> {
-        Err(not_implemented(method::SESSION_SUBSCRIBE))
+        let session = self.sessions.open(&params.session_id)?;
+        Ok(self.hub.subscribe(&session, params.from_seq, sink))
     }
 
-    async fn session_unsubscribe(&self, _: SessionUnsubscribeParams) -> Result<Ack, RpcError> {
-        Err(not_implemented(method::SESSION_UNSUBSCRIBE))
+    async fn session_unsubscribe(&self, params: SessionUnsubscribeParams) -> Result<Ack, RpcError> {
+        self.hub.unsubscribe(params)
     }
 
     async fn agent_prompt(&self, _: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {

@@ -8,12 +8,9 @@ use tempfile::TempDir;
 use tetanus_engine::session::MAX_TITLE;
 use tetanus_engine::session::{MAX_PAGE, SESSION_START};
 use tetanus_engine::{EngineConfig, HarnessEngine};
-use tetanus_protocol::methods::{
-    Engine, HelloParams, PeerInfo, SessionCreateParams, SessionEventsParams,
-};
+use tetanus_protocol::methods::{Engine, SessionCreateParams, SessionEventsParams};
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::types::AgentState;
-use tetanus_protocol::PROTOCOL_VERSION;
 
 fn engine() -> (HarnessEngine, TempDir) {
     let dir = TempDir::new().expect("temp dir");
@@ -131,27 +128,6 @@ async fn ids_that_name_a_path_are_rejected() {
     }
 }
 
-/// TC-SESS-5: a capability is a promise that the call behind it is served.
-/// This build serves no optional call, so `rpc.hello` promises none.
-#[tokio::test]
-async fn no_capability_is_advertised_before_its_call_is_served() {
-    let (engine, _dir) = engine();
-    let result = engine
-        .hello(HelloParams {
-            protocol_version: PROTOCOL_VERSION.into(),
-            client: PeerInfo {
-                name: "test".into(),
-                version: "0".into(),
-            },
-        })
-        .await
-        .expect("hello");
-    assert!(
-        result.capabilities.is_empty(),
-        "advertised {:?} while the calls behind them answer NotImplemented",
-        result.capabilities
-    );
-}
 /// TC-PAGE-1: a durable event crosses the boundary with the journal's own
 /// field names, asserted against literal JSON rather than against the
 /// converter that produced it.
