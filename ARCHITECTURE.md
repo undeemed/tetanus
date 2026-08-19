@@ -142,6 +142,14 @@ Model-visible means logged.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
 
+The other durable record is the settings document: `settings.yaml` (or `.json`) under the harness
+home, which is `$TETANUS_HOME` or `~/.tetanus`
+([crates/config/src/file.rs](crates/config/src/file.rs)).
+It holds sections, and resolution is flat, so a section reads as its leaves under a dotted key -
+`log: {level: debug}` resolves `log.level`.
+An absent document is a first run, not a fault; every other fault is loud, because a document the
+harness silently ignored would leave the user configured on paper and unconfigured in fact.
+
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.
 [crates/turn/src/tokens.rs](crates/turn/src/tokens.rs) prices that surface, and any request, under

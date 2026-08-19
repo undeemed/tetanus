@@ -7,6 +7,37 @@
 //! nothing to come back to.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+pub mod file;
+pub mod home;
+
+/// A fault reading the settings document.
+///
+/// Every variant names the path, because a harness that reports "could not read
+/// settings" without saying which file leaves the user guessing which of the
+/// candidate homes it looked in.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("{}: a settings document is .json, .yaml or .yml, not .{extension}", path.display())]
+    UnsupportedExtension { path: PathBuf, extension: String },
+
+    #[error("{}: a settings document, not a directory", path.display())]
+    IsADirectory { path: PathBuf },
+
+    #[error("{}: cannot be read: {source}", path.display())]
+    Unreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{}: does not parse: {message}", path.display())]
+    Malformed { path: PathBuf, message: String },
+
+    #[error("{}: the root must be a map of sections", path.display())]
+    NotAMap { path: PathBuf },
+}
 
 /// Where a resolved value came from.
 ///
