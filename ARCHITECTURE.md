@@ -403,6 +403,17 @@ That name is tamed for the line that says it and for the heading of the watched 
 the lookup that chose the adapter: what was given is what selects, and what is drawn is what is
 drawn.
 
+A `label  value` row is one whole row as well, and two of them carry a path the user typed.
+A run's closing line says where the journal went ([`main.rs`](crates/cli/src/main.rs)), and the
+serving banner names the directory the work will land in
+([`serve.rs`](crates/cli/src/render/serve.rs)); both came off a flag, so both are tamed where they
+are composed.
+Neither is cut to fit, because a path is the one value on those pages a reader copies: a terminal
+folding a long one leaves it readable, and a cut one sends them back to the flag they typed it on.
+[`Ui::field`](crates/ui/src/writer.rs) itself draws what it is given, the way `line` and `heading`
+do - the config table and the build page hand it a row they painted themselves, and taming it there
+would take that paint out along with the sequences.
+
 Taming can leave nothing behind: a file whose whole name is an escape sequence is a file a reader
 can make, and after the fold there is no character of it to print.
 A row that stopped where its value should be reads as a value the reader failed to see rather than

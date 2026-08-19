@@ -1612,8 +1612,14 @@ async fn session(
 
 /// Where the durable record went. The last thing a run says, however it ended,
 /// because it is the one thing the user cannot work out from the screen.
+///
+/// The path is tamed, not cut. It came off the command line, so it can carry
+/// anything a shell can quote, and a row is a row wherever the value came
+/// from. It keeps its full length because it is the one value on the page a
+/// reader copies: a terminal folding a long path leaves it readable, and a cut
+/// one sends them back to the flag they typed it on.
 fn journal<W: std::io::Write>(out: &mut Ui<W>, log: &JsonlSessionLog) {
     out.blank().ok();
-    out.field("journal", 7, &log.path().display().to_string())
-        .ok();
+    let path = tame_line(&log.path().display().to_string());
+    out.field("journal", 7, &path).ok();
 }

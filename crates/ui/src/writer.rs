@@ -77,11 +77,18 @@ impl<W: Write> Ui<W> {
     /// twice as wide is fewer characters than the columns it takes, and every
     /// row under it would start somewhere else.
     ///
-    /// A value that draws nothing is said in the renderer's own muted word
-    /// rather than left out. A row that stopped after its label reads as a
-    /// value the reader failed to see, and it would end in the blank space of
-    /// the gap. Both cases reach here: a caller that had nothing to say, and
-    /// one whose value was every character `tame_line` had to take out.
+    /// Like [`line`](Self::line) and [`heading`](Self::heading), this draws
+    /// what it is given. A renderer hands it a value it has already made
+    /// safe: [`tame_line`](crate::tame_line) for one that came from outside,
+    /// or its own paint. A row assembled from both cannot be told apart here,
+    /// and taming it would take the paint out with the rest.
+    ///
+    /// A value that draws nothing is the one thing this does say for itself,
+    /// in the renderer's own muted word rather than left out. A row that
+    /// stopped after its label reads as a value the reader failed to see, and
+    /// it would end in the blank space of the gap. Both cases reach here: a
+    /// caller that had nothing to say, and one whose value was every
+    /// character `tame_line` had to take out.
     pub fn field(&mut self, label: &str, pad: usize, value: &str) -> io::Result<()> {
         let gap = " ".repeat(pad.saturating_sub(visible_width(label)) + 2);
         let value = match visible_width(value) {

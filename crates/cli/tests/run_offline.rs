@@ -2,8 +2,9 @@
 //!
 //! Features tested: an offline turn on the built-in mock adapter, the printed
 //! event sequence, the journal on disk, where the prompt is read from, the
-//! failure message when a real provider has no credential, and the refusal of
-//! a full-screen view with no screen to draw on. Features NOT tested here: the
+//! failure message when a real provider has no credential, the refusal of a
+//! full-screen view with no screen to draw on, and the closing row that says
+//! where the journal went. Features NOT tested here: the
 //! flow itself (owned by the conformance suite in `tetanus-turn`), any live
 //! provider, resolving a prompt from plain data (owned by `prompt`, asserted
 //! in its own module), and what a full-screen view draws once it has a
@@ -293,4 +294,38 @@ fn a_full_screen_view_needs_a_screen() {
     assert_eq!(clash.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&clash.stderr);
     assert!(stderr.contains("--json"), "{stderr}");
+}
+
+/// TC-CLI-9: a journal named with escape sequences and a line feed.
+/// Expected: exit 0, and the closing `journal` row is one line holding the
+/// name with the sequences taken out and the feed turned into a space. The
+/// name is what `--session` was given, so a shell can put anything in it; this
+/// row is the last thing a run prints, and a sequence in it reaches a terminal
+/// that has already been told the run is over.
+#[test]
+fn a_journal_named_with_an_escape_sequence_stays_one_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let named = "na\u{1b}[2Jsty\u{1b}]0;pwned\u{7}\nlog.jsonl";
+    let out = run(
+        dir.path(),
+        &["run", "--prompt", "hi", "--session", named],
+        None,
+    );
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let rows: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("journal"))
+        .collect();
+
+    assert_eq!(rows, vec!["journal  nasty log.jsonl"], "{stdout:?}");
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    // The file itself keeps the name it was given: taming is what is drawn,
+    // not what is opened.
+    assert!(dir.path().join(named).exists(), "the journal was written");
 }
