@@ -127,6 +127,8 @@ There is no separate progress event: progress is `step/start`, the chunks, `tool
 `SessionEvent.data` is `Value` because the vocabulary grows.
 For the ten types above it is not arbitrary, and this table is the boundary promise.
 `SessionEvent::parse()` returns `KnownEvent` for these and `None` for anything else, so a surface gets a compiler-checked path for what it knows and still renders what it does not.
+`None` covers two cases and does not distinguish them: a type this build does not know, and a known type whose payload did not match the table.
+Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
@@ -144,6 +146,10 @@ For the ten types above it is not arbitrary, and this table is the boundary prom
 **`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
 A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
 `tool/result` also cites its `tool/call` in `sourceEventSeqs`, so the pairing survives a journal read that starts mid-turn.
+
+The turn's answer is the last `assistant/message.content`, and `turn/end` deliberately does not repeat it.
+`TurnSummary.content` is that same text, restated for a caller that did not stream.
+A surface reads one or the other, never both, or it renders the answer twice.
 
 Adding a field to one of these payloads is a minor change; removing or renaming one is major.
 
