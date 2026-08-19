@@ -59,6 +59,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/config   tetanus-config    layered config with provenance
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
+  -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, held terminal
 
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```
@@ -66,7 +67,10 @@ crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` is standalone and, in Phase ①, is reached only by the CLI.
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
-surface. Nothing depends on `tetanus-hardness`.
+surface.
+`tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
+engine type, so it formats what it is given and the two lanes stay independently reviewable.
+Nothing depends on `tetanus-hardness`.
 
 ### 4.3 Logical view - composition primitives
 

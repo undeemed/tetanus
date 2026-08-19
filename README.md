@@ -173,7 +173,7 @@ A Cargo workspace of nine crates.
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
-| `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen |
+| `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, and the held terminal a full-screen view runs in |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |
 
 The binary is `tetanus`; the publishable umbrella crate is `tetanus-hardness`, because the bare

@@ -22,6 +22,7 @@
 //! writer  ── Ui<W>: the only place a line is written; owns stream + theme + width
 //! progress ─ Progress<W>: the one status line, animated only at a terminal
 //! screen  ── Screen<W>: a block of lines redrawn in place, at a terminal only
+//! terminal ─ Held<C>: raw mode and the alternate screen, taken and given back
 //! ```
 //!
 //! Landing in the following slices of this lane: the help-text surface, and
@@ -43,6 +44,7 @@
 pub mod color;
 pub mod progress;
 pub mod screen;
+pub mod terminal;
 pub mod text;
 pub mod theme;
 pub mod writer;
@@ -50,6 +52,7 @@ pub mod writer;
 pub use color::{Charset, ColorChoice, Env};
 pub use progress::Progress;
 pub use screen::Screen;
+pub use terminal::{Console, Held, Key, Tty};
 pub use text::{fit, truncate, visible_width, wrap};
 pub use theme::{Painted, Role, Theme};
 pub use writer::{buffered, measure, Policy, Ui};
