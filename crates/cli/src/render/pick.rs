@@ -88,7 +88,7 @@ use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{SessionEvent, SessionInfo};
 use tetanus_ui::{bar, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View};
 
-use super::browse::{Journal, NAME};
+use super::browse::{Exit, Journal, NAME};
 use super::sessions;
 
 /// How long the loop waits for a keystroke before painting again.
@@ -449,11 +449,6 @@ impl<'a> Picker<'a> {
                 self.fault = Some(format!("{} holds nothing to read", chosen.session_id));
             }
             Ok(events) => {
-                let keys = format!(
-                    "{} scroll {dot} / find {dot} q back",
-                    self.theme.glyph("↑↓", "up/dn"),
-                    dot = self.theme.glyph("·", "-"),
-                );
                 // Headed by the id, not the path: the id is what the reader
                 // picked and what every other command takes, and an absolute
                 // path is mostly the part of itself that is the same for all
@@ -463,7 +458,7 @@ impl<'a> Picker<'a> {
                     &chosen.session_id,
                     events,
                     self.think,
-                    keys,
+                    Exit::Back,
                     (self.cols, self.room + CHROME),
                 ));
             }
@@ -489,11 +484,12 @@ impl View for Picker<'_> {
         // means to them; leaving the whole view here would make Enter a key
         // worth pressing only once.
         //
-        // Unless the journal is spelling a search, in which case those keys
-        // are letters and it owns them. This is the one place the outer view
-        // has to know something about the inner one, and the alternative is a
-        // reader whose list closes because they went looking for `quota`.
-        if !journal.typing() && matches!(key, Key::Char('q') | Key::Esc) {
+        // Unless the journal has something of its own up - a search being
+        // spelled, where those keys are letters, or the key card, which any
+        // key takes down. This is the one place the outer view has to know
+        // something about the inner one, and the alternative is a reader whose
+        // list closes because they went looking for `quota`.
+        if !journal.busy() && matches!(key, Key::Char('q') | Key::Esc) {
             self.reading = None;
             return Flow::Go;
         }

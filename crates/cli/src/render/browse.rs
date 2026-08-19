@@ -78,6 +78,7 @@ use tetanus_ui::{
     plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
 };
 
+use super::keys::{self, Row};
 use super::timeline::Reader;
 
 /// How long the loop waits for a keystroke before painting again.
@@ -111,12 +112,14 @@ pub fn browse<W: Write>(
     }
     let theme = *out.theme();
     let (cols, rows) = size();
-    let keys = format!(
-        "{} scroll {dot} / find {dot} q quit",
-        theme.glyph("↑↓", "up/dn"),
-        dot = theme.glyph("·", "-")
+    let mut journal = Journal::new(
+        theme,
+        title,
+        events.to_vec(),
+        think,
+        Exit::Quit,
+        (cols, rows),
     );
-    let mut journal = Journal::new(theme, title, events.to_vec(), think, keys, (cols, rows));
     show(
         Tty::new(io::stdout()),
         out,
@@ -126,6 +129,39 @@ pub fn browse<W: Write>(
             wait: IDLE,
         },
     )
+}
+
+/// Where `q` takes a reader out of a journal.
+///
+/// Given by whoever opened it, because only they know: the same view is the
+/// whole of `tetanus replay --ui` and one layer of `tetanus sessions --ui`,
+/// and "quit" to a reader who came from the shell is "back" to a reader who
+/// came from the list. Two words rather than a whole footer, so the wording
+/// of a key map is written once here instead of once per caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Exit {
+    /// Out to the shell: this journal is the view.
+    Quit,
+    /// Back to the list this journal was opened from.
+    Back,
+}
+
+impl Exit {
+    /// The word after `q` on the footer.
+    fn word(self) -> &'static str {
+        match self {
+            Exit::Quit => "quit",
+            Exit::Back => "back",
+        }
+    }
+
+    /// The same thing said in full, for the key card.
+    fn what(self) -> &'static str {
+        match self {
+            Exit::Quit => "close the view",
+            Exit::Back => "back to the session list",
+        }
+    }
 }
 
 /// Whether the keys are moving the window or spelling a search.
@@ -157,7 +193,11 @@ pub(super) struct Journal {
     think: bool,
     title: String,
     page: Page,
-    keys: String,
+    /// Where `q` goes from here, which is the one thing about this view its
+    /// caller knows and it does not.
+    exit: Exit,
+    /// Whether the key card is up in place of the transcript.
+    help: bool,
     /// The width the page was last filled at.
     cols: usize,
     /// The height of the last frame, which is what a PageUp is measured in.
@@ -178,7 +218,7 @@ impl Journal {
         title: &str,
         events: Vec<SessionEvent>,
         think: bool,
-        keys: String,
+        exit: Exit,
         size: (usize, usize),
     ) -> Self {
         let mut journal = Self {
@@ -187,7 +227,8 @@ impl Journal {
             think,
             title: title.to_string(),
             page: Page::new(theme, NAME, title),
-            keys,
+            exit,
+            help: false,
             // Not `size.0`: the fill below is what makes the page true at a
             // width, and starting them equal would claim it already had.
             cols: 0,
@@ -295,7 +336,11 @@ impl Journal {
     fn hint(&self) -> String {
         let dot = self.theme.glyph("·", "-");
         match &self.find {
-            Find::Off => self.keys.clone(),
+            Find::Off => format!(
+                "{} scroll {dot} / find {dot} ? keys {dot} q {}",
+                self.theme.glyph("↑↓", "up/dn"),
+                self.exit.word()
+            ),
             Find::Typing(text) => self
                 .theme
                 .paint(Role::Accent, &format!("/{text}"))
@@ -315,13 +360,37 @@ impl Journal {
         }
     }
 
+    /// Every key this view answers, in the order a reader meets them.
+    fn map(&self) -> Vec<Row> {
+        vec![
+            (
+                self.theme.glyph("↑ ↓", "up dn"),
+                "one line back, one line on",
+            ),
+            ("pgup pgdn", "a screenful either way"),
+            ("home end", "the first line of the turn, the last"),
+            ("/", "a word, then enter: go to the line holding it"),
+            ("n N", "the next line holding it, the one before"),
+            ("esc", "while spelling: drop the word, move nothing"),
+            ("q", self.exit.what()),
+            ("?", "this card; any key goes back"),
+        ]
+    }
+
     /// Whether a word is being spelled into this journal's search prompt.
-    ///
-    /// Asked by a surface that opened this journal inside a view of its own:
-    /// while a word is being typed the keys that would close a journal are
-    /// letters, so its owner has to know not to answer them.
-    pub(super) fn typing(&self) -> bool {
+    fn typing(&self) -> bool {
         matches!(self.find, Find::Typing(_))
+    }
+
+    /// Whether this journal has something of its own over the transcript: a
+    /// word being spelled, or the key card.
+    ///
+    /// Asked by a surface that opened this journal inside a view of its own.
+    /// While either is up the keys that would close a journal belong to it -
+    /// `q` is a letter of a search, and the card is closed by any key at all -
+    /// so its owner has to know not to answer them.
+    pub(super) fn busy(&self) -> bool {
+        self.typing() || self.help
     }
 
     /// Answer a key while the search prompt is open.
@@ -362,6 +431,9 @@ impl View for Journal {
         if cols != self.cols {
             self.fill(cols);
         }
+        if self.help {
+            return keys::card(&self.theme, cols, rows, "journal", &self.map());
+        }
         let keys = self.hint();
         // No block: a journal on disk has nothing arriving, which is what the
         // footer reads back as `end` rather than `live`.
@@ -372,11 +444,19 @@ impl View for Journal {
         if self.typing() {
             return self.spell(key);
         }
+        // The card is read, not worked in. Whatever is pressed next takes it
+        // down and does nothing else, so a reader who opened it by accident is
+        // one key from where they were, whichever key they try.
+        if self.help {
+            self.help = false;
+            return Flow::Go;
+        }
         let screenful = isize::try_from(self.rows.saturating_sub(KEPT).max(1)).unwrap_or(1);
         let found = matches!(self.find, Find::On { .. });
         match key {
             Key::Char('q') | Key::Esc => return Flow::Stop,
             Key::Char('/') => self.find = Find::Typing(String::new()),
+            Key::Char('?') => self.help = true,
             // `n` and `N` mean nothing until a search has been made. A letter
             // that moved the page before then would be a trap in a view whose
             // whole content is letters.
@@ -402,10 +482,11 @@ impl View for Journal {
 /// others; that a journal taller than the screen shows its tail and can be
 /// walked back to its first line; that a resize composes the lines again at
 /// the new width without losing the reader's place; the key map, including the
-/// two keys that end the view; and that `/` reaches the line holding a word,
-/// that `n` walks the rest of them, that the prompt takes the printable keys
-/// while it is open, and that a word no line holds is said rather than acted
-/// on.
+/// two keys that end the view; that `/` reaches the line holding a word, that
+/// `n` walks the rest of them, that the prompt takes the printable keys while
+/// it is open, and that a word no line holds is said rather than acted on; and
+/// that `?` spells the keys out over the transcript, and that any key takes
+/// the card down again.
 ///
 /// Features NOT tested here: the wording of a line (owned by `timeline.rs`),
 /// the arrangement of a frame (owned by `tetanus_ui::Page`), the loop and its
@@ -474,7 +555,7 @@ mod tests {
             "j.jsonl",
             events.to_vec(),
             false,
-            "up/dn scroll".into(),
+            Exit::Quit,
             (cols, 0),
         )
     }
@@ -718,6 +799,76 @@ mod tests {
         assert!(
             narrow[narrow.len() - 1].contains("match 1 of"),
             "{narrow:?}"
+        );
+    }
+
+    /// TC-CLI-BROWSE-10: `?` over a journal, and the way back out of it.
+    /// Expected: the card names the view, holds a row for every key the view
+    /// answers including the one that opened it, and says how to leave; the
+    /// transcript is not on it; and the next key - any key - gives back the
+    /// frame that was there before, unmoved.
+    #[test]
+    fn the_card_says_every_key_and_any_key_takes_it_down() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        let before = rows(&mut view, COLS, 12);
+
+        assert_eq!(view.key(Key::Char('?')), Flow::Go);
+        let card = rows(&mut view, COLS, 12);
+        let shown = text(&card);
+        assert!(
+            card[0].contains("journal keys"),
+            "not headed as the card: {card:?}"
+        );
+        assert!(
+            card[card.len() - 1].contains("any key goes back"),
+            "no way back: {card:?}"
+        );
+        for said in [
+            "one line back",
+            "a screenful either way",
+            "go to the line holding it",
+            "the next line holding it",
+            "close the view",
+            "this card",
+        ] {
+            assert!(
+                shown.contains(said),
+                "the card does not say {said}: {card:?}"
+            );
+        }
+        assert!(
+            !shown.contains("echo this"),
+            "the transcript is still on it: {card:?}"
+        );
+
+        // Not `?` and not `q`: a reader who opened it by accident is one key
+        // from where they were, whichever key they try.
+        assert_eq!(view.key(Key::Char('z')), Flow::Go);
+        assert_eq!(
+            rows(&mut view, COLS, 12),
+            before,
+            "the card left the page moved"
+        );
+    }
+
+    /// TC-CLI-BROWSE-11: `?` while a word is being spelled.
+    /// Expected: it is a letter of the word, the card does not open, and the
+    /// prompt reads back what was typed.
+    #[test]
+    fn the_prompt_keeps_the_key_that_would_open_the_card() {
+        let events = turn();
+        let mut view = journal(&events, COLS);
+        typed(&mut view, "ec?");
+
+        let shown = rows(&mut view, COLS, 12);
+        assert!(
+            !shown[0].contains("journal keys"),
+            "the card opened: {shown:?}"
+        );
+        assert!(
+            shown[shown.len() - 1].contains("/ec?"),
+            "the ? did not go into the word: {shown:?}"
         );
     }
 }
