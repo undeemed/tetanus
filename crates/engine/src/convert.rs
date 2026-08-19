@@ -53,17 +53,21 @@ pub fn journal_error(session_id: &str, journal: Option<&Path>, error: &SessionEr
             format!("journal for `{session_id}` is corrupt at line {line}"),
         )
         .with_data(serde_json::json!({ "session_id": session_id, "line": line })),
-        SessionError::Io(io) => {
-            let error = RpcError::new(ErrorCode::Io, io.to_string());
-            match journal {
-                Some(path) => {
-                    error.with_data(serde_json::json!({ "path": path.display().to_string() }))
-                }
-                None => error,
-            }
-        }
+        SessionError::Io(io) => match journal {
+            Some(path) => io_error(path, io),
+            None => RpcError::new(ErrorCode::Io, io.to_string()),
+        },
         other => RpcError::new(ErrorCode::Internal, other.to_string()),
     }
+}
+
+/// Contract section 4.5: something the filesystem refused, carrying the path
+/// at fault so a surface can name it. A bare `Not a directory` tells the
+/// reader that a path was wrong but not which one, and only the engine knows
+/// which one it was reading.
+pub(crate) fn io_error(path: &Path, error: &std::io::Error) -> RpcError {
+    RpcError::new(ErrorCode::Io, error.to_string())
+        .with_data(serde_json::json!({ "path": path.display().to_string() }))
 }
 
 /// [`journal_error`] for a caller that owns its error and knows no path.

@@ -166,6 +166,78 @@ async fn list_finds_cold_journals() {
     assert_eq!(listed[0].last_seq, 0);
 }
 
+/// TC-SESS-7: a journal root that is not a directory fails with the path in
+/// `data`, per the `Io` row of contract §4.5. A surface renders the path it is
+/// given; it cannot name one the engine kept to itself.
+#[tokio::test]
+async fn a_root_that_is_not_a_directory_names_it() {
+    let dir = TempDir::new().expect("temp dir");
+    let not_a_dir = dir.path().join("a.jsonl");
+    std::fs::write(&not_a_dir, "").expect("write");
+
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: not_a_dir.clone(),
+        ..EngineConfig::default()
+    });
+
+    let error = engine
+        .session_list()
+        .await
+        .expect_err("a root that is a file is not a listing");
+    assert_eq!(error.kind(), Some(ErrorCode::Io));
+    assert_eq!(
+        error.data.expect("data")["path"],
+        serde_json::json!(not_a_dir.display().to_string()),
+        "the path at fault travels with the failure"
+    );
+}
+
+/// TC-SESS-8: a journal root the caller named and that is not there fails with
+/// the path, rather than reading as a history nobody has written yet. The two
+/// are different facts, and the reader acts on them differently: one is a typo
+/// to correct, the other an invitation to run a turn.
+#[tokio::test]
+async fn a_named_root_that_is_missing_is_not_an_empty_history() {
+    let dir = TempDir::new().expect("temp dir");
+    let missing = dir.path().join("nope");
+
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: missing.clone(),
+        ..EngineConfig::default()
+    });
+
+    let error = engine
+        .session_list()
+        .await
+        .expect_err("a root that was named and is not there");
+    assert_eq!(error.kind(), Some(ErrorCode::Io));
+    assert_eq!(
+        error.data.expect("data")["path"],
+        serde_json::json!(missing.display().to_string())
+    );
+}
+
+/// TC-SESS-9: the other half of TC-SESS-8. The default root is allowed not to
+/// exist, so a build that has never run a turn still lists, and answers with
+/// nothing rather than with a failure.
+#[tokio::test]
+async fn the_default_root_may_be_missing() {
+    let engine = HarnessEngine::new(EngineConfig::default());
+
+    let listed = engine
+        .session_list()
+        .await
+        .expect("the default root is allowed not to exist yet")
+        .sessions;
+
+    // This crate's own working directory is not the case under test, and not
+    // this test's to police: the assertion above is the promise, and the
+    // listing is empty whenever the root is in fact absent.
+    if !std::path::Path::new(tetanus_engine::DEFAULT_SESSIONS_ROOT).exists() {
+        assert!(listed.is_empty(), "no root, no sessions");
+    }
+}
+
 /// TC-SESS-4: an id that would reach outside the journal root is
 /// `InvalidParams`, never a filesystem error.
 #[tokio::test]

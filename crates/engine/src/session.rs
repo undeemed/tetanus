@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -263,11 +263,31 @@ impl SessionStore {
         }
     }
 
+    /// Whether this store is rooted where a caller that named no directory
+    /// would have written. `./sessions` is the same place as `sessions`, so
+    /// the comparison drops the components that mean nothing rather than
+    /// demanding one spelling.
+    fn root_is_default(&self) -> bool {
+        fn meaningful(path: &Path) -> impl Iterator<Item = Component<'_>> {
+            path.components()
+                .filter(|c| !matches!(c, Component::CurDir))
+        }
+        meaningful(&self.root).eq(meaningful(Path::new(crate::DEFAULT_SESSIONS_ROOT)))
+    }
+
     fn journals(&self) -> Result<Vec<PathBuf>, RpcError> {
         let dir = match std::fs::read_dir(&self.root) {
             Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(RpcError::new(ErrorCode::Io, e.to_string())),
+            // The default root is allowed not to exist: a build that has never
+            // run a turn has not created it, and "no sessions yet" is the true
+            // answer. A root the caller named is not allowed to be missing.
+            // Reading a typo there as an empty history tells the reader to run
+            // a turn when what they have to do is fix the path, and no surface
+            // can tell the two apart from an empty list.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.root_is_default() => {
+                return Ok(Vec::new())
+            }
+            Err(e) => return Err(crate::convert::io_error(&self.root, &e)),
         };
         let mut out: Vec<PathBuf> = dir
             .filter_map(Result::ok)
