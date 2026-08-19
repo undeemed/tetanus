@@ -11,6 +11,7 @@ every open browser.
 ```
 python3 tools/uiwatch/serve.py            # http://localhost:5200
 python3 tools/uiwatch/serve.py --port 5300
+python3 tools/uiwatch/serve.py --check    # the cell buffer's own test cases
 ```
 
 It takes the next free port if the one asked for is busy, and prints the URL it
@@ -25,6 +26,14 @@ An offline turn finishes in milliseconds, so no still image catches the status
 line moving. The `status` example (`cargo run -p tetanus-ui --example status`)
 drives the same `Progress` renderer slowly, and that pane draws every repaint
 on its own line instead of letting each frame overwrite the last.
+
+The live view redraws a block of rows in place, so the cell buffer follows the
+cursor up a row and honours both erases as well as `\r`. An ordinary pane
+therefore shows what a user would be looking at when the command finished - if
+a block leaves anything behind, the pane shows that too, which is the point.
+A `repaints` pane opts out of the cursor moves so that every frame stays
+visible; that is a deliberate lie about the terminal, and only the two example
+panes tell it. `--check` covers both behaviours in six cases.
 
 ## Adding a scenario
 

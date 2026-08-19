@@ -79,6 +79,9 @@ SCENARIOS = [
     Scenario("tetanus replay j.jsonl", "the same renderer, on a journal from a previous run",
              ["replay", "j.jsonl"],
              setup=[["run", "-p", "echo this", "--session", "j.jsonl"]]),
+    Scenario("tetanus replay j.jsonl --live", "the same journal played back: the block redraws, then leaves nothing",
+             ["replay", "j.jsonl", "--live", "--speed", "6"],
+             setup=[["run", "-p", "echo this", "--session", "j.jsonl"]]),
     Scenario("tetanus config", "every resolved key, and the layer that set it", ["config"]),
     Scenario("tetanus info", "what this build is", ["info"]),
     Scenario("tetanus run --adapter deepseek", "the failure surface: error, then the way out",
@@ -93,11 +96,18 @@ SCENARIOS = [
 
 
 class Screen:
-    """A cell buffer, so `\\r` overwrites the way a terminal would."""
+    """A cell buffer, so `\\r` overwrites the way a terminal would.
+
+    It also follows the cursor up a row and erases, because `tetanus-ui`'s
+    `Screen` redraws a block in place. A pane that ignored those escapes would
+    stack every frame and claim the product had printed all of them.
+    """
 
     def __init__(self, repaints: bool = False) -> None:
         self.repaints = repaints
         self.lines: list[list[tuple[str, tuple]]] = [[]]
+        #: The row the cursor is on. Only a redrawn block ever leaves the last.
+        self.row = 0
         self.column = 0
         self.style = (None, False, False, False)
 
@@ -133,33 +143,67 @@ class Screen:
                     self.sgr([int(p) for p in raw.split(";") if p != ""] if raw else [0])
                     i += match.end()
                     continue
+                move = re.match(r"\x1b\[([0-9]*)([AJK])", text[i:])
+                if move:
+                    self.control(move.group(2), move.group(1))
+                    i += move.end()
+                    continue
                 skip = re.match(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07", text[i:])
                 i += skip.end() if skip else 1
                 continue
             if char == "\n":
-                self.lines.append([])
+                self.down()
                 self.column = 0
             elif char == "\r":
                 if text[i + 1:i + 2] == "\n":
                     i += 1  # a pty writes CRLF for a plain newline
                     continue
-                if self.repaints and self.lines[-1]:
+                if self.repaints and self.lines[self.row]:
                     # An erase - the blanking pass between two frames - is not
                     # a frame, so it gets overwritten rather than a line.
-                    if any(char != " " for char, _ in self.lines[-1]):
-                        self.lines.append([])
+                    if any(char != " " for char, _ in self.lines[self.row]):
+                        self.down()
                     else:
-                        self.lines[-1] = []
+                        self.lines[self.row] = []
                 self.column = 0
             elif char == "\t":
                 self.column += 4 - (self.column % 4)
             elif char >= " ":
-                line = self.lines[-1]
+                line = self.lines[self.row]
                 while len(line) <= self.column:
                     line.append((" ", (None, False, False, False)))
                 line[self.column] = (char, self.style)
                 self.column += 1
             i += 1
+
+    def control(self, final: str, raw: str) -> None:
+        """The three escapes the product writes: cursor up, and the two erases.
+
+        Anything else stays skipped, as it was before this understood any of
+        them. A pane that guessed at an escape it had never seen would be a
+        worse lie than a pane that dropped it.
+        """
+        count = int(raw) if raw else (0 if final in "JK" else 1)
+        if final == "A":
+            # A repaints pane is deliberately stacking every frame, so a frame
+            # must not be allowed to move back over the one before it.
+            if not self.repaints:
+                self.row = max(0, self.row - count)
+        elif final == "K" and count in (0, 2):
+            line = self.lines[self.row]
+            del line[self.column if count == 0 else 0:]
+        elif final == "J" and count in (0, 2):
+            if count == 2:
+                self.lines, self.row, self.column = [[]], 0, 0
+                return
+            del self.lines[self.row][self.column:]
+            del self.lines[self.row + 1:]
+
+    def down(self) -> None:
+        """One row down, onto the row already there if the cursor came up."""
+        self.row += 1
+        while len(self.lines) <= self.row:
+            self.lines.append([])
 
     def to_html(self) -> str:
         out = []
@@ -443,11 +487,46 @@ def poll() -> None:
         build_and_render()
 
 
+def rows(text: str, repaints: bool = False) -> list[str]:
+    """The buffer as plain rows, for the self-check below."""
+    screen = Screen(repaints)
+    screen.write(text)
+    return ["".join(char for char, _ in line) for line in screen.lines]
+
+
+def check() -> None:
+    """Test cases for the cell buffer. Run with `--check`.
+
+    The buffer is the only part of this tool that can be wrong quietly: a
+    dropped escape does not crash anything, it just makes the page claim the
+    product printed something it never printed.
+    """
+    # TC-WATCH-1: a carriage return overwrites its own row.
+    assert rows("frame A\rframe B") == ["frame B"]
+    # TC-WATCH-2: a cursor up replaces the frame that is already on the row.
+    assert rows("keep\r\nold\r\n\x1b[1A\rnew\r\n") == ["keep", "new", ""]
+    # TC-WATCH-3: erase to end of line takes the tail of a longer frame.
+    assert rows("longer frame\r\n\x1b[1A\rshort\x1b[K\r\n") == ["short", ""]
+    # TC-WATCH-4: erase to end of display takes the rows under the cursor.
+    assert rows("a\r\nb\r\nc\r\n\x1b[2A\r\x1b[J") == ["a", ""]
+    # TC-WATCH-5: a repaints pane keeps every frame, cursor up or not.
+    assert rows("one\r\n\x1b[1A\rtwo\r\n", repaints=True) == ["one", "two", ""]
+    # TC-WATCH-6: an escape this does not implement is dropped, not printed.
+    assert rows("\x1b[?25lhidden\x1b[?25h") == ["hidden"]
+    print("uiwatch: the cell buffer agrees with all 6 cases")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=5200)
     parser.add_argument("--tries", type=int, default=12)
+    parser.add_argument("--check", action="store_true",
+                        help="run the cell buffer's self-check and exit")
     args = parser.parse_args()
+
+    if args.check:
+        check()
+        return
 
     if not shutil.which("cargo"):
         raise SystemExit("cargo is not on PATH")
