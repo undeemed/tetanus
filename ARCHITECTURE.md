@@ -230,7 +230,7 @@ Nothing resolves a policy out of settings yet, so a composer passes one in; that
 
 ### 4.7 Interface view - surfaces
 
-The only surface today is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)).
+The main surface is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)).
 It carries the nine subcommands [docs/interface-contract.md](docs/interface-contract.md) §4.7
 defines - `run`, `chat`, `sessions`, `replay`, `models`, `tools`, `config`, `serve`, `info` - each
 identified there by the contract calls it makes rather than by what it prints. See
@@ -306,8 +306,23 @@ live participation.
 
 `tetanus-engine` ([crates/engine](crates/engine)) implements the `Engine` trait, and `tetanus-rpc`
 ([crates/rpc](crates/rpc)) carries it: a JSON-RPC 2.0 codec with a stdio carrier and a WebSocket
-carrier. `tetanus serve` hosts the stdio one, and `tetanus serve --listen` the WebSocket one. There
-is no web UI. §4.8 covers the contract all three speak.
+carrier. `tetanus serve` hosts the stdio one, and `tetanus serve --listen` the WebSocket one. §4.8
+covers the contract all three speak.
+
+[web/chat](web/chat/README.md) is the second surface, and it is a page rather than a program:
+`index.html` and `chat.js` speak that WebSocket carrier directly, with no build step, no framework
+and no dependency, so what a reviewer opens is the file in the repository.
+It makes the four calls `tetanus chat` makes - `rpc.hello`, `session.create`, `session.subscribe`
+from seq 0, then one `agent.prompt` per message typed - and draws the `session/event` pushes as they
+arrive, so it needs nothing from the engine that the contract does not already publish.
+Subscribing from seq 0 is what makes history and live delivery one ordered channel: a reply appears
+delta by delta as the model streams it, a reload continues the conversation instead of starting one,
+and no page of history can race the first live push.
+The transcript is the terminal's transcript - the same rows, the same order, the same closing line -
+because a turn that read differently in a browser would be a second description of the same events
+for a reader to reconcile.
+`web/chat/serve.py` is the development server that opens it: it starts `tetanus serve --listen`,
+reads the bound address out of the banner, and hands it to the page.
 
 ### 4.8 Interface view - the engine/presentation contract
 
