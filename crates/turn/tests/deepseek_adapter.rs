@@ -1,7 +1,8 @@
 //! Test Design Specification: the DeepSeek chat-completions adapter.
 //!
-//! Feature under test: wire serialization and SSE stream decoding for the
-//! provider route `deepseek-official`, exercised through a replaying transport.
+//! Feature under test: wire serialization, SSE stream decoding, and how a
+//! stream ends, for the provider route `deepseek-official`, exercised through a
+//! replaying transport.
 //! Features NOT tested here: TLS, retry policy, thinking-mode configuration and
 //! the credential seam - Phase ② concerns.
 //!
@@ -20,13 +21,13 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use tetanus_turn::llm::deepseek::{
     take_frames, wire_request, DeepSeekAdapter, DeepSeekConfig, ReplayTransport, StreamDecoder,
-    DEFAULT_API_KEY_ENV, PROVIDER, PUBLIC_BASE_URL,
+    DEFAULT_API_KEY_ENV, PROVIDER, PUBLIC_BASE_URL, STREAM_CLOSED,
 };
 use tetanus_turn::llm::{CollectingSink, LlmAdapter, LlmError, Message, ModelRequest, StreamChunk};
 use tetanus_turn::tools::{ToolCall, ToolSchema};
 
-/// A credential variable only TC-DS-ADAPTER-1 reads. Writing the real one
-/// would decide, from another thread, whether TC-DS-LIVE-1 skips.
+/// A credential variable only the offline adapter cases read. Writing the real
+/// one would decide, from another thread, whether TC-DS-LIVE-1 skips.
 const TEST_API_KEY_ENV: &str = "TETANUS_TEST_DEEPSEEK_API_KEY";
 
 static ENVIRONMENT: Mutex<()> = Mutex::const_new(());
@@ -176,6 +177,33 @@ fn an_in_band_error_frame_fails_the_stream() {
     assert!(err.to_string().contains("rate limited"), "{err}");
 }
 
+/// TC-DS-DECODE-3: nothing that follows the sentinel is decoded.
+///
+/// Upstream: `sse.spec.ts`, "stops yielding after DONE even when more data
+/// follows". Upstream stops its parser; tetanus has no parser stage to stop, so
+/// the decoder itself refuses the late payload.
+///
+/// Input: `[DONE]`, then a content frame after it.
+/// Expected: no chunks and no text on the response. The provider said the
+/// answer was finished, so appending to it would report a message it never
+/// sent.
+#[test]
+fn a_frame_after_the_sentinel_is_not_part_of_the_answer() {
+    let mut decoder = StreamDecoder::default();
+    let mut chunks = decoder.push("[DONE]").expect("the sentinel");
+    chunks.extend(
+        decoder
+            .push(r#"{"choices":[{"delta":{"content":"late"}}]}"#)
+            .expect("a late frame is not an error"),
+    );
+
+    let (tail, response) = decoder.finish();
+    chunks.extend(tail);
+
+    assert!(chunks.is_empty(), "{chunks:?}");
+    assert_eq!(response.content, "");
+}
+
 /// TC-DS-ADAPTER-1: end to end through the replaying transport, the adapter
 /// streams chunks into the sink and returns the assembled response.
 /// Expected: the sink sees four chunks in stream order; the transport received
@@ -208,6 +236,135 @@ async fn streams_through_the_transport_seam() {
     );
 
     std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-CLOSE-1: a stream that ends without `[DONE]` fails, and what it
+/// already said still reached the sink.
+///
+/// Upstream: `sse.spec.ts`, "throws STREAM_CLOSED when the stream ends without
+/// DONE". tetanus has no `STREAM_CLOSED` code of its own, so the failure is a
+/// `PROTOCOL` one, which keeps it outside the default retryable set exactly as
+/// upstream keeps `STREAM_CLOSED` outside it.
+///
+/// Input: two content frames and then the end of the stream, with no sentinel.
+/// Expected: [`LlmError::Protocol`] carrying [`STREAM_CLOSED`]; the two chunks
+/// that did arrive are still in the sink, because the failure is about the
+/// stream ending and not about what it managed to say.
+#[tokio::test]
+async fn a_stream_that_ends_without_the_sentinel_fails() {
+    let _environment = environment().await;
+    let adapter = keyed_adapter(&[
+        r#"{"choices":[{"delta":{"content":"half an "}}]}"#,
+        r#"{"choices":[{"delta":{"content":"answer"}}]}"#,
+    ]);
+    let mut sink = CollectingSink::default();
+
+    let err = adapter
+        .stream(&request(), &mut sink)
+        .await
+        .expect_err("the stream was cut short");
+
+    assert!(matches!(err, LlmError::Protocol(ref message) if message == STREAM_CLOSED));
+    assert_eq!(err.to_string(), format!("PROTOCOL: {STREAM_CLOSED}"));
+    assert_eq!(sink.chunks.len(), 2, "{:?}", sink.chunks);
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-CLOSE-2: a stream that says nothing at all fails the same way.
+///
+/// Upstream: `sse.spec.ts`, "throws STREAM_CLOSED for an empty stream".
+///
+/// Input: a transport that yields no frames.
+/// Expected: the same failure, and an empty sink. A stream with no frames is
+/// not an empty answer: nothing said it ended.
+#[tokio::test]
+async fn an_empty_stream_fails_rather_than_answering_with_nothing() {
+    let _environment = environment().await;
+    let adapter = keyed_adapter(&[]);
+    let mut sink = CollectingSink::default();
+
+    let err = adapter
+        .stream(&request(), &mut sink)
+        .await
+        .expect_err("nothing arrived");
+
+    assert!(matches!(err, LlmError::Protocol(ref message) if message == STREAM_CLOSED));
+    assert!(sink.chunks.is_empty(), "{:?}", sink.chunks);
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-CLOSE-3: a sentinel left in a half-arrived event does not count.
+///
+/// Upstream: `sse.spec.ts`, "treats a final DONE missing its blank-line
+/// terminator as truncation". An event dispatches on its terminator, so a tail
+/// at EOF is a cut connection and not a delivered event.
+///
+/// Input: a byte buffer whose last event is `data: [DONE]` with no blank line
+/// after it, split by [`take_frames`] the way the transport splits it.
+/// Expected: `take_frames` yields only the completed event and keeps the tail,
+/// so the adapter never sees the sentinel and the stream fails. This is the
+/// consequence TC-DS-SSE-1 pins the mechanism for.
+#[tokio::test]
+async fn a_sentinel_in_an_unterminated_tail_does_not_close_the_stream() {
+    let _environment = environment().await;
+    let mut buffer =
+        String::from("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]");
+    let frames = take_frames(&mut buffer);
+
+    assert_eq!(frames.len(), 1, "the tail is not an event yet");
+    assert_eq!(buffer, "data: [DONE]", "and it stays in the buffer");
+
+    let adapter = keyed_adapter(&frames.iter().map(String::as_str).collect::<Vec<_>>());
+    let err = adapter
+        .stream(&request(), &mut CollectingSink::default())
+        .await
+        .expect_err("the sentinel never arrived");
+
+    assert!(matches!(err, LlmError::Protocol(ref message) if message == STREAM_CLOSED));
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-CLOSE-4: a stream cut in the middle of its first event fails.
+///
+/// Upstream: `sse.spec.ts`, "throws STREAM_CLOSED for a mid-event close".
+///
+/// Input: a buffer holding `data: {"a"` and nothing more.
+/// Expected: `take_frames` yields nothing, so the adapter reads a stream that
+/// said nothing and fails. Half a JSON object is not a frame to report as
+/// malformed; it is a frame that never finished arriving.
+#[tokio::test]
+async fn a_stream_cut_inside_its_first_event_fails() {
+    let _environment = environment().await;
+    let mut buffer = String::from("data: {\"a\"");
+    let frames = take_frames(&mut buffer);
+
+    assert!(frames.is_empty(), "{frames:?}");
+
+    let adapter = keyed_adapter(&[]);
+    let err = adapter
+        .stream(&request(), &mut CollectingSink::default())
+        .await
+        .expect_err("the event never arrived");
+
+    assert!(matches!(err, LlmError::Protocol(ref message) if message == STREAM_CLOSED));
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// An adapter over canned frames, with the test credential in place. The caller
+/// holds the environment guard while it uses the adapter, and removes the
+/// variable when it is done.
+fn keyed_adapter(frames: &[&str]) -> DeepSeekAdapter {
+    std::env::set_var(TEST_API_KEY_ENV, "sk-test-key");
+    let config = DeepSeekConfig {
+        api_key_env: TEST_API_KEY_ENV.into(),
+        ..DeepSeekConfig::default()
+    };
+    let transport = Arc::new(ReplayTransport::new(frames.iter().copied()));
+    DeepSeekAdapter::new(config, transport)
 }
 
 /// TC-DS-CRED-1: with no key anywhere the call fails before any network I/O,
