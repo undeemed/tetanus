@@ -20,6 +20,7 @@
 //! color   ── policy: --color + environment + is-terminal → color on/off, charset, width
 //! theme   ── palette: Role → anstyle::Style, gated by that policy
 //! writer  ── Ui<W>: the only place a line is written; owns stream + theme + width
+//! progress ─ Progress<W>: the one status line, animated only at a terminal
 //! ```
 //!
 //! Landing in the following slices of this lane: the help-text surface, and
@@ -39,9 +40,11 @@
 //! keeps the presentation lane and the engine lane independently reviewable.
 
 pub mod color;
+pub mod progress;
 pub mod theme;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
+pub use progress::Progress;
 pub use theme::{Painted, Role, Theme};
 pub use writer::{buffered, Policy, Ui};
