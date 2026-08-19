@@ -6,6 +6,7 @@ members = [
   "crates/session",
   "crates/cli",
   "crates/protocol",
+  "crates/ui",
   "crates/turn",
 ]
 
@@ -22,7 +23,9 @@ anyhow = "1"
 thiserror = "2"
 async-trait = "0.1"
 tracing = "0.1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
+anstyle = "1"
+terminal_size = "0.4"
