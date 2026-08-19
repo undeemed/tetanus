@@ -159,6 +159,9 @@ pub enum StopReason {
     MaxSteps,
     /// `TurnEngine::cancel` asked the turn to stop at a step boundary.
     Cancelled,
+    /// The turn never ended: this reason is written by crash repair when a
+    /// later run finds the journal open. See [`crate::repair`].
+    Interrupted,
 }
 
 impl StopReason {
@@ -168,6 +171,7 @@ impl StopReason {
             StopReason::PreStepRejected => "pre-step-rejected",
             StopReason::MaxSteps => "max-steps",
             StopReason::Cancelled => "cancelled",
+            StopReason::Interrupted => "interrupted",
         }
     }
 }
