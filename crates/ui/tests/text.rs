@@ -8,7 +8,7 @@
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{fit, plain, truncate, visible_width, wrap, Charset};
+use tetanus_ui::{fit, light, plain, truncate, visible_width, wrap, Charset};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -136,6 +136,62 @@ fn a_painted_line_reads_back_as_what_it_draws() {
     assert_eq!(plain("\u{1b}[1mbold\u{1b}[0m"), "bold");
     assert_eq!(plain("\u{1b}[36mtool\u{1b}[0m echo"), "tool echo");
     assert_eq!(plain(""), "");
+}
+
+/// TC-UI-TEXT-11: every place a word is drawn on a plain line.
+/// Expected: each occurrence is wrapped in the mark, whatever case it was
+/// written in, and nothing else about the line changes - what the terminal
+/// draws, and how wide it draws it, are the same before and after. A mark that
+/// moved a column would move every line under it on the next frame.
+#[test]
+fn a_word_is_marked_everywhere_it_is_drawn() {
+    let line = "echo said Echo, and echoed";
+    let lit = light(line, "echo");
+
+    assert_eq!(lit.matches("\u{1b}[7m").count(), 3, "{lit:?}");
+    assert_eq!(lit.matches("\u{1b}[27m").count(), 3, "{lit:?}");
+    assert!(lit.starts_with("\u{1b}[7mecho\u{1b}[27m said"), "{lit:?}");
+    assert!(lit.contains("\u{1b}[7mEcho\u{1b}[27m,"), "{lit:?}");
+    assert_eq!(plain(&lit), line);
+    assert_eq!(visible_width(&lit), visible_width(line));
+}
+
+/// TC-UI-TEXT-12: a word drawn inside a line the theme has already painted.
+/// Expected: the mark closes with `27` and never with a full reset, so the
+/// colour the rest of the line is wearing survives it; and a match with a
+/// sequence inside it - a word half of which the theme coloured - is marked
+/// all the way through rather than up to that sequence.
+#[test]
+fn a_mark_does_not_end_the_colour_it_interrupts() {
+    let painted = "\u{1b}[36mtopic\u{1b}[0m turn/start";
+    let lit = light(painted, "turn");
+    assert!(lit.contains("\u{1b}[7mturn\u{1b}[27m/start"), "{lit:?}");
+    assert!(!lit.contains("\u{1b}[7mturn\u{1b}[0m"), "{lit:?}");
+    assert_eq!(plain(&lit), "topic turn/start");
+
+    // `tool` and `echo` are one word on the screen and two colours in memory.
+    let split = "\u{1b}[35mto\u{1b}[0mol";
+    let lit = light(split, "tool");
+    // The mark opens on the first letter, not before the colour that letter is
+    // drawn in: a mark placed ahead of a sequence marks nothing.
+    assert!(lit.starts_with("\u{1b}[35m\u{1b}[7mto"), "{lit:?}");
+    assert!(lit.ends_with("\u{1b}[27m"), "{lit:?}");
+    // Armed again after the reset in the middle, or the second half of the
+    // word would be drawn unmarked.
+    assert!(lit.contains("\u{1b}[0m\u{1b}[7mol"), "{lit:?}");
+    assert_eq!(plain(&lit), "tool");
+}
+
+/// TC-UI-TEXT-13: nothing to mark.
+/// Expected: the line back byte for byte. A renderer calls this on every line
+/// of a page, and the ones the search did not find must be the same bytes the
+/// frame before them held.
+#[test]
+fn a_line_with_nothing_to_mark_is_left_alone() {
+    let painted = "\u{1b}[1mturn/start\u{1b}[0m";
+    assert_eq!(light(painted, "tool"), painted);
+    assert_eq!(light(painted, ""), painted);
+    assert_eq!(light("", "echo"), "");
 }
 
 /// TC-UI-TEXT-14: what a terminal draws a character in, rather than how many
