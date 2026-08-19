@@ -90,10 +90,11 @@ The default adapter is a deterministic built-in mock, so a full turn needs no AP
 cargo run --bin tetanus -- run --prompt "run one full turn"
 ```
 
-It prints the event sequence the turn emitted, then the outcome:
+It prints the turn as a conversation, then where the journal went.
+`--trace` replaces that view with the raw event sequence:
 
 ```text
-   0     0  turn/start
+   0     1  turn/start
    1        agent/pre-step
    2     1  step/start
    3     2  user/message
@@ -118,6 +119,8 @@ The second is the journal sequence number, blank for the live extension points, 
 but never persisted.
 
 The session journal is append-only JSONL.
+Its first line is a `session/start` header naming the id, the provider, the model and the step
+budget, so a reader can open a journal nobody told them about.
 It lands at `sessions/turn.jsonl` under the current directory unless `--session <path>` says
 otherwise. Read it back with:
 
@@ -137,18 +140,23 @@ Without the key the command says so and stops before any network call.
 
 | Command | What it does |
 | --- | --- |
-| `tetanus run` | Run one turn and print the event sequence it emitted |
-| `tetanus replay <path>` | Read a session journal back |
+| `tetanus run` | Run one turn and print it as a conversation |
+| `tetanus replay <path>` | Read a session journal back, at once or `--live` |
+| `tetanus models` | List providers, the models they advertise, and what is reachable |
+| `tetanus tools` | List the tools an agent can call, and the arguments each takes |
 | `tetanus config` | Show resolved config with its provenance layer |
-| `tetanus info` | Print version and phase |
+| `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
 `tetanus run` flags: `--prompt <text>`, `--adapter mock|deepseek`, `--model <id>`,
-`--session <path>`, `--max-steps <n>`, `--verbose` (print each durable payload).
+`--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
+`--trace` (the raw sequence) with `--verbose` (each durable payload), and `--json`.
+`--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
+one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
 
 ## Workspace layout
 
-A Cargo workspace of six crates.
+A Cargo workspace of nine crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
@@ -157,6 +165,9 @@ A Cargo workspace of six crates.
 | `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, boot composition, tracer |
 | `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance |
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
+| `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
+| `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
+| `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |
 
 The binary is `tetanus`; the publishable umbrella crate is `tetanus-hardness`, because the bare

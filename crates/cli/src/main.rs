@@ -764,8 +764,18 @@ async fn run<W: std::io::Write>(
         }
     };
 
+    // The journal is the engine's to open. `session.create` writes the
+    // `session/start` header that makes the file self-describing - the model
+    // it ran under, and the id every other call takes - which is what lets a
+    // reader open a journal nobody told them about. The turn below still runs
+    // in this process; it moves behind `agent.prompt` in its own slice, and
+    // nothing here changes when it does.
+    let opened = session(&args.session, args.adapter.route(), &model, args.max_steps)
+        .await
+        .map_err(|err| fail(policy, &err))?;
+
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create("cli", &args.session, bus.clone())
+    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
         .map_err(|err| fail(policy, &journal_fault(&err, &args.session)))?;
 
     // Read the sequence with the same tracer the conformance suite uses.
@@ -859,6 +869,42 @@ async fn run<W: std::io::Write>(
 
     journal(out, &log);
     Ok(())
+}
+
+/// Open the journal this run writes to, through `session.create`.
+///
+/// The engine is built for this one call and dropped with it: it holds the
+/// journal open while it writes the header, and the turn opens the same file
+/// again to append to it. That is the seam this slice leaves - the call is the
+/// contract's, the turn under it is not yet.
+async fn session(
+    path: &std::path::Path,
+    provider: &str,
+    model: &str,
+    max_steps: u32,
+) -> Result<protocol::SessionInfo, RpcError> {
+    let engine = tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
+        // A named path is opened where it is, so the root is only what an
+        // unnamed session would have fallen back to. Naming the journal's own
+        // directory keeps the two answers the same.
+        sessions_root: path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        ..Default::default()
+    });
+    tetanus_protocol::methods::Engine::session_create(
+        &engine,
+        tetanus_protocol::methods::SessionCreateParams {
+            session_id: None,
+            path: Some(path.display().to_string()),
+            provider: Some(provider.to_string()),
+            model: Some(model.to_string()),
+            max_steps: Some(max_steps),
+        },
+    )
+    .await
 }
 
 /// Where the durable record went. The last thing a run says, however it ended,
