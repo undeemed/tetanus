@@ -119,6 +119,7 @@ fn nothing_overruns_the_width_cap() {
         vec!["--help"],
         vec!["run", "--help"],
         vec!["replay", "--help"],
+        vec!["models", "--help"],
     ] {
         for line in help(&args).lines() {
             assert!(
@@ -203,7 +204,7 @@ fn every_example_model_is_offered_by_its_adapter() {
 /// the column that made the block scannable in the first place.
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
-    for (args, count) in [(vec!["--help"], 6), (vec!["run", "--help"], 6)] {
+    for (args, count) in [(vec!["--help"], 7), (vec!["run", "--help"], 6)] {
         let page = help_at("80", &args);
         let examples = block(&page, "Examples:");
 

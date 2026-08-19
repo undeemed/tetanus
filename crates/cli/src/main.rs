@@ -2,7 +2,7 @@
 
 mod render;
 
-use tetanus_protocol::methods::{AgentPromptResult, SessionEventsResult};
+use tetanus_protocol::methods::{AgentPromptResult, ModelCatalogResult, SessionEventsResult};
 use tetanus_protocol::types as protocol;
 
 use std::path::PathBuf;
@@ -52,6 +52,12 @@ enum Cmd {
     Run(RunArgs),
     /// Show resolved config with provenance
     Config,
+    /// List model providers, the models they advertise, and what is reachable
+    Models {
+        /// Print the call's result as JSON: one object, per contract §4.7
+        #[arg(long)]
+        json: bool,
+    },
     /// Replay a session journal
     Replay {
         /// Path to a JSONL journal a previous run wrote
@@ -119,6 +125,17 @@ enum AdapterChoice {
     Mock,
     /// DeepSeek chat completions. Needs `DEEPSEEK_API_KEY`.
     Deepseek,
+}
+
+impl AdapterChoice {
+    /// The provider route this choice names. `tetanus models` prints these,
+    /// and `--adapter` accepts them, so what a user reads is what they type.
+    fn route(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::Deepseek => "deepseek",
+        }
+    }
 }
 
 /// A failure already reported to the user, carrying the status to exit with.
@@ -198,6 +215,15 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             let mut config = tetanus_config::Config::default();
             config.set("log.level", "info".into(), tetanus_config::Layer::Default);
             render::config::render(&mut out, &settings(&config)).ok();
+            Ok(())
+        }
+        Cmd::Models { json } => {
+            let catalog = providers();
+            if json {
+                return render::json::line(&mut out, &catalog)
+                    .map_err(|err| report(policy, &err.to_string(), None));
+            }
+            render::catalog::models(&mut out, &catalog).ok();
             Ok(())
         }
         Cmd::Replay {
@@ -291,10 +317,10 @@ fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
     }
 }
 
-/// Carry a stop reason across. The third and last crossing, and the one place
-/// neither enum contains the other: the contract names reasons only a served
-/// call can produce, and the engine names `Interrupted`, which the contract
-/// carries as a value of the growable `StopReason` rather than as a variant.
+/// Carry a stop reason across. The one crossing where neither enum contains
+/// the other: the contract names reasons only a served call can produce, and
+/// the engine names `Interrupted`, which the contract carries as a value of
+/// the growable `StopReason` rather than as a variant.
 ///
 /// The match has no wildcard arm on purpose. A reason the engine adds stops
 /// this crate from compiling until someone decides how it crosses, which is
@@ -316,9 +342,52 @@ fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
     }
 }
 
+/// Every provider this build registers, in the contract's shape.
+///
+/// One list, read by `tetanus models` and by the turn that picks a default
+/// model, so the page cannot advertise a catalog the run does not use. It
+/// answers `catalog.models` and moves behind the engine when that call is
+/// served; nothing in `render` changes when it does.
+///
+/// Availability is read here and not cached: a user who exports the key and
+/// runs the command again must see the answer change.
+fn providers() -> ModelCatalogResult {
+    let deepseek = deepseek::DeepSeekConfig::default();
+    let keyed = !std::env::var(&deepseek.api_key_env)
+        .unwrap_or_default()
+        .is_empty();
+    ModelCatalogResult {
+        providers: vec![
+            protocol::ProviderDescriptor {
+                provider: AdapterChoice::Mock.route().into(),
+                models: vec![mock::MODEL.into()],
+                credential_env: None,
+                available: true,
+            },
+            protocol::ProviderDescriptor {
+                provider: AdapterChoice::Deepseek.route().into(),
+                models: deepseek.models.clone(),
+                credential_env: Some(deepseek.api_key_env.clone()),
+                available: keyed,
+            },
+        ],
+    }
+}
+
+/// What one adapter advertises, taken from the list above rather than from a
+/// second copy of it.
+fn advertised(choice: AdapterChoice) -> Vec<String> {
+    providers()
+        .providers
+        .into_iter()
+        .find(|provider| provider.provider == choice.route())
+        .map(|provider| provider.models)
+        .unwrap_or_default()
+}
+
 /// Carry resolved config across to the contract shape the view reads.
 ///
-/// The second and last crossing, and the same story as [`boundary`]: the
+/// The same story as [`boundary`]: the
 /// layers agree one for one, so this is a copy. It goes when the engine serves
 /// `config.dump`, and `render::config` does not notice.
 fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
@@ -535,7 +604,7 @@ async fn run<W: std::io::Write>(
     args: RunArgs,
 ) -> Result<(), Reported> {
     let (adapter, catalog): (Arc<dyn LlmAdapter>, Vec<String>) = match args.adapter {
-        AdapterChoice::Mock => (Arc::new(mock::MockAdapter::new()), vec![mock::MODEL.into()]),
+        AdapterChoice::Mock => (Arc::new(mock::MockAdapter::new()), advertised(args.adapter)),
         AdapterChoice::Deepseek => {
             let config = deepseek::DeepSeekConfig::default();
             if std::env::var(&config.api_key_env)
@@ -548,10 +617,9 @@ async fn run<W: std::io::Write>(
                     Some("run with `--adapter mock` for an offline turn"),
                 ));
             }
-            let catalog = config.models.clone();
             (
                 Arc::new(deepseek::DeepSeekAdapter::with_http(config)),
-                catalog,
+                advertised(args.adapter),
             )
         }
     };
