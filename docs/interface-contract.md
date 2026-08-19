@@ -382,7 +382,8 @@ The conformance cases in §6 hold these rules to their word.
 
 ## 6. Verification
 
-The cases live in `crates/protocol/tests/wire.rs` and run offline.
+The cases run offline.
+Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`.
 
 | Clause | Case |
 | --- | --- |
@@ -398,6 +399,10 @@ The cases live in `crates/protocol/tests/wire.rs` and run offline.
 | §4.3.1 every durable payload parses from the journal shape | TC-PROTO-10 |
 | §4.3.1 an unknown type parses to `None` and keeps its data | TC-PROTO-11 |
 | §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
+| §4.3.1 every event the engine writes parses, and all ten types appear | TC-CONTRACT-1 |
+| §4.3.1 the engine's own `tool/result` names and cites its call | TC-CONTRACT-2 |
+| §4.3.1 `TurnSummary.content` restates the last `assistant/message` | TC-CONTRACT-3 |
+| §4.3.1 `assistant/chunk` names the step it belongs to | TC-CONTRACT-4 |
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
 | §4.1 the id a server answers when it cannot read one | TC-PROTO-15 |
@@ -465,3 +470,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Settles which type a streaming `--json` subcommand prints (§4.7, issue #56): the `SessionEvent` out of the push, not the `SessionEventPush` envelope. Wording only; it is what the presentation lane already shipped, and it keeps the stream byte-identical to the journal. |
 | 1.0 | Names what `session.create` does with a journal a crash left mid-turn (§4.4.4): it appends the missing `tool/result`, `step/end` and `turn/end` closers before answering, so `last_seq` may jump and `stop_reason: "interrupted"` may appear. No type changes: `StopReason` is growable by §7.5, and the closers use payloads §4.3.1 already fixes. |
 | 1.0 | States the guarantee behind a session id (§4.7, issue #67): an id is a fact of the journal's `session/start` line and not of its file name, so every id `session.list` reports resolves for the other `session.*` calls. Wording only, and no type changes: it names which of two readings the engine is held to, and the engine defect that resolved the other way is fixed on its own. |
+| 1.0 | No boundary change. Records in §6 that §4.3.1 is now verified against the engine's own output, not only against the boundary type: `crates/engine/tests/contract_events.rs` runs a real turn and parses every event it wrote (TC-CONTRACT-1..4). A renamed durable field used to fail no test. |
