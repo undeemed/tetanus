@@ -749,6 +749,63 @@ fn a_corrupt_journal_names_the_line_it_stopped_at() {
     assert!(err.contains("--raw"), "{err}");
 }
 
+/// TC-CLI-ERR-8: the note from TC-CLI-ERR-6, taken at its word.
+/// Expected: `--raw` on the very journal the cooked view refused prints the
+/// line and exits 0. A note that names a command has to name one that works;
+/// before this, `--raw` failed the same way and the advice was a dead end.
+#[test]
+fn the_raw_view_reads_the_journal_the_note_sends_you_to() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("bad.jsonl"),
+        "{\"type\":\"turn/start\",\"seq\":7,\"time\":1,\"data\":{}}\n",
+    )
+    .expect("write");
+
+    let refused = run(dir.path(), &["replay", "bad.jsonl"], &[]);
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("--raw"), "{}", stderr(&refused));
+
+    let out = run(dir.path(), &["replay", "bad.jsonl", "--raw"], &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "   7  turn/start           {}\n");
+}
+
+/// TC-CLI-ERR-9: a journal with one line that is not an event at all.
+/// Expected: exit 1 and `LogCorrupt`, but the page is still printed - the
+/// lines before the bad one, the bad one marked and quoted under its number,
+/// and the lines after it. The failure goes to stderr with a note that does
+/// not send the user back to the view they are already in.
+#[test]
+fn the_raw_view_shows_a_broken_line_where_it_is() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("half.jsonl"),
+        "{\"type\":\"turn/start\",\"seq\":0,\"time\":1,\"data\":{}}\n\
+         {oh no\n\
+         {\"type\":\"turn/end\",\"seq\":2,\"time\":3,\"data\":{}}\n",
+    )
+    .expect("write");
+
+    let out = run(dir.path(), &["replay", "half.jsonl", "--raw"], &[]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        concat!(
+            "   0  turn/start           {}\n",
+            "   ?  unreadable           line 2: {oh no\n",
+            "   2  turn/end             {}\n",
+        )
+    );
+    let err = stderr(&out);
+    assert!(err.contains("not readable at line 2"), "{err}");
+    assert!(
+        !err.contains("--raw"),
+        "the note sends the user back to the view they ran:\n{err}"
+    );
+}
+
 /// TC-CLI-ERR-7: a turn that ends normally.
 /// Expected: exit 0. The statuses above are only worth anything if success is
 /// still zero, and a renderer that writes to a closed pipe must not turn a

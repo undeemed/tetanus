@@ -85,7 +85,7 @@ enum Cmd {
         /// Path to a JSONL journal a previous run wrote
         #[arg(value_name = "PATH")]
         path: String,
-        /// Print one line per durable event instead of the timeline
+        /// Print one line per journal line, including any the timeline refuses
         #[arg(long)]
         raw: bool,
         /// Play the turn back one event at a time, as it happened
@@ -295,21 +295,28 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             think,
             json,
         } => {
+            // `--raw` is the view for a journal the reader below refuses,
+            // so it opens the file itself. Asking for a log first would make
+            // the one command that reads a broken journal fail on exactly the
+            // journals it exists for.
+            if raw {
+                let lines = journal_lines(&path).map_err(|err| {
+                    fail(policy, &journal_fault(&err, std::path::Path::new(&path)))
+                })?;
+                render::raw::render(&mut out, &lines).ok();
+                return match render::raw::unreadable(&lines) {
+                    None => Ok(()),
+                    Some(line) => {
+                        let mut err = policy.stderr();
+                        err.error(&render::fault::corrupt_at(line as u64)).ok();
+                        err.note("that line is shown above; repair or remove it")
+                            .ok();
+                        Err(Reported(ErrorCode::LogCorrupt.exit_status()))
+                    }
+                };
+            }
             let events = tetanus_session::replay(&path)
                 .map_err(|err| fail(policy, &journal_fault(&err, std::path::Path::new(&path))))?;
-            if raw {
-                let theme = *out.theme();
-                for event in events {
-                    let line = format!(
-                        "{:>4}  {:<20} {}",
-                        theme.paint(Role::Seq, &event.seq.to_string()),
-                        theme.paint(Role::Topic, &event.ty),
-                        event.data
-                    );
-                    out.line(&line).ok();
-                }
-                return Ok(());
-            }
             let events = boundary(events);
             if json {
                 // `session.events` answers with one page. A journal read from
@@ -539,6 +546,26 @@ fn fail(policy: &Policy, error: &RpcError) -> Reported {
         err.note(&hint).ok();
     }
     Reported(render::fault::status(error))
+}
+
+/// Read a journal as text, one line at a time.
+///
+/// Only opening the file can fail here. A line that is not an event is the
+/// raw view's to show under its number, not this reader's to refuse - that
+/// judgement belongs to `tetanus_session::replay`, which the cooked view
+/// uses and this one deliberately does not.
+fn journal_lines(path: &str) -> Result<Vec<render::raw::Line>, tetanus_session::SessionError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(number, line)| render::raw::parse(number + 1, line))
+        .collect())
 }
 
 /// Carry a journal failure across to the contract's error view. A corrupt

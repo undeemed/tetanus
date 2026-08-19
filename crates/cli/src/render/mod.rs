@@ -12,6 +12,7 @@ pub mod help;
 pub mod info;
 pub mod json;
 pub mod live;
+pub mod raw;
 pub mod replay;
 pub mod sessions;
 pub mod timeline;

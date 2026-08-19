@@ -54,7 +54,7 @@ pub fn wording(error: &RpcError) -> (String, Option<String>) {
         ),
         ErrorCode::LogCorrupt => (
             match number(error, "line") {
-                Some(line) => format!("the journal is not readable at line {line}"),
+                Some(line) => corrupt_at(line),
                 None => error.message.clone(),
             },
             Some("read what is before it with `tetanus replay <path> --raw`".into()),
@@ -134,6 +134,16 @@ fn field(error: &RpcError, name: &str) -> Option<String> {
 }
 
 /// One number out of the error's `data`.
+/// How a corrupt journal reads, wherever it is reported.
+///
+/// The raw view reports the same failure with a note of its own - it cannot
+/// send a user to `--raw` when `--raw` is what printed the line - so the
+/// sentence lives here and not inside the match above, and the two reports
+/// cannot drift into two vocabularies for one file.
+pub fn corrupt_at(line: u64) -> String {
+    format!("the journal is not readable at line {line}")
+}
+
 fn number(error: &RpcError, name: &str) -> Option<u64> {
     error.data.as_ref()?.get(name)?.as_u64()
 }
