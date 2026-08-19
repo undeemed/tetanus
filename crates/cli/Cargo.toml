@@ -26,3 +26,7 @@ tetanus-ui = { path = "../ui" }
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
+futures-util.workspace = true
+# The WebSocket half of `tetanus serve`: the suite dials the socket the
+# binary bound, so `connect` is the client side of the handshake.
+tokio-tungstenite = { workspace = true, features = ["connect"] }

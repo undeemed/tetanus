@@ -4,14 +4,18 @@
 //! Features tested: that a peer's frame is answered on stdout; that stdout
 //! carries frames and nothing else, which is the property the whole
 //! subcommand exists to hold; that stderr carries the page and nothing else,
-//! pipe or no pipe; that a peer who says nothing still gets a clean exit; and
-//! that `--dir` reaches the banner.
+//! pipe or no pipe; that a peer who says nothing still gets a clean exit; that
+//! `--dir` reaches the banner; and, for `--listen`, that the banner names the
+//! port that was actually bound, that a peer dialling it completes the
+//! handshake, and that an address which cannot be bound announces no server.
 //!
 //! Features NOT tested here: the carrier's own behaviour - framing,
 //! concurrency, push ordering - which is `tetanus-rpc`'s, and the wording of
 //! the banner, which is asserted against a buffer in `render::serve`.
 //!
-//! Environmental needs: none. No case needs a key, a network or a terminal.
+//! Environmental needs: a loopback socket on a port the operating system
+//! chooses, for the two `--listen` cases. No case needs a key, an outbound
+//! network or a terminal.
 //!
 //! Procedure: every case spawns the binary with all three streams piped,
 //! writes whole frames, reads whole lines, and closes stdin to end the run.
@@ -21,7 +25,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Output, Stdio};
 
 const HELLO: &str = r#"{"jsonrpc":"2.0","id":1,"method":"rpc.hello","params":{"protocol_version":"1.0","client":{"name":"probe","version":"0.1.0"}}}"#;
 
@@ -182,4 +186,130 @@ fn the_banner_names_the_directory_that_was_asked_for() {
     let said = stderr(&out);
 
     assert!(said.contains("sessions  elsewhere/journals"), "{said}");
+}
+
+/// A WebSocket server on a port the operating system chooses, read far enough
+/// to learn which one.
+///
+/// The address has to come from the banner rather than from the test, because
+/// asking for port 0 is the only way to run this suite on a machine that is
+/// already using whatever port the test would otherwise have picked.
+fn listening(dir: &Path) -> (Child, BufReader<ChildStderr>, String) {
+    let mut server = serve(dir, &["--listen", "127.0.0.1:0"]);
+    let mut page = BufReader::new(server.stderr.take().expect("stderr is piped"));
+    let mut address = None;
+    let mut line = String::new();
+    while address.is_none() {
+        line.clear();
+        if page.read_line(&mut line).expect("stderr reads") == 0 {
+            break;
+        }
+        address = line
+            .strip_prefix("address ")
+            .map(|said| said.trim().to_string());
+    }
+    match address {
+        Some(address) => (server, page, address),
+        // Ended rather than left running: a panic here would otherwise leave
+        // a process holding a port for the rest of the suite.
+        None => {
+            let _ = server.kill();
+            let _ = server.wait();
+            panic!("the banner never named an address");
+        }
+    }
+}
+
+/// Dial the socket, send one frame, and return the first frame that comes
+/// back.
+fn over_websocket(address: &str, frame: &str) -> String {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .expect("the server accepts a handshake");
+            socket
+                .send(Message::text(frame))
+                .await
+                .expect("the peer writes");
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .expect("the server answers")
+                    .expect("a frame");
+                if let Message::Text(text) = message {
+                    return text.to_string();
+                }
+            }
+        })
+}
+
+/// Ask the process to stop the way its own banner said to, and collect the
+/// run.
+fn interrupt(server: Child, page: BufReader<ChildStderr>) -> (Output, String) {
+    let killed = Command::new("kill")
+        .args(["-INT", &server.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(killed.success(), "the interrupt was not delivered");
+    let mut rest = String::new();
+    let mut page = page;
+    while page.read_line(&mut rest).expect("stderr reads") > 0 {}
+    let out = server.wait_with_output().expect("the server exits");
+    (out, rest)
+}
+
+/// TC-CLI-SERVE-6: the WebSocket carrier, end to end through the binary.
+/// Expected: the banner names the port that was actually bound, a peer
+/// dialling that port completes the handshake, and the interrupt the banner
+/// named ends the process with status 0 and a closing line. Contract §4.7
+/// says `tetanus serve` hosts both carriers; this is the case that says the
+/// second one is reachable from the command line and not only from the crate.
+#[test]
+fn the_websocket_carrier_answers_on_the_port_it_bound() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (server, page, address) = listening(dir.path());
+
+    assert!(
+        address.starts_with("127.0.0.1:") && !address.ends_with(":0"),
+        "the banner named `{address}`, which nobody can connect to"
+    );
+
+    let answered = over_websocket(&address, HELLO);
+    let frame: serde_json::Value = serde_json::from_str(&answered).expect("a JSON frame");
+    assert_eq!(frame["id"], 1, "{answered}");
+    assert_eq!(frame["result"]["protocol_version"], "1.0", "{answered}");
+
+    let (out, rest) = interrupt(server, page);
+    assert!(out.status.success(), "{rest}");
+    assert!(
+        rest.contains("interrupted, so the server stopped"),
+        "no closing line:\n{rest}"
+    );
+    assert_eq!(out.stdout, b"", "the WebSocket carrier wrote to stdout");
+}
+
+/// TC-CLI-SERVE-7: an address that cannot be bound.
+/// Expected: no banner, the address in the message, and the exit status §4.5
+/// gives `Io`. Announcing a server and then failing to start it is the one
+/// outcome a supervisor cannot recover from, because its log says the server
+/// came up.
+#[test]
+fn an_address_that_cannot_be_bound_never_announces_a_server() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = serve(dir.path(), &["--listen", "1.2.3.4:80"])
+        .wait_with_output()
+        .expect("the binary exits");
+    let said = String::from_utf8(out.stderr).expect("utf-8");
+
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.starts_with("error: 1.2.3.4:80: "), "{said}");
+    assert!(!said.contains("tetanus serving"), "{said}");
 }
