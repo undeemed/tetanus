@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  conformance:
+    name: build + conformance suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: format
+        run: cargo fmt --all --check
+      - name: lint
+        run: cargo clippy --workspace --all-targets
+      - name: build
+        run: cargo build --workspace
+      # The merge gate. No API key is set, so every case runs offline.
+      - name: test
+        run: cargo test --workspace
