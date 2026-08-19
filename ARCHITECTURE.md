@@ -198,6 +198,11 @@ Two adapters ship:
   network. Credentials are referenced by environment variable name; config never carries a literal
   key.
 
+Only the `[DONE]` sentinel finishes a stream.
+One that stops before it fails as `PROTOCOL` instead of returning what arrived, because half a message
+read as a whole answer is a wrong answer rather than a short one, and nothing after the sentinel is
+decoded.
+
 Every failure carries a stable code (`LlmError::code`), and
 [crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs) decides from that code whether another
 attempt is worth making and how long to wait first.

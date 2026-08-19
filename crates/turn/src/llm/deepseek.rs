@@ -28,6 +28,19 @@ pub const BASE_URL_ENV: &str = "DEEPSEEK_BASE_URL";
 /// from a tool that never ran.
 pub const EMPTY_TOOL_RESULT: &str = "(no output)";
 
+/// What a stream that ends without the `[DONE]` sentinel is reported as.
+///
+/// The provider closes every complete stream with `[DONE]`. A stream that ends
+/// without it was cut short: what arrived is not a short answer, it is an
+/// unfinished one, and returning it would end the turn on half a message.
+///
+/// It is a `PROTOCOL` failure and not a `TRANSPORT` one, which keeps it outside
+/// the default retryable set. The attempt already streamed chunks into the sink
+/// and the journal, so repeating it is not free the way a refused connection
+/// is. Upstream keeps its own `STREAM_CLOSED` out of the same set for the same
+/// reason.
+pub const STREAM_CLOSED: &str = "the stream ended without the [DONE] sentinel";
+
 /// The finish reason a stream that never states one is reported as. The
 /// provider omits the field on some plain completions, and an empty string
 /// downstream reads as a turn that ended for no stated reason.
@@ -133,6 +146,9 @@ impl LlmAdapter for DeepSeekAdapter {
             for chunk in decoder.push(&frame?)? {
                 sink.chunk(chunk).await?;
             }
+        }
+        if !decoder.saw_done {
+            return Err(LlmError::Protocol(STREAM_CLOSED.to_string()));
         }
         let (chunks, response) = decoder.finish();
         for chunk in chunks {
@@ -250,13 +266,24 @@ pub struct StreamDecoder {
     calls: BTreeMap<u64, PartialCall>,
     finish_reason: String,
     usage: Option<Usage>,
+    /// Whether the terminating `[DONE]` sentinel arrived. A stream that ends
+    /// without it ended early, whatever it managed to say first.
+    saw_done: bool,
 }
 
 impl StreamDecoder {
     /// Feed one SSE `data:` payload and get the chunks it produced.
+    ///
+    /// `[DONE]` ends the answer. A payload after it is not part of the answer,
+    /// so it decodes to nothing rather than appending to a message the provider
+    /// already finished.
     pub fn push(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmError> {
         let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
+        if data == "[DONE]" {
+            self.saw_done = true;
+            return Ok(Vec::new());
+        }
+        if self.saw_done || data.is_empty() {
             return Ok(Vec::new());
         }
         let frame: serde_json::Value = serde_json::from_str(data)
