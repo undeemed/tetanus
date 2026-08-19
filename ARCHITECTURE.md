@@ -81,10 +81,10 @@ Four primitives in `tetanus-core`, each one small enough to read in a sitting.
 
 | Primitive | Source | What it guarantees |
 | --- | --- | --- |
-| `Registry` / `Plugin` | [crates/core/src/registry.rs](crates/core/src/registry.rs) | Plugins mount in topological dependency order. Cycles, duplicates, and missing dependencies are rejected at boot, naming the plugin. |
+| `Registry` / `Plugin` | [crates/core/src/registry.rs](crates/core/src/registry.rs) | Plugins mount in topological dependency order. Cycles, duplicates, and missing dependencies are rejected at boot, naming the plugin. A plugin that fails to start rolls the pass back, unmounting dependents before dependencies. |
 | `Services` / `Service` | [crates/core/src/services.rs](crates/core/src/services.rs) | A capability is keyed by type, with a human-readable `KEY`. Exactly one provider per definition; a second is a wiring error. Consumers resolve by type and never import an implementation. |
 | `EventBus` / `Event` | [crates/core/src/events.rs](crates/core/src/events.rs) | An event declares its dispatch mode as a `const`. Registering or dispatching through another mode panics rather than silently doing nothing. |
-| `EffectHandle` | [crates/core/src/effects.rs](crates/core/src/effects.rs) | Every registration returns a handle; dropping it unwinds the registration. `Context` owns its handles and unwinds them in reverse order when dropped. |
+| `EffectHandle` / `EffectScope` | [crates/core/src/effects.rs](crates/core/src/effects.rs) | Every registration returns a handle; dropping it unwinds the registration. A scope holds several and unwinds them newest first, nests inside another scope as one handle, and finishes the unwind even if an undo panics. `Context` is a scope's owner, so a plugin's wiring dies with the context. |
 
 `Context` ([crates/core/src/context.rs](crates/core/src/context.rs)) is what a boot pass hands each
 plugin: the service registry, the bus, and the owned effect handles.
@@ -239,8 +239,7 @@ not protocol-level.
 
 ## 7. Not built yet
 
-Layered config recompose at run time, reversible effects beyond registration handles, the full tool
-pipeline (permissions, concurrency, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM
-plugin host.
+Layered config recompose at run time, live subtree remount, the full tool pipeline (permissions,
+concurrency, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.

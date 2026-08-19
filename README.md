@@ -58,7 +58,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming | More adapters |
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
-| Effects | RAII handles: dropping a registration unwinds it | Reversible effects beyond registration, live subtree remount |
+| Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
 | Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
