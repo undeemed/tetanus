@@ -10,6 +10,10 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+
+use common::without_duration;
+
 fn run(dir: &Path, args: &[&str], key: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tetanus"));
     cmd.current_dir(dir).args(args);
@@ -83,8 +87,11 @@ fn runs_one_full_turn_offline() {
 }
 
 /// TC-CLI-2: the same run is reproducible, so two runs print the same turn.
-/// Expected: byte-identical stdout. Each run gets its own directory and the
-/// same journal name, so even the path the summary echoes is the same.
+/// Expected: byte-identical stdout, once how long each run took is dropped.
+/// Each run gets its own directory and the same journal name, so even the path
+/// the summary echoes is the same. The wall clock is the one field a repeated
+/// run does not owe the first one, and a loaded machine can push one run past
+/// the second the closing line starts reporting at.
 #[test]
 fn the_offline_run_is_reproducible() {
     let args = [
@@ -97,7 +104,9 @@ fn the_offline_run_is_reproducible() {
     let first = tempfile::tempdir().expect("temp dir");
     let second = tempfile::tempdir().expect("temp dir");
 
-    let stdout = |dir: &Path| String::from_utf8(run(dir, &args, None).stdout).expect("utf-8");
+    let stdout = |dir: &Path| {
+        without_duration(&String::from_utf8(run(dir, &args, None).stdout).expect("utf-8"))
+    };
 
     assert_eq!(stdout(first.path()), stdout(second.path()));
 }

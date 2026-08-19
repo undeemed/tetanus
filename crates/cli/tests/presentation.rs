@@ -18,6 +18,10 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+mod common;
+
+use common::without_duration;
+
 const ESC: &str = "\u{1b}";
 
 /// Run the binary with the colour environment stated, never inherited.
@@ -115,6 +119,9 @@ fn the_environment_decides_a_piped_run() {
 /// Expected: the bytes of a piped run are identical whether colour was
 /// declined by the flag, by `NO_COLOR`, or by the pipe itself. Colour is never
 /// "the same text with the codes taken out"; it is a separate rendering.
+/// How long each run took is not part of that claim and is dropped before the
+/// comparison, because a loaded runner can push one of three otherwise
+/// identical runs past the second the closing line starts reporting at.
 #[test]
 fn plain_output_is_byte_identical_however_it_was_declined() {
     // One journal per invocation, in a directory of its own: a run's sequence
@@ -123,9 +130,9 @@ fn plain_output_is_byte_identical_however_it_was_declined() {
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let args = &["run", "-p", "same in, same out", "--session", "j.jsonl"];
 
-    let by_pipe = stdout(&run(dirs[0].path(), args, &[]));
-    let by_env = stdout(&run(dirs[1].path(), args, &[("NO_COLOR", "1")]));
-    let by_flag = stdout(&run(
+    let by_pipe = without_duration(&stdout(&run(dirs[0].path(), args, &[])));
+    let by_env = without_duration(&stdout(&run(dirs[1].path(), args, &[("NO_COLOR", "1")])));
+    let by_flag = without_duration(&stdout(&run(
         dirs[2].path(),
         &[
             "run",
@@ -137,7 +144,7 @@ fn plain_output_is_byte_identical_however_it_was_declined() {
             "j.jsonl",
         ],
         &[],
-    ));
+    )));
 
     assert_eq!(by_pipe, by_env);
     assert_eq!(by_pipe, by_flag);
@@ -209,7 +216,9 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
 /// Expected: the timeline, not the raw event dump - the prompt under `you`,
 /// the answer under `ai`, and the closing line, which reports what the two
 /// steps of the mock turn were billed. `--raw` still gives the dump, so
-/// nothing that scripted against it is broken.
+/// nothing that scripted against it is broken. The journal here carries a real
+/// run's timestamps, so the closing line's wall clock is dropped before the
+/// line is matched; TC-CLI-TL-13 asserts that field against fixed ones.
 #[test]
 fn replay_reads_as_a_conversation() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -219,7 +228,7 @@ fn replay_reads_as_a_conversation() {
         &[],
     );
 
-    let told = stdout(&run(dir.path(), &["replay", "j.jsonl"], &[]));
+    let told = without_duration(&stdout(&run(dir.path(), &["replay", "j.jsonl"], &[])));
     assert!(
         told.starts_with("\nturn 1\n  step 1\n  you   echo this\n"),
         "{told}"
