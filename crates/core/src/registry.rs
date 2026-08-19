@@ -111,15 +111,57 @@ impl Registry {
 
     /// Mount every plugin in dependency order, so a consumer always resolves a
     /// service its provider already installed.
+    ///
+    /// Boot is transactional: a plugin that fails to start rolls the pass back,
+    /// stopping the plugins already mounted, dependents first. A half-mounted
+    /// registry is worse than none, because the caller sees an error and the
+    /// process keeps whatever the successful plugins installed.
+    ///
+    /// The plugin that failed is not stopped. It never finished starting, so
+    /// only it knows what it had done by then, and undoing that is its own
+    /// `start` reporting an error cleanly.
     pub fn start_all(&self, ctx: &mut Context) -> Result<Vec<PluginId>, RegistryError> {
         let order: Vec<PluginId> = self.start_order()?.into_iter().cloned().collect();
+        let mut started: Vec<PluginId> = Vec::new();
         for id in &order {
             let plugin = self.plugins.get(id).expect("id came from this registry");
-            plugin.start(ctx).map_err(|source| RegistryError::Start {
-                id: id.clone(),
-                source,
-            })?;
+            if let Err(source) = plugin.start(ctx) {
+                for (id, error) in self.stop_each(started.iter().rev()) {
+                    tracing::error!(%error, plugin = %id.0, "a plugin failed to stop while boot rolled back");
+                }
+                return Err(RegistryError::Start {
+                    id: id.clone(),
+                    source,
+                });
+            }
+            started.push(id.clone());
         }
         Ok(order)
+    }
+
+    /// Unmount every plugin, dependents before dependencies: the reverse of
+    /// [`Registry::start_all`], for the same reason an effect scope unwinds
+    /// newest first.
+    ///
+    /// Returns what failed instead of stopping at the first fault, so one
+    /// plugin that cannot unmount does not strand every plugin behind it.
+    pub fn stop_all(&self) -> Result<Vec<(PluginId, crate::effects::EffectError)>, RegistryError> {
+        let order: Vec<PluginId> = self.start_order()?.into_iter().cloned().collect();
+        Ok(self.stop_each(order.iter().rev()))
+    }
+
+    /// Stop the named plugins in the order given, collecting what failed.
+    fn stop_each<'a>(
+        &self,
+        ids: impl Iterator<Item = &'a PluginId>,
+    ) -> Vec<(PluginId, crate::effects::EffectError)> {
+        let mut faults = Vec::new();
+        for id in ids {
+            let plugin = self.plugins.get(id).expect("id came from this registry");
+            if let Err(error) = plugin.stop() {
+                faults.push((id.clone(), error));
+            }
+        }
+        faults
     }
 }

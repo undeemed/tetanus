@@ -9,7 +9,7 @@ pub mod registry;
 pub mod services;
 
 pub use context::Context;
-pub use effects::{EffectError, EffectHandle};
+pub use effects::{EffectError, EffectHandle, EffectScope};
 pub use events::{BoxFuture, DispatchMode, Event, EventBus, Next, Terminal};
 pub use registry::{Plugin, PluginId, Registry, RegistryError};
 pub use services::{Service, ServiceError, Services};

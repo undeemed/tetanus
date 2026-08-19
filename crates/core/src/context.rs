@@ -1,7 +1,7 @@
 //! The shared context a boot pass hands to every plugin: the service registry,
 //! the event bus, and the effect handles that keep the wiring alive.
 
-use crate::effects::EffectHandle;
+use crate::effects::{EffectHandle, EffectScope};
 use crate::events::EventBus;
 use crate::services::Services;
 
@@ -9,7 +9,7 @@ use crate::services::Services;
 pub struct Context {
     pub services: Services,
     pub bus: EventBus,
-    effects: Vec<EffectHandle>,
+    effects: EffectScope,
 }
 
 impl Context {
@@ -18,15 +18,10 @@ impl Context {
     }
 
     /// Hold a registration for the lifetime of this context. Dropping the
-    /// context unwinds every effect in reverse registration order.
+    /// context unwinds every effect, newest first: the scope owns that order,
+    /// so the context does not restate it.
     pub fn keep(&mut self, effect: EffectHandle) {
-        self.effects.push(effect);
-    }
-}
-
-impl Drop for Context {
-    fn drop(&mut self) {
-        while self.effects.pop().is_some() {}
+        self.effects.keep(effect);
     }
 }
 
@@ -37,7 +32,7 @@ impl Context {
         Self {
             services: Services::new(),
             bus,
-            effects: Vec::new(),
+            effects: EffectScope::new(),
         }
     }
 }
