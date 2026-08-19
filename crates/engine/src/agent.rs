@@ -1,4 +1,4 @@
-//! The agent runtime: `agent.prompt` and `agent.status`.
+//! The agent runtime: `agent.prompt`, `agent.status` and `agent.interrupt`.
 //!
 //! A prompt runs the documented turn flow on the session's own log and bus,
 //! so every durable fact reaches subscribers as a `session/event` push while
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tetanus_protocol::methods::{
-    AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
+    Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
@@ -169,6 +169,18 @@ impl Runtime {
             last_number(&events, topic::TURN_START, "turn"),
             last_number(&events, topic::STEP_START, "step").map(|step| step as u32),
         )
+    }
+
+    /// Ask a running turn to stop at its next step boundary. A session with
+    /// no turn in flight answers `ok: false`: there was nothing to stop, and
+    /// two callers racing to interrupt one turn is not a fault.
+    pub fn interrupt(&self, sessions: &SessionStore, session_id: &str) -> Result<Ack, RpcError> {
+        let session = sessions.open(session_id)?;
+        let id = &session.header.session_id;
+        let agent = self.agents.lock().expect("agents").get(id).cloned();
+        let asked =
+            agent.is_some_and(|agent| agent.busy.load(Ordering::Acquire) && agent.engine.cancel());
+        Ok(Ack { ok: asked })
     }
 
     fn is_busy(&self, session_id: &str) -> bool {
