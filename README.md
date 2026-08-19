@@ -55,7 +55,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Turn flow | The complete documented sequence, `turn/start` through `turn/end`, driven end to end | Continuation after a stop veto |
 | Extension points | Eight live extension points in a turn, over the four dispatch modes upstream documents | Capability seams (`fs/*`, telemetry) |
 | Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity | Compaction, session query |
-| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming | More adapters |
+| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures | More adapters, the executor that runs the retry policy, token metering |
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
