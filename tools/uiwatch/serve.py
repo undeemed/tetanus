@@ -38,6 +38,10 @@ BIN = TARGET / "debug" / "tetanus"
 EXAMPLES = TARGET / "debug" / "examples"
 COLUMNS = "88"
 POLL_SECONDS = 0.4
+#: How often the event stream looks for something to say. It says nothing when
+#: there is nothing, so this is only how late a browser hears, not how much it
+#: is sent.
+TICK_SECONDS = 0.25
 #: The address a reviewer opens. The server binds every interface, so the line
 #: it prints has to name the one they can reach: `localhost` is only true on
 #: the machine the server runs on, and this is not read there.
@@ -338,16 +342,33 @@ class State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.version = 0
+        self.building = False
         self.page = "<p>building…</p>"
+
+    def begin(self) -> None:
+        """Cargo has started, so the page being served is the previous one."""
+        with self.lock:
+            self.building = True
 
     def publish(self, page: str) -> None:
         with self.lock:
             self.version += 1
+            self.building = False
             self.page = page
 
     def read(self) -> tuple[int, str]:
         with self.lock:
             return self.version, self.page
+
+    def signal(self) -> str:
+        """What the event stream carries: the version, and whether cargo runs.
+
+        One string, so a browser that is up to date and a browser that is a
+        build behind are told apart by comparing it, and so the stream has
+        something to be quiet about when neither has moved.
+        """
+        with self.lock:
+            return f"{self.version} {int(self.building)}"
 
 
 STATE = State()
@@ -377,6 +398,7 @@ def revision() -> tuple[str, str]:
 
 
 def build_and_render() -> None:
+    STATE.begin()
     started = time.monotonic()
     build = subprocess.run(
         ["cargo", "build", "--quiet", "-p", "tetanus-hardness", "--bin", "tetanus",
@@ -421,7 +443,21 @@ def page(panes: list[dict] | None, failure: str | None, seconds: float) -> str:
    display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }}
  header.top h1 {{ font-size:15px; margin:0; letter-spacing:.02em; }}
  .meta {{ color:#7f848e; font-size:12.5px; font-family:ui-monospace,monospace; }}
- .live {{ color:#98c379; font-size:12.5px; }}
+ .live {{ color:#98c379; font-size:12.5px; transition:color 200ms ease; }}
+ .live .dot {{ display:inline-block; width:7px; height:7px; border-radius:50%;
+   background:currentColor; margin-right:6px; vertical-align:middle; }}
+ /* Amber and breathing while cargo runs. The panes under this are the
+    previous build for as long as that takes, up to ten seconds on a cold
+    one, and a still page under a green light claims to be current when it is
+    not. The dot moves rather than only changing colour because a state that
+    lasts seconds and never moves reads as stuck: the word says what is
+    happening, the movement says it is still happening. Anyone who has asked
+    not to be moved gets the colour and the word on their own. */
+ .live.building {{ color:#e5c07b; }}
+ .live.building .dot {{ animation:breathe 1.4s ease-in-out infinite alternate; }}
+ @keyframes breathe {{ from {{ opacity:1; }} to {{ opacity:.3; }} }}
+ @media (prefers-reduced-motion: reduce) {{
+   .live.building .dot {{ animation:none; opacity:.6; }} }}
  /* Columns, not a grid: a card is as tall as its output, and the next card
     starts under it rather than under the tallest card in its row. */
  main {{ padding:22px; column-width:760px; column-gap:18px; }}
@@ -441,11 +477,17 @@ def page(panes: list[dict] | None, failure: str | None, seconds: float) -> str:
 <header class="top"><h1>tetanus ui</h1>
  <span class="meta">{html.escape(branch)} · {html.escape(commit)}</span>
  <span class="meta">built in {seconds:.1f}s · {stamp}</span>
- <span class="live">● live</span></header>
+ <span class="live"><span class="dot"></span><span class="what">live</span></span></header>
 <main>{body}</main>
 <script>
  const here = {STATE.version + 1};
- new EventSource('/events').onmessage = e => {{ if (+e.data !== here) location.reload(); }};
+ const live = document.querySelector('.live'), what = live.querySelector('.what');
+ new EventSource('/events').onmessage = e => {{
+   const [version, building] = e.data.split(' ');
+   if (+version !== here) {{ location.reload(); return; }}
+   live.classList.toggle('building', building === '1');
+   what.textContent = building === '1' ? 'building' : 'live';
+ }};
 </script></body></html>"""
 
 
@@ -461,12 +503,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
+            # Only on change. Nothing here moves between builds, and a
+            # stream that repeated itself once a second would keep every open
+            # browser awake for as long as it was left open. The comment is
+            # not an event: it is there so anything that closes an idle
+            # connection sees the connection is not idle.
+            said, quiet = None, 0.0
             try:
                 while True:
-                    version, _ = STATE.read()
-                    self.wfile.write(f"retry: 1000\ndata: {version}\n\n".encode())
+                    signal = STATE.signal()
+                    if signal != said:
+                        self.wfile.write(f"retry: 1000\ndata: {signal}\n\n".encode())
+                        said, quiet = signal, 0.0
+                    elif quiet >= 15.0:
+                        self.wfile.write(b": still here\n\n")
+                        quiet = 0.0
                     self.wfile.flush()
-                    time.sleep(1.0)
+                    time.sleep(TICK_SECONDS)
+                    quiet += TICK_SECONDS
             except (BrokenPipeError, ConnectionResetError):
                 return
         _, body = STATE.read()
