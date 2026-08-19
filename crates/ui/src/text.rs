@@ -1,6 +1,41 @@
 //! Text rules every renderer shares.
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::color::Charset;
+
+/// The columns a terminal draws `char` in.
+///
+/// One for most of what a turn writes, two for a CJK character or an emoji,
+/// none for a combining mark. `unicode_width` has no answer for a control
+/// character, which is none here: a renderer that met one has already lost the
+/// row, and counting it as a column would leave every row after it short.
+fn columns(char: char) -> usize {
+    UnicodeWidthChar::width(char).unwrap_or(0)
+}
+
+/// How many leading characters of `text` a terminal draws inside `width`
+/// columns.
+///
+/// Zero when the first character is already wider than the width. A cut takes
+/// that answer as it is - the width is the promise, and a column overrun
+/// corrupts every row under it - while a fold, which has to make progress or
+/// never end, takes one character anyway.
+fn take(text: &[char], width: usize) -> usize {
+    let mut columns = 0;
+    for (taken, char) in text.iter().enumerate() {
+        columns += self::columns(*char);
+        if columns > width {
+            return taken;
+        }
+    }
+    text.len()
+}
+
+/// The columns a terminal draws every character of `text` in.
+fn span(text: &[char]) -> usize {
+    text.iter().copied().map(columns).sum()
+}
 
 /// Cut `text` to `width` columns, marking that it was cut.
 ///
@@ -8,20 +43,25 @@ use crate::color::Charset;
 /// terminal scrolls and the next repaint lands on the wrong row - and by any
 /// renderer showing a value it did not author, such as a tool's arguments.
 pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
-    if text.chars().count() <= width {
+    let chars: Vec<char> = text.chars().collect();
+    if span(&chars) <= width {
         return text.to_string();
     }
     let mark = match charset {
         Charset::Unicode => "…",
         Charset::Ascii => "...",
     };
-    if width <= mark.chars().count() {
+    if width <= visible_width(mark) {
         // No room to say it was cut. The width is the harder promise: a value
         // that overruns its column corrupts every line drawn under it.
-        return text.chars().take(width).collect();
+        return chars[..take(&chars, width)].iter().collect();
     }
-    let keep = width - mark.chars().count();
-    text.chars().take(keep).chain(mark.chars()).collect()
+    let keep = width - visible_width(mark);
+    chars[..take(&chars, keep)]
+        .iter()
+        .copied()
+        .chain(mark.chars())
+        .collect()
 }
 
 /// The columns a terminal draws `text` in, ignoring the SGR sequences a theme
@@ -35,7 +75,7 @@ pub fn visible_width(text: &str) -> usize {
     let mut chars = text.chars();
     while let Some(char) = chars.next() {
         if char != '\u{1b}' {
-            columns += 1;
+            columns += self::columns(char);
             continue;
         }
         // Every escape a `Theme` writes is `ESC [ ... m`. Skipping to the `m`
@@ -91,11 +131,10 @@ pub fn fit(text: &str, width: usize, charset: Charset) -> String {
     };
     // The same rule as `truncate`: with no room for the mark, the width is
     // still the harder promise.
-    let keep = width.saturating_sub(mark.chars().count());
-    let (keep, mark) = if width <= mark.chars().count() {
+    let (keep, mark) = if width <= visible_width(mark) {
         (width, "")
     } else {
-        (keep, mark)
+        (width - visible_width(mark), mark)
     };
 
     let mut out = String::new();
@@ -114,11 +153,15 @@ pub fn fit(text: &str, width: usize, charset: Charset) -> String {
             }
             continue;
         }
-        if columns == keep {
+        // Asked before the character is written, not after: a two-column
+        // character taken while one column is left would put the mark past
+        // the width, which is the one thing this must not do.
+        let drawn = self::columns(char);
+        if columns + drawn > keep {
             break;
         }
         out.push(char);
-        columns += 1;
+        columns += drawn;
     }
     out.push_str(mark);
     if painted {
@@ -148,15 +191,20 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 
         for word in paragraph.split_whitespace() {
             let mut rest: Vec<char> = word.chars().collect();
-            while rest.len() > width {
+            while span(&rest) > width {
                 if filled > 0 {
                     lines.push(std::mem::take(&mut line));
                     filled = 0;
                 }
-                lines.push(rest.drain(..width).collect::<String>());
+                // One character in any case: a character wider than the whole
+                // width overruns it by a column, and a fold that took none
+                // would fold this word for the rest of the run.
+                let cut = take(&rest, width).max(1);
+                lines.push(rest.drain(..cut).collect::<String>());
             }
 
-            if filled > 0 && filled + 1 + rest.len() > width {
+            let drawn = span(&rest);
+            if filled > 0 && filled + 1 + drawn > width {
                 lines.push(std::mem::take(&mut line));
                 filled = 0;
             }
@@ -164,7 +212,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 line.push(' ');
                 filled += 1;
             }
-            filled += rest.len();
+            filled += drawn;
             line.extend(rest);
         }
         lines.push(line);

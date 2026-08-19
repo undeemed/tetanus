@@ -137,3 +137,77 @@ fn a_painted_line_reads_back_as_what_it_draws() {
     assert_eq!(plain("\u{1b}[36mtool\u{1b}[0m echo"), "tool echo");
     assert_eq!(plain(""), "");
 }
+
+/// TC-UI-TEXT-14: what a terminal draws a character in, rather than how many
+/// characters there are.
+/// Expected: a CJK character measures two columns and an emoji two, a
+/// combining mark none, and a painted wide line measures what it draws. A
+/// renderer that counted characters here would compose a row that overruns
+/// every box it is put in, and the row under it would land in the wrong
+/// column for the rest of the screen.
+#[test]
+fn width_is_measured_in_columns() {
+    assert_eq!(visible_width("ai"), 2);
+    assert_eq!(visible_width("日本"), 4);
+    assert_eq!(visible_width("🔥"), 2);
+    // e + a combining acute is one column, whatever it is made of.
+    assert_eq!(visible_width("e\u{301}"), 1);
+    assert_eq!(visible_width("\u{1b}[1m日本\u{1b}[0m"), 4);
+}
+
+/// TC-UI-TEXT-15: prose in a script a terminal draws twice as wide.
+/// Expected: no folded line is wider than the width it was folded to, and the
+/// text survives the fold character for character. This is the case the
+/// journal met: a Japanese prompt folded by character count is drawn at twice
+/// the width of the frame holding it, so the terminal folds it again where the
+/// renderer did not mean it to and every row after it is out of place.
+#[test]
+fn wide_prose_folds_to_the_columns_it_is_given() {
+    let prose = "日本語のとても長い行をここに置きます。折り返しの幅を見ます。";
+
+    for width in [8, 20, 40] {
+        let folded = wrap(prose, width);
+        for line in &folded {
+            assert!(
+                visible_width(line) <= width,
+                "`{line}` is {} columns at width {width}",
+                visible_width(line)
+            );
+        }
+        assert_eq!(
+            folded.concat(),
+            prose,
+            "the fold lost text at width {width}"
+        );
+    }
+}
+
+/// TC-UI-TEXT-16: a wide character at the width.
+/// Expected: neither cut spends more columns than it was given, and neither
+/// splits a character in half to do it. The character before the boundary is
+/// dropped whole - a half of a two-column character is a byte sequence the
+/// terminal draws as a replacement glyph, which is wider than the column the
+/// cut was protecting.
+#[test]
+fn a_cut_lands_between_characters_not_inside_one() {
+    // Six columns of text, cut to five: the mark takes one, so two characters
+    // fit and the third is dropped whole rather than halved.
+    assert_eq!(truncate("日本語", 5, Charset::Unicode), "日本…");
+    assert_eq!(visible_width(&truncate("日本語", 5, Charset::Unicode)), 5);
+
+    // A width the wide character cannot land on exactly: short, never over.
+    // At one column nothing fits at all, which is the honest answer.
+    assert_eq!(truncate("日本語", 1, Charset::Unicode), "");
+    for width in 1..8 {
+        let cut = truncate("日本語", width, Charset::Unicode);
+        assert!(
+            visible_width(&cut) <= width,
+            "`{cut}` overruns {width} columns"
+        );
+        let painted = fit("\u{1b}[1m日本語\u{1b}[0m", width, Charset::Unicode);
+        assert!(
+            visible_width(&painted) <= width,
+            "`{painted}` overruns {width} columns"
+        );
+    }
+}

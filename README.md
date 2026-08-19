@@ -173,6 +173,7 @@ When the view comes down, the answer and the journal path are written on the ord
 
 `tetanus replay <path> --ui` reads a finished journal the same way and with the same keys, so a long turn is paged through instead of poured into the scrollback, which it leaves untouched.
 Nothing is arriving in that view, so the foot of the screen says `end` rather than `live`, and a terminal made narrower rewraps the journal rather than cutting it.
+Rewrapping counts the columns a terminal draws, not characters, so a prompt in a script drawn two columns to the character folds inside the frame like any other.
 `q` or Esc leaves it having read the journal, and exits 0; Ctrl-C is an interruption, and exits 130 like any other.
 It cannot be combined with `--raw`, `--live` or `--json`, and like `run --ui` it needs a terminal.
 
