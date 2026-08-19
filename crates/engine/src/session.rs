@@ -203,6 +203,26 @@ impl SessionStore {
         })
     }
 
+    /// The live handle for a session, opening its journal if this process has
+    /// not already. A subscriber names a session it did not create, and a cold
+    /// journal has a bus to attach to as soon as it is open.
+    pub fn open(&self, session_id: &str) -> Result<Arc<LiveSession>, RpcError> {
+        if let Some(live) = self.live(session_id) {
+            return Ok(live);
+        }
+        validate_id(session_id)?;
+        if !self.path_of(session_id).exists() {
+            return Err(session_not_found(session_id));
+        }
+        self.create(SessionCreateParams {
+            session_id: Some(session_id.to_string()),
+            ..SessionCreateParams::default()
+        })?;
+        self.live(session_id).ok_or_else(|| {
+            crate::convert::internal(format!("session `{session_id}` vanished while opening"))
+        })
+    }
+
     /// The live handle for a session, for callers that run turns on it.
     pub fn live(&self, session_id: &str) -> Option<Arc<LiveSession>> {
         self.live.lock().expect("live").get(session_id).cloned()
