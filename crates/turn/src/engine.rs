@@ -222,13 +222,26 @@ impl TurnEngine {
             // Model history is derived from the log, never stored beside it.
             let history = derive_messages(&self.log.events());
 
+            let sections = self.prompt.assemble(&AssembleAt { turn, step });
+            // A section registered as the whole prompt is kept aside here and
+            // restored below. The assembly still runs in full, so tool schemas
+            // and every other contribution still resolve and every listener
+            // still sees them, but what the model reads is that one section as
+            // it was assembled.
+            let complete = self
+                .prompt
+                .complete_id()
+                .and_then(|id| sections.iter().find(|s| s.id == id).cloned());
             let mut assemble = AssemblePrompt {
                 turn,
                 step,
-                sections: self.prompt.assemble(&AssembleAt { turn, step }),
+                sections,
                 tools: self.tools.schemas(),
             };
-            let prompt = self.bus.waterfall(&mut assemble, assemble_prompt()).await;
+            let mut prompt = self.bus.waterfall(&mut assemble, assemble_prompt()).await;
+            if let Some(section) = complete {
+                prompt.sections = vec![section];
+            }
 
             let mut request = AgentRequest {
                 turn,

@@ -8,10 +8,9 @@
 //! Approach: the same offline fixture the turn-flow suite uses, driven through
 //! the bus, plus a bare registry where a case is about registration alone.
 //! Upstream's assembly still carries surfaces tetanus has not built - prompt
-//! variables and `{{name}}` interpolation, runtime-context providers, scoped
-//! layers, and "complete" sections that replace the assembly. Cases that only
-//! exist because of those are not restated here as passing tests; they stay
-//! rows in `docs/parity.md`. Upstream's non-finite order is unrepresentable in
+//! variables and `{{name}}` interpolation, runtime-context providers, and
+//! scoped layers. Cases that only exist because of those are not restated here
+//! as passing tests; they stay rows in `docs/parity.md`. Upstream's non-finite order is unrepresentable in
 //! an `i32`, so that case has nothing to restate.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
@@ -452,6 +451,124 @@ fn dropping_the_handle_removes_the_section() {
     assert!(sections
         .assemble(&AssembleAt { turn: 1, step: 2 })
         .is_empty());
+}
+
+/// TC-PORT-PROMPT-13: a section registered as the whole prompt is what the
+/// model reads, and a listener cannot edit it.
+///
+/// Upstream: "restores one complete section after the assembly waterfall".
+///
+/// Input: a complete section, and a listener that rewrites every section it is
+/// shown and adds one of its own.
+/// Expected: the system message is the complete section's text as assembled;
+/// the listener still saw the whole assembly, base included; and the tool
+/// catalog that rode the same assembly still reaches the model.
+#[tokio::test]
+async fn a_complete_section_is_the_whole_prompt() {
+    let h = Harness::new("prompt-complete").await;
+    let (requests, _record) = record_requests(h.bus());
+    let _persona = h
+        .sections
+        .section(Section::new("persona", 10, "Exact prompt.").complete())
+        .expect("persona");
+
+    let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let shown = Arc::clone(&seen);
+    let _meddler = h.bus().on_waterfall::<AssemblePrompt, _>(move |ev, next| {
+        shown
+            .lock()
+            .expect("seen")
+            .push(ev.sections.iter().map(|s| s.id.clone()).collect());
+        for section in ev.sections.iter_mut() {
+            section.text = "mutated".into();
+        }
+        ev.sections.push(PromptSection {
+            id: "late".into(),
+            text: "LATE".into(),
+        });
+        Box::pin(next.run(ev))
+    });
+
+    h.engine.run_turn("complete").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    assert_eq!(system_message(&requests[0]), "Exact prompt.");
+    assert_eq!(
+        seen.lock().expect("seen")[0],
+        ["base", "persona"],
+        "the assembly still ran in full"
+    );
+    assert!(
+        requests[0].tools.iter().any(|tool| tool.name == "echo"),
+        "the tool catalog rides the same assembly and is not replaced"
+    );
+}
+
+/// TC-PORT-PROMPT-14: a registry holds one complete section at a time.
+///
+/// Upstream: "rejects multiple effective complete sections".
+///
+/// Translation: upstream can hold two, in different scopes, and fails the
+/// assembly that finds both effective. tetanus has no scopes, so a second one
+/// can only be a mistake, and it is refused at registration - the earliest
+/// point at which it is knowable.
+///
+/// Expected: the second registration is `PromptError::Complete` naming both
+/// sections, the refused section is not registered, and the first still holds
+/// the slot.
+#[test]
+fn a_second_complete_section_is_refused() {
+    let sections = PromptRegistry::new();
+    let _first = sections
+        .section(Section::new("first", 10, "first").complete())
+        .expect("first");
+
+    let Err(err) = sections.section(Section::new("second", 20, "second").complete()) else {
+        panic!("the second complete section was accepted");
+    };
+
+    assert!(
+        matches!(err, PromptError::Complete { ref held, ref refused }
+            if held == "first" && refused == "second"),
+        "{err}"
+    );
+    assert_eq!(
+        sections.assemble(&AssembleAt { turn: 1, step: 1 }).len(),
+        1,
+        "the refused section is not registered"
+    );
+    assert_eq!(sections.complete_id().as_deref(), Some("first"));
+}
+
+/// TC-PORT-PROMPT-15: the whole prompt is given back when the section goes.
+///
+/// Upstream: the same disposal contract every contribution has.
+///
+/// Input: a complete section and an ordinary contributor, one turn, then the
+/// complete section's handle dropped and another turn.
+/// Expected: the first turn reads the complete section alone; the second reads
+/// the assembly again, contributor included.
+#[tokio::test]
+async fn dropping_the_complete_section_gives_the_prompt_back() {
+    let h = Harness::new("prompt-complete-dropped").await;
+    let (requests, _record) = record_requests(h.bus());
+    let persona = h
+        .sections
+        .section(Section::new("persona", 10, "Exact prompt.").complete())
+        .expect("persona");
+    let _plugin = contribute(h.bus(), "plugin", "PLUGIN");
+
+    h.engine.run_turn("first").await.unwrap();
+    drop(persona);
+    h.engine.run_turn("second").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    assert_eq!(system_message(&requests[0]), "Exact prompt.");
+    let after = system_message(requests.last().expect("a later request"));
+    assert!(
+        after.contains("PLUGIN") && !after.contains("Exact prompt."),
+        "the assembly is back: {after}"
+    );
 }
 
 /// Record every model request the driver builds, in order.
