@@ -1,7 +1,6 @@
 //! The tool registry and the model-facing schemas it contributes to prompt
-//! assembly. Phase ① runs one call at a time through the documented pipeline;
-//! the concurrency classes upstream schedules (barriers, rolling pool) are a
-//! Phase ② concern.
+//! assembly, plus the concurrency class a pending call is scheduled by.
+//! The scheduler that reads that class is `TurnEngine::run_tool_calls`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,9 +54,31 @@ pub enum ToolError {
     InvalidArguments(String, String),
 }
 
+/// How one pending call may overlap with its siblings in the same step.
+///
+/// The classification is per call, not per tool: the same tool can be safe to
+/// overlap for a read and unsafe for a write, and only the arguments say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    /// Safe to run beside its siblings.
+    Parallel,
+    /// Runs alone. It is a barrier: everything before it settles first, and
+    /// nothing after it starts until it is done.
+    Exclusive,
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
+
+    /// Classify one pending call. Fail closed: the default is
+    /// [`ToolMode::Exclusive`], so overlapping is something a tool opts into
+    /// for arguments it has looked at, never something it gets by silence.
+    fn mode(&self, arguments: &serde_json::Value) -> ToolMode {
+        let _ = arguments;
+        ToolMode::Exclusive
+    }
+
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
 }
 
@@ -89,6 +110,14 @@ impl ToolRegistry {
         self.tools.keys()
     }
 
+    /// Classify a pending call. A call naming no registered tool is exclusive:
+    /// it is about to fail, and it fails on its own.
+    pub fn mode(&self, call: &ToolCall) -> ToolMode {
+        self.tools
+            .get(&call.name)
+            .map_or(ToolMode::Exclusive, |tool| tool.mode(&call.arguments))
+    }
+
     pub async fn execute(&self, call: &ToolCall) -> Result<ToolOutcome, ToolError> {
         match self.tools.get(&call.name) {
             Some(tool) => tool.execute(&call.arguments).await,
@@ -113,6 +142,12 @@ impl Tool for EchoTool {
                 "required": ["text"],
             }),
         }
+    }
+
+    /// Echoing reads nothing and writes nothing, so any number of echoes may
+    /// overlap.
+    fn mode(&self, _arguments: &serde_json::Value) -> ToolMode {
+        ToolMode::Parallel
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError> {
