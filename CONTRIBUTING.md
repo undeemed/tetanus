@@ -54,6 +54,7 @@ cargo test -p tetanus-core --test event_modes    # the four dispatch modes
 cargo test -p tetanus-turn --test boot           # registry composition
 cargo test -p tetanus-protocol --test wire       # the engine/presentation contract
 cargo test -p tetanus-hardness --test run_offline
+cargo test -p tetanus-turn --test properties   # what holds for every journal
 ```
 
 Three rules keep it a gate rather than a formality.
@@ -73,6 +74,13 @@ Every test case carries a stable identifier (`TC-TURN-1`, `TC-BUS-WATERFALL-2`, 
 in its doc comment, with its expected result stated. New cases get a new identifier in the same
 family and a row in the verification table of the design document they cover. "It passes" is not an
 expected result.
+
+A property case states what holds for every input rather than for one:
+[crates/turn/tests/properties.rs](crates/turn/tests/properties.rs) generates journals and asserts
+the invariants the turn engine reads them back under. It carries a `TC-PROP-*` identifier and an
+expected result like any other case. When one fails, proptest writes the shrunken counterexample to
+a `*.proptest-regressions` file beside the suite; check that file in with the fix, so the input that
+found the defect runs first from then on.
 
 ## Code style
 
