@@ -6,9 +6,10 @@
 //!
 //! Approach: one offline turn per case over a temporary journal, driven
 //! through the bus. Most of upstream's file is about surfaces tetanus has not
-//! built: fiber disposal, a steering inbox, a `finish {kind:error}` chunk, and
-//! containment of a throwing listener. Those cases have nothing to restate and
-//! stay rows in `docs/parity.md`.
+//! built: fiber disposal, a steering inbox, and a `finish {kind:error}` chunk.
+//! Those cases have nothing to restate and stay rows in `docs/parity.md`.
+//! Containment of a throwing listener is restated at bus level in
+//! `crates/core/tests/containment.rs` and at turn level below.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
@@ -159,6 +160,48 @@ async fn the_request_waterfall_decides_what_the_provider_is_called_with() {
     let seen = seen.lock().expect("seen").clone();
     let default = TurnConfig::default().model;
     assert_eq!(seen, vec!["routed-elsewhere".to_string(), default]);
+}
+
+/// TC-PORT-REG-4: a panicking `session/event` observer cannot change a turn.
+///
+/// Upstream: "a throwing session/event listener on turn/end is contained (turn
+/// still balanced, loop survives)" and "a throwing step/start observer cannot
+/// change a successful turn".
+///
+/// Input: an observer that panics on every durable event, registered before a
+/// second observer that records what it sees.
+/// Expected: the turn finishes naturally with its answer, the journal holds
+/// the same events it holds without the panicking observer, and the observer
+/// behind it saw every one of them. Instrumentation with a bug is the
+/// instrumentation's problem, not the turn's.
+#[tokio::test]
+async fn a_panicking_session_event_observer_cannot_change_a_turn() {
+    let quiet = Fixture::new("reg-containment-quiet").await;
+    let expected = quiet.engine.run_turn("containment").await.expect("turn");
+    let expected_log: Vec<String> = quiet.log.events().iter().map(|e| e.ty.clone()).collect();
+
+    let f = Fixture::new("reg-containment").await;
+    let _bug = f
+        .bus
+        .on_emit::<SessionEventDispatch>(|_| panic!("an observer with a bug"));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let peer = Arc::clone(&seen);
+    let _watch = f.bus.on_emit::<SessionEventDispatch>(move |ev| {
+        peer.lock().expect("seen").push(ev.event.ty.clone());
+    });
+
+    let outcome = f.engine.run_turn("containment").await.expect("turn");
+
+    assert_eq!(outcome.reason, expected.reason);
+    assert_eq!(outcome.steps, expected.steps);
+    assert_eq!(outcome.content, expected.content);
+    let written: Vec<String> = f.log.events().iter().map(|e| e.ty.clone()).collect();
+    assert_eq!(written, expected_log, "the journal is what it always was");
+    assert_eq!(
+        seen.lock().expect("seen").clone(),
+        written,
+        "the observer behind the panicking one saw every event"
+    );
 }
 
 /// One booted turn engine over a fresh journal, with the log kept so a case

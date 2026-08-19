@@ -84,7 +84,7 @@ Four primitives in `tetanus-core`, each one small enough to read in a sitting.
 | --- | --- | --- |
 | `Registry` / `Plugin` | [crates/core/src/registry.rs](crates/core/src/registry.rs) | Plugins mount in topological dependency order. Cycles, duplicates, and missing dependencies are rejected at boot, naming the plugin. A plugin that fails to start rolls the pass back, unmounting dependents before dependencies. |
 | `Services` / `Service` | [crates/core/src/services.rs](crates/core/src/services.rs) | A capability is keyed by type, with a human-readable `KEY`. Exactly one provider per definition; a second is a wiring error. Consumers resolve by type and never import an implementation. |
-| `EventBus` / `Event` | [crates/core/src/events.rs](crates/core/src/events.rs) | An event declares its dispatch mode as a `const`. Registering or dispatching through another mode panics rather than silently doing nothing. |
+| `EventBus` / `Event` | [crates/core/src/events.rs](crates/core/src/events.rs) | An event declares its dispatch mode as a `const`. Registering or dispatching through another mode panics rather than silently doing nothing. An `emit` or `parallel` observer that panics is contained and logged: its peers still run, and the dispatch still returns. A `serial` or `waterfall` listener that panics stays loud. |
 | `EffectHandle` / `EffectScope` | [crates/core/src/effects.rs](crates/core/src/effects.rs) | Every registration returns a handle; dropping it unwinds the registration. A scope holds several and unwinds them newest first, nests inside another scope as one handle, and finishes the unwind even if an undo panics. `Context` is a scope's owner, so a plugin's wiring dies with the context. |
 
 `Context` ([crates/core/src/context.rs](crates/core/src/context.rs)) is what a boot pass hands each
@@ -286,6 +286,9 @@ explicitly in [docs/PLAN.md](docs/PLAN.md).
 **The dispatch mode is part of the contract.** It could have been a runtime string, matching
 upstream. Making it a `const` on the `Event` impl means the wrong mode is a panic at registration,
 not a listener that silently never runs.
+Containment follows the same line: an observer returns nothing, so swallowing its panic loses
+no answer and only spares its peers; a `serial` or `waterfall` listener returns the value the
+engine acts on, so swallowing its panic would invent one.
 
 **Our own protocol, not upstream's.** Upstream's web contract is generated from TypeScript
 decorators, so it is a build artifact rather than a documented protocol and can change on any rc bump.
