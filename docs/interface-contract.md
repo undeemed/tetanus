@@ -55,7 +55,12 @@ Every carrier moves the same payloads, so a surface that works over one works ov
 
 The envelope is JSON-RPC 2.0 exactly: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
 A frame whose `jsonrpc` is absent or is not the string `"2.0"` is rejected, not guessed at.
-Batch arrays are not part of contract 1.0.
+Batch arrays are not part of contract 1.0: a server answers one `InvalidRequest`.
+
+A frame the server cannot correlate is still answered, with `id: null`.
+That covers a frame that is not JSON, a frame that is JSON but not a request, and a batch array.
+`rpc::Id::Null` is that value.
+Dropping such a frame silently would leave a client waiting for a reply it will never get, which is the one failure a codec must not have; a client never sends the value itself.
 
 Pushes reach all three carriers the same way.
 `session.subscribe` takes an `EventSink` alongside its params, supplied by the carrier and never by the wire.
@@ -371,6 +376,7 @@ The cases live in `crates/protocol/tests/wire.rs` and run offline.
 | §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
+| §4.1 the id a server answers when it cannot read one | TC-PROTO-15 |
 
 ## 7. Design rationale
 
@@ -431,3 +437,4 @@ Every boundary change adds a row here, in its own pull request.
 | --- | --- |
 | 1.0 | First contract: envelope, error codes and exit statuses, session and agent calls, tool, model and config catalogues, `session/event` and `agent/status` pushes, `ui/ask` reserved. |
 | 1.0 | Reconciles the presentation lane's consumer review, before 1.0 is served: `EventSink` puts `session.subscribe` on the `Engine` trait so every carrier feeds one renderer (§4.1, §4.2); §4.3.1 fixes the `data` payload of each durable type and `SessionEvent::parse()` makes it compiler-checked; `SessionCreateParams.path` addresses a journal by path (§4.7); `--json` streaming is stated (§4.7); `TurnSummary.duration_ms` and `usage`, and `SessionInfo.title`, are named. |
+| 1.0 | Names the id a server answers with when it cannot read one (§4.1): `rpc::Id::Null`, serialized as JSON `null`, for a frame that is not JSON, is not a request, or is a batch array. No carrier existed when this landed, so no peer had observed the gap. |

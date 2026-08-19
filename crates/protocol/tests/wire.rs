@@ -335,3 +335,33 @@ fn unmeasured_facts_are_absent_not_zero() {
     let json = serde_json::to_value(&measured).expect("serialize");
     assert_eq!(json["usage"]["prompt_tokens"], json!(3));
 }
+
+/// TC-PROTO-15: contract section 4.1. A server that cannot read an id still
+/// answers, with `id: null`. The value round trips both ways and stays
+/// distinct from a numeric or textual id, so a client can tell an answer to
+/// its call from an answer to a frame the server could not correlate.
+#[test]
+fn a_frame_the_server_cannot_correlate_is_answered_with_a_null_id() {
+    let refusal = Response {
+        jsonrpc: V2,
+        id: Id::Null,
+        payload: Payload::Error(RpcError::new(ErrorCode::ParseError, "not JSON")),
+    };
+
+    let json = serde_json::to_value(&refusal).expect("serialize");
+    assert_eq!(json["id"], json!(null), "JSON-RPC 2.0 requires null here");
+    assert_eq!(json["error"]["code"], json!(-32700));
+
+    let read: Response = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(read, refusal, "the id survives the round trip");
+
+    assert_ne!(Id::Null, Id::Number(0), "null is not id zero");
+    assert_ne!(Id::Null, Id::Text(String::new()), "null is not an empty id");
+
+    // A frame is still demultiplexed by shape, null id and all.
+    let frame = json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batch"}});
+    assert!(matches!(
+        serde_json::from_value::<Message>(frame).expect("demultiplex"),
+        Message::Response(_)
+    ));
+}
