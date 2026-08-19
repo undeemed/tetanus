@@ -863,38 +863,26 @@ fn journal_fault(error: &tetanus_session::SessionError, path: &std::path::Path) 
     }
 }
 
-/// Carry a turn failure across. A provider that refused the call is the
-/// provider's failure and not this build's, which is why it exits `6` and not
-/// `1`: a script retries one and reports the other.
+/// Carry a turn failure across to the contract's error view.
+///
+/// The mapping itself is the engine's, in `tetanus_engine::convert::turn_error`,
+/// and contract section 8 names it the only one. This is a call and not a
+/// match for two reasons. A second mapping drifts: the code a failure carries
+/// is what a script acts on, and two tables deciding it separately is one
+/// table too many. And an engine error enum has no fallback variant, so a
+/// surface that matched one would stop compiling the day the engine names a
+/// new failure - a file this lane owns, broken by a change it has no part in.
+///
+/// What is left here is the three facts the engine cannot know: which session
+/// this was, which provider was routed to, and which file the journal is.
+/// Closes #142.
 fn turn_fault(
     error: &tetanus_turn::TurnError,
+    session_id: &str,
     provider: &str,
-    session: &std::path::Path,
+    journal: &std::path::Path,
 ) -> RpcError {
-    use tetanus_turn::llm::LlmError;
-    match error {
-        tetanus_turn::TurnError::Session(inner) => journal_fault(inner, session),
-        tetanus_turn::TurnError::Service(inner) => {
-            RpcError::new(ErrorCode::Internal, inner.to_string())
-        }
-        tetanus_turn::TurnError::Llm(inner) => match inner {
-            LlmError::MissingCredential(env) | LlmError::InvalidCredential(env) => {
-                RpcError::new(ErrorCode::MissingCredential, inner.to_string())
-                    .with_data(serde_json::json!({ "provider": provider, "env": env }))
-            }
-            LlmError::Provider { status, .. } => {
-                RpcError::new(ErrorCode::ProviderError, inner.to_string())
-                    .with_data(serde_json::json!({ "provider": provider, "status": status }))
-            }
-            // No HTTP status to report, so the field the code carries is
-            // omitted rather than filled with a number nothing returned.
-            LlmError::Transport(_) | LlmError::Protocol(_) => {
-                RpcError::new(ErrorCode::ProviderError, inner.to_string())
-                    .with_data(serde_json::json!({ "provider": provider }))
-            }
-            LlmError::Sink(_) => RpcError::new(ErrorCode::Internal, inner.to_string()),
-        },
-    }
+    tetanus_engine::convert::turn_error(session_id, provider, Some(journal), error)
 }
 
 /// Run `work` behind the status line, ticking the animation while it waits.
@@ -1458,7 +1446,7 @@ async fn run<W: std::io::Write>(
                 title: &model,
             };
             with_page(policy, out, &log, watched, turn, |err| {
-                turn_fault(err, args.adapter.route(), &args.session)
+                turn_fault(err, &opened.session_id, args.adapter.route(), &args.session)
             })
             .await
         }
@@ -1479,7 +1467,12 @@ async fn run<W: std::io::Write>(
     let outcome = outcome.map_err(|err| {
         fail(
             policy,
-            &turn_fault(&err, args.adapter.route(), &args.session),
+            &turn_fault(
+                &err,
+                &opened.session_id,
+                args.adapter.route(),
+                &args.session,
+            ),
         )
     })?;
     engine
