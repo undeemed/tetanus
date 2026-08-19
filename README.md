@@ -169,6 +169,7 @@ Up and Down move a row, PageUp and PageDown a screenful, Home goes to the first 
 `?` spells out every key the view you are in answers, and any key goes back to what you were reading; on a terminal too narrow for the whole footer, `? keys` and the way out are what is kept.
 The transcript is kept whole, so a turn can be read back from its first line while it is still running, and the block showing what is arriving stays at the foot of the screen however far back you have scrolled.
 The view outlives the turn: it stays up until you close it, because the moment to look back over a turn is after it has finished.
+When the turn is over the block goes and the footer reads `end`, and a turn that failed says why on the page it failed on rather than only on the way out.
 Closing it before the turn finishes stops the turn, and a stopped turn has no result to report.
 It needs a terminal - a piped `--ui` is refused with the same exit status as any other bad argument, before a journal is opened - and it cannot be combined with `--trace` or `--json`.
 When the view comes down, the answer and the journal path are written on the ordinary screen, so what a run leaves in the scrollback is the same either way.

@@ -94,6 +94,17 @@ impl Live {
         self.reader.lines(&self.theme, self.width, event)
     }
 
+    /// Nothing more will arrive.
+    ///
+    /// `turn/end` says the same thing and is the ordinary way this is reached.
+    /// A turn that failed never writes one: it stops where it stopped, and a
+    /// view left waiting on the event that is not coming would spin over a
+    /// dead turn for as long as the reader believed it. So the caller, which
+    /// is the one thing holding the turn itself, says so.
+    pub fn finish(&mut self) {
+        self.over = true;
+    }
+
     /// Compose at a new width, after the terminal was resized under the block.
     pub fn resize(&mut self, width: usize) {
         self.width = width;
@@ -168,8 +179,9 @@ impl Live {
 ///
 /// Features tested: that the settled half is the timeline byte for byte, that
 /// chunks settle nothing, what the block holds while an answer arrives, its
-/// height, its footer, that it follows a resize, and that it empties when the
-/// turn ends.
+/// height, its footer, that it follows a resize, that it empties when the turn
+/// ends, and that it empties when the caller says the turn is over without
+/// one.
 ///
 /// Features NOT tested here: drawing (owned by `tetanus-ui`'s `screen.rs`),
 /// the wording of a settled line (owned by `timeline.rs`), and the polling
@@ -391,5 +403,25 @@ mod tests {
                 "`{line}` overruns thirty columns"
             );
         }
+    }
+
+    /// TC-CLI-LIVE-9: a turn that stopped without ending.
+    /// Expected: the block is empty after `finish`, exactly as it is after
+    /// `turn/end`. A turn that failed writes no closing event, and a block
+    /// left drawing its spinner and its stopwatch over a dead turn tells the
+    /// reader it is still running for as long as they are willing to watch.
+    #[test]
+    fn the_block_empties_when_the_caller_says_the_turn_is_over() {
+        let mut live = view(80);
+        for event in turn().into_iter().take(4) {
+            live.push(&event);
+        }
+        assert!(
+            !live.block(Duration::from_secs(3)).is_empty(),
+            "a turn still running has a block"
+        );
+
+        live.finish();
+        assert!(live.block(Duration::from_secs(3)).is_empty());
     }
 }

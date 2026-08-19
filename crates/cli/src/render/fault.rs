@@ -29,6 +29,36 @@
 //! reads, which is the cheapest moment to decide it.
 
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
+use tetanus_ui::{wrap, Role, Theme};
+
+/// The same failure as rows of a transcript, for a surface that has no stderr
+/// to report it on.
+///
+/// A turn watched full-screen fails inside the view: the ordinary line goes to
+/// stderr, which is behind the alternate screen and not read until the reader
+/// has already given up on a turn they were told nothing about. So the failure
+/// lands where the turn was being read, in the wording [`wording`] gives every
+/// other surface, and the marks are the ones a failed tool call already uses.
+pub fn lines(theme: &Theme, cols: usize, error: &RpcError) -> Vec<String> {
+    let (message, note) = wording(error);
+    let glyph = theme.glyph("✗", "!");
+    // Two columns of indent for the mark, and two more for what a note says
+    // about the line over it, which is the transcript's own shape.
+    let mut lines = vec![format!(
+        "  {} {}",
+        theme.paint(Role::Error, glyph),
+        theme.paint(Role::Error, &message)
+    )];
+    let Some(note) = note else {
+        return lines;
+    };
+    lines.extend(
+        wrap(&note, cols.saturating_sub(6).max(1))
+            .into_iter()
+            .map(|line| format!("    {}", theme.paint(Role::Muted, &line))),
+    );
+    lines
+}
 
 /// The sentence to print, and the way out when there is one.
 pub fn wording(error: &RpcError) -> (String, Option<String>) {
@@ -163,7 +193,9 @@ fn number(error: &RpcError, name: &str) -> Option<u64> {
 /// Features tested: the exit status of every code against the contract's own
 /// table; that a code carrying `data` says what the data names; that a code
 /// with no `data` falls back to the server's sentence rather than printing a
-/// blank; and that an unknown code is reported raw and exits 1.
+/// blank; that an unknown code is reported raw and exits 1; and that the same
+/// failure read as rows of a transcript is worded the same way, marked the way
+/// a failed tool call is, and folded to the width it is given.
 ///
 /// Features NOT tested here: which failure the binary raises for a given
 /// situation (owned by `main.rs`, asserted end to end in
@@ -174,6 +206,7 @@ fn number(error: &RpcError, name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tetanus_ui::{visible_width, Charset};
 
     use super::*;
 
@@ -335,5 +368,40 @@ mod tests {
         assert_eq!(wording(&error).0, "the wire caught fire (error -32050)");
         assert_eq!(wording(&error).1, None);
         assert_eq!(status(&error), 1);
+    }
+
+    /// TC-CLI-ERR-5: a failure as rows of a transcript.
+    /// Expected: at 80 columns, the same wording the printed report gives,
+    /// behind the mark a failed tool call already uses, with the way out on
+    /// the line under it; at 34, the way out folded to the width and still
+    /// indented under the line it is about. A view that worded a failure its
+    /// own way would be a second place to keep every sentence in this module
+    /// right.
+    #[test]
+    fn a_failure_reads_the_same_way_on_a_page() {
+        let theme = Theme::new(false, Charset::Ascii);
+        let error = fault(
+            ErrorCode::ProviderError,
+            "unreachable",
+            Some(json!({ "provider": "deepseek" })),
+        );
+        let (message, note) = wording(&error);
+
+        let lines = lines(&theme, 80, &error);
+        assert_eq!(lines[0], format!("  ! {message}"));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], format!("    {}", note.expect("a way out")));
+
+        // Folded to the width, and still indented under the line it is about.
+        let narrow = self::lines(&theme, 34, &error);
+        assert!(narrow.len() > 2, "the note did not fold: {narrow:?}");
+        for line in &narrow[1..] {
+            assert!(line.starts_with("    "), "{narrow:?}");
+            assert!(visible_width(line) <= 34, "`{line}` overruns the width");
+        }
+
+        // A failure with no way out is the one line.
+        let bare = fault(ErrorCode::Io, "no such file", None);
+        assert_eq!(self::lines(&theme, 80, &bare).len(), 1);
     }
 }

@@ -997,6 +997,20 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     done
 }
 
+/// What a full-screen watch is of.
+///
+/// Three values that travel together and are read once each, kept as one so
+/// the loop below is a call a reader can take in rather than a row of
+/// positional arguments to count off against the signature.
+struct Watched<'a> {
+    /// What the turn is waiting on before its first event.
+    phase: &'a str,
+    /// Whether the settled lines unfold what the model thought.
+    think: bool,
+    /// The right of the heading: the model this turn is running on.
+    title: &'a str,
+}
+
 /// Watch a turn on a screen of its own.
 ///
 /// The same poll as [`with_live`], drawn as whole frames on the alternate
@@ -1020,20 +1034,37 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 /// happened. So the outcome is kept and the loop runs on until the view is
 /// closed.
 ///
+/// Which means the view has to say what the outcome was. A turn that finished
+/// writes `turn/end` and the page reads it like any other event; a turn that
+/// failed writes nothing at all, and the ordinary report of it goes to stderr,
+/// behind the alternate screen, where it is read after the reader has given up
+/// on a turn they were told nothing about. So a failure is settled onto the
+/// page in the wording every other surface gives it, and `fault` is how the
+/// caller - which is the only place that knows what kind of error this is -
+/// supplies it.
+///
 /// Returns `None` when the view was closed before the turn finished, however
 /// the reader asked: the turn is dropped where it stands and there is no
 /// result to report, which contract §4.5 exits `130`. Closing the view over a
 /// turn that already finished is not an interruption, and the caller still has
 /// its result.
-async fn with_page<W: std::io::Write, F: std::future::Future>(
+async fn with_page<W, T, E, F>(
     policy: &Policy,
     out: &mut Ui<W>,
     log: &JsonlSessionLog,
-    phase: &str,
-    think: bool,
-    title: &str,
+    watched: Watched<'_>,
     work: F,
-) -> Option<F::Output> {
+    fault: impl Fn(&E) -> RpcError,
+) -> Option<Result<T, E>>
+where
+    W: std::io::Write,
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let Watched {
+        phase,
+        think,
+        title,
+    } = watched;
     // Raw mode is a property of the process's controlling terminal rather than
     // of a stream, and the alternate screen is two escape codes on the way in
     // and two on the way out. Neither interleaves with the frames `out` paints
@@ -1075,7 +1106,15 @@ async fn with_page<W: std::io::Write, F: std::future::Future>(
     let mut stop = std::pin::pin!(interrupt());
     let done = loop {
         tokio::select! {
-            done = &mut work => break Some(done),
+            done = &mut work => {
+                // The view outlives the turn, so it has to be told the turn is
+                // over: nothing more will arrive, and from here the spinner
+                // would be saying otherwise for as long as the reader watched
+                // it. A failure has no event of its own - a turn that fails
+                // stops where it stopped - so the wording comes from here too.
+                watch.over(out, done.as_ref().err().map(&fault).as_ref());
+                break Some(done);
+            }
             _ = &mut stop => break None,
             _ = frames.tick() => {
                 if watch.beat(out, held.console()) == Flow::Stop {
@@ -1167,13 +1206,7 @@ impl View for Watch<'_> {
     fn frame(&mut self, cols: usize, rows: usize) -> Frame {
         self.size = (cols, rows);
         self.live.resize(cols);
-
-        let events = self.log.events();
-        for event in events.iter().skip(self.seen) {
-            let settled = self.live.push(&crossing(event));
-            self.page.settle(settled);
-        }
-        self.seen = events.len();
+        self.settle();
 
         // Composed after the events above are settled, so the transcript the
         // card is hiding is still up to date the moment it comes down.
@@ -1216,6 +1249,38 @@ impl View for Watch<'_> {
 }
 
 impl Watch<'_> {
+    /// Commit every journal event the page has not seen yet.
+    ///
+    /// The journal is polled rather than subscribed to, for the reason
+    /// [`with_live`] gives, so this is the only way anything reaches the page.
+    fn settle(&mut self) {
+        let events = self.log.events();
+        for event in events.iter().skip(self.seen) {
+            let settled = self.live.push(&crossing(event));
+            self.page.settle(settled);
+        }
+        self.seen = events.len();
+    }
+
+    /// The turn is over: `fault` is why, when it did not end well.
+    ///
+    /// Painted here rather than left to the next frame, because the frames are
+    /// 80ms apart and this is the answer the reader has been waiting for.
+    fn over<W: std::io::Write>(&mut self, out: &mut Ui<W>, fault: Option<&RpcError>) {
+        // Settled first, so a failure lands after the last thing the turn
+        // managed rather than in front of it.
+        self.settle();
+        if let Some(error) = fault {
+            self.page
+                .settle(render::fault::lines(&self.theme, self.size.0, error));
+        }
+        // Whether it failed or not: nothing more is coming, so the block that
+        // says what the turn is waiting on has nothing left to say. Its going
+        // is also what the footer reads back as `end` rather than `live`.
+        self.live.finish();
+        self.paint(out);
+    }
+
     /// One turn of [`tetanus_ui::show`]'s loop, under this file's clock:
     /// answer every keystroke waiting, then paint.
     ///
@@ -1386,7 +1451,17 @@ async fn run<W: std::io::Write>(
         // above it while the turn runs.
         (true, _, _) => Some(with_progress(policy, &phase, turn).await),
         (_, true, _) => with_json(policy, out, &log, &phase, turn).await,
-        (_, _, true) => with_page(policy, out, &log, &phase, args.think, &model, turn).await,
+        (_, _, true) => {
+            let watched = Watched {
+                phase: &phase,
+                think: args.think,
+                title: &model,
+            };
+            with_page(policy, out, &log, watched, turn, |err| {
+                turn_fault(err, args.adapter.route(), &args.session)
+            })
+            .await
+        }
         // From the first event: a run prints the whole of the journal it
         // opened - the header naming the model included, and for a resumed
         // journal the turns already on it.
