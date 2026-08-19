@@ -10,6 +10,7 @@ This directory holds the documents that go deeper than the root files.
 | --- | --- | --- |
 | [turn-flow.md](turn-flow.md) | Design description (IEEE 1016) of the turn: canonical sequence, dispatch modes, durable log, rationale | Current, matches the code |
 | [interface-contract.md](interface-contract.md) | The engine/presentation boundary: JSON-RPC envelope, calls, wire types, versioning. Its machine-readable half is `crates/protocol` | Current, contract version 1.0. No carrier serves it yet |
+| [parity.md](parity.md) | Gap list: what upstream deepseek-harness does that tetanus does not do yet, and the phase that closes each gap | Current, against upstream `0.1.0-rc.7` |
 | [PLAN.md](PLAN.md) | Decision document: parity scope, options considered, phase plan | Current, decision closed 2026-08-18 |
 | [plan-visual.html](plan-visual.html) | The option diff behind PLAN.md, as a diagram. Open it in a browser | Historical, matches PLAN.md |
 | [scoping-superseded.md](scoping-superseded.md) | First-pass scoping note | Superseded by PLAN.md, kept for provenance |
@@ -20,9 +21,12 @@ This directory holds the documents that go deeper than the root files.
   [turn-flow.md](turn-flow.md) sections 4.1 and 4.2.
 - *Why is `system-prompt/assemble` where it is, when upstream says otherwise?* -
   [turn-flow.md](turn-flow.md) section 6.1.
+- *What is still missing against upstream, and when does it land?* -
+  [parity.md](parity.md) sections 3 and 4.
 - *Which crate owns what?* - [ARCHITECTURE.md](../ARCHITECTURE.md) section 4.2.
 - *What does "parity with upstream" mean here, and what is out of scope?* -
-  [PLAN.md](PLAN.md), plus [ARCHITECTURE.md](../ARCHITECTURE.md) section 7.
+  [PLAN.md](PLAN.md) and [parity.md](parity.md) section 5, plus
+  [ARCHITECTURE.md](../ARCHITECTURE.md) section 7.
 - *What does the merge gate actually prove?* - [ARCHITECTURE.md](../ARCHITECTURE.md) section 5.
 - *What may a UI call, and what may change under it?* - [interface-contract.md](interface-contract.md)
   sections 4.2 and 5. Change it in its own PR, never inside a feature PR.
