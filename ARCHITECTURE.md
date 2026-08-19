@@ -57,6 +57,8 @@ crates/cli      tetanus-hardness   the `tetanus` binary
        -> crates/session  tetanus-session   durable event vocabulary + JSONL journal
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
+  -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
+  -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
 
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```

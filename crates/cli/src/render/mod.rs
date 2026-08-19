@@ -14,5 +14,6 @@ pub mod json;
 pub mod live;
 pub mod raw;
 pub mod replay;
+pub mod serve;
 pub mod sessions;
 pub mod timeline;
