@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, and re-reading it at run time | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
+| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal; `tetanus serve`: the published contract served over the stdio and WebSocket carriers | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -141,6 +141,7 @@ Without the key the command says so and stops before any network call.
 | Command | What it does |
 | --- | --- |
 | `tetanus run` | Run one turn and print it as a conversation, or watch it full-screen with `--ui` |
+| `tetanus chat` | Hold a conversation: one journal, a turn per message you type, resumed by `--session` |
 | `tetanus sessions` | List the journals in a directory, newest first, or pick one to read with `--ui` |
 | `tetanus replay <path>` | Read a session journal back: at once, `--live`, or full-screen with `--ui` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
@@ -185,6 +186,14 @@ A journal that will not open says why at the foot of the list and leaves the cur
 `/` narrows the list to the journals whose id or title holds what you type, as you type it, and marks the word on the rows it keeps; Enter accepts the word and gives the cursor back, and Esc gives the whole list back.
 Inside a journal, in `replay --ui` as well, `/` and a word move the page to the line that holds it and `n` walks the rest; the footer says which match you are on, and the word itself is marked wherever the page draws it.
 `--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
+
+`tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
+Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.
+That journal is `sessions/chat.jsonl` unless `-s/--session <path>` says otherwise, and a path that already holds a conversation is resumed rather than replaced: the opening page says how many turns it is carrying, and the next turn is numbered after them.
+It takes the same `--adapter`, `--model`, `--max-steps` and `--think` flags as `run`, and like `run` it defaults to DeepSeek, so a chat with no `DEEPSEEK_API_KEY` says so and stops before a journal is opened.
+A line that opens with a slash is a command: `/help` lists them, `/exit` leaves, and `//text` asks the model `/text` rather than running it as one.
+Ctrl-D leaves the way `/exit` does and exits 0, Ctrl-C stops what is running and exits 130, and either way every turn already written stays on the journal.
+Standard input can be a pipe as well as a keyboard - `tetanus chat -a mock < questions.txt` asks each line in turn - and a piped chat prints the transcript without the prompt marker.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.

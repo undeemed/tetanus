@@ -1,5 +1,6 @@
 //! The `tetanus` binary: run one documented turn headlessly.
 
+mod chat;
 mod prompt;
 mod render;
 
@@ -57,6 +58,8 @@ struct Cli {
 enum Cmd {
     /// Run one full turn and print the event sequence it emitted
     Run(RunArgs),
+    /// Hold a conversation: one session, a turn per message you type
+    Chat(chat::ChatArgs),
     /// Show resolved config with provenance
     Config {
         /// Print the call's result as JSON: one object, per contract §4.7
@@ -226,7 +229,8 @@ impl Cli {
             .color(help::command_style(theme.color()))
             .styles(help::styles())
             .after_help(help::root_epilogue(&theme))
-            .mut_subcommand("run", |run| run.after_help(help::run_epilogue(&theme)));
+            .mut_subcommand("run", |run| run.after_help(help::run_epilogue(&theme)))
+            .mut_subcommand("chat", |chat| chat.after_help(help::chat_epilogue(&theme)));
         <Self as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
             .unwrap_or_else(|err| err.exit())
     }
@@ -263,6 +267,19 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
             runtime.block_on(run(policy, &mut out, args))
+        }
+        Cmd::Chat(args) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let held = runtime.block_on(chat::chat(policy, &mut out, args));
+            // The line reader is a blocking read that nothing can cancel, so a
+            // chat left with Ctrl-C exits with one still parked on standard
+            // input. Dropping the runtime waits for its pool; this does not,
+            // and the process is on its way out either way.
+            runtime.shutdown_background();
+            held
         }
         Cmd::Config { json } => {
             let mut config = tetanus_config::Config::default();
@@ -651,6 +668,53 @@ fn advertised(choice: AdapterChoice) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Resolve a named adapter and the model it will run, or report why it cannot.
+///
+/// Both commands that run a turn ask this, so a credential that is missing
+/// fails the same way and a model that was not named defaults the same way,
+/// whichever of them was typed. Everything it can refuse is refused before a
+/// journal is opened: a chat that cannot reach a model must not first write a
+/// session holding no turns.
+fn adapter(
+    policy: &Policy,
+    choice: AdapterChoice,
+    model: Option<String>,
+) -> Result<(Arc<dyn LlmAdapter>, String), Reported> {
+    let adapter: Arc<dyn LlmAdapter> = match choice {
+        AdapterChoice::Mock => Arc::new(mock::MockAdapter::new()),
+        AdapterChoice::Deepseek => {
+            let config = deepseek::DeepSeekConfig::default();
+            if std::env::var(&config.api_key_env)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                let missing = RpcError::new(
+                    ErrorCode::MissingCredential,
+                    format!("{} is not set", config.api_key_env),
+                )
+                .with_data(serde_json::json!({
+                    "provider": choice.route(),
+                    "env": config.api_key_env,
+                }));
+                return Err(fail(policy, &missing));
+            }
+            Arc::new(deepseek::DeepSeekAdapter::with_http(config))
+        }
+    };
+    let model = match model.or_else(|| advertised(choice).first().cloned()) {
+        Some(model) => model,
+        None => {
+            let unusable = RpcError::new(
+                ErrorCode::InvalidParams,
+                "the adapter advertises no models, so there is nothing to default to",
+            )
+            .with_data(serde_json::json!({ "field": "model" }));
+            return Err(fail(policy, &unusable));
+        }
+    };
+    Ok((adapter, model))
+}
+
 /// The tools an agent may call. Built from the registry a turn is booted with,
 /// so `tetanus tools` cannot list a tool a run does not have. It answers
 /// `catalog.tools`.
@@ -869,10 +933,16 @@ async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, wor
 /// Returns `None` when the user stopped the turn with Ctrl-C. The turn is
 /// dropped where it stands; the block still comes off the screen, and the
 /// journal keeps every event that had already been written to it.
+///
+/// `from` is where on the journal this view starts. A run draws the whole of
+/// it, and a chat draws each turn from where that turn began - the journal it
+/// appends to already holds the conversation before it, and a view that
+/// started at zero would print the whole afternoon again for every question.
 async fn with_live<W: std::io::Write, F: std::future::Future>(
     policy: &Policy,
     out: &mut Ui<W>,
     log: &JsonlSessionLog,
+    from: usize,
     phase: &str,
     think: bool,
     work: F,
@@ -890,7 +960,7 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     };
 
     let started = std::time::Instant::now();
-    let mut seen = 0;
+    let mut seen = from;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
     let mut stop = std::pin::pin!(interrupt());
@@ -978,7 +1048,7 @@ async fn with_page<W: std::io::Write, F: std::future::Future>(
                 .stderr()
                 .warn(&format!("{err}; watching in the ordinary view"))
                 .ok();
-            return with_live(policy, out, log, phase, think, work).await;
+            return with_live(policy, out, log, 0, phase, think, work).await;
         }
     };
 
@@ -1278,41 +1348,7 @@ async fn run<W: std::io::Write>(
     let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
         .map_err(|err| fail(policy, &err))?;
 
-    let (adapter, catalog): (Arc<dyn LlmAdapter>, Vec<String>) = match args.adapter {
-        AdapterChoice::Mock => (Arc::new(mock::MockAdapter::new()), advertised(args.adapter)),
-        AdapterChoice::Deepseek => {
-            let config = deepseek::DeepSeekConfig::default();
-            if std::env::var(&config.api_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                let missing = RpcError::new(
-                    ErrorCode::MissingCredential,
-                    format!("{} is not set", config.api_key_env),
-                )
-                .with_data(serde_json::json!({
-                    "provider": args.adapter.route(),
-                    "env": config.api_key_env,
-                }));
-                return Err(fail(policy, &missing));
-            }
-            (
-                Arc::new(deepseek::DeepSeekAdapter::with_http(config)),
-                advertised(args.adapter),
-            )
-        }
-    };
-    let model = match args.model.or_else(|| catalog.first().cloned()) {
-        Some(model) => model,
-        None => {
-            let unusable = RpcError::new(
-                ErrorCode::InvalidParams,
-                "the adapter advertises no models, so there is nothing to default to",
-            )
-            .with_data(serde_json::json!({ "field": "model" }));
-            return Err(fail(policy, &unusable));
-        }
-    };
+    let (adapter, model) = adapter(policy, args.adapter, args.model)?;
 
     // The journal is the engine's to open. `session.create` writes the
     // `session/start` header that makes the file self-describing - the model
@@ -1351,7 +1387,10 @@ async fn run<W: std::io::Write>(
         (true, _, _) => Some(with_progress(policy, &phase, turn).await),
         (_, true, _) => with_json(policy, out, &log, &phase, turn).await,
         (_, _, true) => with_page(policy, out, &log, &phase, args.think, &model, turn).await,
-        _ => with_live(policy, out, &log, &phase, args.think, turn).await,
+        // From the first event: a run prints the whole of the journal it
+        // opened - the header naming the model included, and for a resumed
+        // journal the turns already on it.
+        _ => with_live(policy, out, &log, 0, &phase, args.think, turn).await,
     };
     let Some(outcome) = finished else {
         // Stopped by the user. The journal is still worth naming: it holds

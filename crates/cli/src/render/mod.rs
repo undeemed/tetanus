@@ -7,6 +7,7 @@
 
 pub mod browse;
 pub mod catalog;
+pub mod chat;
 pub mod config;
 pub mod fault;
 pub mod help;

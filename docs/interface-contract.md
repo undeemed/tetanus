@@ -349,6 +349,7 @@ Each subcommand is defined as the calls it makes, and makes no others.
 | Subcommand | Calls |
 | --- | --- |
 | `tetanus run` | `session.create`, `session.subscribe`, `agent.prompt` |
+| `tetanus chat` | `session.create`, `session.subscribe`, then one `agent.prompt` per message typed |
 | `tetanus replay <path>` | `session.create` with `path`, then `session.events` |
 | `tetanus sessions` | `session.list` |
 | `tetanus tools` | `catalog.tools` |
@@ -356,6 +357,10 @@ Each subcommand is defined as the calls it makes, and makes no others.
 | `tetanus config` | `config.dump` |
 | `tetanus serve` | hosts the stdio and WebSocket carriers |
 | `tetanus info` | none; build metadata only |
+
+`tetanus chat` is `tetanus run` held open: one `session.create` and one `session.subscribe`, then an `agent.prompt` for each message, all against the same session id.
+It needs no call of its own because a conversation is already what a session is: every `agent.prompt` against a session id is a turn on the journal that session has been writing since it was opened (§4.4.1, §4.4.2), and the engine answers each one in the light of the turns already on it.
+So nothing about the conversation is held by the surface, and a chat that names the same journal tomorrow is the same conversation.
 
 A journal is addressed by id, never by path, because an id is what every other call takes.
 `SessionCreateParams.path` is the bridge: naming a path opens the journal there and returns its `SessionInfo`, with the id read from the journal's own `session/start` line.
@@ -529,3 +534,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Names who maps an engine failure to a code (§4.5): the engine does, in `tetanus_engine::convert::turn_error` and `convert::journal_error`, which this change publishes. A surface must not match on an engine error type to derive a code of its own, because an engine error enum has no fallback variant and a surface that matches one stops compiling the day the engine names a new failure. No wire types change. Two mapping fixes travel with it: `Io` now carries the `path` the table already asked for, and a session log that refused a chunk is `Internal` rather than `ProviderError`, since nothing about the provider was wrong and retrying it cannot help. The presentation lane's own copy of the mapping in `crates/cli` is redundant from this version; removing it is that lane's change. |
 | 1.0 | Publishes two durable types the engine is about to write (§4.3.2): `llm/retry` before a policy's wait and `llm/retry-started` when the wait is over, so a surface can say a request is being retried instead of showing a stalled turn. No type changes, no version bump and nothing to recompile: `type` is a free string by §4.3, and the two are deliberately not `KnownEvent` variants, because that enum has no fallback and growing it stops a consumer's build. §4.3.2 states the two-step rule that follows from that; the presentation lane decides when to take the variants, and that step is the minor bump. TC-PROTO-16 pins the staged behaviour. |
 | 1.0 | No boundary change, and no type changes: states in section 3 that a surface matches the wire types with a fallback arm, and never matches an engine enum such as `tetanus_turn::StopReason` (issue #142). Section 4.5 said this for engine error types only, so a growable enum that is not an error was left unstated, and every added variant is a build break in the consuming lane rather than the minor change section 5 promises. `KnownEvent` is named too: an open match on it is what would let section 4.3.2's two steps become one. The rule is a promise here rather than a compiler error, because `#[non_exhaustive]` on those enums would fail the build of a surface that has not adopted it yet; the marker lands with the adoption, in its own row. |
+| 1.0 | Adds a ninth subcommand to §4.7: `tetanus chat`, an interactive conversation defined as `session.create`, `session.subscribe`, then one `agent.prompt` per message typed. No new calls, no new types, no version bump - the table is the closed list of what a subcommand may call, so a subcommand that calls nothing new still lands here to keep that list true. Section 4.7 states why a conversation needs no call of its own: a session is already the conversation, so many turns typed into one is the mechanism two `tetanus run --session <path>` invocations already use. |

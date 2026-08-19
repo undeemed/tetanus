@@ -231,9 +231,10 @@ Nothing resolves a policy out of settings yet, so a composer passes one in; that
 ### 4.7 Interface view - surfaces
 
 The only surface today is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)).
-It carries the eight subcommands [docs/interface-contract.md](docs/interface-contract.md) §4.7
-defines - `run`, `sessions`, `replay`, `models`, `tools`, `config`, `serve`, `info` - each identified
-there by the contract calls it makes rather than by what it prints. See [README.md](README.md#cli).
+It carries the nine subcommands [docs/interface-contract.md](docs/interface-contract.md) §4.7
+defines - `run`, `chat`, `sessions`, `replay`, `models`, `tools`, `config`, `serve`, `info` - each
+identified there by the contract calls it makes rather than by what it prints. See
+[README.md](README.md#cli).
 
 `tetanus run` shows one turn three ways, and every settled line in all three comes from the same
 `Reader` in [crates/cli/src/render/timeline.rs](crates/cli/src/render/timeline.rs), so a turn watched
@@ -245,6 +246,18 @@ still running.
 `--json` prints the contract's own result types and draws nothing.
 All three read their events from the session log the engine is writing rather than from the bus: the
 journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
+
+`tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
+again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
+comes back for the next.
+It holds no conversation of its own, because `TurnEngine` derives each request's history from the
+journal it was built on - which is why leaving and resuming is not a different thing from never
+leaving, and why the loop is this small.
+The three things it prints that a turn does not - the opening page, the prompt marker, the card of
+commands - are in [crates/cli/src/render/chat.rs](crates/cli/src/render/chat.rs); everything between
+them is the `Reader` above.
+A typed line is read by one pure function, so what counts as a command is a unit test rather than a
+session driven through a pty.
 
 `tetanus replay` reads a finished journal through that same `Reader`, printed whole, played back at
 the pace it happened (`--live`), or on a page of its own (`--ui`,
