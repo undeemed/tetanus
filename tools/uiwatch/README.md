@@ -14,6 +14,17 @@ nothing in the working tree, and a checkout between branches that differ only
 outside `crates/` writes nothing either, so watching the files alone would
 leave the header naming the previous commit over the current build.
 
+While cargo runs, the light in the header turns amber, reads `building`, and
+breathes. Everything under it is the previous build until the reload arrives,
+which on a cold build is ten seconds of a page that would otherwise claim to
+be current. The dot moves because a state that lasts seconds and never moves
+reads as stuck; under `prefers-reduced-motion` it holds still and the colour
+and the word say it instead.
+
+The event stream only speaks when the version or that light changes, and
+sends a comment every fifteen seconds so an idle connection is not closed
+under it. A browser left open on this page is sent nothing at all.
+
 ```sh
 python3 tools/uiwatch/serve.py                  # http://15.204.113.4:5200
 python3 tools/uiwatch/serve.py --port 5300
