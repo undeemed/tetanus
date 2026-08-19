@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod config;
 pub mod fault;
 pub mod help;
+pub mod info;
 pub mod json;
 pub mod live;
 pub mod replay;
