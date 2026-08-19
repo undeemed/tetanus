@@ -242,16 +242,23 @@ async fn every_advertised_capability_is_served_and_no_other() {
         .await;
     assert!(served.is_ok(), "an advertised call must answer");
 
+    assert!(capabilities.contains(&capability::AGENT_INTERRUPT.to_string()));
     assert!(
-        !capabilities.contains(&capability::AGENT_INTERRUPT.to_string()),
-        "agent.interrupt is not served yet, so it must not be promised"
-    );
-    assert_eq!(
         engine
             .agent_interrupt(SessionRef { session_id: id })
             .await
-            .expect_err("not served yet")
-            .kind(),
-        Some(ErrorCode::NotImplemented)
+            .is_ok(),
+        "an advertised call must answer"
+    );
+
+    // The other direction: nothing else is promised. `ui.ask` is a client
+    // capability, so a server that advertised it would be claiming to be a
+    // surface.
+    assert_eq!(
+        capabilities,
+        vec![
+            capability::SESSION_SUBSCRIBE.to_string(),
+            capability::AGENT_INTERRUPT.to_string(),
+        ]
     );
 }

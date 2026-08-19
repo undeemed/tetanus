@@ -1,4 +1,5 @@
-//! Conformance for the agent runtime: `agent.prompt` and `agent.status`.
+//! Conformance for the agent runtime: `agent.prompt`, `agent.status` and
+//! `agent.interrupt`.
 //!
 //! Test design: every case runs on the deterministic mock adapter, or on a
 //! gated one written here, so none needs a key or a network. The gated
@@ -18,6 +19,7 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::types::{AgentState, StopReason};
 use tetanus_turn::llm::{ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse};
+use tetanus_turn::tools::ToolCall;
 
 /// One ordered record of everything a carrier would have written, both kinds
 /// of push in the order they arrived. Asserting the order is the point: a
@@ -58,6 +60,9 @@ impl EventSink for Recorder {
 struct GateAdapter {
     gate: Arc<tokio::sync::Semaphore>,
     entered: Arc<AtomicBool>,
+    /// Ask for a tool on every step, so the turn runs on until something
+    /// stops it. This is the model that never settles by itself.
+    never_finishes: bool,
 }
 
 #[async_trait::async_trait]
@@ -75,6 +80,18 @@ impl LlmAdapter for GateAdapter {
     ) -> Result<ModelResponse, LlmError> {
         self.entered.store(true, Ordering::Release);
         self.gate.acquire().await.expect("gate").forget();
+        if self.never_finishes {
+            return Ok(ModelResponse {
+                content: "one more tool, please".into(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({ "text": "again" }),
+                }],
+                finish_reason: "tool_calls".into(),
+                ..ModelResponse::default()
+            });
+        }
         Ok(ModelResponse {
             content: "held, then answered".into(),
             finish_reason: "stop".into(),
@@ -103,7 +120,9 @@ fn engine() -> (HarnessEngine, TempDir) {
 
 /// An engine whose turns stop inside the provider call until the returned
 /// gate is opened.
-fn gated_engine() -> (
+fn gated_engine(
+    never_finishes: bool,
+) -> (
     Arc<HarnessEngine>,
     Arc<tokio::sync::Semaphore>,
     Arc<AtomicBool>,
@@ -115,6 +134,7 @@ fn gated_engine() -> (
     let adapter: Arc<dyn LlmAdapter> = Arc::new(GateAdapter {
         gate: Arc::clone(&gate),
         entered: Arc::clone(&entered),
+        never_finishes,
     });
     let engine = HarnessEngine::new(EngineConfig {
         sessions_root: dir.path().to_path_buf(),
@@ -271,7 +291,7 @@ async fn status_is_pushed_on_each_transition() {
 /// disturbed: it still answers.
 #[tokio::test]
 async fn a_second_prompt_while_running_is_busy() {
-    let (engine, gate, entered, _dir) = gated_engine();
+    let (engine, gate, entered, _dir) = gated_engine(false);
     let id = session(&engine).await;
 
     let running = tokio::spawn({
@@ -314,7 +334,7 @@ async fn a_second_prompt_while_running_is_busy() {
 /// surface that missed a push resynchronises.
 #[tokio::test]
 async fn status_reads_the_live_state() {
-    let (engine, gate, entered, _dir) = gated_engine();
+    let (engine, gate, entered, _dir) = gated_engine(false);
     let id = session(&engine).await;
     let status = |id: String| {
         let engine = Arc::clone(&engine);
@@ -429,5 +449,116 @@ async fn a_prompt_that_cannot_start_says_which_input_is_wrong() {
     assert_eq!(
         refused.data.expect("data")["field"],
         serde_json::json!("provider")
+    );
+}
+
+/// TC-AGENT-8: `agent.interrupt` stops the turn at its next step boundary.
+/// The turn closes the way any turn closes: `turn/end` carries
+/// `stop_reason: "cancelled"`, and the prompt answers with its summary rather
+/// than the `Cancelled` error code, which section 4.4.2 reserves for a call
+/// that could not complete at all.
+#[tokio::test]
+async fn an_interrupt_closes_the_turn_at_a_step_boundary() {
+    let (engine, gate, entered, _dir) = gated_engine(true);
+    let id = session(&engine).await;
+
+    let running = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let id = id.clone();
+        async move {
+            engine
+                .agent_prompt(AgentPromptParams {
+                    session_id: id,
+                    content: "go on for ever".into(),
+                })
+                .await
+        }
+    });
+    until("the turn to reach the provider", || {
+        entered.load(Ordering::Acquire)
+    })
+    .await;
+
+    let asked = engine
+        .agent_interrupt(SessionRef {
+            session_id: id.clone(),
+        })
+        .await
+        .expect("interrupt");
+    assert!(asked.ok, "a running turn was asked to stop");
+
+    // Let the step in flight finish. The interrupt lands after it, not in it.
+    gate.add_permits(1);
+    let summary = running
+        .await
+        .expect("join")
+        .expect("an interrupted prompt still answers");
+    assert_eq!(summary.summary.stop_reason, StopReason::Cancelled);
+    assert_eq!(
+        summary.summary.steps, 1,
+        "the step in flight ran to its end"
+    );
+
+    let journal = engine
+        .session_events(SessionEventsParams {
+            session_id: id,
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("events");
+    let end = journal
+        .events
+        .iter()
+        .find(|event| event.ty == "turn/end")
+        .expect("the turn closed");
+    assert_eq!(end.data["stop_reason"], serde_json::json!("cancelled"));
+}
+
+/// TC-AGENT-9: an interrupt with no turn in flight stops nothing and says so,
+/// and it does not leak into the turn that starts next.
+#[tokio::test]
+async fn an_interrupt_of_an_idle_session_stops_nothing() {
+    let (engine, _dir) = engine();
+    let id = session(&engine).await;
+
+    let before = engine
+        .agent_interrupt(SessionRef {
+            session_id: id.clone(),
+        })
+        .await
+        .expect("interrupt");
+    assert!(!before.ok, "there was no turn to stop");
+
+    let one = engine
+        .agent_prompt(AgentPromptParams {
+            session_id: id.clone(),
+            content: "first".into(),
+        })
+        .await
+        .expect("prompt")
+        .summary;
+    assert_eq!(one.stop_reason, StopReason::Natural);
+
+    let between = engine
+        .agent_interrupt(SessionRef {
+            session_id: id.clone(),
+        })
+        .await
+        .expect("interrupt");
+    assert!(!between.ok, "the turn had already closed");
+
+    let two = engine
+        .agent_prompt(AgentPromptParams {
+            session_id: id,
+            content: "second".into(),
+        })
+        .await
+        .expect("prompt")
+        .summary;
+    assert_eq!(
+        two.stop_reason,
+        StopReason::Natural,
+        "an idle interrupt must not stop the next turn"
     );
 }
