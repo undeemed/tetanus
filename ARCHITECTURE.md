@@ -142,6 +142,12 @@ Model-visible means logged.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
 
+The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
+*surface*: the part of the log the model sees.
+[crates/turn/src/tokens.rs](crates/turn/src/tokens.rs) prices that surface, and any request, under
+one fixed heuristic, so a context gauge and a compaction decision read the same number.
+It is deliberately crude, and it is the only estimate available until a provider reports usage.
+
 ### 4.6 Interface view - the LLM adapter seam
 
 A provider implements `LlmAdapter` ([crates/turn/src/llm/mod.rs](crates/turn/src/llm/mod.rs)): a
