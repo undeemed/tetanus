@@ -7,11 +7,13 @@
 //!
 //! Approach: the same offline fixture the turn-flow suite uses, driven through
 //! the bus, plus a bare registry where a case is about registration alone.
-//! Upstream's assembly still carries surfaces tetanus has not built - prompt
-//! variables and `{{name}}` interpolation, runtime-context providers, and
-//! scoped layers. Cases that only exist because of those are not restated here
-//! as passing tests; they stay rows in `docs/parity.md`. Upstream's non-finite order is unrepresentable in
-//! an `i32`, so that case has nothing to restate.
+//! Prompt-variable references are covered on `interpolate`, the rule that
+//! substitutes them, because nothing registers a variable and no assembly
+//! carries one yet. Upstream's assembly still carries surfaces tetanus has not
+//! built: a variable registry, runtime-context providers and scoped layers. Cases that only exist because
+//! of those are not restated here as passing tests; they stay rows in
+//! `docs/parity.md`. Upstream's non-finite order is unrepresentable in an
+//! `i32`, so that case has nothing to restate.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
@@ -28,7 +30,10 @@ use harness::Harness;
 use tetanus_core::{EffectHandle, EventBus};
 use tetanus_turn::events::{AgentRequest, AssemblePrompt, PromptSection, SystemPrompt};
 use tetanus_turn::llm::{ModelRequest, Role};
-use tetanus_turn::prompt::{AssembleAt, PromptError, PromptRegistry, Section, SectionText};
+use tetanus_turn::prompt::{
+    interpolate, AssembleAt, PromptError, PromptRegistry, Section, SectionText, Variables,
+    VARIABLE_NAME,
+};
 
 /// TC-PORT-PROMPT-1: sections reach the model in the order they were
 /// contributed, joined by a blank line, and the registry's tool schemas ride
@@ -569,6 +574,193 @@ async fn dropping_the_complete_section_gives_the_prompt_back() {
         after.contains("PLUGIN") && !after.contains("Exact prompt."),
         "the assembly is back: {after}"
     );
+}
+
+/// TC-PORT-PROMPT-16: every `{{name}}` in a section's text is substituted.
+///
+/// Upstream: "interpolates {{name}} references in section text at render - the
+/// persona included".
+///
+/// Expected: both references carry their values, and the text around them is
+/// untouched.
+#[test]
+fn references_are_substituted() {
+    let text = interpolate(
+        "You run on {{model}} in {{cwd}}.",
+        "persona",
+        &vars(&[("model", Some("deepseek-v4")), ("cwd", Some("/work"))]),
+    )
+    .expect("both names are registered");
+
+    assert_eq!(text, "You run on deepseek-v4 in /work.");
+}
+
+/// TC-PORT-PROMPT-17: a reference to a name nothing registered fails, and says
+/// what is registered.
+///
+/// Upstream: "throws on a reference to an unregistered variable, listing what
+/// exists" and "names \"(none)\" when no variables are registered at all".
+///
+/// Expected: `UnknownVariable` both times, listing the registered names and
+/// `(none)` respectively, so a typo reads as a typo.
+#[test]
+fn an_unregistered_reference_fails_and_lists_what_exists() {
+    let typo = interpolate("on {{modle}}", "persona", &vars(&[("model", Some("m"))]))
+        .expect_err("a typo is not prose");
+    let nothing = interpolate("{{x}}", "s", &vars(&[])).expect_err("nothing is registered");
+
+    assert_eq!(
+        typo.to_string(),
+        "unknown prompt variable \"{{modle}}\" in section \"persona\"; registered variables: model"
+    );
+    assert_eq!(
+        nothing.to_string(),
+        "unknown prompt variable \"{{x}}\" in section \"s\"; registered variables: (none)"
+    );
+}
+
+/// TC-PORT-PROMPT-18: a registered name with no value this time fails, and
+/// says so in different words.
+///
+/// Upstream: "throws when a referenced variable has no value for this
+/// assembly".
+///
+/// Expected: `NoValue`, naming the section, so the reader looks at the
+/// provider rather than at the spelling.
+#[test]
+fn a_registered_name_with_no_value_fails() {
+    let err = interpolate("in {{cwd}}", "persona", &vars(&[("cwd", None)]))
+        .expect_err("a provider that said nothing is not an empty string");
+
+    assert_eq!(
+        err.to_string(),
+        "prompt variable \"{{cwd}}\" has no value for this assembly (section \"persona\")"
+    );
+}
+
+/// TC-PORT-PROMPT-19: a complete group whose name is not a name fails.
+///
+/// Upstream: "throws on a malformed complete reference, e.g. inner spaces",
+/// and its note that `{{}}` takes the same path.
+///
+/// Expected: `BadReference` quoting the group as written and the rule it
+/// missed, for both the padded name and the empty one.
+#[test]
+fn a_complete_group_that_is_not_a_name_fails() {
+    let padded = interpolate("on {{ model }}", "s", &vars(&[("model", Some("m"))]))
+        .expect_err("the braces hold a name, not a phrase");
+    let empty = interpolate("on {{}}", "s", &vars(&[])).expect_err("there is no name here");
+
+    assert_eq!(
+        padded.to_string(),
+        format!("malformed prompt variable reference \"{{{{ model }}}}\" in section \"s\" (variable names match {VARIABLE_NAME})")
+    );
+    assert!(
+        empty
+            .to_string()
+            .starts_with("malformed prompt variable reference \"{{}}\" in section \"s\""),
+        "{empty}"
+    );
+}
+
+/// TC-PORT-PROMPT-20: a lone `{{` with no `}}` after it anywhere is prose.
+///
+/// Upstream: "leaves a lone {{ verbatim only when NO }} follows anywhere after
+/// it".
+///
+/// Expected: a shell default keeps its braces, unchanged, with no variable
+/// registered at all.
+#[test]
+fn a_lone_opening_brace_pair_is_prose() {
+    let text = interpolate("shell ${X:-{{fallback} stays", "s", &vars(&[]))
+        .expect("prose is not a reference");
+
+    assert_eq!(text, "shell ${X:-{{fallback} stays");
+}
+
+/// TC-PORT-PROMPT-21: braces that opened a reference and never closed one
+/// properly fail, when a `}}` still follows.
+///
+/// Upstream: "throws on a mangled reference with a }} still following", for
+/// extra outer braces and for a nested brace inside a would-be group.
+///
+/// Expected: `MalformedReference` both times, quoting where it started, so the
+/// author sees which braces to fix.
+#[test]
+fn mangled_braces_with_a_closing_pair_after_them_fail() {
+    let outer = interpolate("{{{model}}}", "s", &vars(&[("model", Some("m"))]))
+        .expect_err("three braces are not a group");
+    let nested = interpolate("x {{a{b}} y {{model}}", "s", &vars(&[("model", Some("m"))]))
+        .expect_err("a brace inside is not a name");
+
+    assert_eq!(
+        outer.to_string(),
+        "malformed prompt variable reference at \"{{{model}}}\u{2026}\" in section \"s\" (references are complete simple {{name}} groups)"
+    );
+    assert!(
+        nested
+            .to_string()
+            .starts_with("malformed prompt variable reference at \"{{a{b}} y {{mode\u{2026}\""),
+        "{nested}"
+    );
+}
+
+/// TC-PORT-PROMPT-22: a substituted value is text, not more references.
+///
+/// Upstream: "never re-scans substituted values (a value containing
+/// {{sneaky}} stays literal)".
+///
+/// Expected: the braces inside the value survive verbatim, so no provider can
+/// smuggle a reference - or a failure - into another section's text.
+#[test]
+fn a_substituted_value_is_never_scanned_again() {
+    let text = interpolate(
+        "v = {{model}}!",
+        "s",
+        &vars(&[("model", Some("literal {{sneaky}} inside"))]),
+    )
+    .expect("the value is text");
+
+    assert_eq!(text, "v = literal {{sneaky}} inside!");
+}
+
+/// TC-PORT-PROMPT-23: a name that means something to the host language is an
+/// ordinary variable name.
+///
+/// Upstream: "rejects {{constructor}} as UNKNOWN - prototype properties are
+/// not variables" and "a variable NAMED like a prototype property works once
+/// actually registered". A `BTreeMap` has no prototype to inherit from, so the
+/// hazard cannot exist here; the case is restated to pin that the name has no
+/// special meaning either way.
+///
+/// Expected: unknown when nothing registered it, its own value when something
+/// did.
+#[test]
+fn a_name_the_host_language_uses_is_an_ordinary_variable() {
+    let unknown = interpolate("on {{constructor}}", "s", &vars(&[("model", Some("m"))]))
+        .expect_err("nothing registered it");
+    let registered = interpolate(
+        "{{constructor}}",
+        "s",
+        &vars(&[("constructor", Some("own-value"))]),
+    )
+    .expect("something registered it");
+
+    assert!(
+        unknown
+            .to_string()
+            .starts_with("unknown prompt variable \"{{constructor}}\""),
+        "{unknown}"
+    );
+    assert_eq!(registered, "own-value");
+}
+
+/// The variables of one assembly, as a case writes them.
+fn vars(pairs: &[(&str, Option<&str>)]) -> Variables {
+    pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.map(str::to_string)))
+        .collect()
 }
 
 /// Record every model request the driver builds, in order.
