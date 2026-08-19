@@ -3,10 +3,20 @@
 //!
 //! Test design: each case names the contract clause it fixes, and runs offline.
 
-use tetanus_engine::HarnessEngine;
+use tempfile::TempDir;
+use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{Engine, HelloParams, PeerInfo};
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::PROTOCOL_VERSION;
+
+fn engine() -> (HarnessEngine, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    });
+    (engine, dir)
+}
 
 fn hello(version: &str) -> HelloParams {
     HelloParams {
@@ -22,7 +32,7 @@ fn hello(version: &str) -> HelloParams {
 /// minor; a different major is refused with the documented code and data.
 #[tokio::test]
 async fn hello_accepts_a_matching_major_only() {
-    let engine = HarnessEngine::new();
+    let (engine, _dir) = engine();
 
     let result = engine.hello(hello("1.7")).await.expect("a 1.x client");
     assert_eq!(result.protocol_version, PROTOCOL_VERSION);
@@ -39,7 +49,7 @@ async fn hello_accepts_a_matching_major_only() {
 /// the same code, not accepted by accident.
 #[tokio::test]
 async fn hello_refuses_a_version_it_cannot_parse() {
-    let engine = HarnessEngine::new();
+    let (engine, _dir) = engine();
     let error = engine
         .hello(hello("banana"))
         .await
@@ -51,7 +61,7 @@ async fn hello_refuses_a_version_it_cannot_parse() {
 /// naming itself, so a surface can tell "not yet" from "went wrong".
 #[tokio::test]
 async fn unserved_calls_name_themselves() {
-    let engine = HarnessEngine::new();
+    let (engine, _dir) = engine();
     let error = engine.catalog_tools().await.expect_err("not served yet");
     assert_eq!(error.kind(), Some(ErrorCode::NotImplemented));
     assert_eq!(
@@ -59,9 +69,9 @@ async fn unserved_calls_name_themselves() {
         serde_json::json!("catalog.tools")
     );
 
-    let error = engine.session_list().await.expect_err("not served yet");
+    let error = engine.config_dump().await.expect_err("not served yet");
     assert_eq!(
         error.data.expect("data")["method"],
-        serde_json::json!("session.list")
+        serde_json::json!("config.dump")
     );
 }

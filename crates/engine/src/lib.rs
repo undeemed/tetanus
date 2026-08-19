@@ -2,19 +2,16 @@
 //!
 //! [`HarnessEngine`] is the one implementation of [`tetanus_protocol::Engine`].
 //! The JSON-RPC carriers and the CLI both drive it, so no surface can serve a
-//! different contract from another, and adding a call is a compile error in
-//! every surface that has not handled it.
+//! different contract from another.
 //!
 //! This crate is a library. It prints nothing, and it owns no binary: the
 //! presentation lane owns the binary and wires each subcommand to the calls
 //! section 4.7 of the contract lists for it.
-//!
-//! A call this build does not serve yet answers `NotImplemented` naming
-//! itself, which is the contract's way of letting a surface tell "not yet"
-//! from "went wrong".
 
 pub mod convert;
+pub mod session;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tetanus_protocol::methods::{
@@ -28,21 +25,59 @@ use tetanus_protocol::types::SessionInfo;
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
 use crate::convert::not_implemented;
+use crate::session::{SessionDefaults, SessionStore};
 
-#[derive(Default)]
+/// Everything the engine needs that is not a call.
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    /// Directory holding one JSONL journal per session.
+    pub sessions_root: PathBuf,
+    /// Provider a `session.create` with no override resolves to.
+    pub default_provider: String,
+    /// Model a `session.create` with no override resolves to.
+    pub default_model: String,
+    pub max_steps: u32,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            sessions_root: PathBuf::from("sessions"),
+            default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
+            default_model: tetanus_turn::llm::mock::MODEL.to_string(),
+            max_steps: 8,
+        }
+    }
+}
+
 pub struct HarnessEngine {
-    _private: (),
+    sessions: Arc<SessionStore>,
 }
 
 impl HarnessEngine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(config: EngineConfig) -> Self {
+        Self {
+            sessions: Arc::new(SessionStore::new(
+                config.sessions_root,
+                SessionDefaults {
+                    provider: config.default_provider,
+                    model: config.default_model,
+                    max_steps: config.max_steps,
+                },
+            )),
+        }
+    }
+
+    pub fn sessions(&self) -> &Arc<SessionStore> {
+        &self.sessions
     }
 
     /// The optional calls this build actually serves. A surface hides an
     /// affordance whose capability is absent, rather than discovering the
     /// absence as an error.
     pub fn capabilities(&self) -> Vec<String> {
+        // A capability is a promise that the call behind it is served. This
+        // build serves no optional call yet, so it promises nothing.
         Vec::new()
     }
 }
@@ -73,12 +108,14 @@ impl Engine for HarnessEngine {
         })
     }
 
-    async fn session_create(&self, _: SessionCreateParams) -> Result<SessionInfo, RpcError> {
-        Err(not_implemented(method::SESSION_CREATE))
+    async fn session_create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
+        self.sessions.create(params)
     }
 
     async fn session_list(&self) -> Result<SessionListResult, RpcError> {
-        Err(not_implemented(method::SESSION_LIST))
+        Ok(SessionListResult {
+            sessions: self.sessions.list()?,
+        })
     }
 
     async fn session_events(

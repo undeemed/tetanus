@@ -1101,7 +1101,11 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
+ "tetanus-core",
  "tetanus-protocol",
+ "tetanus-session",
+ "tetanus-turn",
  "tokio",
 ]
 
