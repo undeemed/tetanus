@@ -295,6 +295,14 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             think,
             json,
         } => {
+            // A path that is not there is a typo, and reading it as an
+            // empty session is how a typo becomes a blank page and a zero
+            // exit. The check is here, before any view is chosen, so every
+            // shape of `replay` fails the same way.
+            let file = std::path::Path::new(&path);
+            if !file.exists() {
+                return Err(fail(policy, &missing_journal(file)));
+            }
             // `--raw` is the view for a journal the reader below refuses,
             // so it opens the file itself. Asking for a log first would make
             // the one command that reads a broken journal fail on exactly the
@@ -546,6 +554,20 @@ fn fail(policy: &Policy, error: &RpcError) -> Reported {
         err.note(&hint).ok();
     }
     Reported(render::fault::status(error))
+}
+
+/// A path the user named that is not there.
+///
+/// The contract's §4.7 mapping sends `tetanus replay <path>` through
+/// `session.create`, which creates a journal at a path that has none. That is
+/// what `run --session` wants and the opposite of what a read wants, so this
+/// surface answers the read before it makes the call.
+fn missing_journal(path: &std::path::Path) -> RpcError {
+    RpcError::new(
+        ErrorCode::SessionNotFound,
+        format!("no journal at {}", path.display()),
+    )
+    .with_data(serde_json::json!({ "path": path.display().to_string() }))
 }
 
 /// Read a journal as text, one line at a time.

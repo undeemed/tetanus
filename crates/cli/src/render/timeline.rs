@@ -221,6 +221,13 @@ fn tokens(count: u64) -> String {
 
 /// Render a whole event stream, as a reader of a finished turn sees it.
 pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent], think: bool) -> io::Result<()> {
+    if events.is_empty() {
+        // A page with nothing on it reads exactly like a command that did
+        // nothing at all. The journal is there and it holds no events, and
+        // the view has to say which of the two happened.
+        let empty = ui.paint(Role::Muted, "the journal is empty").to_string();
+        return ui.line(&empty);
+    }
     let (theme, width) = (*ui.theme(), ui.width());
     let mut reader = Reader::new(think);
     for event in events {
@@ -378,6 +385,19 @@ mod tests {
             "assistant/message",
             json!({ "content": "42", "reasoning": reasoning }),
         )]
+    }
+
+    /// TC-CLI-TL-12: a journal with no events in it.
+    /// Expected: a line saying so. A page with nothing on it reads exactly
+    /// like a command that did nothing, and the two are worth telling apart -
+    /// this view is the one a user reaches for when they are not sure the run
+    /// happened.
+    #[test]
+    fn an_empty_journal_says_it_is_empty() {
+        assert_eq!(
+            rendered(&[], Charset::Unicode, 80),
+            "the journal is empty\n"
+        );
     }
 
     /// TC-CLI-TL-1: one whole turn.

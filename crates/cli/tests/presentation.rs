@@ -806,6 +806,76 @@ fn the_raw_view_shows_a_broken_line_where_it_is() {
     );
 }
 
+/// TC-CLI-ERR-10: a journal path that is not there, in all three shapes.
+/// Expected: the contract's `SessionNotFound` status, the path named, a note
+/// that points at `tetanus sessions`, and nothing at all on stdout. Reading a
+/// path that does not exist as an empty session is how a typo becomes a blank
+/// page and a zero exit, which is the failure a user never notices.
+#[test]
+fn a_journal_that_is_not_there_is_not_an_empty_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let want = i32::from(tetanus_protocol::rpc::ErrorCode::SessionNotFound.exit_status());
+
+    for args in [
+        vec!["replay", "nope.jsonl"],
+        vec!["replay", "nope.jsonl", "--raw"],
+        vec!["replay", "nope.jsonl", "--json"],
+    ] {
+        let out = run(dir.path(), &args, &[]);
+
+        assert_eq!(
+            out.status.code(),
+            Some(want),
+            "`{args:?}`: {}",
+            stderr(&out)
+        );
+        assert_eq!(
+            stdout(&out),
+            "",
+            "`{args:?}` wrote a page for a missing file"
+        );
+        let err = stderr(&out);
+        assert!(
+            err.contains("no journal at nope.jsonl"),
+            "`{args:?}`: {err}"
+        );
+        assert!(err.contains("tetanus sessions"), "`{args:?}`: {err}");
+    }
+    assert!(
+        !dir.path().join("nope.jsonl").exists(),
+        "a read created a file"
+    );
+}
+
+/// TC-CLI-ERR-11: a journal that is there and holds nothing.
+/// Expected: exit 0 and one line saying so, in every human view. The file
+/// exists, so this is not a failure - but a page with nothing on it reads
+/// exactly like a command that did nothing, and the two have to be told
+/// apart. `--json` is unaffected: an empty page is a valid result.
+#[test]
+fn an_empty_journal_says_it_is_empty() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("empty.jsonl"), "").expect("write");
+
+    for args in [
+        vec!["replay", "empty.jsonl"],
+        vec!["replay", "empty.jsonl", "--raw"],
+        vec!["replay", "empty.jsonl", "--live"],
+    ] {
+        let out = run(dir.path(), &args, &[]);
+
+        assert_eq!(out.status.code(), Some(0), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "the journal is empty\n", "`{args:?}`");
+    }
+
+    let json = run(dir.path(), &["replay", "empty.jsonl", "--json"], &[]);
+    assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
+    assert_eq!(
+        stdout(&json),
+        "{\"events\":[],\"next_seq\":0,\"eof\":true}\n"
+    );
+}
+
 /// TC-CLI-ERR-7: a turn that ends normally.
 /// Expected: exit 0. The statuses above are only worth anything if success is
 /// still zero, and a renderer that writes to a closed pipe must not turn a
