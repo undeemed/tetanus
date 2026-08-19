@@ -35,8 +35,9 @@ use tetanus_session::{SessionError, SessionLog};
 
 use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
 use crate::events::{
-    AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, StopReason, SystemPrompt,
-    ToolsExecute, ToolsPostExecute, ToolsPreExecute, TurnStopping,
+    AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
+    RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute, ToolsPostExecute,
+    ToolsPreExecute, TurnStopping,
 };
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, Message, ModelRequest, ModelResponse, StreamChunk,
@@ -252,10 +253,33 @@ impl TurnEngine {
                     seqs: Arc::clone(&chunks),
                 }),
             };
-            let response = self
-                .bus
-                .waterfall(&mut stream, self.call_provider())
-                .await?;
+            // A failed call is offered to `agent/request-error` before it ends
+            // the turn. A listener may answer `Retry`, and the same request
+            // goes out again; the chunks the failed attempt already streamed
+            // stay on the journal, with the policy's own records between them
+            // and the next attempt to say why a second stream follows.
+            let response = loop {
+                match self.bus.waterfall(&mut stream, self.call_provider()).await {
+                    Ok(response) => break response,
+                    Err(failed) => {
+                        let mut recovery = RequestError {
+                            turn,
+                            step,
+                            provider: stream.request.provider.clone(),
+                            failure: RequestFailure::from(&failed),
+                        };
+                        let action = self.bus.waterfall(&mut recovery, no_recovery()).await;
+                        // An interrupt beats a retry: a caller who has just
+                        // asked the turn to stop does not want it to wait and
+                        // try again.
+                        if action != Some(RequestErrorAction::Retry)
+                            || self.cancelled.load(Ordering::Acquire)
+                        {
+                            return Err(failed.into());
+                        }
+                    }
+                }
+            };
             let source_event_seqs = chunks.lock().expect("chunk seqs").clone();
 
             self.log.append_with_sources(
@@ -513,6 +537,12 @@ fn assemble_prompt() -> Terminal<AssemblePrompt> {
             }
         })
     })
+}
+
+/// The built-in behaviour of `agent/request-error`: recover nothing, so the
+/// failure the driver already has is the answer.
+fn no_recovery() -> Terminal<RequestError> {
+    Arc::new(|_ev: &mut RequestError| Box::pin(async move { None }))
 }
 
 fn build_request() -> Terminal<AgentRequest> {

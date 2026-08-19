@@ -11,7 +11,7 @@ use tetanus_core::{EffectHandle, Event, EventBus};
 use tetanus_session::SessionEventDispatch;
 
 use crate::events::{
-    AgentRequest, AssemblePrompt, LlmStream, PreStep, ToolsExecute, ToolsPostExecute,
+    AgentRequest, AssemblePrompt, LlmStream, PreStep, RequestError, ToolsExecute, ToolsPostExecute,
     ToolsPreExecute, TurnStopping,
 };
 
@@ -92,6 +92,7 @@ impl TurnTrace {
             watch_waterfall!(AssemblePrompt, "system-prompt/assemble"),
             watch_waterfall!(AgentRequest, "agent/request"),
             watch_waterfall!(LlmStream, "llm/stream"),
+            watch_waterfall!(RequestError, "agent/request-error"),
             watch_waterfall!(ToolsPreExecute, "tools/pre-execute"),
             watch_waterfall!(ToolsExecute, "tools/execute"),
             watch_waterfall!(ToolsPostExecute, "tools/post-execute"),

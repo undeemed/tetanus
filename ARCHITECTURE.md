@@ -104,7 +104,8 @@ owns event order:
 
 ```text
 turn/start -> agent/pre-step -> step/start -> user/message -> system-prompt/assemble
-  -> agent/request -> llm/stream -> assistant/chunk* -> assistant/message
+  -> agent/request -> llm/stream -> [agent/request-error -> llm/stream]* -> assistant/chunk*
+  -> assistant/message
   -> tool/call* -> tools/pre-execute -> tools/execute -> tools/post-execute -> tool/result*
   -> step/end -> ...loop... -> agent/turn-stopping -> turn/end
 ```
@@ -208,7 +209,13 @@ Every failure carries a stable code (`LlmError::code`), and
 attempt is worth making and how long to wait first.
 The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
 which is what keeps its cases offline and free of a clock.
-The executor that would act on the decision is phase ② ([docs/parity.md](docs/parity.md) section 4).
+
+A failed call is offered to `agent/request-error` before it ends the turn, and a listener there may
+ask for the same request to be sent again.
+That is the seam an executor of the policy occupies, and it is why the driver needs no clock of its
+own: the waiting belongs to whoever asked for the retry.
+Nothing listens yet, so today every failure still ends the turn
+([docs/parity.md](docs/parity.md) section 4).
 
 ### 4.7 Interface view - surfaces
 
