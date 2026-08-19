@@ -344,6 +344,19 @@ colours it finds, but the family of sequences that carries a colour is the famil
 cursor move, so a filter is what this is until a parser is written - and a parser would still have
 to end here for everything it refused.
 
+Taming inside the width rules covers the text they size and nothing else, so the short values a page
+draws as themselves are tamed where they are composed: a model and a tool's name, the `call_id` a
+late result names, a stop reason and its veto, and an event type this build does not know
+([`timeline.rs`](crates/cli/src/render/timeline.rs)), plus the type and the unreadable line in the
+`--raw` view ([`raw.rs`](crates/cli/src/render/raw.rs)).
+The alternative - taming inside `Theme::paint` - was rejected twice over: `paint` is a no-op when
+colour is off, which is exactly the setting that promises no colour will be written, and it is also
+called on lines that already hold a nested paint, whose sequences are the renderer's own and would
+be stripped with the rest.
+The same edit measures the room beside a name in columns rather than characters, because a name is a
+value like any other and one in a wide script would otherwise push the value it labels past the
+frame.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut

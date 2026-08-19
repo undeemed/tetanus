@@ -17,11 +17,16 @@
 //! part of what the view shows, not part of how the file is opened. The line
 //! it does parse is the contract's own [`SessionEvent`], so the columns below
 //! carry no second copy of the journal's field names.
+//!
+//! Showing a file is not handing it over. The payload column is JSON, where an
+//! escape is six characters no terminal acts on, but the type and the text of
+//! a line this view could not read are drawn as themselves - so they are tamed
+//! first, the way every other view tames what it did not write.
 
 use std::io::{self, Write};
 
 use tetanus_protocol::types::SessionEvent;
-use tetanus_ui::{Role, Ui};
+use tetanus_ui::{tame, Role, Ui};
 
 /// Width of the `seq` column, wide enough for a journal no one will scroll.
 const SEQ: usize = 4;
@@ -71,10 +76,13 @@ pub fn render<W: Write>(ui: &mut Ui<W>, lines: &[Line]) -> io::Result<()> {
     }
     for line in lines {
         let row = match line {
+            // The payload prints as the JSON it is, where an escape is six
+            // characters no terminal acts on. The type beside it is a value
+            // out of the same file drawn as itself, so it is tamed.
             Line::Event(event) => format!(
                 "{:>SEQ$}  {:<TOPIC$} {}",
                 ui.paint(Role::Seq, &event.seq.to_string()),
-                ui.paint(Role::Topic, &event.ty),
+                ui.paint(Role::Topic, &tame(&event.ty)),
                 event.data
             ),
             // The number goes beside the text and not in the `seq` column:
@@ -84,7 +92,7 @@ pub fn render<W: Write>(ui: &mut Ui<W>, lines: &[Line]) -> io::Result<()> {
                 "{:>SEQ$}  {:<TOPIC$} {}",
                 ui.paint(Role::Error, "?"),
                 ui.paint(Role::Error, "unreadable"),
-                ui.paint(Role::Muted, &format!("line {number}: {text}"))
+                ui.paint(Role::Muted, &format!("line {number}: {}", tame(text)))
             ),
         };
         ui.line(&row)?;
@@ -192,6 +200,31 @@ mod tests {
         let painted = shown(&lines, true);
         assert!(painted.contains("\u{1b}["), "nothing was painted");
         assert_eq!(strip(&painted), shown(&lines, false));
+    }
+
+    /// TC-CLI-RAW-7: a type and an unreadable line that carry escapes.
+    /// Expected: neither reaches the page, and both are still shown as the
+    /// words they also hold. This is the view a reader opens on a file the
+    /// cooked view refused, so it is the view most likely to be pointed at a
+    /// file the reader did not write.
+    #[test]
+    fn a_file_this_view_shows_cannot_drive_the_terminal() {
+        let lines = vec![
+            parse(
+                1,
+                "{\"type\":\"weather/\\u001b[2Jreport\",\"seq\":0,\"time\":1,\"data\":{}}",
+            ),
+            parse(2, "not json \u{1b}]0;pwned\u{7} at all"),
+        ];
+        let page = shown(&lines, false);
+
+        assert!(
+            !page.contains('\u{1b}'),
+            "an escape reached the page: {page:?}"
+        );
+        assert!(page.contains("weather/report"), "{page}");
+        assert!(page.contains("line 2: not json"), "{page}");
+        assert!(page.contains("at all"), "{page}");
     }
 
     /// Drop every escape sequence, so two renderings can be compared as text.
