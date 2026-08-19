@@ -6,8 +6,9 @@
 //! environment cannot change the bytes of plain output; the shape and exit
 //! status of a reported failure; that a bad `--color` value is a usage error;
 //! which of the two views - the turn, or the raw sequence - a command prints;
-//! that a model's thinking stays folded until it is asked for; and the shape
-//! of the machine-readable output the interface contract fixes. NOT tested
+//! that a model's thinking stays folded until it is asked for; that the
+//! journal a run leaves behind says what it ran under; and the shape of the
+//! machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
@@ -213,12 +214,13 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
 }
 
 /// TC-CLI-UI-8: `tetanus replay` on a journal a run just wrote.
-/// Expected: the timeline, not the raw event dump - the prompt under `you`,
-/// the answer under `ai`, and the closing line, which reports what the two
-/// steps of the mock turn were billed. `--raw` still gives the dump, so
-/// nothing that scripted against it is broken. The journal here carries a real
-/// run's timestamps, so the closing line's wall clock is dropped before the
-/// line is matched; TC-CLI-TL-13 asserts that field against fixed ones.
+/// Expected: the timeline, not the raw event dump - the header naming what
+/// the session ran under, the prompt under `you`, the answer under `ai`, and
+/// the closing line, which reports what the two steps of the mock turn were
+/// billed. `--raw` still gives the dump, so nothing that scripted against it
+/// is broken. The journal here carries a real run's timestamps, so the closing
+/// line's wall clock is dropped before the line is matched; TC-CLI-TL-13
+/// asserts that field against fixed ones.
 #[test]
 fn replay_reads_as_a_conversation() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -230,7 +232,7 @@ fn replay_reads_as_a_conversation() {
 
     let told = without_duration(&stdout(&run(dir.path(), &["replay", "j.jsonl"], &[])));
     assert!(
-        told.starts_with("\nturn 1\n  step 1\n  you   echo this\n"),
+        told.starts_with("session on mock-echo-1\n\nturn 1\n  step 1\n  you   echo this\n"),
         "{told}"
     );
     assert!(told.contains("  ai    You said: echo this\n"), "{told}");
@@ -240,7 +242,7 @@ fn replay_reads_as_a_conversation() {
     );
 
     let raw = stdout(&run(dir.path(), &["replay", "j.jsonl", "--raw"], &[]));
-    assert!(raw.starts_with("   0  turn/start"), "{raw}");
+    assert!(raw.starts_with("   0  session/start"), "{raw}");
 }
 
 /// TC-CLI-UI-9: what `tetanus run` prints by default, and what `--trace` adds.
@@ -271,7 +273,10 @@ fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
         &["run", "--trace", "-p", "echo this"],
         &[],
     ));
-    assert!(traced.starts_with("   0     0  turn/start"), "{traced}");
+    // The tracer reads the turn's own bus, so its first entry is still
+    // `turn/start`; the journal seq beside it is 1, because the header the
+    // session was opened with took seq 0.
+    assert!(traced.starts_with("   0     1  turn/start"), "{traced}");
     assert!(traced.contains("You said: echo this\n"), "{traced}");
 }
 
@@ -375,6 +380,52 @@ fn thinking_is_folded_until_it_is_asked_for() {
         assert!(opened.contains(line), "`{line}` missing from:\n{opened}");
     }
     assert!(opened.contains("  ai    42\n"), "{opened}");
+}
+
+/// TC-CLI-UI-14: the journal a run leaves behind.
+/// Expected: its first line is the `session/start` header, carrying the id,
+/// the provider, the model and the step budget the run actually used - the
+/// facts that let `tetanus sessions` and `tetanus replay` read a journal
+/// nobody told them about. A second run on the same journal reopens it: one
+/// header, and the turn numbering carries on.
+#[test]
+fn a_run_writes_a_journal_that_says_what_it_ran_under() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let args = &[
+        "run",
+        "-p",
+        "echo this",
+        "--session",
+        "j.jsonl",
+        "--max-steps",
+        "3",
+    ];
+    assert!(run(dir.path(), args, &[]).status.success());
+
+    let written = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+    let first: serde_json::Value =
+        serde_json::from_str(written.lines().next().expect("a line")).expect("json");
+
+    assert_eq!(first["type"], "session/start");
+    assert_eq!(first["seq"], 0);
+    assert_eq!(first["data"]["provider"], "mock");
+    assert_eq!(first["data"]["model"], "mock-echo-1");
+    assert_eq!(first["data"]["max_steps"], 3);
+    assert!(
+        first["data"]["session_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "no id on the header: {first}"
+    );
+
+    assert!(run(dir.path(), args, &[]).status.success());
+    let again = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+    assert_eq!(
+        again.matches(r#""type":"session/start""#).count(),
+        1,
+        "a reopened journal gained a second header:\n{again}"
+    );
+    assert!(again.contains(r#""turn":2"#), "the turn did not carry on");
 }
 
 /// TC-CLI-JSON-1: `tetanus run --json`.

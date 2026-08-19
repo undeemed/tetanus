@@ -16,6 +16,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
+tetanus-engine = { path = "../engine" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 tetanus-protocol = { path = "../protocol" }

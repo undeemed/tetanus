@@ -82,7 +82,10 @@ fn runs_one_full_turn_offline() {
 
     let journal = dir.path().join("journal.jsonl");
     let events = tetanus_session::replay(&journal).expect("the journal replays");
-    assert_eq!(events.first().expect("first").ty, "turn/start");
+    // The journal opens on the header the session was created with, not on
+    // the turn: a reader has to be able to tell what the turn ran under.
+    assert_eq!(events.first().expect("first").ty, "session/start");
+    assert_eq!(events[1].ty, "turn/start");
     assert_eq!(events.last().expect("last").ty, "turn/end");
 }
 
