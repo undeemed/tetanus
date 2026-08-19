@@ -293,6 +293,8 @@ A journal is addressed by id, never by path, because an id is what every other c
 `SessionCreateParams.path` is the bridge: naming a path opens the journal there and returns its `SessionInfo`, with the id read from the journal's own `session/start` line.
 So `tetanus replay <path>` and `tetanus run --session <path>` are both `session.create` with a `path`, and neither needs a second call form.
 A path with no file yet is created; a path whose file is not a journal is `LogCorrupt`.
+A journal outside the server's own directory is reachable by id for as long as the server holds it open, and `session.list` reports only the server's directory.
+So a surface that wants a foreign journal back after a restart names its path again; it does not keep the id.
 
 Machine-readable output is contract output.
 `--json` prints the call's result type verbatim, one JSON object per line, with no added fields and no colour.
