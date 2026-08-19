@@ -295,6 +295,97 @@ async fn an_empty_stream_fails_rather_than_answering_with_nothing() {
     std::env::remove_var(TEST_API_KEY_ENV);
 }
 
+/// TC-DS-EMPTY-1: a completion that ended cleanly and said nothing is a
+/// failure, not an empty answer.
+///
+/// Upstream: `llm-pi-ai/tests/convert.spec.ts`, "classifies a completed stop
+/// with no content as an EMPTY_RESPONSE error", and the `EMPTY_RESPONSE` the
+/// official adapter throws for a response with no body.
+///
+/// Input: one frame that finishes with `stop` and carries no delta at all, then
+/// the sentinel.
+/// Expected: [`LlmError::EmptyResponse`] naming the model that did it, code
+/// `EMPTY_RESPONSE`, and an empty sink. The code is in the default retryable
+/// set, so the executor asks again rather than handing the turn a blank answer.
+#[tokio::test]
+async fn a_completed_response_with_no_content_fails_as_empty() {
+    let _environment = environment().await;
+    let adapter = keyed_adapter(&[
+        r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        "[DONE]",
+    ]);
+    let mut sink = CollectingSink::default();
+
+    let err = adapter
+        .stream(&request(), &mut sink)
+        .await
+        .expect_err("the model said nothing");
+
+    assert!(matches!(err, LlmError::EmptyResponse(_)));
+    assert_eq!(err.code(), "EMPTY_RESPONSE");
+    assert_eq!(
+        err.to_string(),
+        "EMPTY_RESPONSE: model \"deepseek-v4-flash\" returned a completed response with no content"
+    );
+    assert!(sink.chunks.is_empty(), "{:?}", sink.chunks);
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-EMPTY-2: a stop whose only output is reasoning is an answer.
+///
+/// Upstream: `convert.spec.ts`, "keeps a thinking-only stop successful (any
+/// block counts as content)".
+///
+/// Input: one reasoning delta, a `stop`, and the sentinel.
+/// Expected: the call succeeds, the reasoning is carried, and the sink saw it.
+/// A model that thought out loud produced output, however little the user reads
+/// of it.
+#[tokio::test]
+async fn a_stop_that_only_reasoned_is_still_an_answer() {
+    let _environment = environment().await;
+    let adapter = keyed_adapter(&[
+        r#"{"choices":[{"delta":{"reasoning_content":"mull"},"finish_reason":"stop"}]}"#,
+        "[DONE]",
+    ]);
+    let mut sink = CollectingSink::default();
+
+    let response = adapter.stream(&request(), &mut sink).await.expect("stream");
+
+    assert_eq!(response.reasoning, "mull");
+    assert!(response.content.is_empty());
+    assert_eq!(sink.chunks.len(), 1, "{:?}", sink.chunks);
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
+/// TC-DS-EMPTY-3: a stop whose only output is a tool call is an answer.
+///
+/// Upstream: the same rule - any content block counts - applied to the block
+/// tetanus carries as a call rather than as text.
+///
+/// Input: one complete tool call, a `stop`, and the sentinel.
+/// Expected: the call succeeds and carries the tool call. Answering by asking
+/// for a tool is producing output, whatever finish reason the provider labelled
+/// it with.
+#[tokio::test]
+async fn a_stop_that_only_called_a_tool_is_still_an_answer() {
+    let _environment = environment().await;
+    let adapter = keyed_adapter(&[
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"echo","arguments":"{\"text\":\"hi\"}"}}]},"finish_reason":"stop"}]}"#,
+        "[DONE]",
+    ]);
+    let mut sink = CollectingSink::default();
+
+    let response = adapter.stream(&request(), &mut sink).await.expect("stream");
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].name, "echo");
+    assert!(response.content.is_empty());
+
+    std::env::remove_var(TEST_API_KEY_ENV);
+}
+
 /// TC-DS-CLOSE-3: a sentinel left in a half-arrived event does not count.
 ///
 /// Upstream: `sse.spec.ts`, "treats a final DONE missing its blank-line

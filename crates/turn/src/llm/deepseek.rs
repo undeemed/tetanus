@@ -151,11 +151,37 @@ impl LlmAdapter for DeepSeekAdapter {
             return Err(LlmError::Protocol(STREAM_CLOSED.to_string()));
         }
         let (chunks, response) = decoder.finish();
+        if is_empty_completion(&response) {
+            return Err(LlmError::EmptyResponse(format!(
+                "model {:?} returned a completed response with no content",
+                request.model
+            )));
+        }
         for chunk in chunks {
             sink.chunk(chunk).await?;
         }
         Ok(response)
     }
+}
+
+/// Whether a completion that ended normally carried nothing at all.
+///
+/// Reasoning counts as content, and so does a tool call: a model that thought
+/// out loud, or that answered by asking for a tool, produced output. What this
+/// catches is the degenerate completion - a clean `stop` with no text, no
+/// reasoning and no calls - which upstream classifies the same way
+/// (`packages/llm/llm-pi-ai/src/stream.ts`, "a terminal stop that produced no
+/// content blocks is a degenerate provider completion, not a successful (empty)
+/// assistant message").
+///
+/// Only a `stop` is judged. A stream cut short is already
+/// [`LlmError::Protocol`], and any other finish reason said something about why
+/// it stopped, which is not this.
+fn is_empty_completion(response: &ModelResponse) -> bool {
+    response.finish_reason == DEFAULT_FINISH_REASON
+        && response.content.is_empty()
+        && response.reasoning.is_empty()
+        && response.tool_calls.is_empty()
 }
 
 /// Judge a stored credential and return the form that goes on the wire.
