@@ -21,6 +21,17 @@ pub fn session_event(event: tetanus_session::SessionEvent) -> wire::SessionEvent
     }
 }
 
+/// Why a turn closed, in the contract's vocabulary. The engine's enum and the
+/// wire's are separate types on purpose (contract section 7.6), so this is the
+/// one place a new stop reason has to be named twice.
+pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
+    match reason {
+        tetanus_turn::StopReason::Natural => wire::StopReason::Natural,
+        tetanus_turn::StopReason::PreStepRejected => wire::StopReason::PreStepRejected,
+        tetanus_turn::StopReason::MaxSteps => wire::StopReason::MaxSteps,
+    }
+}
+
 /// Contract section 4.5: a journal that is not a faithful copy of a log is
 /// `LogCorrupt`, anything else the filesystem refused is `Io`.
 pub fn session_error(session_id: &str, error: SessionError) -> RpcError {
