@@ -12,6 +12,7 @@ pub mod agent;
 pub mod boot;
 pub mod catalog;
 pub mod convert;
+pub mod retry;
 pub mod session;
 pub mod subscribe;
 
@@ -52,6 +53,9 @@ pub struct EngineConfig {
     /// Model a `session.create` with no override resolves to.
     pub default_model: String,
     pub max_steps: u32,
+    /// What a turn does with a model request that failed, on the route the
+    /// session names. Resolved from the document by [`crate::retry::policy`].
+    pub retry: tetanus_turn::llm::retry::RetryPolicy,
     /// The adapter behind each provider a session may name.
     pub providers: Arc<dyn Providers>,
     /// The tools every turn on this engine can call.
@@ -69,6 +73,7 @@ impl Default for EngineConfig {
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
+            retry: tetanus_turn::llm::retry::RetryPolicy::default(),
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),

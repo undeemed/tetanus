@@ -7,9 +7,10 @@
 //! value two surfaces can disagree about, and `config.dump` would then report
 //! provenance for one of them.
 //!
-//! The keys are the ones [`crate::catalog::key`] already names, so the list a
-//! `tetanus config` prints and the list a document may set cannot drift apart.
-//! A key a document does not set keeps the compiled default, and says so.
+//! The keys are the ones [`crate::catalog::key`] and [`crate::retry::key`]
+//! name, so the list a `tetanus config` prints and the list a document may set
+//! cannot drift apart. A key a document does not set keeps the compiled
+//! default, and says so.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,7 +43,7 @@ pub fn document(path: &Path) -> Result<Config, ConfigError> {
 /// nowhere.
 pub fn defaults() -> Document {
     let base = EngineConfig::default();
-    Document::from([
+    let mut document = Document::from([
         (
             key::SESSIONS_ROOT.to_string(),
             serde_json::json!(base.sessions_root.display().to_string()),
@@ -59,7 +60,9 @@ pub fn defaults() -> Document {
             key::MAX_STEPS.to_string(),
             serde_json::json!(base.max_steps),
         ),
-    ])
+    ]);
+    document.extend(crate::retry::defaults());
+    document
 }
 
 impl EngineConfig {
@@ -77,6 +80,7 @@ impl EngineConfig {
             default_provider: text(&settings, key::PROVIDER)?.unwrap_or(base.default_provider),
             default_model: text(&settings, key::MODEL)?.unwrap_or(base.default_model),
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
+            retry: crate::retry::policy(&settings)?,
             providers: base.providers,
             tools: base.tools,
             resolved: Arc::new(settings),
@@ -112,7 +116,7 @@ fn steps(settings: &Config, key: &str) -> Result<Option<u32>, ConfigError> {
     }
 }
 
-fn bad(key: &str, expected: &str, found: &serde_json::Value) -> ConfigError {
+pub(crate) fn bad(key: &str, expected: &str, found: &serde_json::Value) -> ConfigError {
     ConfigError::BadValue {
         key: key.to_string(),
         expected: expected.to_string(),

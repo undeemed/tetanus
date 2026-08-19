@@ -12,10 +12,9 @@
 //!
 //! Parity: upstream `packages/llm/llm/src/retry-policy.ts` for the shape and
 //! the defaults, and `packages/llm/llm-retry/src/index.ts` for the executor.
-//! Resolving a policy out of a settings document is not here: nothing reads
-//! settings into the turn engine yet, and validating a value no one can
-//! configure would be a contract with no consumer. That gap is a row in
-//! `docs/parity.md`.
+//! Resolving a policy out of a settings document is not here either, because
+//! this crate reads no settings: `tetanus_engine::retry` does it, and hands
+//! the result to [`install`].
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -205,8 +204,9 @@ pub fn clock_jitter() -> Jitter {
 ///
 /// Scoped to a route because a policy belongs to a provider and not to the
 /// engine - upstream reads it from each provider's own configuration - so a
-/// failure from another route is delegated on untouched. Nothing resolves a
-/// policy out of settings yet, so a composer passes one in.
+/// failure from another route is delegated on untouched. The policy comes
+/// from the composer; `tetanus_engine::retry` resolves one out of the settings
+/// document for it.
 ///
 /// The returned handle removes the listener, as every registration does.
 pub fn install(
