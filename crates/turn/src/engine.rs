@@ -44,7 +44,7 @@ use crate::llm::{
 };
 use crate::log::{derive_messages, topic, with_system};
 use crate::prompt::{AssembleAt, PromptRegistry};
-use crate::tools::{ToolCall, ToolMode, ToolOutcome, ToolRegistry};
+use crate::tools::{ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
@@ -71,6 +71,10 @@ pub struct TurnConfig {
     /// A cap of one is fully serial dispatch. It cannot be zero, because a pool
     /// that may start nothing never finishes.
     pub max_parallel_tool_calls: NonZeroUsize,
+    /// The order the model is offered its tools in. `None` is canonical
+    /// (lexicographic) order, which is what a harness that configured nothing
+    /// gets; a [`ToolOrder`] was read against the registry it arranges.
+    pub tool_order: Option<ToolOrder>,
 }
 
 impl Default for TurnConfig {
@@ -83,6 +87,7 @@ impl Default for TurnConfig {
                 "You are tetanus, a headless coding agent. Answer with the tools you have."
                     .to_string(),
             max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
+            tool_order: None,
         }
     }
 }
@@ -236,7 +241,7 @@ impl TurnEngine {
                 turn,
                 step,
                 sections,
-                tools: self.tools.schemas(),
+                tools: self.offered_tools(),
             };
             let mut prompt = self.bus.waterfall(&mut assemble, assemble_prompt()).await;
             if let Some(section) = complete {
@@ -364,6 +369,17 @@ impl TurnEngine {
             content,
             stop_veto,
         })
+    }
+
+    /// The schemas one assembly starts from, in the order the model reads them:
+    /// canonical unless the harness settled a [`ToolOrder`]. The
+    /// `system-prompt/assemble` waterfall still runs after this, and what a
+    /// listener adds there is that listener's to order.
+    fn offered_tools(&self) -> Vec<ToolSchema> {
+        match &self.config.tool_order {
+            Some(order) => self.tools.schemas_in(order),
+            None => self.tools.schemas(),
+        }
     }
 
     /// Run one step's tool calls: an exclusive call is a barrier, parallel-safe

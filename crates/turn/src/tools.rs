@@ -1,8 +1,13 @@
 //! The tool registry and the model-facing schemas it contributes to prompt
 //! assembly, plus the concurrency class a pending call is scheduled by.
 //! The scheduler that reads that class is `TurnEngine::run_tool_calls`.
+//!
+//! Schemas leave the registry in one settled order, because the order the model
+//! reads its tools in is part of the prompt. That order is lexicographic unless
+//! the harness configured a [`ToolOrder`], which names the tools it cares about
+//! and leaves the rest to [`TOOL_ORDER_REST`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -85,6 +90,108 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
 }
 
+/// The reserved entry in a configured tool order: the one place every tool the
+/// order does not name is inserted, in canonical order.
+///
+/// Upstream exports the same string from its system-prompt plugin
+/// (`TOOL_ORDER_REST`), and a deployment writes it in its config, so the value
+/// is part of the surface rather than an implementation detail.
+pub const TOOL_ORDER_REST: &str = "<unlisted-tools>";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolOrderError {
+    #[error("tool order lists {0:?} more than once")]
+    Duplicate(String),
+    #[error("tool order must contain the {TOOL_ORDER_REST:?} entry, which is where the tools it does not name go")]
+    NoRest,
+    #[error("a registered tool is named {TOOL_ORDER_REST:?}, which a tool order keeps for its rest entry")]
+    Reserved,
+    #[error("tool order lists {} {}; registered: {}", plural(.missing), quoted(.missing), listed(.registered))]
+    Unregistered {
+        missing: Vec<String>,
+        registered: Vec<String>,
+    },
+}
+
+/// A checked order for the tools the model is offered.
+///
+/// A value of this type has been read against the registry it was built from:
+/// the rest entry is present exactly once, no name is listed twice, and every
+/// other name is a tool that registry holds.
+///
+/// Upstream checks the same things later and in two places, because its plugins
+/// register tools after the order is read: an unregistered name is only found
+/// while a turn assembles its prompt, and that turn closes with no step. A
+/// tetanus registry is settled before the engine is built, so the check has an
+/// earlier home - the order cannot be constructed at all, and no turn starts on
+/// a harness whose configuration was already wrong. `docs/parity.md` records the
+/// difference.
+#[derive(Debug, Clone)]
+pub struct ToolOrder {
+    names: Vec<String>,
+}
+
+impl ToolOrder {
+    /// Read a configured order against the registry it will arrange.
+    pub fn new<I, S>(names: I, registry: &ToolRegistry) -> Result<Self, ToolOrderError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        let mut seen = BTreeSet::new();
+        for name in &names {
+            if !seen.insert(name.as_str()) {
+                return Err(ToolOrderError::Duplicate(name.clone()));
+            }
+        }
+        if !seen.contains(TOOL_ORDER_REST) {
+            return Err(ToolOrderError::NoRest);
+        }
+        if registry.tools.contains_key(TOOL_ORDER_REST) {
+            return Err(ToolOrderError::Reserved);
+        }
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| {
+                name.as_str() != TOOL_ORDER_REST && !registry.tools.contains_key(name.as_str())
+            })
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(ToolOrderError::Unregistered {
+                missing,
+                registered: registry.names().cloned().collect(),
+            });
+        }
+        Ok(Self { names })
+    }
+}
+
+fn plural(missing: &[String]) -> &'static str {
+    if missing.len() == 1 {
+        "unregistered tool"
+    } else {
+        "unregistered tools"
+    }
+}
+
+fn quoted(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn listed(names: &[String]) -> String {
+    if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
@@ -107,6 +214,36 @@ impl ToolRegistry {
     /// Schemas in a stable order, so one prompt is byte-identical across runs.
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools.values().map(|t| t.schema()).collect()
+    }
+
+    /// Schemas in a configured order: each name the order lists at its place,
+    /// and every other tool at [`TOOL_ORDER_REST`], in canonical order.
+    ///
+    /// A listed name this registry does not hold contributes nothing.
+    /// [`ToolOrder::new`] has already refused that against the registry it read,
+    /// so it takes an order applied to a second, different registry to reach -
+    /// and upstream's `orderTools` drops such a name the same way.
+    pub fn schemas_in(&self, order: &ToolOrder) -> Vec<ToolSchema> {
+        let listed: BTreeSet<&str> = order.names.iter().map(String::as_str).collect();
+        order
+            .names
+            .iter()
+            .flat_map(|name| -> Vec<ToolSchema> {
+                if name == TOOL_ORDER_REST {
+                    self.tools
+                        .iter()
+                        .filter(|(name, _)| !listed.contains(name.as_str()))
+                        .map(|(_, tool)| tool.schema())
+                        .collect()
+                } else {
+                    self.tools
+                        .get(name)
+                        .map(|tool| tool.schema())
+                        .into_iter()
+                        .collect()
+                }
+            })
+            .collect()
     }
 
     pub fn names(&self) -> impl Iterator<Item = &String> {
