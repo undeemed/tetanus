@@ -918,24 +918,62 @@ fn turn_fault(
     tetanus_engine::convert::turn_error(session_id, provider, Some(journal), error)
 }
 
+/// The status line, for a run whose progress the person cannot already see.
+///
+/// One rule for the four ways a turn is run, because they used to hold three
+/// between them and one of them held none: the plain run asked whether stdout
+/// was a terminal, `--json` asked whether stderr was, `--trace` never asked,
+/// and `--ui` wrote no status at all. So `tetanus run --json > events 2> log`
+/// left `log` empty while the same command with no `--json` filled it.
+///
+/// `drawn_on_stdout` is whether this way of running shows the turn on stdout:
+/// true for the live block and the watched page, false for `--trace`, which
+/// prints nothing until the end, and for `--json`, whose stdout is for a
+/// script rather than a person.
+///
+/// The status is then written unless it would be a second spinner on a screen
+/// that already has one. A stderr that is not a terminal cannot be: the line
+/// degrades to one plain sentence, which is the record a redirected stderr was
+/// redirected to keep.
+fn status_line(
+    policy: &Policy,
+    phase: &str,
+    drawn_on_stdout: bool,
+) -> Option<tetanus_ui::Progress<std::io::Stderr>> {
+    if drawn_on_stdout && policy.stderr_is_terminal {
+        return None;
+    }
+    let mut status = policy.stderr_progress();
+    status.set(phase).ok();
+    Some(status)
+}
+
 /// Run `work` behind the status line, ticking the animation while it waits.
 ///
 /// A live model call can hold for a long time with nothing to print, and a
 /// surface that prints nothing looks hung. The line is on stderr and is erased
 /// before anything else is written, so stdout is unchanged either way.
+///
+/// Nothing is drawn on stdout here - the trace is printed after the turn - so
+/// [`status_line`] always gives one, which is what this did before it asked.
 async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, work: F) -> F::Output {
-    let mut progress = policy.stderr_progress();
-    progress.set(label).ok();
+    let mut progress = status_line(policy, label, false);
 
     let mut work = std::pin::pin!(work);
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let done = loop {
         tokio::select! {
             done = &mut work => break done,
-            _ = frames.tick() => { progress.tick().ok(); }
+            _ = frames.tick() => {
+                if let Some(progress) = &mut progress {
+                    progress.tick().ok();
+                }
+            }
         }
     };
-    progress.finish().ok();
+    if let Some(progress) = progress {
+        progress.finish().ok();
+    }
     done
 }
 
@@ -947,9 +985,9 @@ async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, wor
 /// lane out of the engine - the log is a public type, and the one tracer the
 /// conformance suite attaches stays the only observer of the bus.
 ///
-/// The status line is for a piped run only. At a terminal the block's own
-/// footer says what a status line would, and two spinners at once read as two
-/// programs.
+/// The block is on stdout, so [`status_line`] gives a status only when stderr
+/// is somewhere else: at one terminal the block's own footer says what a
+/// status line would, and two spinners at once read as two programs.
 ///
 /// Returns `None` when the user stopped the turn with Ctrl-C. The turn is
 /// dropped where it stands; the block still comes off the screen, and the
@@ -971,14 +1009,7 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     let (theme, width) = (*out.theme(), out.width());
     let mut view = Live::new(theme, width, phase, think);
     let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
-    let mut status = match policy.stdout_is_terminal {
-        true => None,
-        false => {
-            let mut status = policy.stderr_progress();
-            status.set(phase).ok();
-            Some(status)
-        }
-    };
+    let mut status = status_line(policy, phase, policy.stdout_is_terminal);
 
     let started = std::time::Instant::now();
     let mut seen = from;
@@ -1113,6 +1144,12 @@ where
         }
     };
 
+    // The page is on stdout, so a stderr that is the same terminal is left
+    // alone - it is behind the alternate screen anyway. A stderr that is not
+    // gets the one line, which is the whole of what a redirected stderr can
+    // learn about a run watched on a screen it cannot see.
+    let status = status_line(policy, phase, true);
+
     let theme = *out.theme();
     let (cols, rows) = tetanus_ui::size();
     let mut watch = Watch {
@@ -1168,6 +1205,9 @@ where
         }
     }
     held.release().ok();
+    if let Some(status) = status {
+        status.finish().ok();
+    }
     done
 }
 
@@ -1367,14 +1407,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
     phase: &str,
     work: F,
 ) -> Option<F::Output> {
-    let mut status = match policy.stderr_is_terminal {
-        false => None,
-        true => {
-            let mut status = policy.stderr_progress();
-            status.set(phase).ok();
-            Some(status)
-        }
-    };
+    let mut status = status_line(policy, phase, false);
     let mut seen = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
