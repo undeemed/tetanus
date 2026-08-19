@@ -36,7 +36,10 @@ pub enum Role {
 }
 
 impl Role {
-    fn style(self) -> Style {
+    /// The raw style for this role, ungated. A surface that hands styling to
+    /// another library - clap's help renderer, for one - reads it here and
+    /// gates on [`Theme::color`] itself.
+    pub fn style(self) -> Style {
         let plain = Style::new();
         match self {
             Self::Heading => plain.bold(),

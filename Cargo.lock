@@ -152,6 +152,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -1116,6 +1117,7 @@ dependencies = [
  "tetanus-core",
  "tetanus-session",
  "tetanus-turn",
+ "tetanus-ui",
  "tokio",
 ]
 
