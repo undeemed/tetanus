@@ -312,8 +312,19 @@ def render_scenarios() -> list[dict]:
     return panes
 
 
-def sources() -> dict[str, float]:
-    stamps = {}
+def sources() -> dict[str, object]:
+    """What a rebuild is keyed on: the crates, and the commit they sit on.
+
+    The mtimes are not enough on their own. `git commit` writes nothing in the
+    working tree, and a checkout between two branches that differ only outside
+    `crates/` writes nothing either, so a page that watched the files alone
+    would go on naming the previous branch and the previous commit in its
+    header while the panes under it are the current build. That header is the
+    only provenance a reviewer has for what they are looking at, so it is not
+    allowed to disagree with the panes: the revision is part of what a change
+    means here.
+    """
+    stamps: dict[str, object] = {"HEAD": revision()}
     for path in (ROOT / "crates").rglob("*"):
         if path.suffix in (".rs", ".toml") and ".git" not in path.parts:
             try:
@@ -350,6 +361,21 @@ def git(*args: str) -> str:
         return "?"
 
 
+def revision() -> tuple[str, str]:
+    """The branch and the commit a page is built from.
+
+    One reader of this is `sources`, which keys a rebuild on it, and the other
+    is `page`, which draws it in the header. Reading it in one place is what
+    stops those two from disagreeing: whatever moves the header is by the same
+    fact a change, so the build the header describes is the build under it.
+
+    A git call that fails answers `?`, which counts as a change and costs one
+    rebuild it did not need. That is the cheaper way round: a page nobody can
+    trust the provenance of is worse than a page that was drawn twice.
+    """
+    return git("branch", "--show-current"), git("log", "--oneline", "-1")
+
+
 def build_and_render() -> None:
     started = time.monotonic()
     build = subprocess.run(
@@ -369,7 +395,7 @@ def build_and_render() -> None:
 
 def page(panes: list[dict] | None, failure: str | None, seconds: float) -> str:
     stamp = datetime.now().strftime("%H:%M:%S")
-    branch, commit = git("branch", "--show-current"), git("log", "--oneline", "-1")
+    branch, commit = revision()
     if failure is not None:
         body = (f'<section class="pane broken"><header><h2>the build failed</h2>'
                 f'<p>nothing below is current</p></header><pre>{failure}</pre></section>')
