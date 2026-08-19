@@ -17,13 +17,19 @@
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 
 pub mod stdio;
+pub mod websocket;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
-use tetanus_protocol::methods::{method, Engine, EventSink, SessionUnsubscribeParams};
-use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Request, Response, RpcError, V2};
+use tetanus_protocol::methods::{
+    method, push, AgentStatusPush, Engine, EventSink, SessionEventPush, SessionUnsubscribeParams,
+};
+use tetanus_protocol::rpc::{
+    ErrorCode, Id, Message, Notification, Payload, Request, Response, RpcError, V2,
+};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// One connection's codec.
 ///
@@ -187,10 +193,44 @@ impl Codec {
     }
 }
 
+/// The connection's [`EventSink`]: serialize the push, write it as a frame.
+///
+/// Shared by both carriers on purpose: contract section 4.1 says the stdio and
+/// WebSocket carriers implement [`EventSink`] as "serialize and write a
+/// frame", and one implementation is how that stays true of both.
+///
+/// The `Option` is the writer's stop signal: `None` means "no more frames".
+pub(crate) struct Frames(pub(crate) UnboundedSender<Option<String>>);
+
+impl Frames {
+    fn notify<T: serde::Serialize>(&self, method: &str, params: T) {
+        let frame = Notification {
+            jsonrpc: V2,
+            method: method.to_string(),
+            params: Some(serde_json::to_value(params).expect("a push serializes")),
+        };
+        // A send that fails means the peer is gone, which is not this side's
+        // problem to report: the carrier is already on its way out.
+        let _ = self.0.send(Some(
+            serde_json::to_string(&frame).expect("a frame serializes"),
+        ));
+    }
+}
+
+impl EventSink for Frames {
+    fn session_event(&self, event: SessionEventPush) {
+        self.notify(push::SESSION_EVENT, event);
+    }
+
+    fn agent_status(&self, status: AgentStatusPush) {
+        self.notify(push::AGENT_STATUS, status);
+    }
+}
+
 /// The answer to a frame whose id could not be read. Section 4.1: it is still
 /// answered, with `id: null`, because a client that is waiting has to be
 /// released.
-fn refusal(code: ErrorCode, message: impl Into<String>) -> Response {
+pub(crate) fn refusal(code: ErrorCode, message: impl Into<String>) -> Response {
     Response {
         jsonrpc: V2,
         id: Id::Null,

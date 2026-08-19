@@ -6,10 +6,15 @@ license.workspace = true
 description = "The tetanus JSON-RPC codec and its carriers: one frame in, one frame out, over the Engine trait."
 
 [dependencies]
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tetanus-protocol = { path = "../protocol" }
 tokio = { workspace = true }
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
+# `connect` is the client half of the handshake: the suite dials its own server.
+tokio-tungstenite = { workspace = true, features = ["connect"] }
