@@ -13,6 +13,7 @@ use std::io::{self, IsTerminal, Write};
 
 use crate::color::{self, ColorChoice, Env};
 use crate::progress::Progress;
+use crate::screen::Screen;
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -117,6 +118,9 @@ pub struct Policy {
     /// never` at a terminal is still a terminal, and progress may still
     /// repaint in place.
     pub stderr_is_terminal: bool,
+    /// The same question for stdout, which the live view repaints on. The two
+    /// are asked separately because they are redirected separately.
+    pub stdout_is_terminal: bool,
 }
 
 impl Policy {
@@ -126,6 +130,7 @@ impl Policy {
         let charset = color::charset(env);
         let terminal_width = terminal_size::terminal_size().map(|(w, _)| w.0);
         let stderr_is_terminal = io::stderr().is_terminal();
+        let stdout_is_terminal = io::stdout().is_terminal();
         Self {
             stdout: Theme::new(
                 color::color_enabled(choice, env, io::stdout().is_terminal()),
@@ -137,6 +142,7 @@ impl Policy {
             ),
             width: color::width(env, terminal_width),
             stderr_is_terminal,
+            stdout_is_terminal,
         }
     }
 
@@ -156,6 +162,12 @@ impl Policy {
     /// The progress line, on stderr, animated only at a terminal.
     pub fn stderr_progress(&self) -> Progress<io::Stderr> {
         Progress::new(self.stderr(), self.stderr_is_terminal)
+    }
+
+    /// The live block, on stdout, repainted only at a terminal. A piped run
+    /// gets the printed lines and no frames at all.
+    pub fn stdout_screen(&self) -> Screen<io::Stdout> {
+        Screen::new(self.stdout(), self.stdout_is_terminal)
     }
 }
 
