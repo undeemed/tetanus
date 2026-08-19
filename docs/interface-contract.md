@@ -328,6 +328,7 @@ So `tetanus replay <path>` and `tetanus run --session <path>` are both `session.
 A path with no file yet is created; a path whose file is not a journal is `LogCorrupt`.
 A journal outside the server's own directory is reachable by id for as long as the server holds it open, and `session.list` reports only the server's directory.
 So a surface that wants a foreign journal back after a restart names its path again; it does not keep the id.
+An id is a fact of the journal and not of its file name, so every id `session.list` reports is one that `session.events` and `session.subscribe` resolve, whatever the file holding that journal is called.
 
 Machine-readable output is contract output.
 `--json` prints the call's result type verbatim, one JSON object per line, with no added fields and no colour.
@@ -463,3 +464,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Names the id a server answers with when it cannot read one (§4.1): `rpc::Id::Null`, serialized as JSON `null`, for a frame that is not JSON, is not a request, or is a batch array. No carrier existed when this landed, so no peer had observed the gap. |
 | 1.0 | Settles which type a streaming `--json` subcommand prints (§4.7, issue #56): the `SessionEvent` out of the push, not the `SessionEventPush` envelope. Wording only; it is what the presentation lane already shipped, and it keeps the stream byte-identical to the journal. |
 | 1.0 | Names what `session.create` does with a journal a crash left mid-turn (§4.4.4): it appends the missing `tool/result`, `step/end` and `turn/end` closers before answering, so `last_seq` may jump and `stop_reason: "interrupted"` may appear. No type changes: `StopReason` is growable by §7.5, and the closers use payloads §4.3.1 already fixes. |
+| 1.0 | States the guarantee behind a session id (§4.7, issue #67): an id is a fact of the journal's `session/start` line and not of its file name, so every id `session.list` reports resolves for the other `session.*` calls. Wording only, and no type changes: it names which of two readings the engine is held to, and the engine defect that resolved the other way is fixed on its own. |
