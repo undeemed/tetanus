@@ -8,14 +8,22 @@ scenarios through a pty so the binary sees a terminal and paints exactly as it
 would for a user, converts the escape codes to HTML, and pushes a reload to
 every open browser.
 
-```
-python3 tools/uiwatch/serve.py            # http://localhost:5200
+```sh
+python3 tools/uiwatch/serve.py                  # http://15.204.113.4:5200
 python3 tools/uiwatch/serve.py --port 5300
-python3 tools/uiwatch/serve.py --check    # the cell buffer's own test cases
+python3 tools/uiwatch/serve.py --host 127.0.0.1 # this machine only
+python3 tools/uiwatch/serve.py --check          # the cell buffer's own test cases
 ```
 
+It binds every interface, so the page is open to anyone who can reach this
+host: it is a preview of a terminal, with no login and nothing to post to, and
+a reviewer is not on the machine it runs on. `--host` binds one address
+instead.
+
 It takes the next free port if the one asked for is busy, and prints the URL it
-settled on. Editing `serve.py` restarts it in place.
+settled on - the address a reviewer can open, which is the public one whenever
+it is bound to every interface and the bound address otherwise. Editing
+`serve.py` restarts it in place.
 
 ## What it shows, and what it cannot
 

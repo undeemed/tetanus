@@ -9,7 +9,7 @@ the emitted escape codes to HTML, and pushes a reload to any open browser.
 
 What a reviewer sees is therefore the binary's own output, not a mock of it.
 
-Usage: python3 tools/uiwatch/serve.py [--port 5200]
+Usage: python3 tools/uiwatch/serve.py [--host 0.0.0.0] [--port 5200]
 """
 
 from __future__ import annotations
@@ -38,6 +38,13 @@ BIN = TARGET / "debug" / "tetanus"
 EXAMPLES = TARGET / "debug" / "examples"
 COLUMNS = "88"
 POLL_SECONDS = 0.4
+#: The address a reviewer opens. The server binds every interface, so the line
+#: it prints has to name the one they can reach: `localhost` is only true on
+#: the machine the server runs on, and this is not read there.
+PUBLIC_HOST = "15.204.113.4"
+#: The hosts that mean "every interface". Bound to one of these, the server has
+#: no one address of its own to name, so it names the public one instead.
+WILDCARD = ("0.0.0.0", "::", "")
 
 # The palette the page paints ANSI colours in. Only the eight base colours plus
 # bold and dim are used by `tetanus-ui`; clap adds underline.
@@ -518,6 +525,8 @@ def check() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="the address to bind (default: every interface)")
     parser.add_argument("--port", type=int, default=5200)
     parser.add_argument("--tries", type=int, default=12)
     parser.add_argument("--check", action="store_true",
@@ -533,11 +542,12 @@ def main() -> None:
 
     for port in range(args.port, args.port + args.tries):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            server = ThreadingHTTPServer((args.host, port), Handler)
         except OSError:
             continue
         server.daemon_threads = True
-        print(f"uiwatch: http://localhost:{port} (worktree {ROOT})", flush=True)
+        shown = PUBLIC_HOST if args.host in WILDCARD else args.host
+        print(f"uiwatch: http://{shown}:{port} (worktree {ROOT})", flush=True)
         threading.Thread(target=watch, daemon=True).start()
         server.serve_forever()
         return
