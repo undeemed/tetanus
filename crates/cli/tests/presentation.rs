@@ -193,3 +193,31 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
         "progress leaked onto stdout"
     );
 }
+
+/// TC-CLI-UI-8: `tetanus replay` on a journal a run just wrote.
+/// Expected: the timeline, not the raw event dump - the prompt under `you`,
+/// the answer under `ai`, and the closing line. `--raw` still gives the dump,
+/// so nothing that scripted against it is broken.
+#[test]
+fn replay_reads_as_a_conversation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    let told = stdout(&run(dir.path(), &["replay", "j.jsonl"], &[]));
+    assert!(
+        told.starts_with("\nturn 1\n  step 1\n  you   echo this\n"),
+        "{told}"
+    );
+    assert!(told.contains("  ai    You said: echo this\n"), "{told}");
+    assert!(
+        told.ends_with("turn 1 \u{b7} natural \u{b7} 2 steps\n"),
+        "{told}"
+    );
+
+    let raw = stdout(&run(dir.path(), &["replay", "j.jsonl", "--raw"], &[]));
+    assert!(raw.starts_with("   0  turn/start"), "{raw}");
+}

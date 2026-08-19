@@ -53,6 +53,9 @@ enum Cmd {
         /// Path to a JSONL journal a previous run wrote
         #[arg(value_name = "PATH")]
         path: String,
+        /// Print one line per durable event instead of the timeline
+        #[arg(long)]
+        raw: bool,
     },
     /// Print version/build info
     Info,
@@ -174,19 +177,34 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             }
             Ok(())
         }
-        Cmd::Replay { path } => {
+        Cmd::Replay { path, raw } => {
             let events = tetanus_session::replay(&path)
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            let theme = *out.theme();
-            for event in events {
-                let line = format!(
-                    "{:>4}  {:<20} {}",
-                    theme.paint(Role::Seq, &event.seq.to_string()),
-                    theme.paint(Role::Topic, &event.ty),
-                    event.data
-                );
-                out.line(&line).ok();
+            if raw {
+                let theme = *out.theme();
+                for event in events {
+                    let line = format!(
+                        "{:>4}  {:<20} {}",
+                        theme.paint(Role::Seq, &event.seq.to_string()),
+                        theme.paint(Role::Topic, &event.ty),
+                        event.data
+                    );
+                    out.line(&line).ok();
+                }
+                return Ok(());
             }
+            // The one crossing between the engine's journal type and the
+            // contract shape the renderer reads. In M2 this is `session.events`
+            // returning `tetanus_protocol::SessionEvent`, and the map goes.
+            let events: Vec<render::stub::SessionEvent> = events
+                .into_iter()
+                .map(|event| render::stub::SessionEvent {
+                    ty: event.ty,
+                    seq: event.seq,
+                    data: event.data,
+                })
+                .collect();
+            render::timeline::render(&mut out, &events).ok();
             Ok(())
         }
         Cmd::Info => {
