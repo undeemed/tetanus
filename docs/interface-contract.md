@@ -309,7 +309,8 @@ So a surface that wants a foreign journal back after a restart names its path ag
 
 Machine-readable output is contract output.
 `--json` prints the call's result type verbatim, one JSON object per line, with no added fields and no colour.
-A subcommand that streams prints each pushed `SessionEvent` as its own line as it arrives, and the call's result as the last line.
+A subcommand that streams prints the `SessionEvent` carried by each `SessionEventPush`, as its own line as it arrives, and the call's result as the last line.
+The push envelope is not printed: `session_id` is already known to whoever invoked the run, and dropping it makes the stream byte-identical to the journal on disk.
 A subcommand that does not stream prints exactly one line.
 So a script reads lines until the stream ends and treats the last one as the answer, whichever subcommand it ran.
 Human-readable output is the presentation lane's, and this document says nothing about it beyond the exit statuses in §4.5.
@@ -438,3 +439,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | First contract: envelope, error codes and exit statuses, session and agent calls, tool, model and config catalogues, `session/event` and `agent/status` pushes, `ui/ask` reserved. |
 | 1.0 | Reconciles the presentation lane's consumer review, before 1.0 is served: `EventSink` puts `session.subscribe` on the `Engine` trait so every carrier feeds one renderer (§4.1, §4.2); §4.3.1 fixes the `data` payload of each durable type and `SessionEvent::parse()` makes it compiler-checked; `SessionCreateParams.path` addresses a journal by path (§4.7); `--json` streaming is stated (§4.7); `TurnSummary.duration_ms` and `usage`, and `SessionInfo.title`, are named. |
 | 1.0 | Names the id a server answers with when it cannot read one (§4.1): `rpc::Id::Null`, serialized as JSON `null`, for a frame that is not JSON, is not a request, or is a batch array. No carrier existed when this landed, so no peer had observed the gap. |
+| 1.0 | Settles which type a streaming `--json` subcommand prints (§4.7, issue #56): the `SessionEvent` out of the push, not the `SessionEventPush` envelope. Wording only; it is what the presentation lane already shipped, and it keeps the stream byte-identical to the journal. |
