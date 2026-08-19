@@ -1,6 +1,6 @@
 //! Help ergonomics: what `tetanus --help` says, and how the colour policy
-//! reaches clap before clap has parsed anything. Two things happen here that
-//! are easy to get wrong.
+//! reaches clap before clap has parsed anything. Three things happen here
+//! that are easy to get wrong.
 //!
 //! Help is printed *during* parsing, so the palette has to be decided before
 //! `Cli::parse()` runs. [`color_from_argv`] pre-scans the raw arguments for
@@ -11,9 +11,16 @@
 //! ([`command_style`]) whenever we resolved plain, so that one decision - the
 //! one in `tetanus-ui` - governs every byte the binary writes, help text
 //! included.
+//!
+//! The page also has to say what the binary exits with. The numbers belong to
+//! the interface contract, not to this module: `ErrorCode::exit_status` is
+//! the single source, and [`EXIT_STATUS`] only words each one. It is on
+//! `--help` alone ([`root_long_epilogue`]) because a status is read by the
+//! script around a person, and `-h` is the summary that person skims for a
+//! flag.
 
 use clap::builder::styling::Styles;
-use tetanus_ui::{ColorChoice, Role, Theme};
+use tetanus_ui::{wrap, ColorChoice, Role, Theme};
 
 /// Pre-scan raw arguments for `--color`, before clap owns them.
 ///
@@ -119,6 +126,58 @@ Type a message and press Enter. `/help` lists the commands, `/exit` or ctrl-d
 leaves, and every turn is appended to the journal, which is what the next chat
 on the same path reads back as memory."
     )
+}
+
+/// What each exit status means, in the order a reader scans them.
+///
+/// Interface contract section 4.5 fixes the numbers and `ErrorCode::exit_status`
+/// is the single source for them, so nothing here decides one. Several codes
+/// share a status - a session that is gone, a session that is busy and a tool
+/// this build has not got are all `4` - so a row says what they have in
+/// common rather than naming codes a reader of a help page has never seen.
+/// `0` is worded here too, though no failure carries it, because the caller
+/// checking the others has to know what the absence of one means.
+///
+/// A status the contract defines and this table does not word is a hole in
+/// the page, and TC-CLI-HELP-8 is what stops one being left.
+const EXIT_STATUS: &[(u8, &str)] = &[
+    (0, "it did what was asked"),
+    (1, "this build failed, or a file could not be read"),
+    (2, "the command line was wrong"),
+    (3, "this build cannot do what was asked of it"),
+    (4, "what was named is not there, or is busy"),
+    (5, "a credential is not set"),
+    (6, "the provider refused the call"),
+    (130, "interrupted"),
+];
+
+/// The width of the number column: two spaces of indent, room for `130`, and
+/// the space after it. What a meaning starts at, and what a folded one
+/// continues under.
+const NUMBER: usize = 7;
+
+/// The root epilogue, and under it the statuses a caller reads.
+///
+/// Only `--help` is given this one. The rows are aligned on a fixed column
+/// rather than on the widest number, because the widest is `130` and a page
+/// that moves its own column when a status is added reads as a different page.
+///
+/// The meanings are folded here rather than left to clap. clap folds an
+/// epilogue it is handed to the width it was given, but it folds every line
+/// back to column zero, and a row continued in the number column reads as a
+/// status whose number went missing. Folded to `width` with the number column
+/// kept clear, nothing is left for clap to fold.
+pub fn root_long_epilogue(theme: &Theme, width: usize) -> String {
+    let heading = theme.paint(Role::Heading, "Exit status:");
+    let indent = " ".repeat(NUMBER);
+    let mut rows = Vec::new();
+    for (status, meaning) in EXIT_STATUS {
+        let mut folded = wrap(meaning, width.saturating_sub(NUMBER).max(1)).into_iter();
+        let first = folded.next().unwrap_or_default();
+        rows.push(format!("  {status:<4} {first}"));
+        rows.extend(folded.map(|line| format!("{indent}{line}")));
+    }
+    format!("{}\n\n{heading}\n{}", root_epilogue(theme), rows.join("\n"))
 }
 
 /// The block under `tetanus run --help`.

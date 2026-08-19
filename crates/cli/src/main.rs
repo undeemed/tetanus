@@ -227,8 +227,14 @@ impl Cli {
         let theme = policy.stdout;
         let command = <Self as clap::CommandFactory>::command()
             .color(help::command_style(theme.color()))
+            // The page folds where every other page this binary prints folds.
+            // clap would otherwise measure the terminal a second time and
+            // reach a different answer at the two ends of the clamp, which is
+            // where a block folded here would be folded again.
+            .term_width(policy.width)
             .styles(help::styles())
             .after_help(help::root_epilogue(&theme))
+            .after_long_help(help::root_long_epilogue(&theme, policy.width))
             .mut_subcommand("run", |run| run.after_help(help::run_epilogue(&theme)))
             .mut_subcommand("chat", |chat| chat.after_help(help::chat_epilogue(&theme)));
         <Self as clap::FromArgMatches>::from_arg_matches(&command.get_matches())

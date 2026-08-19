@@ -158,6 +158,10 @@ and `--json`.
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
 
+A script reads the exit status rather than the page: `0` when it did what was asked, `2` for a wrong command line, `4` for something named that is not there or is busy, `5` for a credential that is not set, `6` for a provider that refused, `130` for an interrupt, and `1` for a fault of this build's own.
+`tetanus --help` words all of them under `Exit status:`, and the numbers are [docs/interface-contract.md](docs/interface-contract.md) §4.5's, which every surface tetanus ships exits with.
+`-h` leaves the block out, because it is the summary you skim for a flag.
+
 The prompt is the command's own argument: `tetanus run "list the files"`.
 `-p/--prompt` takes the same text and cannot be combined with it.
 Either form given as `-` reads the prompt from standard input instead, so `tetanus run - < task.md` and a heredoc both become one turn, newlines and all.

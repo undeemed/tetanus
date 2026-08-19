@@ -403,6 +403,20 @@ That name is tamed for the line that says it and for the heading of the watched 
 the lookup that chose the adapter: what was given is what selects, and what is drawn is what is
 drawn.
 
+What the binary exits with is on the page too, under `Exit status:`
+([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)), because the caller of `tetanus run
+|| case $? in ...` reads a number this build has nowhere else told them about. The numbers are not
+this module's: `ErrorCode::exit_status` is the single source §4.5 names, so the table beside them
+words each status and decides none, and a status the contract can return with no wording beside it
+fails TC-CLI-HELP-8. Several codes share a status, so a row says what they have in common rather
+than naming a code a reader of a help page has never met. Only `--help` carries the block; `-h` is
+the summary a person skims for a flag, and a status is for the script around them.
+
+That block folds its own rows, and clap is given the width the rest of the binary uses
+([`Policy::width`](crates/ui/src/writer.rs)) so that it agrees. clap measures the terminal itself,
+which is a different answer at both ends of that clamp, and a block folded twice continues in the
+number column - where a wrapped meaning reads as a status whose number went missing.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
