@@ -65,6 +65,10 @@ pub fn unreadable(lines: &[Line]) -> Option<usize> {
 
 /// Print every line, readable or not, in the order the file holds them.
 pub fn render<W: Write>(ui: &mut Ui<W>, lines: &[Line]) -> io::Result<()> {
+    if lines.is_empty() {
+        let empty = ui.paint(Role::Muted, "the journal is empty").to_string();
+        return ui.line(&empty);
+    }
     for line in lines {
         let row = match line {
             Line::Event(event) => format!(
@@ -164,6 +168,14 @@ mod tests {
             shown(&lines, false),
             "   0  turn/start           {}\n   ?  unreadable           line 2: {oh no\n"
         );
+    }
+
+    /// TC-CLI-RAW-6: a file with no lines in it.
+    /// Expected: the same sentence the timeline prints. The two views of one
+    /// journal must not disagree about whether it is empty.
+    #[test]
+    fn an_empty_file_says_it_is_empty() {
+        assert_eq!(shown(&[], false), "the journal is empty\n");
     }
 
     /// TC-CLI-RAW-5: the same page, coloured.

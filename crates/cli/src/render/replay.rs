@@ -50,7 +50,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use tetanus_protocol::types::SessionEvent;
-use tetanus_ui::{Screen, Ui};
+use tetanus_ui::{Role, Screen, Ui};
 
 use super::live::Live;
 
@@ -89,6 +89,15 @@ pub async fn play<W: Write>(
     think: bool,
     stop: impl Future<Output = ()>,
 ) -> io::Result<Ended> {
+    if events.is_empty() {
+        // The same sentence the other two views print. Three views of one
+        // journal must not disagree about whether it is empty, and a
+        // playback that draws nothing is the easiest of the three to read as
+        // a command that failed silently.
+        let empty = ui.paint(Role::Muted, "the journal is empty").to_string();
+        ui.line(&empty)?;
+        return Ok(Ended::Finished);
+    }
     let (theme, width) = (*ui.theme(), ui.width());
     let mut view = Live::new(theme, width, "replaying", think);
     let mut screen = Screen::new(Ui::new(ui.out(), theme, width), animated);
@@ -277,17 +286,19 @@ mod tests {
     }
 
     /// TC-CLI-PLAY-5: a journal with no events.
-    /// Expected: nothing written and no panic. The first event's time is what
-    /// the clock counts from, and a journal that has none must not decide the
-    /// arithmetic by crashing.
+    /// Expected: the one sentence the static views print, and no panic. The
+    /// first event's time is what the clock counts from, so a journal that
+    /// has none must not decide the arithmetic by crashing; and a playback
+    /// that drew nothing at all would be the third view of one journal
+    /// saying a different thing about it.
     #[tokio::test]
-    async fn an_empty_journal_plays_as_nothing() {
+    async fn an_empty_journal_says_it_is_empty() {
         let mut ui = buffered(theme(), 80);
         let ended = play(&mut ui, false, &[], 1.0, false, never())
             .await
             .expect("play");
         assert_eq!(ended, Ended::Finished);
-        assert_eq!(ui.contents(), "");
+        assert_eq!(ui.contents(), "the journal is empty\n");
     }
 
     /// TC-CLI-PLAY-6: Ctrl-C during a playback.

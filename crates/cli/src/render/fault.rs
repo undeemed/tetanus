@@ -66,13 +66,23 @@ pub fn wording(error: &RpcError) -> (String, Option<String>) {
             },
             None,
         ),
-        ErrorCode::SessionNotFound => (
-            match field(error, "session_id") {
-                Some(id) => format!("no session {id}"),
-                None => error.message.clone(),
-            },
-            Some("name the journal by path to open it again".into()),
-        ),
+        // A path the user typed and an id that has gone are different
+        // mistakes: one is a typo to fix here, the other is a session to
+        // find again. They do not get the same way out.
+        ErrorCode::SessionNotFound => match (field(error, "path"), field(error, "session_id")) {
+            (Some(path), _) => (
+                format!("no journal at {path}"),
+                Some("check the path, or list what there is with `tetanus sessions`".into()),
+            ),
+            (None, Some(id)) => (
+                format!("no session {id}"),
+                Some("name the journal by path to open it again".into()),
+            ),
+            (None, None) => (
+                error.message.clone(),
+                Some("name the journal by path to open it again".into()),
+            ),
+        },
         ErrorCode::SessionBusy => (
             match field(error, "session_id") {
                 Some(id) => format!("a turn is already running on {id}"),
@@ -259,6 +269,27 @@ mod tests {
                 ),
                 "/srv/j.jsonl: permission denied",
                 "",
+            ),
+            // The same code, two mistakes. A path the user typed is fixed by
+            // looking at the path; an id that has gone is found again by
+            // naming the journal it lives in.
+            (
+                fault(
+                    ErrorCode::SessionNotFound,
+                    "no such journal",
+                    Some(json!({ "path": "nope.jsonl" })),
+                ),
+                "no journal at nope.jsonl",
+                "tetanus sessions",
+            ),
+            (
+                fault(
+                    ErrorCode::SessionNotFound,
+                    "no such session",
+                    Some(json!({ "session_id": "s1755" })),
+                ),
+                "no session s1755",
+                "name the journal by path",
             ),
         ];
 
