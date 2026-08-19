@@ -239,6 +239,28 @@ The ask is a server-to-client request because the engine blocks on it: a tool ca
 A client that advertises no `ui.ask` capability is never asked, and the engine denies the underlying action instead of hanging.
 A client that advertises the capability and then fails to answer must answer with an error; the engine treats any error as a denial.
 
+#### 4.4.4 Reopening a journal a crash left open
+
+A process that dies mid-turn leaves a journal whose last turn never ended, and possibly a tool call no `tool/result` answers.
+`session.create` closes that turn before it answers, so no surface ever sees a session whose history has a dangling call.
+
+The closers are ordinary durable events, written once, at the end of the journal:
+
+```text
+session/event tool/result   (one per unanswered call, ok: false)
+session/event step/end      (only when a step was open)
+session/event turn/end      (stop_reason: "interrupted")
+```
+
+A surface reads them exactly as it reads a live turn's, and `SessionInfo.last_seq` counts them.
+So a reopened session may report a `last_seq` above the one the surface last saw, and that is the repair, not a lost push.
+
+Each synthesized `tool/result` carries a `code`: `TOOL_NOT_STARTED` when no `tool/call` was ever written for it, and `TOOL_OUTCOME_UNKNOWN` when one was, in which case the result cites that `tool/call` in `sourceEventSeqs`.
+The two are worth telling apart in a transcript, because the first is safe to retry and the second is not.
+
+`stop_reason: "interrupted"` is a new value of the growable `StopReason`, and §7.5 already fixes what an old surface does with one.
+A balanced journal is untouched, so this is invisible to every session that closed normally.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -440,3 +462,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Reconciles the presentation lane's consumer review, before 1.0 is served: `EventSink` puts `session.subscribe` on the `Engine` trait so every carrier feeds one renderer (§4.1, §4.2); §4.3.1 fixes the `data` payload of each durable type and `SessionEvent::parse()` makes it compiler-checked; `SessionCreateParams.path` addresses a journal by path (§4.7); `--json` streaming is stated (§4.7); `TurnSummary.duration_ms` and `usage`, and `SessionInfo.title`, are named. |
 | 1.0 | Names the id a server answers with when it cannot read one (§4.1): `rpc::Id::Null`, serialized as JSON `null`, for a frame that is not JSON, is not a request, or is a batch array. No carrier existed when this landed, so no peer had observed the gap. |
 | 1.0 | Settles which type a streaming `--json` subcommand prints (§4.7, issue #56): the `SessionEvent` out of the push, not the `SessionEventPush` envelope. Wording only; it is what the presentation lane already shipped, and it keeps the stream byte-identical to the journal. |
+| 1.0 | Names what `session.create` does with a journal a crash left mid-turn (§4.4.4): it appends the missing `tool/result`, `step/end` and `turn/end` closers before answering, so `last_seq` may jump and `stop_reason: "interrupted"` may appear. No type changes: `StopReason` is growable by §7.5, and the closers use payloads §4.3.1 already fixes. |
