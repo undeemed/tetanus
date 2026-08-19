@@ -179,6 +179,9 @@ The engine turns that document into the settings it runs on
 `config.dump` reports and the keys a document may set are one list rather than two.
 A value of the wrong type fails the boot for the same reason: a refused setting is visible, and an
 ignored one is not.
+The retry policy is resolved there too ([crates/engine/src/retry.rs](crates/engine/src/retry.rs)),
+under the `llm.retry` keys upstream uses, because the decision and the executor
+([crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs)) read no settings themselves.
 Which binary calls it, and with which flags, is the presentation lane's wiring.
 
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
