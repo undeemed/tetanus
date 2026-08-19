@@ -30,8 +30,67 @@
 //! follows the cursor. It is the same bargain `Screen` makes for a frame: one
 //! line is one row, whatever it holds.
 
-use crate::terminal::Key;
+use std::io::{self, Write};
+use std::time::Duration;
+
+use crate::terminal::{Key, Keys};
 use crate::text::visible_width;
+
+/// How long a read waits before looking again.
+///
+/// Nothing depends on the length: the wait ends the moment a key arrives, and
+/// a wait that passed with none simply starts another. It is bounded at all
+/// only so that a reader is not blocked inside a call that cannot be
+/// interrupted.
+const LOOKING: Duration = Duration::from_secs(1);
+
+/// Read one line, drawing it as it is typed.
+///
+/// The terminal is the caller's to take and give back - this function reads
+/// keys and writes rows, and holds nothing. It returns on the three keystrokes
+/// that end a line, having written the newline that closes the row, so what
+/// the caller prints next starts on a row of its own.
+///
+/// A window that changed size arrives on the same queue as the keys, and is
+/// answered here rather than passed on: the row is redrawn to the new width,
+/// which is the whole of what a line being typed has to do about it.
+pub fn read<K: Keys, W: Write>(
+    keys: &mut K,
+    out: &mut W,
+    marker: &str,
+    width: usize,
+) -> io::Result<Typed> {
+    let mut line = Line::new();
+    let mut width = width;
+    let draw = |line: &mut Line, out: &mut W, width| -> io::Result<()> {
+        write!(out, "{}", line.repaint(marker, width))?;
+        out.flush()
+    };
+
+    draw(&mut line, out, width)?;
+    loop {
+        let Some(key) = keys.key(LOOKING)? else {
+            continue;
+        };
+        if let Key::Resize(cols, _) = key {
+            width = cols as usize;
+            draw(&mut line, out, width)?;
+            continue;
+        }
+        match line.key(key) {
+            Typed::Editing => draw(&mut line, out, width)?,
+            Typed::Ignored => {}
+            // Raw mode is the caller's, so the return is written out: the
+            // terminal is not translating one into the other while a line is
+            // being read this way.
+            ended => {
+                write!(out, "\r\n")?;
+                out.flush()?;
+                return Ok(ended);
+            }
+        }
+    }
+}
 
 /// What a keystroke did to the line.
 ///
@@ -94,7 +153,11 @@ impl Line {
                 self.cursor += 1;
                 Typed::Editing
             }
-            Key::Enter => {
+            // Ctrl-J is the same byte a newline is, and a terminal in raw
+            // mode is not translating it: it is what the Enter key sends
+            // through some terminals, and what every line of a pasted block
+            // ends with.
+            Key::Enter | Key::Ctrl('j') => {
                 let asked = self.text();
                 self.text.clear();
                 self.cursor = 0;
@@ -271,16 +334,48 @@ impl Line {
 /// longer than the row scrolls under a cursor that stays where the reader put
 /// it.
 ///
-/// Features NOT tested here: reading the keys (owned by
-/// [`Keys`](crate::Keys), which is a terminal), and what a finished line means
-/// (owned by the caller - `tetanus chat` decides what is a question and what
-/// is a command).
+/// It also covers the read loop over those keystrokes: that it draws the row
+/// once before anything is typed and once per change, that a wait which passed
+/// with nothing is not a keystroke, that a window which changed size is
+/// answered by redrawing at the new width, and that each of the three keys
+/// that end a line writes the return that closes the row.
+///
+/// Features NOT tested here: the terminal itself - taking raw mode and
+/// supplying real keystrokes is [`Typing`](crate::Typing), which needs a
+/// controlling terminal a `cargo test` process does not have, and which
+/// `target/probe-edit.py` drives on a pty instead. Nor what a finished line
+/// means: `tetanus chat` decides what is a question and what is a command.
 ///
 /// Environmental needs: none. Every case feeds keys to a value and reads it
 /// back; no case opens a terminal.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A terminal that answers the keys it was given, and nothing after them.
+    /// A `None` in the script is a wait that passed with nothing typed, which
+    /// is what a real one returns while a person is thinking.
+    struct Scripted(std::vec::IntoIter<Option<Key>>);
+
+    impl Keys for Scripted {
+        fn key(&mut self, _wait: Duration) -> io::Result<Option<Key>> {
+            match self.0.next() {
+                Some(key) => Ok(key),
+                // The script ran out without a key that ends the line, which
+                // is a case being written wrong rather than anything a
+                // terminal does.
+                None => Err(io::Error::other("the script ran out")),
+            }
+        }
+    }
+
+    /// Read one line from a script, and answer it with what was drawn.
+    fn read_from(script: Vec<Option<Key>>, width: usize) -> (Typed, String) {
+        let mut keys = Scripted(script.into_iter());
+        let mut out = Vec::new();
+        let read = read(&mut keys, &mut out, "> ", width).expect("the script reads");
+        (read, String::from_utf8(out).expect("utf-8"))
+    }
 
     /// Type `text` into a fresh line, character by character.
     fn typed(text: &str) -> Line {
@@ -316,7 +411,8 @@ mod tests {
     /// Expected: the whole line, once, and an empty editor after it - a second
     /// Enter answers with the empty line rather than the one before it. What
     /// an empty line means is the caller's to decide, so it is handed over
-    /// like any other.
+    /// like any other. Ctrl-J does the same: it is the byte a newline is, and
+    /// a terminal in raw mode hands it over untranslated.
     #[test]
     fn enter_hands_the_line_over_and_keeps_none_of_it() {
         let mut line = typed("ask me");
@@ -324,6 +420,9 @@ mod tests {
         assert_eq!(line.text(), "");
         assert_eq!(line.cursor(), 0);
         assert_eq!(line.key(Key::Enter), Typed::Asked(String::new()));
+
+        let mut line = typed("ask me");
+        assert_eq!(line.key(Key::Ctrl('j')), Typed::Asked("ask me".into()));
     }
 
     /// TC-UI-EDIT-3: the movement keys, including at both ends.
@@ -510,5 +609,81 @@ mod tests {
     fn one_backspace_takes_one_character() {
         assert_eq!(after("café", &[Key::Backspace]), ("caf".into(), 3));
         assert_eq!(after("hi 🙂", &[Key::Backspace]), ("hi ".into(), 3));
+    }
+
+    /// TC-UI-EDIT-12: a line typed and entered.
+    /// Expected: the line, and a row drawn once before anything was typed and
+    /// once for each key that changed it, closing with the return that ends
+    /// it. The first draw is what puts the marker on the screen, so a prompt
+    /// that printed nothing until the first keystroke would look like a hung
+    /// process.
+    #[test]
+    fn a_read_draws_the_row_and_answers_with_the_line() {
+        let (read, drawn) = read_from(
+            vec![Some(Key::Char('h')), Some(Key::Char('i')), Some(Key::Enter)],
+            20,
+        );
+
+        assert_eq!(read, Typed::Asked("hi".into()));
+        assert_eq!(
+            drawn,
+            "\r> \x1b[K\r\x1b[2C\
+             \r> \x1b[Kh\r\x1b[3C\
+             \r> \x1b[Khi\r\x1b[4C\
+             \r\n"
+        );
+    }
+
+    /// TC-UI-EDIT-13: a wait that passed with nothing typed, and a key that
+    /// changed nothing.
+    /// Expected: no row for either. A prompt that redrew itself once a second
+    /// while nobody typed would fight anything else writing to the terminal.
+    #[test]
+    fn nothing_typed_draws_nothing() {
+        let (read, drawn) = read_from(vec![None, None, Some(Key::Left), Some(Key::Enter)], 20);
+
+        assert_eq!(read, Typed::Asked(String::new()));
+        assert_eq!(drawn, "\r> \x1b[K\r\x1b[2C\r\n");
+    }
+
+    /// TC-UI-EDIT-14: the window changed size while a line was being typed.
+    /// Expected: the row redrawn to the new width, which for a line longer
+    /// than the new one means the window over it moves. The size arrives on
+    /// the same queue as the keys because it has to be answered in the same
+    /// place: the row on the screen was drawn for a width that no longer
+    /// exists.
+    #[test]
+    fn a_resize_redraws_the_row_at_the_new_width() {
+        let typing = "abcdefghij".chars().map(|char| Some(Key::Char(char)));
+        let (read, drawn) = read_from(
+            typing
+                .chain([Some(Key::Resize(8, 24)), Some(Key::Enter)])
+                .collect(),
+            20,
+        );
+
+        assert_eq!(read, Typed::Asked("abcdefghij".into()));
+        // Two returns to a row - one to draw it, one to place the cursor -
+        // so the row before the resize is five pieces from the end and the
+        // row after it is three.
+        let rows: Vec<&str> = drawn.split('\r').collect();
+        assert_eq!(rows[rows.len() - 5], "> \x1b[Kabcdefghij");
+        assert_eq!(rows[rows.len() - 3], "> \x1b[Kfghij", "the window moved");
+    }
+
+    /// TC-UI-EDIT-15: the other two keys that end a line.
+    /// Expected: each returns what it means and closes the row, so that
+    /// whatever the caller prints about it starts on a row of its own rather
+    /// than beside the marker.
+    #[test]
+    fn every_way_out_closes_the_row() {
+        for (key, expected) in [
+            (Key::Ctrl('c'), Typed::Interrupted),
+            (Key::Ctrl('d'), Typed::Left),
+        ] {
+            let (read, drawn) = read_from(vec![Some(key)], 20);
+            assert_eq!(read, expected);
+            assert!(drawn.ends_with("\r\n"), "{drawn:?}");
+        }
     }
 }
