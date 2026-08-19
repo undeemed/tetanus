@@ -1124,6 +1124,7 @@ where
         seen: 0,
         help: false,
         started: std::time::Instant::now(),
+        painted: None,
     };
     // One frame before the loop. Entering the alternate screen and leaving it
     // blank until something happens is a visible flash, and an offline turn
@@ -1189,6 +1190,9 @@ struct Watch<'a> {
     /// Whether the key card is up in place of the turn.
     help: bool,
     started: std::time::Instant,
+    /// The frame the terminal is showing, so an unchanged one is not sent
+    /// again. See [`Watch::paint`].
+    painted: Option<Frame>,
 }
 
 impl Watch<'_> {
@@ -1348,10 +1352,28 @@ impl Watch<'_> {
         flow
     }
 
-    /// Compose the screen at the size the terminal has now, and paint it.
+    /// Compose the screen at the size the terminal has now, and paint it if
+    /// it is not already the screen on the terminal.
+    ///
+    /// This loop's clock is the turn's, not the reader's: it comes round every
+    /// 80ms so that a spinner moves and a keystroke is answered without a wait
+    /// anybody notices. The content does not change that often, and once the
+    /// turn is over it does not change at all - `Live::block` is empty from
+    /// there on, so every later frame is the previous one. The views driven by
+    /// `tetanus_ui::show` never meet this, because a page over something
+    /// finished waits an hour for a key; this one cannot wait, so it compares
+    /// instead. Without the comparison a finished turn left on the screen goes
+    /// on sending a repaint of it twelve times a second for as long as the
+    /// reader reads it, which over a slow link is the difference between a
+    /// still page and a flickering one.
     fn paint<W: std::io::Write>(&mut self, out: &mut Ui<W>) {
         let (cols, rows) = self.size;
-        self.frame(cols, rows).paint(out).ok();
+        let frame = self.frame(cols, rows);
+        if self.painted.as_ref() == Some(&frame) {
+            return;
+        }
+        frame.paint(out).ok();
+        self.painted = Some(frame);
     }
 }
 

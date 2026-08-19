@@ -266,6 +266,11 @@ closing event, so the only record of the failure is the value the future returne
 polling a journal that stopped growing would keep saying the turn was running.
 The reason is settled onto the page in the wording [crates/cli/src/render/fault.rs](crates/cli/src/render/fault.rs)
 gives every other surface, because stderr is behind the alternate screen until the reader gives up.
+Being told is also what lets the view go quiet: from there the frame it composes every 80ms is the
+frame already on the terminal, and `Frame` is comparable so that the paint is skipped rather than
+sent again.
+The two views driven by `tetanus_ui::show` never need this - a page over something finished waits an
+hour for a keystroke - and this one cannot wait, because the turn is still arriving.
 
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
