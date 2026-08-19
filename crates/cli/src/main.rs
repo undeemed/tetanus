@@ -2,6 +2,8 @@
 
 mod render;
 
+use tetanus_protocol::types as protocol;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -210,18 +212,22 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
     }
 }
 
-/// Carry journal events across to the shape the renderer reads.
+/// Carry journal events across to the contract shape the renderer reads.
 ///
-/// The one crossing between an engine type and a contract type. In M2 this is
-/// `session.events` returning `tetanus_protocol::SessionEvent`, and this
-/// function goes.
-fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<render::stub::SessionEvent> {
+/// The one crossing left between an engine type and a contract type. The two
+/// structs agree field for field, so this is a copy, not a translation: the
+/// journal on disk is already the wire shape. It goes when the engine serves
+/// `session.events` over the contract itself, and nothing in `render` changes
+/// when it does - that is the point of the boundary.
+fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<protocol::SessionEvent> {
     events
         .into_iter()
-        .map(|event| render::stub::SessionEvent {
+        .map(|event| protocol::SessionEvent {
             ty: event.ty,
             seq: event.seq,
+            time: event.time,
             data: event.data,
+            source_event_seqs: event.source_event_seqs,
         })
         .collect()
 }

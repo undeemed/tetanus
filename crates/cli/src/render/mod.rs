@@ -6,5 +6,4 @@
 //! presentation lane change the binary without reviewing each other's work.
 
 pub mod help;
-pub mod stub;
 pub mod timeline;
