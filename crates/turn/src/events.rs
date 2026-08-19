@@ -157,6 +157,9 @@ pub enum StopReason {
     PreStepRejected,
     /// The step budget ran out before the model settled.
     MaxSteps,
+    /// The turn never ended: this reason is written by crash repair when a
+    /// later run finds the journal open. See [`crate::repair`].
+    Interrupted,
 }
 
 impl StopReason {
@@ -165,6 +168,7 @@ impl StopReason {
             StopReason::Natural => "natural",
             StopReason::PreStepRejected => "pre-step-rejected",
             StopReason::MaxSteps => "max-steps",
+            StopReason::Interrupted => "interrupted",
         }
     }
 }
