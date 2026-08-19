@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline, one call at a time | Shell, subprocess, filesystem, MCP client; permissions, concurrency, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`) | Profiles, bundles, patch overlays, live recompose |
 | Effects | RAII handles: dropping a registration unwinds it | Reversible effects beyond registration, live subtree remount |
-| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio carrier | The WebSocket carrier, and the fire UI |
+| Surfaces | `tetanus` CLI, headless, and `tetanus serve`: the published contract served over the stdio carrier. The WebSocket carrier is written and conformance-tested | `tetanus serve` hosting the WebSocket carrier, and the fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is

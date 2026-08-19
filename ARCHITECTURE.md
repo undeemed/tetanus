@@ -165,8 +165,11 @@ one delegating listener per documented event, and prints the sequence.
 Any other consumer would attach the same way: `session/event` for durable facts, the waterfalls for
 live participation.
 
-No carrier is wired yet: nothing implements the `Engine` trait, so there is no JSON-RPC server, no
-WebSocket surface, and no web UI. The contract that those will speak is published, and §4.8 covers it.
+`tetanus-engine` ([crates/engine](crates/engine)) implements the `Engine` trait, and `tetanus-rpc`
+([crates/rpc](crates/rpc)) carries it: a JSON-RPC 2.0 codec with a stdio carrier and a WebSocket
+carrier. `tetanus serve` hosts the stdio one; nothing hosts the WebSocket one yet, so that carrier
+is reachable as a library and not from the command line. There is no web UI. §4.8 covers the
+contract all three speak.
 
 ### 4.8 Interface view - the engine/presentation contract
 
@@ -177,8 +180,8 @@ One contract serves three carriers - in process, stdio, WebSocket - because a su
 `EventSink` supplied by the carrier rather than named on the wire.
 
 The document is the specification and the crate is what both lanes compile against.
-Today the crate carries types and the trait only; no component implements `Engine`, so every call in
-the contract is a promise rather than a running endpoint.
+The crate carries the types and the trait; `tetanus-engine` implements every call, and `tetanus-rpc`
+serves them over stdio and WebSocket.
 The contract's own status table and changelog are authoritative for what is served.
 
 A boundary change is its own pull request touching the document and the types together
