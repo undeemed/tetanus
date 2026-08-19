@@ -89,6 +89,7 @@ use tetanus_protocol::types::{SessionEvent, SessionInfo};
 use tetanus_ui::{bar, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View};
 
 use super::browse::{Exit, Journal, NAME};
+use super::keys::{self, Row};
 use super::sessions;
 
 /// How long the loop waits for a keystroke before painting again.
@@ -208,6 +209,8 @@ struct Picker<'a> {
     reading: Option<Journal>,
     /// Why the last journal would not open, until the next key.
     fault: Option<String>,
+    /// Whether the key card is up in place of the list.
+    help: bool,
 }
 
 impl<'a> Picker<'a> {
@@ -236,6 +239,7 @@ impl<'a> Picker<'a> {
             open,
             reading: None,
             fault: None,
+            help: false,
         };
         picker.fill(cols);
         picker
@@ -301,7 +305,7 @@ impl<'a> Picker<'a> {
             ),
             (None, Filter::Off) => {
                 let keys = format!(
-                    "{} move {dot} enter read {dot} / filter {dot} q quit",
+                    "{} move {dot} enter read {dot} / filter {dot} ? keys {dot} q quit",
                     self.theme.glyph("↑↓", "up/dn"),
                 );
                 self.theme.paint(Role::Muted, &keys).to_string()
@@ -325,6 +329,9 @@ impl<'a> Picker<'a> {
     fn list(&mut self, cols: usize, rows: usize) -> Frame {
         if cols != self.cols {
             self.fill(cols);
+        }
+        if self.help {
+            return keys::card(&self.theme, cols, rows, "session list", &self.map());
         }
         self.room = rows.saturating_sub(CHROME);
         self.follow();
@@ -364,8 +371,28 @@ impl<'a> Picker<'a> {
         frame
     }
 
+    /// Every key the list answers, in the order a reader meets them.
+    fn map(&self) -> Vec<Row> {
+        vec![
+            (self.theme.glyph("↑ ↓", "up dn"), "one row up, one row down"),
+            ("pgup pgdn", "a screenful either way"),
+            ("home end", "the newest journal, the oldest"),
+            ("enter", "read the journal under the cursor"),
+            ("/", "a word: keep the journals holding it, as you type"),
+            ("esc", "clear the filter, then close the view"),
+            ("q", "close the view"),
+            ("?", "this card; any key goes back"),
+        ]
+    }
+
     /// Answer a key while the list is the thing on screen.
     fn choose(&mut self, key: Key) -> Flow {
+        // The card is read, not worked in: the next key takes it down, and
+        // that is all it does. The rule a journal states, held to here as well.
+        if self.help {
+            self.help = false;
+            return Flow::Go;
+        }
         self.fault = None;
         if matches!(self.filter, Filter::Typing(_)) {
             return self.spell(key);
@@ -386,6 +413,7 @@ impl<'a> Picker<'a> {
             // `/` on a filter that is already on re-opens it for editing
             // rather than clearing it: narrowing is usually done in two goes.
             Key::Char('/') => self.filter = Filter::Typing(self.filter.text().to_string()),
+            Key::Char('?') => self.help = true,
             Key::Up => self.at = self.at.saturating_sub(1),
             Key::Down => self.at = (self.at + 1).min(last),
             Key::PageUp => self.at = self.at.saturating_sub(screenful),
@@ -509,9 +537,11 @@ impl View for Picker<'_> {
 /// its id; that a journal spelling a search keeps the keys that would close it;
 /// that `q` leaves a journal for the list and only then the list for the
 /// shell; that a journal which will not open, or holds nothing, is reported
-/// without ending the view; and that `/` narrows the list to the journals that
+/// without ending the view; that `/` narrows the list to the journals that
 /// match, takes the printable keys while it is being typed, and moves the
-/// cursor and Enter on to the matches.
+/// cursor and Enter on to the matches; and that `?` spells the list's own keys
+/// out over it, and that a journal showing its card keeps the keys that would
+/// close it.
 ///
 /// Features NOT tested here: the wording and widths of a row (owned by
 /// `sessions.rs`), the arrangement of a frame (owned by `tetanus_ui::Frame`),
@@ -907,6 +937,80 @@ mod tests {
         // Esc closes the prompt, and the next Esc is the journal's own again.
         view.key(Key::Esc);
         assert_eq!(view.key(Key::Esc), Flow::Go);
+        assert!(view.reading.is_none(), "the journal did not close");
+    }
+
+    /// TC-CLI-PICK-12: `?` over the list, and the way back out of it.
+    /// Expected: the card names this view rather than a journal, holds a row
+    /// for every key the list answers, and the next key - any key - gives back
+    /// the list as it was, cursor where it was left.
+    #[test]
+    fn the_card_says_the_lists_own_keys() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        view.key(Key::Down);
+        let before = rows(&mut view, COLS, 12);
+
+        assert_eq!(view.key(Key::Char('?')), Flow::Go);
+        let card = rows(&mut view, COLS, 12);
+        let shown = body(&card).join("\n");
+        assert!(
+            card[0].contains("session list keys"),
+            "not headed as this view's card: {card:?}"
+        );
+        for said in [
+            "one row up",
+            "read the journal under the cursor",
+            "clear the filter",
+            "this card",
+        ] {
+            assert!(
+                shown.contains(said),
+                "the card does not say {said}: {card:?}"
+            );
+        }
+        assert!(!shown.contains("s2"), "the list is still on it: {card:?}");
+
+        assert_eq!(view.key(Key::Char('z')), Flow::Go);
+        assert_eq!(
+            rows(&mut view, COLS, 12),
+            before,
+            "the card moved the cursor"
+        );
+    }
+
+    /// TC-CLI-PICK-13: `?` inside an opened journal, then `q`.
+    /// Expected: the journal keeps both keys - the one that opens its card and
+    /// the one that takes the card down - and the list is still behind it. The
+    /// other half of TC-CLI-PICK-11: an inner view showing something of its
+    /// own owns the keyboard until it is done with it.
+    #[test]
+    fn a_journal_showing_its_card_keeps_the_keys_that_would_close_it() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+        view.key(Key::Enter);
+
+        view.key(Key::Char('?'));
+        let card = rows(&mut view, COLS, 12);
+        assert!(
+            card[0].contains("journal keys"),
+            "the journal's card is not up: {card:?}"
+        );
+
+        // `q` takes the card down and nothing else: the journal is still open,
+        // and so is the list under it.
+        assert_eq!(view.key(Key::Char('q')), Flow::Go, "the journal closed");
+        assert!(view.reading.is_some(), "the journal closed");
+        let back = rows(&mut view, COLS, 12);
+        assert!(
+            !back[0].contains("journal keys"),
+            "the card stayed up: {back:?}"
+        );
+
+        assert_eq!(view.key(Key::Char('q')), Flow::Go);
         assert!(view.reading.is_none(), "the journal did not close");
     }
 }
