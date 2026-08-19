@@ -25,6 +25,13 @@
 //! reported how long it took to play would say nothing about the turn it is
 //! showing, so an offline turn honestly reads `0.0s` however slowly it plays.
 //!
+//! # Ctrl-C
+//!
+//! A playback is a thing a person watches and then stops watching, so it takes
+//! a `stop` future and treats it as one of the two ways a playback can end.
+//! The caller passes the real signal; a test passes a future it controls,
+//! which is why the case below needs no terminal and no signal.
+//!
 //! # Into a pipe
 //!
 //! Nothing waits when the stream is not a terminal, and `Screen` draws nothing
@@ -32,7 +39,9 @@
 //! There is no one watching to pace for, and the byte-identical guarantee the
 //! rest of the surface keeps holds here too.
 
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use tetanus_protocol::types::SessionEvent;
@@ -52,54 +61,79 @@ const FLOOR: Duration = Duration::from_millis(140);
 /// through it again is not.
 const CEILING: Duration = Duration::from_secs(2);
 
+/// How a playback ended, which is what decides the exit status.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// The journal ran out.
+    Finished,
+    /// A person stopped watching.
+    Interrupted,
+}
+
 /// Play `events` through the live view.
 ///
 /// `animated` is "this stream is a terminal", resolved once by the caller -
 /// it decides both whether the block is drawn and whether anything waits.
-pub fn play<W: Write>(
+/// `stop` is Ctrl-C: when it resolves, the block is erased and whatever was
+/// already committed stays committed.
+pub async fn play<W: Write>(
     ui: &mut Ui<W>,
     animated: bool,
     events: &[SessionEvent],
     speed: f64,
-) -> io::Result<()> {
+    stop: impl Future<Output = ()>,
+) -> io::Result<Ended> {
     let (theme, width) = (*ui.theme(), ui.width());
     let mut view = Live::new(theme, width, "replaying");
     let mut screen = Screen::new(Ui::new(ui.out(), theme, width), animated);
+    let mut stop = std::pin::pin!(stop);
 
     let start = events.first().map(|event| event.time).unwrap_or_default();
     let mut previous: Option<u64> = None;
+    let mut ended = Ended::Finished;
     for event in events {
         if let Some(before) = previous.filter(|_| animated) {
             let gap = pace(event.time.saturating_sub(before), speed);
-            hold(&mut screen, &mut view, since(start, before), gap)?;
+            if hold(&mut screen, &mut view, since(start, before), gap, &mut stop).await? {
+                ended = Ended::Interrupted;
+                break;
+            }
         }
         previous = Some(event.time);
         let lines = view.push(event);
         screen.print(&lines)?;
     }
+    // Erasing the block is the whole of the cleanup, and it happens on both
+    // endings: a terminal left holding a half-drawn frame is the one thing a
+    // program that draws in place owes its user never to do.
     screen.finish()?;
-    Ok(())
+    Ok(ended)
 }
 
-/// Hold the block on screen for `gap`, ticking it while it waits.
+/// Hold the block on screen for `gap`, ticking it while it waits. Reports
+/// whether the wait was stopped rather than served.
 ///
 /// The frame is drawn before the sleep, not after, so the block an event
 /// produced is on screen for the whole of the gap that follows it.
-fn hold<W: Write>(
+async fn hold<W: Write>(
     screen: &mut Screen<W>,
     view: &mut Live,
     elapsed: Duration,
     gap: Duration,
-) -> io::Result<()> {
+    stop: &mut Pin<&mut impl Future<Output = ()>>,
+) -> io::Result<bool> {
     let until = Instant::now() + gap;
     loop {
         view.tick();
         screen.draw(&view.block(elapsed))?;
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Ok(());
+            return Ok(false);
         }
-        std::thread::sleep(left.min(FRAME));
+        tokio::select! {
+            _ = tokio::time::sleep(left.min(FRAME)) => {}
+            _ = stop.as_mut() => return Ok(true),
+        }
     }
 }
 
@@ -119,7 +153,8 @@ fn since(start: u64, time: u64) -> Duration {
 ///
 /// Features tested: the pace one recorded gap becomes, at the floor, at the
 /// ceiling and under `--speed`; that a playback into a pipe is the timeline
-/// byte for byte; and that an empty journal plays as nothing.
+/// byte for byte; that an empty journal plays as nothing; and that Ctrl-C
+/// stops the playback and erases the block.
 ///
 /// Features NOT tested here: the wording of a settled line (owned by
 /// `timeline.rs`), the block (owned by `live.rs`), the escapes a frame writes
@@ -128,8 +163,10 @@ fn since(start: u64, time: u64) -> Duration {
 /// flaky suite and no new information, because the arithmetic under it is
 /// TC-CLI-PLAY-1..3.
 ///
-/// Environmental needs: none. No case here waits, because no case here is
-/// animated.
+/// Environmental needs: a tokio runtime, which `#[tokio::test]` supplies. No
+/// case needs a terminal - the stream is a buffer - and no case needs a
+/// signal, because the stop signal is an ordinary future the case resolves
+/// itself.
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -207,11 +244,14 @@ mod tests {
     /// Expected: the bytes `tetanus replay` writes for the same journal, and
     /// no escape codes. `--live` is a way of watching a turn, not a second
     /// wording of it, so a script that reads either gets one answer.
-    #[test]
-    fn a_piped_playback_is_the_timeline() {
+    #[tokio::test]
+    async fn a_piped_playback_is_the_timeline() {
         let events = turn();
         let mut played = buffered(theme(), 80);
-        play(&mut played, false, &events, 1.0).expect("play");
+        let ended = play(&mut played, false, &events, 1.0, never())
+            .await
+            .expect("play");
+        assert_eq!(ended, Ended::Finished);
 
         let mut printed = buffered(theme(), 80);
         super::super::timeline::render(&mut printed, &events).expect("render");
@@ -224,10 +264,46 @@ mod tests {
     /// Expected: nothing written and no panic. The first event's time is what
     /// the clock counts from, and a journal that has none must not decide the
     /// arithmetic by crashing.
-    #[test]
-    fn an_empty_journal_plays_as_nothing() {
+    #[tokio::test]
+    async fn an_empty_journal_plays_as_nothing() {
         let mut ui = buffered(theme(), 80);
-        play(&mut ui, false, &[], 1.0).expect("play");
+        let ended = play(&mut ui, false, &[], 1.0, never()).await.expect("play");
+        assert_eq!(ended, Ended::Finished);
         assert_eq!(ui.contents(), "");
+    }
+
+    /// TC-CLI-PLAY-6: Ctrl-C during a playback.
+    /// Expected: it stops where it was, it reports that it was stopped, and
+    /// the last thing it writes erases the block. What was already committed
+    /// stays - a person who stops watching keeps what they watched - and the
+    /// terminal is handed back with nothing half-drawn on it, which is the
+    /// whole obligation of a program that draws in place.
+    #[tokio::test]
+    async fn ctrl_c_stops_the_playback_and_hands_the_terminal_back() {
+        let events = turn();
+        let mut ui = buffered(theme(), 80);
+        let ended = play(&mut ui, true, &events, 1_000.0, std::future::ready(()))
+            .await
+            .expect("play");
+
+        assert_eq!(ended, Ended::Interrupted);
+        let shown = ui.contents();
+        assert!(
+            shown.contains("turn 1"),
+            "nothing was committed:\n{shown:?}"
+        );
+        assert!(
+            !shown.contains("natural"),
+            "it played to the end anyway:\n{shown:?}"
+        );
+        assert!(
+            shown.ends_with("\u{1b}[J"),
+            "the block was left drawn:\n{shown:?}"
+        );
+    }
+
+    /// A stop signal that never arrives: the ordinary case, without a wait.
+    fn never() -> impl std::future::Future<Output = ()> {
+        std::future::pending()
     }
 }
