@@ -226,6 +226,36 @@ async fn turns_are_numbered_and_appended_to_one_journal() {
     assert_eq!(events.iter().filter(|e| e.ty == topic::TURN_END).count(), 2);
 }
 
+/// TC-TURN-8: the second turn on one engine runs the same documented sequence
+/// as the first, and answers its own prompt.
+///
+/// A request carries the whole conversation, so an adapter that asks the
+/// conversation a question about this step reads an earlier turn's answer to
+/// it. Issue #140 was exactly that: every turn after the first echoed turn 1's
+/// text and called no tool, because a tool result anywhere in the history read
+/// as "this step is already answered".
+///
+/// Input: two `run_turn` calls on one engine, with different prompts.
+/// Expected: the trace equals [`MOCK_TURN_FLOW`] twice over - so turn 2 calls
+/// the tool and steps twice, exactly as turn 1 does - and turn 2 answers with
+/// its own text.
+#[tokio::test]
+async fn a_second_turn_runs_the_same_sequence_as_the_first() {
+    let h = Harness::new("second-turn").await;
+
+    h.engine.run_turn("first").await.unwrap();
+    let second = h.engine.run_turn("second").await.unwrap();
+
+    let twice: Vec<&str> = MOCK_TURN_FLOW
+        .iter()
+        .chain(MOCK_TURN_FLOW.iter())
+        .copied()
+        .collect();
+    assert_eq!(h.trace(), twice, "turn 2 runs the documented turn too");
+    assert_eq!(second.steps, 2);
+    assert_eq!(second.content, "You said: second");
+}
+
 fn is_durable(topic: &str) -> bool {
     topic.starts_with("turn/")
         || topic.starts_with("step/")

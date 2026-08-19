@@ -1,6 +1,11 @@
 //! Deterministic offline adapter. It runs the same documented turn as a real
 //! provider - one step that calls a tool, one step that answers - so a run with
 //! no API key is still a full turn and is reproducible byte for byte.
+//!
+//! Every turn runs that shape, not only the first. A request carries the whole
+//! conversation, so both of the adapter's questions are asked of this step's
+//! own messages: an earlier turn's tool result is history, not an answer to
+//! the call this step has not made yet.
 
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse, Role, StreamChunk, Usage,
@@ -34,10 +39,18 @@ impl LlmAdapter for MockAdapter {
         request: &ModelRequest,
         sink: &mut dyn ChunkSink,
     ) -> Result<ModelResponse, LlmError> {
-        let answered = request.messages.iter().any(|m| m.role == Role::Tool);
+        // The result of this step's own call, if the step already has one.
+        // Tool results are appended after the assistant message that asked for
+        // them, so the last message is a tool result exactly on the step that
+        // answers. Reading the decision and the text from one message keeps
+        // them from disagreeing.
+        let answer = request
+            .messages
+            .last()
+            .filter(|message| message.role == Role::Tool);
         let can_echo = request.tools.iter().any(|t| t.name == "echo");
 
-        if !answered && can_echo {
+        if answer.is_none() && can_echo {
             let asked = last_content(request, Role::User);
             let content = "Let me echo that back.";
             for delta in ["Let me ", "echo that ", "back."] {
@@ -62,7 +75,9 @@ impl LlmAdapter for MockAdapter {
             });
         }
 
-        let echoed = last_content(request, Role::Tool);
+        let echoed = answer
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
         let content = format!("You said: {echoed}");
         for delta in ["You said: ", echoed.as_str()] {
             sink.chunk(StreamChunk::Text {

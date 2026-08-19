@@ -179,6 +179,8 @@ Two adapters ship:
 
 - [crates/turn/src/llm/mock.rs](crates/turn/src/llm/mock.rs) - deterministic and offline. It calls a
   tool on step 1 and answers on step 2, so one offline run covers the tool pipeline and the loop-back.
+  Every turn runs that shape, not only the first: it reads this step's own messages, never the whole
+  conversation.
 - [crates/turn/src/llm/deepseek.rs](crates/turn/src/llm/deepseek.rs) - DeepSeek chat completions
   behind an `SseTransport` seam, so the request body and the stream decoder are tested without
   network. Credentials are referenced by environment variable name; config never carries a literal
