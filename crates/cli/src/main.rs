@@ -19,7 +19,9 @@ use tetanus_turn::boot::boot;
 use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
-use tetanus_ui::{ColorChoice, Policy, Role, Screen, Theme, Ui};
+use tetanus_ui::{
+    ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Theme, Tty, Ui, View,
+};
 
 use render::help;
 use render::live::Live;
@@ -152,6 +154,10 @@ struct RunArgs {
     /// Print the events and the summary as JSON, per contract §4.7
     #[arg(long, conflicts_with = "trace")]
     json: bool,
+    /// Watch the turn on a screen of its own, scrollable, instead of in a
+    /// block under the shell prompt
+    #[arg(long, conflicts_with_all = ["trace", "json"])]
+    ui: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -837,6 +843,223 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
     done
 }
 
+/// Watch a turn on a screen of its own.
+///
+/// The same poll as [`with_live`], drawn as whole frames on the alternate
+/// screen instead of as a block on the ordinary one, and reading the keyboard
+/// between them so a reader can look back through a turn while it is running.
+///
+/// The loop is [`tetanus_ui::show`]'s, written again around an async clock
+/// rather than reused. `show` waits for a keystroke on the thread it was
+/// called on; the turn is a future borrowing the engine, so it can neither be
+/// spawned away nor driven from inside a blocking wait. The view itself is a
+/// [`View`] all the same, so what it draws and what a key means stay the
+/// crate's vocabulary rather than this file's, and the day a turn can be
+/// spawned this loop is deleted rather than rewritten.
+///
+/// The terminal is taken by a [`Held`], so every way out of here gives it back
+/// - the turn ending, Ctrl-C, `q`, or a panic on the way through.
+///
+/// The view outlives the turn. One that came down the instant the model
+/// stopped talking would show the finished turn for a single frame, and the
+/// reader's chance to look back through what just happened is after it has
+/// happened. So the outcome is kept and the loop runs on until the view is
+/// closed.
+///
+/// Returns `None` when the view was closed before the turn finished, however
+/// the reader asked: the turn is dropped where it stands and there is no
+/// result to report, which contract §4.5 exits `130`. Closing the view over a
+/// turn that already finished is not an interruption, and the caller still has
+/// its result.
+async fn with_page<W: std::io::Write, F: std::future::Future>(
+    policy: &Policy,
+    out: &mut Ui<W>,
+    log: &JsonlSessionLog,
+    phase: &str,
+    think: bool,
+    title: &str,
+    work: F,
+) -> Option<F::Output> {
+    // Raw mode is a property of the process's controlling terminal rather than
+    // of a stream, and the alternate screen is two escape codes on the way in
+    // and two on the way out. Neither interleaves with the frames `out` paints
+    // between them, so the two handles on the one terminal cannot cross.
+    let mut held = match Held::take(Tty::new(std::io::stdout())) {
+        Ok(held) => held,
+        // It said it was a terminal and then would not be taken. The turn is
+        // worth more than the view it was going to be watched in, so it runs
+        // in the ordinary block instead and the reason goes to stderr.
+        Err((_, err)) => {
+            policy
+                .stderr()
+                .warn(&format!("{err}; watching in the ordinary view"))
+                .ok();
+            return with_live(policy, out, log, phase, think, work).await;
+        }
+    };
+
+    let theme = *out.theme();
+    let (cols, rows) = tetanus_ui::size();
+    let mut watch = Watch {
+        log,
+        live: Live::new(theme, cols, phase, think),
+        page: Page::new(theme, "tetanus", title),
+        keys: format!(
+            "{} scroll {} q quit",
+            theme.glyph("↑↓", "up/dn"),
+            theme.glyph("·", "-")
+        ),
+        size: (cols, rows),
+        seen: 0,
+        started: std::time::Instant::now(),
+    };
+    // One frame before the loop. Entering the alternate screen and leaving it
+    // blank until something happens is a visible flash, and an offline turn
+    // finishes inside a frame interval - so without this, the first frame a
+    // whole run draws could also be its last.
+    watch.paint(out);
+
+    let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
+    let mut work = std::pin::pin!(work);
+    let mut stop = std::pin::pin!(interrupt());
+    let done = loop {
+        tokio::select! {
+            done = &mut work => break Some(done),
+            _ = &mut stop => break None,
+            _ = frames.tick() => {
+                if watch.beat(out, held.console()) == Flow::Stop {
+                    break None;
+                }
+            }
+        }
+    };
+    if done.is_some() {
+        // The turn is over and the view is not. Nothing left here can fail the
+        // run, so the only way out is the reader closing the view.
+        loop {
+            tokio::select! {
+                _ = &mut stop => break,
+                _ = frames.tick() => {
+                    if watch.beat(out, held.console()) == Flow::Stop {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    held.release().ok();
+    done
+}
+
+/// Keystrokes one frame will answer before it draws.
+const KEYS: usize = 32;
+
+/// A turn, watched on a screen of its own.
+struct Watch<'a> {
+    /// The journal the turn is writing, polled rather than subscribed to, for
+    /// the reason [`with_live`] gives.
+    log: &'a JsonlSessionLog,
+    live: Live,
+    page: Page,
+    /// The left of the footer. Built once, because a charset does not change
+    /// under a running view.
+    keys: String,
+    /// Columns and rows, as of the last resize the terminal reported.
+    size: (usize, usize),
+    /// Journal events already settled onto the page.
+    seen: usize,
+    started: std::time::Instant,
+}
+
+impl View for Watch<'_> {
+    /// Commit whatever arrived, then compose the screen.
+    ///
+    /// The journal is read here rather than in [`View::tick`] because `frame`
+    /// is the one method the loop calls every time round: a reader holding a
+    /// key down would otherwise stop the turn arriving.
+    fn frame(&mut self, cols: usize, rows: usize) -> Frame {
+        self.size = (cols, rows);
+        self.live.resize(cols);
+
+        let events = self.log.events();
+        for event in events.iter().skip(self.seen) {
+            let settled = self.live.push(&crossing(event));
+            self.page.settle(settled);
+        }
+        self.seen = events.len();
+
+        let block = self.live.block(self.started.elapsed());
+        self.page.frame(cols, rows, &block, &self.keys)
+    }
+
+    fn key(&mut self, key: Key) -> Flow {
+        // A page is the body, less a row so the reader keeps their place in
+        // the transcript, and never nothing on a small terminal.
+        let page = self.size.1.saturating_sub(5).max(1) as isize;
+        match key {
+            Key::Char('q') | Key::Esc => return Flow::Stop,
+            Key::Up => self.page.scroll(1),
+            Key::Down => self.page.scroll(-1),
+            Key::PageUp => self.page.scroll(page),
+            Key::PageDown => self.page.scroll(-page),
+            Key::Home => self.page.scroll(isize::MAX),
+            Key::End => self.page.follow(),
+            _ => {}
+        }
+        Flow::Go
+    }
+
+    fn tick(&mut self) -> Flow {
+        self.live.tick();
+        Flow::Go
+    }
+}
+
+impl Watch<'_> {
+    /// One turn of [`tetanus_ui::show`]'s loop, under this file's clock:
+    /// answer every keystroke waiting, then paint.
+    ///
+    /// Ctrl-C and a resize are answered here and never reach [`View::key`],
+    /// which is the contract `show` holds its views to. In raw mode Ctrl-C is
+    /// a keystroke rather than a signal, so this is the only place it can be
+    /// caught while the view is up.
+    fn beat<W: std::io::Write>(&mut self, out: &mut Ui<W>, tty: &mut Tty<std::io::Stdout>) -> Flow {
+        let mut flow = Flow::Go;
+        // Every keystroke waiting, not one. A held arrow key repeats faster
+        // than the frame interval, and a frame that answered one of them would
+        // fall further behind the longer it was held. Bounded all the same, so
+        // a pasted wall of text cannot hold up the turn running beside it.
+        for _ in 0..KEYS {
+            // No wait at all: the frame interval is this loop's clock, and a
+            // read that blocked for one would cost the turn that time.
+            let Some(key) = tty.key(std::time::Duration::ZERO).ok().flatten() else {
+                // Nothing was typed, which is the wait `tick` answers.
+                flow = self.tick();
+                break;
+            };
+            flow = match key {
+                Key::Ctrl('c') => Flow::Stop,
+                Key::Resize(cols, rows) => {
+                    self.size = (cols as usize, rows as usize);
+                    Flow::Go
+                }
+                key => self.key(key),
+            };
+            if flow == Flow::Stop {
+                break;
+            }
+        }
+        self.paint(out);
+        flow
+    }
+
+    /// Compose the screen at the size the terminal has now, and paint it.
+    fn paint<W: std::io::Write>(&mut self, out: &mut Ui<W>) {
+        let (cols, rows) = self.size;
+        self.frame(cols, rows).paint(out).ok();
+    }
+}
+
 /// Stream the journal as contract output while the turn runs.
 ///
 /// The same poll as [`with_live`], reporting to a script instead of a person:
@@ -913,7 +1136,16 @@ async fn run<W: std::io::Write>(
     out: &mut Ui<W>,
     args: RunArgs,
 ) -> Result<(), Reported> {
-    // First, before the journal exists: a prompt this build will not send is
+    // Before anything is opened. A view needs a screen to draw on, and a run
+    // that cannot have one should say so at the point the flag was read rather
+    // than after it has written a journal nobody will get to see.
+    if args.ui && !policy.stdout_is_terminal {
+        let nowhere = RpcError::new(ErrorCode::InvalidParams, "--ui needs a terminal to draw on")
+            .with_data(serde_json::json!({ "field": "ui" }));
+        return Err(fail(policy, &nowhere));
+    }
+
+    // Then, before the journal exists: a prompt this build will not send is
     // a mistake to report at the point it was made, not one to record.
     let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
         .map_err(|err| fail(policy, &err))?;
@@ -985,11 +1217,12 @@ async fn run<W: std::io::Write>(
 
     let phase = format!("running the turn on {model}");
     let turn = engine.run_turn(&asked);
-    let finished = match (args.trace, args.json) {
+    let finished = match (args.trace, args.json, args.ui) {
         // The trace prints the sequence afterwards, so nothing may be written
         // above it while the turn runs.
-        (true, _) => Some(with_progress(policy, &phase, turn).await),
-        (_, true) => with_json(policy, out, &log, &phase, turn).await,
+        (true, _, _) => Some(with_progress(policy, &phase, turn).await),
+        (_, true, _) => with_json(policy, out, &log, &phase, turn).await,
+        (_, _, true) => with_page(policy, out, &log, &phase, args.think, &model, turn).await,
         _ => with_live(policy, out, &log, &phase, args.think, turn).await,
     };
     let Some(outcome) = finished else {
@@ -1055,6 +1288,13 @@ async fn run<W: std::io::Write>(
         };
         return render::json::line(out, &result)
             .map_err(|err| report(policy, &err.to_string(), None));
+    }
+
+    if args.ui {
+        // The view had the whole screen and has given it back, and everything
+        // drawn on it went with it. The answer is what the user asked for, so
+        // it is written once more on the ordinary screen.
+        out.line(&outcome.content).ok();
     }
 
     journal(out, &log);

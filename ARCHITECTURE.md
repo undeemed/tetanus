@@ -172,19 +172,32 @@ The executor that would act on the decision is phase ② ([docs/parity.md](docs/
 
 ### 4.7 Interface view - surfaces
 
-The only surface today is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)):
-`run`, `replay`, `config`, `info`. See [README.md](README.md#cli).
+The only surface today is the `tetanus` binary ([crates/cli/src/main.rs](crates/cli/src/main.rs)).
+It carries the eight subcommands [docs/interface-contract.md](docs/interface-contract.md) §4.7
+defines - `run`, `sessions`, `replay`, `models`, `tools`, `config`, `serve`, `info` - each identified
+there by the contract calls it makes rather than by what it prints. See [README.md](README.md#cli).
 
-`tetanus run` observes a turn with `TurnTrace` ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)),
-one delegating listener per documented event, and prints the sequence.
+`tetanus run` shows one turn three ways, and every settled line in all three comes from the same
+`Reader` in [crates/cli/src/render/timeline.rs](crates/cli/src/render/timeline.rs), so a turn watched
+live reads like the same turn replayed tomorrow.
+The default is a block under the shell prompt, redrawn in place by `Screen`.
+`--ui` takes the whole terminal instead and composes each frame with `Page`
+([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
+still running.
+`--json` prints the contract's own result types and draws nothing.
+All three read their events from the session log the engine is writing rather than from the bus: the
+journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
+
+`tetanus run` also observes the sequence with `TurnTrace`
+([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,
+which `--trace` prints instead of the turn.
 Any other consumer would attach the same way: `session/event` for durable facts, the waterfalls for
 live participation.
 
 `tetanus-engine` ([crates/engine](crates/engine)) implements the `Engine` trait, and `tetanus-rpc`
 ([crates/rpc](crates/rpc)) carries it: a JSON-RPC 2.0 codec with a stdio carrier and a WebSocket
-carrier. `tetanus serve` hosts the stdio one; nothing hosts the WebSocket one yet, so that carrier
-is reachable as a library and not from the command line. There is no web UI. §4.8 covers the
-contract all three speak.
+carrier. `tetanus serve` hosts the stdio one, and `tetanus serve --listen` the WebSocket one. There
+is no web UI. §4.8 covers the contract all three speak.
 
 ### 4.8 Interface view - the engine/presentation contract
 
