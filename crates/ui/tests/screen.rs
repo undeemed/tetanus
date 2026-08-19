@@ -3,7 +3,8 @@
 //! Features tested: that a plain stream never sees a frame or an escape, what
 //! the first frame writes, how a second frame returns to the block's top, that
 //! a shorter frame erases what the taller one left, that a printed line leaves
-//! the block for good, and that a painted line is cut by what it draws.
+//! the block for good, that a painted line is cut by what it draws, and what a
+//! resize does to the block already on screen.
 //!
 //! Features NOT tested here: terminal detection (owned by `Policy`), the
 //! colour rules (owned by `color_policy.rs`), and what any particular view
@@ -137,4 +138,48 @@ fn finishing_erases_the_block() {
     let ui = screen.finish().expect("finish");
 
     assert_eq!(&ui.contents()[first..], "\u{1b}[2A\r\u{1b}[J");
+}
+
+/// TC-UI-SCREEN-8: the terminal is resized under a block.
+/// Expected: the block on screen is erased, because it was fitted to a width
+/// that is no longer the terminal's, and the frame after it is cut to the new
+/// one. A block kept at the old width wraps in a narrower window, and a
+/// wrapped row puts every later frame out of place.
+#[test]
+fn a_resize_erases_the_block_the_old_width_drew() {
+    let mut screen = screen(true, 40);
+    screen
+        .draw(&lines(&["ai  on it", "tool  echo"]))
+        .expect("frame");
+    let drawn = screen.ui().contents().len();
+
+    screen.resize(12).expect("resize");
+    screen.draw(&["x".repeat(40)]).expect("frame");
+
+    let out = written(screen);
+    let after = &out[drawn..];
+    assert!(
+        after.starts_with("\u{1b}[2A\r\u{1b}[J"),
+        "the old block was left drawn: {after:?}"
+    );
+    let row = after
+        .trim_start_matches("\u{1b}[2A\r\u{1b}[J")
+        .trim_start_matches('\r')
+        .trim_end_matches("\u{1b}[K\n");
+    assert_eq!(visible_width(row), 12, "{row:?}");
+}
+
+/// TC-UI-SCREEN-9: a resize to the width already in force.
+/// Expected: nothing is written. The width is asked for on every frame, so the
+/// answer is the same one twelve times a second; a redraw each time would make
+/// a still block flicker for no reason.
+#[test]
+fn a_resize_to_the_same_width_writes_nothing() {
+    let mut screen = screen(true, 40);
+    screen.draw(&lines(&["ai  on it"])).expect("frame");
+    let drawn = screen.ui().contents().len();
+
+    screen.resize(40).expect("resize");
+
+    assert_eq!(written(screen).len(), drawn);
 }
