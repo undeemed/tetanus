@@ -13,15 +13,19 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tetanus_core::EventBus;
-use tetanus_protocol::methods::SessionCreateParams;
+use tetanus_protocol::methods::{SessionCreateParams, SessionEventsResult};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, SessionInfo};
 use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
 
-use crate::convert::session_error;
+use crate::convert::{session_error, session_event, session_not_found};
 
 /// The durable header event every journal opens with.
 pub const SESSION_START: &str = "session/start";
+
+/// Largest page `session.events` returns, and the page size when a caller
+/// names none. A caller that wants the whole journal pages to `eof`.
+pub const MAX_PAGE: u32 = 500;
 
 /// The `session/start` payload: what a surface needs to list a cold session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,9 +165,46 @@ impl SessionStore {
         Ok(out.into_values().collect())
     }
 
+    /// One page of a journal, by seq. Paging by seq and not by offset is what
+    /// makes a page stable while the log grows underneath it.
+    pub fn events(
+        &self,
+        session_id: &str,
+        from_seq: u64,
+        limit: Option<u32>,
+    ) -> Result<SessionEventsResult, RpcError> {
+        let events = self.read_all(session_id)?;
+        let limit = limit.unwrap_or(MAX_PAGE).min(MAX_PAGE) as usize;
+        let start = (from_seq as usize).min(events.len());
+        let end = start.saturating_add(limit).min(events.len());
+        Ok(SessionEventsResult {
+            events: events[start..end]
+                .iter()
+                .cloned()
+                .map(session_event)
+                .collect(),
+            next_seq: end as u64,
+            eof: end == events.len(),
+        })
+    }
+
     /// The live handle for a session, for callers that run turns on it.
     pub fn live(&self, session_id: &str) -> Option<Arc<LiveSession>> {
         self.live.lock().expect("live").get(session_id).cloned()
+    }
+
+    /// A live session reads from memory; a cold one is replayed from disk, so
+    /// a surface can page a journal this process never opened.
+    fn read_all(&self, session_id: &str) -> Result<Vec<SessionEvent>, RpcError> {
+        if let Some(live) = self.live(session_id) {
+            return Ok(live.log.events());
+        }
+        validate_id(session_id)?;
+        let path = self.path_of(session_id);
+        if !path.exists() {
+            return Err(session_not_found(session_id));
+        }
+        tetanus_session::replay(&path).map_err(|e| session_error(session_id, e))
     }
 
     fn info(&self, live: &LiveSession) -> SessionInfo {

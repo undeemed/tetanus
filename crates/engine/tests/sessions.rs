@@ -1,11 +1,15 @@
-//! Conformance for the session store: `session.create` and `session.list`.
+//! Conformance for the session surfaces: `session.create`, `session.list`
+//! and `session.events`.
 //!
 //! Test design: each case names the contract clause it fixes. Every case runs
 //! offline against a temporary journal root, so none needs a key or a network.
 
 use tempfile::TempDir;
+use tetanus_engine::session::{MAX_PAGE, SESSION_START};
 use tetanus_engine::{EngineConfig, HarnessEngine};
-use tetanus_protocol::methods::{Engine, HelloParams, PeerInfo, SessionCreateParams};
+use tetanus_protocol::methods::{
+    Engine, HelloParams, PeerInfo, SessionCreateParams, SessionEventsParams,
+};
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::types::AgentState;
 use tetanus_protocol::PROTOCOL_VERSION;
@@ -146,4 +150,164 @@ async fn no_capability_is_advertised_before_its_call_is_served() {
         "advertised {:?} while the calls behind them answer NotImplemented",
         result.capabilities
     );
+}
+/// TC-PAGE-1: a durable event crosses the boundary with the journal's own
+/// field names, asserted against literal JSON rather than against the
+/// converter that produced it.
+#[tokio::test]
+async fn a_session_event_crosses_the_boundary_unchanged() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id.clone(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("events");
+
+    let first = serde_json::to_value(&page.events[0]).expect("serialize");
+    assert_eq!(first["type"], serde_json::json!(SESSION_START));
+    assert_eq!(first["seq"], serde_json::json!(0));
+    assert_eq!(
+        first["data"]["session_id"],
+        serde_json::json!(info.session_id)
+    );
+    assert!(
+        first.get("sourceEventSeqs").is_none(),
+        "a header cites nothing"
+    );
+}
+
+/// TC-PAGE-2: paging is by seq. A page reports the seq the next one starts at,
+/// and only the last page is `eof`.
+#[tokio::test]
+async fn events_page_by_seq() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    let live = engine.sessions().live(&info.session_id).expect("live");
+    for n in 0..4 {
+        tetanus_session::SessionLog::append(
+            live.log.as_ref(),
+            "turn/start",
+            serde_json::json!({ "turn": n }),
+        )
+        .expect("append");
+    }
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id.clone(),
+            from_seq: 1,
+            limit: Some(2),
+        })
+        .await
+        .expect("first page");
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[0].seq, 1);
+    assert_eq!(page.next_seq, 3);
+    assert!(!page.eof);
+
+    let rest = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: page.next_seq,
+            limit: Some(MAX_PAGE),
+        })
+        .await
+        .expect("last page");
+    assert_eq!(rest.events.len(), 2);
+    assert!(rest.eof);
+}
+
+/// TC-PAGE-3: a limit above the server's maximum is clamped, not refused,
+/// which is what the contract's "server clamps to its own maximum" promises.
+#[tokio::test]
+async fn an_oversized_limit_is_clamped() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: 0,
+            limit: Some(MAX_PAGE * 100),
+        })
+        .await
+        .expect("events");
+    assert_eq!(page.events.len(), 1);
+    assert!(page.eof);
+}
+
+/// TC-PAGE-4: a cold journal pages from disk, so a surface can replay a
+/// session this process never opened.
+#[tokio::test]
+async fn a_cold_journal_pages_from_disk() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+
+    let cold = HarnessEngine::new(config.clone());
+    let created = cold
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    drop(cold);
+
+    let page = HarnessEngine::new(config)
+        .session_events(SessionEventsParams {
+            session_id: created.session_id.clone(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("events");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].ty, SESSION_START);
+    assert!(page.eof);
+}
+
+/// TC-PAGE-5: an unknown session is `SessionNotFound`, and an id that would
+/// reach outside the journal root is `InvalidParams`, never a filesystem
+/// error leaking through the boundary.
+#[tokio::test]
+async fn paging_a_session_that_is_not_there_is_the_documented_code() {
+    let (engine, _dir) = engine();
+
+    let missing = engine
+        .session_events(SessionEventsParams {
+            session_id: "nope".into(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect_err("unknown session");
+    assert_eq!(missing.kind(), Some(ErrorCode::SessionNotFound));
+    assert_eq!(
+        missing.data.expect("data")["session_id"],
+        serde_json::json!("nope")
+    );
+
+    let escape = engine
+        .session_events(SessionEventsParams {
+            session_id: "../escape".into(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect_err("an id that names a path outside the root");
+    assert_eq!(escape.kind(), Some(ErrorCode::InvalidParams));
 }
