@@ -37,7 +37,7 @@ Upstream's web contract is generated from TypeScript decorators, so its client s
 
 | Upstream area | Specs | Today | Gap | Closes in |
 | --- | ---: | --- | --- | --- |
-| `core/*` (agent-loop, session, tools, agent, system-prompt, scope) | 58 | Turn engine, session log, registry, four dispatch modes, prompt assembly as a waterfall, resume from a cold journal | Cancel, fork, scoped stores, the full tool pipeline (permissions, concurrency), a `max-tokens` stop reason, a durable `turn/end` for a failed turn, a named section registry with prompt variables and runtime-context providers, property tests | ② (port list in section 4) |
+| `core/*` (agent-loop, session, tools, agent, system-prompt, scope) | 58 | Turn engine, session log, registry, four dispatch modes, prompt assembly as a waterfall, resume from a cold journal, interrupt at the step boundary | Fork, scoped stores, the full tool pipeline (permissions, concurrency), a queued inbox with steering and latched wakes, cancellation inside a step, a `max-tokens` stop reason, a durable `turn/end` for a failed turn, a named section registry with prompt variables and runtime-context providers, property tests | ② (port list in section 4) |
 | `session/*`, `session-query/*` | 38 | JSONL log, session store, self-describing journal, crash repair on reopen | SQLite persistence, projections and caches, titles, telemetry, stats, checkpoints, log export and query | ② for persistence, ③ for query |
 | `llm/*` | 34 | DeepSeek adapter, streaming seam, token-free mock | Further providers, retry policy, token metering | ② |
 | `client/*` | 125 | Terminal UI, owned by the presentation lane | Not a port. See section 5 | out of scope |
@@ -79,7 +79,7 @@ Closing a row updates it here and in section 3, in the same PR.
 | `core/agent-loop/tests/request-error.spec.ts` | `crates/turn/tests/upstream_loop.rs` | A provider failure ends that turn and no more | ported: TC-PORT-LOOP-7 |
 | `core/agent-loop/tests/tool-order.spec.ts` | `crates/turn/tests/upstream_loop.rs` | Canonical tool order, whatever the registration order | part ported: TC-PORT-LOOP-5. A configured `toolOrder` has no surface yet |
 | `core/agent-loop/tests/tool-calls.spec.ts` | `crates/turn/tests/` | Grouping, barriers, the parallel cap, and results committed in model order | blocked on the tool pipeline (phase ②) |
-| `core/agent-loop/tests/cancel.spec.ts` | `crates/engine/tests/` | Interrupt during a step, and the state the session is left in | next, after `agent.interrupt` lands |
+| `core/agent-loop/tests/cancel.spec.ts` | `crates/engine/tests/interrupt.rs` | Interrupt during a step, and the state the session is left in | part ported: TC-PORT-CANCEL-1..5, with TC-AGENT-8 and TC-AGENT-9 pinning two more. An interrupt lands at the step boundary, so it cannot skip a tool already dispatched, and it does not relabel a turn whose last step already answered |
 | `core/agent-loop/tests/resume.spec.ts` | `crates/engine/tests/resume.rs` | Resuming a session from its log | part ported: TC-PORT-RESUME-1..3. Upstream's file is mostly its agent factory - identity registration, abort signals, transactional setup and rollback - which tetanus does not have, so those cases have nothing to restate |
 | `core/agent-loop/tests/contract-regressions.spec.ts` | `crates/turn/tests/` | The named regressions upstream keeps pinned | to do |
 | `core/session/tests/session.spec.ts`, `surface.spec.ts` | `crates/session/tests/upstream_session.rs`, `crates/turn/tests/upstream_history.rs` | The append-only log contract, replay, citations, and what derives to a message | ported: TC-PORT-SESS-1..7, TC-PORT-HIST-1..4 |
@@ -111,3 +111,4 @@ It does not mean the capability is refused: if one of these turns into a real re
 | 2026-08-19 | The closers are committed when a cold journal is reopened (TC-PORT-REPAIR-10, TC-SESS-6), closing the `repair.spec.ts` row. |
 | 2026-08-19 | System-prompt assembly ported as far as the surface reaches (TC-PORT-PROMPT-1..7). It found one defect: `SystemPrompt::text()` did not drop empty sections. The section registry, variables and context providers added to the `core/*` gap. |
 | 2026-08-19 | Resume ported as far as the surface reaches (TC-PORT-RESUME-1..3): a continued journal, the carried transcript, and repair that happens once. |
+| 2026-08-19 | Cancellation ported as far as the surface reaches (TC-PORT-CANCEL-1..5). The queued inbox, steering and in-step cancellation it does not cover moved into the `core/*` gap column. |
