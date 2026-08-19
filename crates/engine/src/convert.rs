@@ -55,14 +55,6 @@ pub fn session_not_found(session_id: &str) -> RpcError {
     .with_data(serde_json::json!({ "session_id": session_id }))
 }
 
-pub fn not_implemented(method: &str) -> RpcError {
-    RpcError::new(
-        ErrorCode::NotImplemented,
-        format!("`{method}` is in the contract but this build does not serve it yet"),
-    )
-    .with_data(serde_json::json!({ "method": method }))
-}
-
 pub fn internal(message: impl std::fmt::Display) -> RpcError {
     RpcError::new(ErrorCode::Internal, message.to_string())
 }
