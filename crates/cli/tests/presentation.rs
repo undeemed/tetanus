@@ -18,6 +18,10 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+mod common;
+
+use common::without_duration;
+
 const ESC: &str = "\u{1b}";
 
 /// Run the binary with the colour environment stated, never inherited.
@@ -115,6 +119,9 @@ fn the_environment_decides_a_piped_run() {
 /// Expected: the bytes of a piped run are identical whether colour was
 /// declined by the flag, by `NO_COLOR`, or by the pipe itself. Colour is never
 /// "the same text with the codes taken out"; it is a separate rendering.
+/// How long each run took is not part of that claim and is dropped before the
+/// comparison, because a loaded runner can push one of three otherwise
+/// identical runs past the second the closing line starts reporting at.
 #[test]
 fn plain_output_is_byte_identical_however_it_was_declined() {
     // One journal per invocation, in a directory of its own: a run's sequence
@@ -123,9 +130,9 @@ fn plain_output_is_byte_identical_however_it_was_declined() {
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let args = &["run", "-p", "same in, same out", "--session", "j.jsonl"];
 
-    let by_pipe = stdout(&run(dirs[0].path(), args, &[]));
-    let by_env = stdout(&run(dirs[1].path(), args, &[("NO_COLOR", "1")]));
-    let by_flag = stdout(&run(
+    let by_pipe = without_duration(&stdout(&run(dirs[0].path(), args, &[])));
+    let by_env = without_duration(&stdout(&run(dirs[1].path(), args, &[("NO_COLOR", "1")])));
+    let by_flag = without_duration(&stdout(&run(
         dirs[2].path(),
         &[
             "run",
@@ -137,7 +144,7 @@ fn plain_output_is_byte_identical_however_it_was_declined() {
             "j.jsonl",
         ],
         &[],
-    ));
+    )));
 
     assert_eq!(by_pipe, by_env);
     assert_eq!(by_pipe, by_flag);
@@ -209,7 +216,9 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
 /// Expected: the timeline, not the raw event dump - the prompt under `you`,
 /// the answer under `ai`, and the closing line, which reports what the two
 /// steps of the mock turn were billed. `--raw` still gives the dump, so
-/// nothing that scripted against it is broken.
+/// nothing that scripted against it is broken. The journal here carries a real
+/// run's timestamps, so the closing line's wall clock is dropped before the
+/// line is matched; TC-CLI-TL-13 asserts that field against fixed ones.
 #[test]
 fn replay_reads_as_a_conversation() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -219,7 +228,7 @@ fn replay_reads_as_a_conversation() {
         &[],
     );
 
-    let told = stdout(&run(dir.path(), &["replay", "j.jsonl"], &[]));
+    let told = without_duration(&stdout(&run(dir.path(), &["replay", "j.jsonl"], &[])));
     assert!(
         told.starts_with("\nturn 1\n  step 1\n  you   echo this\n"),
         "{told}"
@@ -624,4 +633,43 @@ fn a_finished_turn_still_exits_zero() {
     let out = run(dir.path(), &["run", "--session", "j.jsonl"], &[]);
 
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// TC-CLI-INFO-3: the build page against the catalogues and the contract.
+/// Expected: the counts equal the lengths of the two `--json` catalogues, and
+/// the protocol equals the version the contract crate publishes. The page is
+/// what a bug report quotes, so a count assembled by hand here and a list
+/// printed there must not be able to disagree.
+#[test]
+fn the_build_page_counts_agree_with_the_catalogues() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    fn listed(dir: &Path, args: &[&str], field: &str) -> usize {
+        let printed = stdout(&run(dir, args, &[]));
+        let parsed: serde_json::Value = serde_json::from_str(printed.trim()).expect("JSON");
+        parsed[field].as_array().expect("a list").len()
+    }
+
+    fn value(page: &str, label: &str) -> String {
+        page.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no `{label}` row:\n{page}"))
+            .split_whitespace()
+            .nth(1)
+            .expect("a value")
+            .to_string()
+    }
+
+    let page = stdout(&run(dir.path(), &["info"], &[]));
+    let providers = listed(dir.path(), &["models", "--json"], "providers");
+    let tools = listed(dir.path(), &["tools", "--json"], "tools");
+
+    assert_eq!(value(&page, "providers"), providers.to_string(), "{page}");
+    assert_eq!(value(&page, "tools"), tools.to_string(), "{page}");
+    assert_eq!(
+        value(&page, "protocol"),
+        tetanus_protocol::PROTOCOL_VERSION,
+        "{page}"
+    );
+    assert!(page.starts_with("\ntetanus "), "{page}");
 }

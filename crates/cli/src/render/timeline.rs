@@ -160,10 +160,13 @@ impl Reader {
                 let reason = theme.paint(Role::Ok, &shown);
                 let unit = if *steps == 1 { "step" } else { "steps" };
                 let mut closing = format!("turn {turn} {dot} {reason} {dot} {steps} {unit}");
-                // Under a second is not worth reporting, and reporting it
-                // would cost more than it is worth: two identical offline runs
-                // would print different bytes, which is the reproducibility
-                // TC-CLI-2 and TC-CLI-UI-4 both rest on.
+                // Under a second is not worth reporting: nobody waited for
+                // it, and the figure would be the only part of an otherwise
+                // repeatable turn that changed between two runs of it. The
+                // threshold makes that rare, not impossible - a loaded machine
+                // still crosses it - so the two cases that compare two runs
+                // byte for byte drop the field rather than trust the
+                // threshold. See `tests/common/mod.rs`.
                 let took = self.started.take().map(|start| time.saturating_sub(start));
                 if let Some(took) = took.filter(|took| *took >= 1_000) {
                     closing.push_str(&format!(" {dot} {}", duration(Duration::from_millis(took))));
@@ -716,10 +719,10 @@ mod tests {
 
     /// TC-CLI-TL-13: how long the turn took.
     /// Expected: a turn whose journal spans twelve seconds says so, in the
-    /// same wording the live footer uses; a turn under a second says nothing.
-    /// Two identical offline runs have to print identical bytes - that is what
-    /// TC-CLI-2 and TC-CLI-UI-4 rest on - and a sub-second figure would differ
-    /// between them while telling a reader nothing they waited for.
+    /// same wording the live footer uses; a turn under a second says nothing,
+    /// because a sub-second figure tells a reader nothing they waited for.
+    /// This case fixes the journal's timestamps, so it is the one that asserts
+    /// the field; TC-CLI-2 and TC-CLI-UI-4 compare two real runs and drop it.
     #[test]
     fn a_turn_that_took_time_says_how_long() {
         let slow = [
