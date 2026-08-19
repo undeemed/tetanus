@@ -450,9 +450,9 @@ impl<'a> Picker<'a> {
             }
             Ok(events) => {
                 let keys = format!(
-                    "{} scroll {} q back",
+                    "{} scroll {dot} / find {dot} q back",
                     self.theme.glyph("↑↓", "up/dn"),
-                    self.theme.glyph("·", "-"),
+                    dot = self.theme.glyph("·", "-"),
                 );
                 // Headed by the id, not the path: the id is what the reader
                 // picked and what every other command takes, and an absolute
@@ -488,7 +488,12 @@ impl View for Picker<'_> {
         // the shell. The reader came from somewhere, and that is what "back"
         // means to them; leaving the whole view here would make Enter a key
         // worth pressing only once.
-        if matches!(key, Key::Char('q') | Key::Esc) {
+        //
+        // Unless the journal is spelling a search, in which case those keys
+        // are letters and it owns them. This is the one place the outer view
+        // has to know something about the inner one, and the alternative is a
+        // reader whose list closes because they went looking for `quota`.
+        if !journal.typing() && matches!(key, Key::Char('q') | Key::Esc) {
             self.reading = None;
             return Flow::Go;
         }
@@ -505,7 +510,8 @@ impl View for Picker<'_> {
 /// against the whole of it; the key map, including the two keys that close the
 /// view; that a resize composes the rows again at the new width; that Enter
 /// opens the journal the cursor is on, by that session's own path and headed by
-/// its id; that `q` leaves a journal for the list and only then the list for the
+/// its id; that a journal spelling a search keeps the keys that would close it;
+/// that `q` leaves a journal for the list and only then the list for the
 /// shell; that a journal which will not open, or holds nothing, is reported
 /// without ending the view; and that `/` narrows the list to the journals that
 /// match, takes the printable keys while it is being typed, and moves the
@@ -884,5 +890,27 @@ mod tests {
         view.key(Key::Enter);
         assert_eq!(view.key(Key::Enter), Flow::Go, "Enter on no rows stopped");
         assert_eq!(asked.borrow().len(), 1, "a journal opened with no row");
+    }
+    /// TC-CLI-PICK-11: `/` inside an opened journal, then `q`.
+    /// Expected: the journal keeps the key, because it is spelling a word with
+    /// a `q` in it, and the list is still behind it. The picker is the only
+    /// place two views share one keyboard, so this is the case that holds them
+    /// apart.
+    #[test]
+    fn a_journal_spelling_a_search_keeps_the_keys_that_would_close_it() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+        view.key(Key::Enter);
+
+        view.key(Key::Char('/'));
+        assert_eq!(view.key(Key::Char('q')), Flow::Go, "the journal closed");
+        assert!(view.reading.is_some(), "the journal closed");
+
+        // Esc closes the prompt, and the next Esc is the journal's own again.
+        view.key(Key::Esc);
+        assert_eq!(view.key(Key::Esc), Flow::Go);
+        assert!(view.reading.is_none(), "the journal did not close");
     }
 }
