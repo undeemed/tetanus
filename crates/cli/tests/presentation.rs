@@ -468,8 +468,8 @@ fn a_journal_read_full_screen_needs_a_screen() {
 /// `InvalidParams`, exit 2 per contract §4.5, the terminal named, and nothing
 /// on stdout. It is refused before the directory is read, so a `--ui` at a
 /// directory holding no journals says the same thing rather than printing the
-/// empty list. `--json` asks for the opposite of a screen, and clap refuses
-/// that pairing itself.
+/// empty list. `--json` asks for the opposite of a screen, and `--think`
+/// means nothing with no journal open, so clap refuses both pairings itself.
 #[test]
 fn a_session_picker_needs_a_screen() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -490,6 +490,10 @@ fn a_session_picker_needs_a_screen() {
     let clash = run(dir.path(), &["sessions", "--ui", "--json"], &[]);
     assert_eq!(clash.status.code(), Some(2), "{}", stdout(&clash));
     assert!(stderr(&clash).contains("--json"), "{}", stderr(&clash));
+
+    let alone = run(dir.path(), &["sessions", "--think"], &[]);
+    assert_eq!(alone.status.code(), Some(2), "{}", stdout(&alone));
+    assert!(stderr(&alone).contains("--ui"), "{}", stderr(&alone));
 }
 
 /// TC-CLI-JSON-1: `tetanus run --json`.

@@ -80,10 +80,13 @@ enum Cmd {
         /// Directory the journals live in
         #[arg(long, value_name = "PATH", default_value = "sessions")]
         dir: PathBuf,
-        /// Move a cursor down the list on a screen of its own, instead of
-        /// printing the whole of it into the scrollback
+        /// Move a cursor down the list on a screen of its own, and read the
+        /// journal under it with Enter
         #[arg(long, conflicts_with = "json")]
         ui: bool,
+        /// Unfold what the model thought, in whichever journal is opened
+        #[arg(long, requires = "ui")]
+        think: bool,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -292,7 +295,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             render::catalog::tools(&mut out, &catalog).ok();
             Ok(())
         }
-        Cmd::Sessions { dir, ui, json } => {
+        Cmd::Sessions {
+            dir,
+            ui,
+            think,
+            json,
+        } => {
             // Answered before the directory is read, for the reason `run` and
             // `replay` answer it before a journal is opened: a flag the
             // terminal cannot honour is wrong at the moment it is read.
@@ -319,7 +327,15 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                     .map_err(|err| report(policy, &err.to_string(), None));
             }
             if ui {
-                return match render::pick::pick(&mut out, &list) {
+                // The one place this binary reads a journal is `replay`, and
+                // this is that same read: the same reader, the same crossing of
+                // the boundary, and the same wording for every way it fails.
+                let open = |path: &str| {
+                    tetanus_session::replay(path)
+                        .map(boundary)
+                        .map_err(|err| journal_fault(&err, std::path::Path::new(path)).message)
+                };
+                return match render::pick::pick(&mut out, &list, think, &open) {
                     Ok(Stop::Interrupted) => Err(stopped(policy)),
                     Ok(Stop::Quit) => Ok(()),
                     // The list is worth more than the view of it, and by here

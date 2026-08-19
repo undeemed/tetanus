@@ -83,7 +83,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus run \"list the files\"                ask for something specific
   tetanus run -a deepseek -m deepseek-v4-pro  needs DEEPSEEK_API_KEY
   tetanus sessions                            every journal, newest first
-  tetanus sessions --ui                       the same list, with a cursor
+  tetanus sessions --ui                       pick one of them and read it
   tetanus replay sessions/turn.jsonl          re-read a journal from before
   tetanus replay sessions/turn.jsonl --live   watch that turn arrive again
   tetanus replay sessions/turn.jsonl --ui     read it on a screen of its own
