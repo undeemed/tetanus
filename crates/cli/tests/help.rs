@@ -14,10 +14,17 @@
 
 use std::process::Command;
 
-/// Ask the binary for a help page, at a stated width, into a pipe.
+/// Ask the binary for a help page, at the widest width it uses, into a pipe.
 fn help(args: &[&str]) -> String {
+    help_at("100", args)
+}
+
+/// The same, at a stated terminal width.
+fn help_at(columns: &str, args: &[&str]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tetanus"));
-    cmd.args(args).env("COLUMNS", "100").env_remove("NO_COLOR");
+    cmd.args(args)
+        .env("COLUMNS", columns)
+        .env_remove("NO_COLOR");
     let out = cmd.output().expect("the binary runs");
     assert!(
         out.status.success(),
@@ -187,4 +194,25 @@ fn every_example_model_is_offered_by_its_adapter() {
         checked > 0,
         "the live-provider example went missing:\n{page}"
     );
+}
+
+/// TC-CLI-HELP-7: the page in an 80-column terminal, the width a user who has
+/// never resized anything is reading at.
+/// Expected: every hand-aligned example still holds its description on one
+/// line. clap wraps an epilogue that does not fit, and a wrapped example loses
+/// the column that made the block scannable in the first place.
+#[test]
+fn the_examples_survive_an_eighty_column_terminal() {
+    for (args, count) in [(vec!["--help"], 5), (vec!["run", "--help"], 4)] {
+        let page = help_at("80", &args);
+        let examples = block(&page, "Examples:");
+
+        assert_eq!(examples.len(), count, "wrapped in `{args:?}`:\n{page}");
+        for line in &examples {
+            assert!(
+                line.starts_with("  tetanus ") && line.chars().count() <= 80,
+                "`{line}` in `{args:?}` does not fit 80 columns"
+            );
+        }
+    }
 }
