@@ -14,6 +14,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **One tracer, two readers.** `TurnTrace` (`crates/turn/src/trace.rs`) feeds both `tetanus run` and the conformance suite, so the printed sequence and the asserted sequence cannot drift. Do not add a second observer.
 - **The engine<->presentation boundary is published, not implied.** `docs/interface-contract.md` is the spec; `crates/protocol` is the same contract as Rust types. Any change to either lands as its own PR touching both plus the doc's changelog, never inside a feature PR. The doc's file-ownership table says which lane owns which path.
 - **Phase boundaries.** Layered config recompose, deeper reversible effects, the full tool pipeline, more adapters, the JSON-RPC/WebSocket surfaces and the WASM host are Phase ②/③. `docs/PLAN.md` is the captain-approved decision doc.
+- **The license field lags the LICENSE files.** The project is dual licensed `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE`, README license section), but `Cargo.toml` still declares `license = "MIT"` because the docs pass that added the second license could not touch manifests. The next PR that edits `Cargo.toml` should set `license = "MIT OR Apache-2.0"` in `[workspace.package]`.
+- **Docs are part of done.** `README.md` has a truthful status table, `ARCHITECTURE.md` is the workspace design description, `CONTRIBUTING.md` holds the dev commands. A behaviour change that leaves them stale is unfinished; `CONTRIBUTING.md` states the standards they follow.
 
 ## Maintaining this file
 
