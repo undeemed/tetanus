@@ -13,14 +13,20 @@ pub struct EffectHandle {
 
 impl EffectHandle {
     pub fn new(undo: impl FnOnce() + Send + 'static) -> Self {
-        Self { undo: Some(Box::new(undo)) }
+        Self {
+            undo: Some(Box::new(undo)),
+        }
     }
     /// Keep the effect permanently (leak the undo).
-    pub fn forget(mut self) { self.undo = None; }
+    pub fn forget(mut self) {
+        self.undo = None;
+    }
 }
 
 impl Drop for EffectHandle {
     fn drop(&mut self) {
-        if let Some(u) = self.undo.take() { u(); }
+        if let Some(u) = self.undo.take() {
+            u();
+        }
     }
 }

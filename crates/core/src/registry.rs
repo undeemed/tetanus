@@ -1,7 +1,17 @@
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+use crate::context::Context;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct PluginId(pub String);
+
+impl From<&str> for PluginId {
+    fn from(s: &str) -> Self {
+        PluginId(s.to_string())
+    }
+}
 
 /// A plugin is a statically-typed unit of composition. Unlike the JS
 /// harness, wiring errors are caught at registration, not mid-run.
@@ -9,9 +19,17 @@ pub trait Plugin: Send + Sync + 'static {
     fn id(&self) -> PluginId;
     /// Declared dependencies; the registry topo-sorts and rejects cycles
     /// at insert time (harness parity: "reject cycles at startup").
-    fn deps(&self) -> Vec<PluginId> { Vec::new() }
-    fn start(&self) -> Result<(), crate::effects::EffectError> { Ok(()) }
-    fn stop(&self) -> Result<(), crate::effects::EffectError> { Ok(()) }
+    fn deps(&self) -> Vec<PluginId> {
+        Vec::new()
+    }
+    /// Mount: provide services and register listeners on the shared context.
+    fn start(&self, ctx: &mut Context) -> Result<(), crate::effects::EffectError> {
+        let _ = ctx;
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), crate::effects::EffectError> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -27,10 +45,18 @@ pub enum RegistryError {
     Cycle(PluginId),
     #[error("missing dependency {missing:?} required by {by:?}")]
     MissingDep { missing: PluginId, by: PluginId },
+    #[error("plugin {id:?} failed to start: {source}")]
+    Start {
+        id: PluginId,
+        #[source]
+        source: crate::effects::EffectError,
+    },
 }
 
 impl Registry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn insert(&mut self, p: Box<dyn Plugin>) -> Result<(), RegistryError> {
         let id = p.id();
@@ -56,13 +82,20 @@ impl Registry {
                 2 => return Ok(()),
                 _ => {}
             }
-            let (key, plugin) = plugins
-                .get_key_value(id)
-                .ok_or_else(|| RegistryError::MissingDep { missing: id.clone(), by: id.clone() })?;
+            let (key, plugin) =
+                plugins
+                    .get_key_value(id)
+                    .ok_or_else(|| RegistryError::MissingDep {
+                        missing: id.clone(),
+                        by: id.clone(),
+                    })?;
             state.insert(key, 1);
             for dep in plugin.deps() {
                 let dep_key = plugins.get_key_value(&dep).map(|(k, _)| k).ok_or(
-                    RegistryError::MissingDep { missing: dep.clone(), by: id.clone() },
+                    RegistryError::MissingDep {
+                        missing: dep.clone(),
+                        by: id.clone(),
+                    },
                 )?;
                 visit(dep_key, plugins, state, order)?;
             }
@@ -72,6 +105,20 @@ impl Registry {
         }
         for id in self.plugins.keys() {
             visit(id, &self.plugins, &mut state, &mut order)?;
+        }
+        Ok(order)
+    }
+
+    /// Mount every plugin in dependency order, so a consumer always resolves a
+    /// service its provider already installed.
+    pub fn start_all(&self, ctx: &mut Context) -> Result<Vec<PluginId>, RegistryError> {
+        let order: Vec<PluginId> = self.start_order()?.into_iter().cloned().collect();
+        for id in &order {
+            let plugin = self.plugins.get(id).expect("id came from this registry");
+            plugin.start(ctx).map_err(|source| RegistryError::Start {
+                id: id.clone(),
+                source,
+            })?;
         }
         Ok(order)
     }

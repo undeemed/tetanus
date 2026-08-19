@@ -16,3 +16,7 @@ tokio.workspace = true
 tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tempfile.workspace = true
