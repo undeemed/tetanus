@@ -224,8 +224,8 @@ fn replay_reads_as_a_conversation() {
 }
 
 /// TC-CLI-UI-9: what `tetanus run` prints by default, and what `--trace` adds.
-/// Expected: the default is the turn as a conversation, read back from the
-/// journal the run just wrote; `--trace` replaces it with the raw sequence and
+/// Expected: the default is the turn as a conversation, committed line by line
+/// as the journal receives it; `--trace` replaces it with the raw sequence and
 /// still ends on the answer. Both close on the journal path, so a user always
 /// knows where the durable record went.
 #[test]

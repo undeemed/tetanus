@@ -9,14 +9,15 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tetanus_core::EventBus;
-use tetanus_session::JsonlSessionLog;
+use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
-use tetanus_ui::{ColorChoice, Policy, Role, Theme, Ui};
+use tetanus_ui::{ColorChoice, Policy, Role, Screen, Theme, Ui};
 
 use render::help;
+use render::live::Live;
 
 #[derive(Parser)]
 #[command(
@@ -206,16 +207,18 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
 /// `session.events` over the contract itself, and nothing in `render` changes
 /// when it does - that is the point of the boundary.
 fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<protocol::SessionEvent> {
-    events
-        .into_iter()
-        .map(|event| protocol::SessionEvent {
-            ty: event.ty,
-            seq: event.seq,
-            time: event.time,
-            data: event.data,
-            source_event_seqs: event.source_event_seqs,
-        })
-        .collect()
+    events.iter().map(crossing).collect()
+}
+
+/// One event across the same boundary.
+fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
+    protocol::SessionEvent {
+        ty: event.ty.clone(),
+        seq: event.seq,
+        time: event.time,
+        data: event.data.clone(),
+        source_event_seqs: event.source_event_seqs.clone(),
+    }
 }
 
 /// Carry resolved config across to the contract shape the view reads.
@@ -268,6 +271,80 @@ async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, wor
     };
     progress.finish().ok();
     done
+}
+
+/// Draw the turn while it runs, and commit each settled line as it arrives.
+///
+/// The events come from the session log the engine is writing, not from the
+/// engine: the journal is the durable record, so what a user watches arrive is
+/// what a replay will show them tomorrow. Polling it is also what keeps this
+/// lane out of the engine - the log is a public type, and the one tracer the
+/// conformance suite attaches stays the only observer of the bus.
+///
+/// The status line is for a piped run only. At a terminal the block's own
+/// footer says what a status line would, and two spinners at once read as two
+/// programs.
+async fn with_live<W: std::io::Write, F: std::future::Future>(
+    policy: &Policy,
+    out: &mut Ui<W>,
+    log: &JsonlSessionLog,
+    phase: &str,
+    work: F,
+) -> F::Output {
+    let (theme, width) = (*out.theme(), out.width());
+    let mut view = Live::new(theme, width, phase);
+    let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
+    let mut status = match policy.stdout_is_terminal {
+        true => None,
+        false => {
+            let mut status = policy.stderr_progress();
+            status.set(phase).ok();
+            Some(status)
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let mut seen = 0;
+    let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
+    let mut work = std::pin::pin!(work);
+    let done = loop {
+        tokio::select! {
+            done = &mut work => break done,
+            _ = frames.tick() => {
+                seen = settle(&mut view, &mut screen, log, seen);
+                view.tick();
+                screen.draw(&view.block(started.elapsed())).ok();
+                if let Some(status) = &mut status {
+                    status.tick().ok();
+                }
+            }
+        }
+    };
+
+    // Whatever the last frame did not catch. A turn shorter than one frame
+    // interval - every offline turn - is committed entirely here.
+    settle(&mut view, &mut screen, log, seen);
+    screen.finish().ok();
+    if let Some(status) = status {
+        status.finish().ok();
+    }
+    done
+}
+
+/// Commit every event written since the last look, and report how many events
+/// the log now holds.
+fn settle<W: std::io::Write>(
+    view: &mut Live,
+    screen: &mut Screen<W>,
+    log: &JsonlSessionLog,
+    seen: usize,
+) -> usize {
+    let events = log.events();
+    for event in events.iter().skip(seen) {
+        let lines = view.push(&crossing(event));
+        screen.print(&lines).ok();
+    }
+    events.len()
 }
 
 async fn run<W: std::io::Write>(
@@ -331,10 +408,14 @@ async fn run<W: std::io::Write>(
     )
     .map_err(|err| report(policy, &err.to_string(), None))?;
 
-    let outcome = with_progress(policy, &format!("running the turn on {model}"), async {
-        engine.run_turn(&args.prompt).await
-    })
-    .await
+    let phase = format!("running the turn on {model}");
+    let turn = engine.run_turn(&args.prompt);
+    let outcome = match args.trace {
+        // The trace prints the sequence afterwards, so nothing may be written
+        // above it while the turn runs.
+        true => with_progress(policy, &phase, turn).await,
+        false => with_live(policy, out, &log, &phase, turn).await,
+    }
     .map_err(|err| report(policy, &err.to_string(), None))?;
     engine
         .flush()
@@ -366,13 +447,6 @@ async fn run<W: std::io::Write>(
         // A debugging view still owes the user the answer they asked for.
         out.blank().ok();
         out.line(&outcome.content).ok();
-    } else {
-        // Read back what was written, rather than rendering the in-memory
-        // outcome: the journal is the durable record, so the turn a user sees
-        // is the turn a replay will show them tomorrow.
-        let events = tetanus_session::replay(log.path())
-            .map_err(|err| report(policy, &err.to_string(), None))?;
-        render::timeline::render(out, &boundary(events)).ok();
     }
 
     out.blank().ok();
