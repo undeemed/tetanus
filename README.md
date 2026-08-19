@@ -87,7 +87,7 @@ Use `cargo build --workspace --release` for an optimised build at `target/releas
 The default adapter is a deterministic built-in mock, so a full turn needs no API key and no network.
 
 ```bash
-cargo run --bin tetanus -- run --prompt "run one full turn"
+cargo run --bin tetanus -- run "run one full turn"
 ```
 
 It prints the turn as a conversation, then where the journal went.
@@ -149,12 +149,18 @@ Without the key the command says so and stops before any network call.
 | `tetanus serve` | Host the JSON-RPC protocol on stdio, or on a socket with `--listen`, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
-`tetanus run` flags: `--prompt <text>`, `--adapter mock|deepseek`, `--model <id>`,
+`tetanus run` flags: `--adapter mock|deepseek`, `--model <id>`,
 `--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
 `--trace` (the raw sequence) with `--verbose` (each durable payload), and `--json`.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
+
+The prompt is the command's own argument: `tetanus run "list the files"`.
+`-p/--prompt` takes the same text and cannot be combined with it.
+Either form given as `-` reads the prompt from standard input instead, so `tetanus run - < task.md` and a heredoc both become one turn, newlines and all.
+With no prompt at all the run asks `run one full turn`, which is what makes the quickstart above a bare command.
+An empty prompt is refused before the journal is opened, with the exit status [docs/interface-contract.md](docs/interface-contract.md) §4.5 gives a bad argument.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.

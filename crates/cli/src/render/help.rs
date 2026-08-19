@@ -80,7 +80,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
         "\
 {examples}
   tetanus run                                 one offline turn, mock adapter
-  tetanus run -p \"list the files\"             ask for something specific
+  tetanus run \"list the files\"                ask for something specific
   tetanus run -a deepseek -m deepseek-v4-pro  needs DEEPSEEK_API_KEY
   tetanus sessions                            every journal, newest first
   tetanus replay sessions/turn.jsonl          re-read a journal from before
@@ -105,7 +105,9 @@ pub fn run_epilogue(theme: &Theme) -> String {
     format!(
         "\
 {examples}
-  tetanus run -p \"run one full turn\"  the default: no key, no network
+  tetanus run                         the default: \"run one full turn\"
+  tetanus run \"list the files\"        ask for something else
+  tetanus run - < task.md             a prompt too long to quote
   tetanus run --trace                 the raw event sequence instead
   tetanus run --session /tmp/t.jsonl  choose where the journal lands
   tetanus run --max-steps 1           stop after one step

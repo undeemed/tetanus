@@ -1,14 +1,17 @@
 //! Test Design Specification: the headless `tetanus run` command.
 //!
 //! Features tested: an offline turn on the built-in mock adapter, the printed
-//! event sequence, the journal on disk, and the failure message when a real
-//! provider has no credential. Features NOT tested here: the flow itself
-//! (owned by the conformance suite in `tetanus-turn`) and any live provider.
+//! event sequence, the journal on disk, where the prompt is read from, and the
+//! failure message when a real provider has no credential. Features NOT tested
+//! here: the flow itself (owned by the conformance suite in `tetanus-turn`),
+//! any live provider, and resolving a prompt from plain data (owned by
+//! `prompt`, asserted in its own module).
 //!
 //! Environmental needs: none. Every case runs offline.
 
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod common;
 
@@ -22,6 +25,26 @@ fn run(dir: &Path, args: &[&str], key: Option<&str>) -> std::process::Output {
         None => cmd.env_remove("DEEPSEEK_API_KEY"),
     };
     cmd.output().expect("the binary runs")
+}
+
+/// The same run, with `typed` on its standard input rather than a terminal.
+fn piped(dir: &Path, args: &[&str], typed: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir)
+        .args(args)
+        .env_remove("DEEPSEEK_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(typed.as_bytes())
+        .expect("the prompt is written");
+    child.wait_with_output().expect("the binary exits")
 }
 
 /// TC-CLI-1: one full turn with no key, no network and no config.
@@ -130,6 +153,105 @@ fn a_real_adapter_without_a_key_says_so() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("DEEPSEEK_API_KEY"), "{stderr}");
     assert!(stderr.contains("--adapter mock"), "{stderr}");
+    assert!(
+        !dir.path().join("never.jsonl").exists(),
+        "nothing was written"
+    );
+}
+
+/// TC-CLI-4: the prompt as the command's argument, the way upstream's headless
+/// profile takes it.
+/// Expected: exit 0, and the turn answers what was typed - not the default a
+/// bare `tetanus run` asks. A positional that silently lost its value would
+/// still exit 0 and still print a turn, so the answer is what is asserted.
+#[test]
+fn a_positional_prompt_is_what_the_turn_asks() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["run", "list the files", "--session", "journal.jsonl"],
+        None,
+    );
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(stdout.contains("You said: list the files"), "{stdout}");
+}
+
+/// TC-CLI-5: `-`, with a prompt on standard input.
+/// Expected: exit 0, and the turn asks the whole of it - the blank line in the
+/// middle included. This is the case the source exists for: a prompt with
+/// paragraphs in it is one no shell quotes comfortably.
+#[test]
+fn a_dash_reads_the_prompt_from_standard_input() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = piped(
+        dir.path(),
+        &["run", "-", "--session", "journal.jsonl"],
+        "first line\n\nlast line\n",
+    );
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events = tetanus_session::replay(dir.path().join("journal.jsonl")).expect("replays");
+    let asked = events
+        .iter()
+        .find(|event| event.ty == "user/message")
+        .map(|event| event.data.to_string())
+        .unwrap_or_default();
+    assert!(asked.contains("first line"), "{asked}");
+    assert!(asked.contains("last line"), "{asked}");
+}
+
+/// TC-CLI-6: `-`, with nothing on standard input.
+/// Expected: exit 2 - the status §4.5 gives a bad argument - a message naming
+/// the prompt, and no journal. Stopping before the journal is opened is the
+/// point: a turn that ran would leave a file recording that the agent was
+/// asked nothing, and would have spent a provider call to write it.
+#[test]
+fn an_empty_standard_input_stops_before_the_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = piped(dir.path(), &["run", "-", "--session", "never.jsonl"], "");
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("prompt"), "{stderr}");
+    assert!(
+        !dir.path().join("never.jsonl").exists(),
+        "nothing was written"
+    );
+}
+
+/// TC-CLI-7: both prompt forms at once.
+/// Expected: a usage error, exit 2, and no journal. The two forms say the same
+/// thing, so accepting both would mean silently picking one and running a turn
+/// the user did not ask for.
+#[test]
+fn the_two_prompt_forms_are_refused_together() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &[
+            "run",
+            "here",
+            "--prompt",
+            "there",
+            "--session",
+            "never.jsonl",
+        ],
+        None,
+    );
+
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--prompt"), "{stderr}");
     assert!(
         !dir.path().join("never.jsonl").exists(),
         "nothing was written"
