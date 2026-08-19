@@ -113,6 +113,13 @@ The canonical sequence, each event's dispatch mode and output type, and the rati
 are in [docs/turn-flow.md](docs/turn-flow.md).
 The live extension points are declared in [crates/turn/src/events.rs](crates/turn/src/events.rs).
 
+One step's `tool/call*` may overlap.
+A call whose tool declares itself parallel-safe joins a pool bounded by
+`TurnConfig::max_parallel_tool_calls` (default 10); a call whose tool declares itself exclusive runs
+alone, after the pool ahead of it drains and before any call behind it starts.
+Dispatch may overlap but commitment may not: a `tool/result` is appended only once every earlier
+call of the step has been appended, so the journal reads in model order however the calls settled.
+
 The engine resolves four services from the registry and names no implementation:
 
 | Service | Key | Provider trait | Phase ① implementations |
@@ -305,7 +312,7 @@ not protocol-level.
 
 ## 7. Not built yet
 
-Layered config recompose at run time, live subtree remount, the full tool pipeline (permissions,
-concurrency, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
+Layered config recompose at run time, live subtree remount, the rest of the tool pipeline
+(permissions, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.
