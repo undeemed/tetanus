@@ -19,6 +19,7 @@
 //!
 //! ```text
 //! Console ── the trait: take the terminal, give it back
+//! Keys    ── the trait: the next keystroke, or nothing within the wait
 //! Tty     ── the real one: raw mode, alternate screen, hidden cursor
 //! Held    ── the guard: takes on construction, restores on drop
 //! Key     ── what a keystroke is, in this crate's own vocabulary
@@ -71,6 +72,24 @@ pub trait Console {
     fn restore(&mut self) -> io::Result<()>;
 }
 
+/// Where a view's keystrokes come from.
+///
+/// Separate from [`Console`] because they are separate powers: taking the
+/// terminal is what a view must undo, reading it is what a view is driven by,
+/// and the test double for a loop needs to script the second without
+/// pretending to do the first. [`Tty`] answers both, so a real view names
+/// `Console + Keys` and gets one object.
+pub trait Keys {
+    /// The next keystroke, or `None` if `wait` passed without one.
+    ///
+    /// Returning on a timeout is what lets a view repaint a spinner while
+    /// nobody is typing. Anything that is not a keystroke this crate names -
+    /// a mouse report, a focus change, the release half of a key - reads as
+    /// `None` as well, so a caller that treats `None` as "nothing happened"
+    /// is correct in every case.
+    fn key(&mut self, wait: Duration) -> io::Result<Option<Key>>;
+}
+
 /// The real terminal, over the stream a view draws on.
 ///
 /// Raw mode is a property of the process's controlling terminal rather than
@@ -87,15 +106,10 @@ impl<W: Write> Tty<W> {
     pub fn new(out: W) -> Self {
         Self { out }
     }
+}
 
-    /// The next keystroke, or `None` if `wait` passed without one.
-    ///
-    /// Returning on a timeout is what lets a view repaint a spinner while
-    /// nobody is typing. Anything that is not a keystroke this crate names -
-    /// a mouse report, a focus change, the release half of a key - reads as
-    /// `None` as well, so a caller that treats `None` as "nothing happened"
-    /// is correct in every case.
-    pub fn key(&mut self, wait: Duration) -> io::Result<Option<Key>> {
+impl<W: Write> Keys for Tty<W> {
+    fn key(&mut self, wait: Duration) -> io::Result<Option<Key>> {
         if !event::poll(wait)? {
             return Ok(None);
         }
