@@ -7,6 +7,7 @@
 //! append-only artifact, which is the same rule the turn flow follows.
 
 use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -102,7 +103,9 @@ impl SessionStore {
             return Ok(self.info(live));
         }
 
-        let path = named.unwrap_or_else(|| self.path_of(&id));
+        let path = named
+            .or_else(|| self.resolve(&id))
+            .unwrap_or_else(|| self.path_of(&id));
         let existing = tetanus_session::replay(&path).map_err(|e| session_error(&id, e))?;
 
         let bus = EventBus::new();
@@ -155,21 +158,21 @@ impl SessionStore {
             .collect();
 
         for path in self.journals()? {
-            let Some(id) = journal_id(&path) else {
-                continue;
-            };
-            if out.contains_key(&id) {
-                continue;
-            }
-            // A journal that cannot be read is reported as an empty entry
-            // rather than failing the whole listing: one damaged session must
-            // not hide the others.
+            // A journal that cannot be read is skipped rather than failing
+            // the whole listing: one damaged session must not hide the
+            // others.
             let events = tetanus_session::replay(&path).unwrap_or_default();
             let Some(header) = header_of(&events) else {
                 continue;
             };
+            // Keyed by the id it reports, and not by the file name, because
+            // the two may differ and only the reported one is an id the rest
+            // of `session.*` resolves.
+            if out.contains_key(&header.session_id) {
+                continue;
+            }
             out.insert(
-                id,
+                header.session_id.clone(),
                 SessionInfo {
                     session_id: header.session_id,
                     path: path.display().to_string(),
@@ -216,7 +219,7 @@ impl SessionStore {
             return Ok(live);
         }
         validate_id(session_id)?;
-        if !self.path_of(session_id).exists() {
+        if self.resolve(session_id).is_none() {
             return Err(session_not_found(session_id));
         }
         self.create(SessionCreateParams {
@@ -240,10 +243,9 @@ impl SessionStore {
             return Ok(live.log.events());
         }
         validate_id(session_id)?;
-        let path = self.path_of(session_id);
-        if !path.exists() {
+        let Some(path) = self.resolve(session_id) else {
             return Err(session_not_found(session_id));
-        }
+        };
         tetanus_session::replay(&path).map_err(|e| session_error(session_id, e))
     }
 
@@ -280,6 +282,35 @@ impl SessionStore {
         self.root.join(format!("{id}.jsonl"))
     }
 
+    /// The journal an id names, or `None` if this store holds none.
+    ///
+    /// Contract section 4.7: an id is a fact of the journal's `session/start`
+    /// line, not of its file name, so `<root>/<id>.jsonl` is a fast path and
+    /// not the definition. An id the store minted for a journal that is called
+    /// something else still resolves, which is what makes every id
+    /// `session.list` reports an id `session.events` can open.
+    fn resolve(&self, id: &str) -> Option<PathBuf> {
+        if let Some(live) = self.live(id) {
+            return Some(live.path.clone());
+        }
+        let direct = self.path_of(id);
+        if direct.exists() {
+            match header_at(&direct) {
+                // The ordinary case, and a journal whose header is not written
+                // yet: the file name is all there is to go on.
+                None => return Some(direct),
+                Some(header) if header.session_id == id => return Some(direct),
+                // Named `<id>.jsonl` but belonging to another session. The id
+                // wins, so the search goes on.
+                Some(_) => {}
+            }
+        }
+        self.journals()
+            .ok()?
+            .into_iter()
+            .find(|path| header_at(path).is_some_and(|header| header.session_id == id))
+    }
+
     fn fresh_id(&self) -> String {
         let base = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -292,7 +323,7 @@ impl SessionStore {
             } else {
                 format!("s{base}-{n}")
             };
-            if !self.path_of(&id).exists() && !self.live.lock().expect("live").contains_key(&id) {
+            if self.resolve(&id).is_none() {
                 return id;
             }
         }
@@ -328,8 +359,14 @@ fn title_of(events: &[SessionEvent]) -> Option<String> {
     }
 }
 
-fn journal_id(path: &Path) -> Option<String> {
-    Some(path.file_stem()?.to_str()?.to_string())
+/// The header of a cold journal, read from its first line alone. Resolving one
+/// id must not cost a full replay of every journal in the directory.
+fn header_at(path: &Path) -> Option<SessionHeader> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
+    let event: SessionEvent = serde_json::from_str(first.trim_end()).ok()?;
+    header_of(&[event])
 }
 
 /// A session id names a file, so it may not reach outside the store's root.
