@@ -20,6 +20,7 @@
 //! color   ── policy: --color + environment + is-terminal → color on/off, charset, width
 //! theme   ── palette: Role → anstyle::Style, gated by that policy
 //! writer  ── Ui<W>: the only place a line is written; owns stream + theme + width
+//! frame   ── Frame: one whole screen, composed and painted in a single pass
 //! progress ─ Progress<W>: the one status line, animated only at a terminal
 //! screen  ── Screen<W>: a block of lines redrawn in place, at a terminal only
 //! terminal ─ Held<C>: raw mode and the alternate screen, taken and given back
@@ -42,6 +43,7 @@
 //! keeps the presentation lane and the engine lane independently reviewable.
 
 pub mod color;
+pub mod frame;
 pub mod progress;
 pub mod screen;
 pub mod terminal;
@@ -50,6 +52,7 @@ pub mod theme;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
+pub use frame::Frame;
 pub use progress::Progress;
 pub use screen::Screen;
 pub use terminal::{Console, Held, Key, Tty};
