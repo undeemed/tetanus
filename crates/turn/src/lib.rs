@@ -18,6 +18,7 @@ pub mod events;
 pub mod llm;
 pub mod log;
 pub mod repair;
+pub mod tokens;
 pub mod tools;
 pub mod trace;
 
