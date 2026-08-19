@@ -180,6 +180,7 @@ It cannot be combined with `--raw`, `--live` or `--json`, and like `run --ui` it
 Up and Down move the cursor, PageUp and PageDown a screenful, Home and End reach the newest and the oldest, and Enter reads the journal the cursor is on with the same keys `replay --ui` uses.
 `q` or Esc closes a journal back to the list and closes the list to the shell, so Enter is a key you can afford to press.
 A journal that will not open says why at the foot of the list and leaves the cursor where it was; the list is not worth losing over one bad file.
+`/` narrows the list to the journals whose id or title holds what you type, as you type it; Enter accepts the word and gives the cursor back, and Esc gives the whole list back.
 `--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
 
 `tetanus serve` is the one subcommand that prints no page.

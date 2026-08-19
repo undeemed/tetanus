@@ -219,6 +219,9 @@ alternate screen between the list and the journal is visible to the reader as th
 The journal is read through the closure the binary hands in, which is the read `tetanus replay`
 already does, so a journal that will not open is worded once and reported on the footer rather than
 costing the reader the list.
+`/` narrows the list to the journals whose id or title holds what is typed, as it is typed, and
+while the prompt is open every printable key belongs to it - `q` included, because a view that quit
+on `q` could not be used to look for `quota`.
 
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,

@@ -5,7 +5,8 @@
 //! lines poured into the scrollback, and the one wanted is somewhere in the
 //! middle of them. This module is the other view of the same list: the
 //! alternate screen, a window on as much of it as fits, a cursor to move
-//! through it with, and Enter to read the journal under the cursor.
+//! through it with, `/` to take it down to the journals that match a word,
+//! and Enter to read the journal under the cursor.
 //!
 //! # Stakeholders and concerns
 //!
@@ -45,6 +46,22 @@
 //! two columns narrower to leave room for it. A row that can only be found by
 //! its colour cannot be found under `--color never`, on a terminal that has no
 //! colour, or by a reader who cannot tell two of them apart.
+//!
+//! # Rationale: `/` narrows the list, it does not search the screen
+//!
+//! A hundred journals is the case this view exists for, and a cursor is a slow
+//! way through a hundred of anything. `/` takes the list down to the journals
+//! whose id or title holds what is typed, and everything else then counts
+//! against what is left: the footer counts matches, PageDown is a screenful of
+//! matches, and Enter opens the match under the cursor. Nothing is highlighted
+//! and nothing is jumped to, because a reader who has typed a word wants the
+//! other ninety-odd rows gone, not coloured.
+//!
+//! While the filter is being typed, every printable key belongs to it - `q`
+//! included, because a view that quit on `q` in the middle of a word could not
+//! be used to look for `quota`. Enter accepts the filter and hands the keys
+//! back to the cursor; Esc drops it and the whole list is under the cursor
+//! again.
 //!
 //! # Rationale: one view, not two
 //!
@@ -88,6 +105,44 @@ const CHROME: usize = 4;
 /// Columns the cursor mark takes, on the row it is on and on every other.
 const MARK: usize = 2;
 
+/// Whether the keys are moving a cursor or spelling a filter.
+#[derive(Debug, PartialEq, Eq)]
+enum Filter {
+    /// No filter: every journal is on the list, and the keys move the cursor.
+    Off,
+    /// Being typed. The list narrows on each keystroke rather than on Enter,
+    /// so a word is answered while it is being written and a reader can stop
+    /// typing as soon as the row they want is the only one left.
+    Typing(String),
+    /// Accepted: the list stays narrowed, and the keys move the cursor again.
+    On(String),
+}
+
+impl Filter {
+    /// What has been typed, which is the empty string when nothing has.
+    fn text(&self) -> &str {
+        match self {
+            Filter::Off => "",
+            Filter::Typing(text) | Filter::On(text) => text,
+        }
+    }
+}
+
+/// Whether `row` is one of the sessions `wanted` names, `wanted` already
+/// lowercased. Matched against the id and the title, because those are the two
+/// columns a reader recognises a session by; the other two are a count and one
+/// of three words, which the eye does better than a filter would.
+fn held(row: &SessionInfo, wanted: &str) -> bool {
+    if wanted.is_empty() {
+        return true;
+    }
+    row.session_id.to_lowercase().contains(wanted)
+        || row
+            .title
+            .as_deref()
+            .is_some_and(|title| title.to_lowercase().contains(wanted))
+}
+
 /// Reads a journal by path, or says in one line why it could not.
 ///
 /// Taken as a closure rather than done here so that opening a journal, and the
@@ -127,9 +182,15 @@ pub fn pick<W: Write>(
 /// A list of journals, and whichever one of them the reader has opened.
 struct Picker<'a> {
     theme: Theme,
-    /// The sessions in the order they are shown, newest first.
+    /// Every session, in the order they are shown, newest first.
     sessions: Vec<&'a SessionInfo>,
-    /// Those sessions as rows, composed for the width below.
+    /// The ones the filter leaves, which is what the rows are composed from,
+    /// what the cursor counts against, and what Enter opens out of. All of
+    /// them when there is no filter.
+    shown: Vec<&'a SessionInfo>,
+    /// What has been typed after `/`, and whether it is still being typed.
+    filter: Filter,
+    /// Those shown sessions as rows, composed for the width below.
     rows: Vec<String>,
     /// The terminal width the rows were composed for.
     cols: usize,
@@ -158,9 +219,12 @@ impl<'a> Picker<'a> {
         open: &'a Open<'a>,
         cols: usize,
     ) -> Self {
+        let sessions = sessions::ordered(list);
         let mut picker = Self {
             theme,
-            sessions: sessions::ordered(list),
+            shown: sessions.clone(),
+            sessions,
+            filter: Filter::Off,
             rows: Vec::new(),
             // Not `cols`: the fill below is what makes the rows true at a
             // width, and starting them equal would claim it already had.
@@ -177,10 +241,27 @@ impl<'a> Picker<'a> {
         picker
     }
 
-    /// Compose every row again for a terminal `cols` wide.
+    /// Compose every shown row again for a terminal `cols` wide.
     fn fill(&mut self, cols: usize) {
-        self.rows = sessions::rows(&self.theme, cols.saturating_sub(MARK), &self.sessions);
+        self.rows = sessions::rows(&self.theme, cols.saturating_sub(MARK), &self.shown);
         self.cols = cols;
+    }
+
+    /// Take the list down to the sessions the filter leaves, and compose them.
+    fn narrow(&mut self) {
+        let wanted = self.filter.text().to_lowercase();
+        self.shown = self
+            .sessions
+            .iter()
+            .copied()
+            .filter(|row| held(row, &wanted))
+            .collect();
+        // The cursor was on a row that may not be here any more, and the
+        // window it sat in was measured against a list that has changed under
+        // it. Both go back to somewhere that exists.
+        self.at = self.at.min(self.shown.len().saturating_sub(1));
+        self.top = 0;
+        self.fill(self.cols);
     }
 
     /// Move the window so the cursor is on it.
@@ -196,24 +277,43 @@ impl<'a> Picker<'a> {
         self.top = self.top.min(self.rows.len().saturating_sub(self.room));
     }
 
-    /// The keys on the left, or what went wrong; where the cursor is, right.
+    /// The keys on the left, or the filter, or what went wrong; where the
+    /// cursor is, right.
     ///
     /// Counted against the whole list rather than against the part of it on
     /// screen, because "4 of 27" is the answer to the question a reader has.
+    /// Under a filter the whole list is the matches, which is what the cursor
+    /// moves through and what the reader is choosing between.
     fn footer(&self, cols: usize) -> String {
-        let left = match &self.fault {
-            Some(why) => self.theme.paint(Role::Warn, why).to_string(),
-            None => {
+        let dot = self.theme.glyph("·", "-");
+        let left = match (&self.fault, &self.filter) {
+            (Some(why), _) => self.theme.paint(Role::Warn, why).to_string(),
+            // A filter being typed has the footer to itself: the keys it would
+            // sit beside are the keys it has taken over.
+            (None, Filter::Typing(text)) => self
+                .theme
+                .paint(Role::Accent, &format!("/{text}"))
+                .to_string(),
+            (None, Filter::On(text)) => format!(
+                "{} {dot} {}",
+                self.theme.paint(Role::Accent, &format!("/{text}")),
+                self.theme.paint(Role::Muted, "esc clear"),
+            ),
+            (None, Filter::Off) => {
                 let keys = format!(
-                    "{} move {} enter read {} q quit",
+                    "{} move {dot} enter read {dot} / filter {dot} q quit",
                     self.theme.glyph("↑↓", "up/dn"),
-                    self.theme.glyph("·", "-"),
-                    self.theme.glyph("·", "-"),
                 );
                 self.theme.paint(Role::Muted, &keys).to_string()
             }
         };
-        let here = format!("{} of {}", self.at + 1, self.rows.len());
+        let here = if self.rows.is_empty() {
+            // Not "1 of 0": the cursor is on nothing, and saying it is on the
+            // first of nothing is a worse answer than saying there is nothing.
+            "0 of 0".to_string()
+        } else {
+            format!("{} of {}", self.at + 1, self.rows.len())
+        };
         bar(
             cols,
             &left,
@@ -250,6 +350,13 @@ impl<'a> Picker<'a> {
             };
             frame.row(format!("{mark}{row}"));
         }
+        if self.rows.is_empty() {
+            // Only reachable under a filter, because `pick` answers an empty
+            // directory before a screen is opened. A blank page reads as a
+            // view that failed to draw, so the answer is written out.
+            let none = format!("nothing matches {}", self.filter.text());
+            frame.row(format!("  {}", self.theme.paint(Role::Muted, &none)));
+        }
         while frame.free() > 1 {
             frame.blank();
         }
@@ -260,12 +367,25 @@ impl<'a> Picker<'a> {
     /// Answer a key while the list is the thing on screen.
     fn choose(&mut self, key: Key) -> Flow {
         self.fault = None;
+        if matches!(self.filter, Filter::Typing(_)) {
+            return self.spell(key);
+        }
         // One row less than a screenful, so the row the reader was looking at
         // is still on the screen they land on.
         let screenful = self.room.saturating_sub(1).max(1);
         let last = self.rows.len().saturating_sub(1);
         match key {
+            // Esc backs out of the filter before it backs out of the view, so
+            // a narrowed list is one press from being whole and two from being
+            // gone. The reader who meant to leave presses it twice.
+            Key::Esc if self.filter != Filter::Off => {
+                self.filter = Filter::Off;
+                self.narrow();
+            }
             Key::Char('q') | Key::Esc => return Flow::Stop,
+            // `/` on a filter that is already on re-opens it for editing
+            // rather than clearing it: narrowing is usually done in two goes.
+            Key::Char('/') => self.filter = Filter::Typing(self.filter.text().to_string()),
             Key::Up => self.at = self.at.saturating_sub(1),
             Key::Down => self.at = (self.at + 1).min(last),
             Key::PageUp => self.at = self.at.saturating_sub(screenful),
@@ -278,9 +398,47 @@ impl<'a> Picker<'a> {
         Flow::Go
     }
 
+    /// Answer a key while the filter is being typed.
+    fn spell(&mut self, key: Key) -> Flow {
+        // Taken by value rather than borrowed out of `self.filter`, because
+        // the arms below end in a call that composes the rows again, and a
+        // borrow of the filter held across that is a borrow of `self`. A
+        // filter is a word long, so the copy costs nothing worth naming.
+        let mut text = self.filter.text().to_string();
+        match key {
+            Key::Char(typed) => text.push(typed),
+            Key::Backspace => {
+                text.pop();
+            }
+            // Accepted. An empty filter is no filter, so a reader who pressed
+            // `/` and thought better of it is back where they started.
+            Key::Enter => {
+                self.filter = if text.is_empty() {
+                    Filter::Off
+                } else {
+                    Filter::On(text)
+                };
+                return Flow::Go;
+            }
+            Key::Esc => {
+                self.filter = Filter::Off;
+                self.narrow();
+                return Flow::Go;
+            }
+            // Every other key waits. The cursor keys still mean what they mean
+            // once Enter has been pressed, and answering them here as well
+            // would make one press of Down do a different thing depending on
+            // whether a prompt the reader has stopped looking at is open.
+            _ => return Flow::Go,
+        }
+        self.filter = Filter::Typing(text);
+        self.narrow();
+        Flow::Go
+    }
+
     /// Open the journal the cursor is on, or say why not.
     fn read(&mut self) {
-        let Some(chosen) = self.sessions.get(self.at) else {
+        let Some(chosen) = self.shown.get(self.at) else {
             return;
         };
         match (self.open)(&chosen.path) {
@@ -348,8 +506,10 @@ impl View for Picker<'_> {
 /// view; that a resize composes the rows again at the new width; that Enter
 /// opens the journal the cursor is on, by that session's own path and headed by
 /// its id; that `q` leaves a journal for the list and only then the list for the
-/// shell; and that a journal which will not open, or holds nothing, is reported
-/// without ending the view.
+/// shell; that a journal which will not open, or holds nothing, is reported
+/// without ending the view; and that `/` narrows the list to the journals that
+/// match, takes the printable keys while it is being typed, and moves the
+/// cursor and Enter on to the matches.
 ///
 /// Features NOT tested here: the wording and widths of a row (owned by
 /// `sessions.rs`), the arrangement of a frame (owned by `tetanus_ui::Frame`),
@@ -418,6 +578,14 @@ mod tests {
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").trim_end().to_string())
             .collect()
+    }
+
+    /// Open the filter prompt and type `text` into it, one key at a time.
+    fn typed(view: &mut Picker<'_>, text: &str) {
+        view.key(Key::Char('/'));
+        for letter in text.chars() {
+            view.key(Key::Char(letter));
+        }
     }
 
     /// The rows between the heading's blank and the footer, blanks dropped.
@@ -616,5 +784,105 @@ mod tests {
             "{shown:?}"
         );
         assert_eq!(body(&shown).len(), 3, "the list went away: {shown:?}");
+    }
+    /// TC-CLI-PICK-8: `/` and a word, on a list of eight.
+    /// Expected: the list is down to the journals that match on the keystroke
+    /// which made them match, not on Enter; the match is not case sensitive,
+    /// because a reader typing a filter is reading rather than retyping an id;
+    /// the title matches as well as the id; and the footer shows what has been
+    /// typed and counts the matches.
+    #[test]
+    fn a_filter_narrows_the_list_as_it_is_typed() {
+        let list = list(8);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+
+        typed(&mut view, "S3");
+        let shown = rows(&mut view, COLS, 12);
+        assert_eq!(body(&shown).len(), 1, "{shown:?}");
+        assert!(body(&shown)[0].contains("s3"), "{shown:?}");
+        assert!(shown[shown.len() - 1].contains("/S3"), "{shown:?}");
+        assert!(shown[shown.len() - 1].contains("1 of 1"), "{shown:?}");
+
+        // Every title here is "about sN", so a word out of one of them holds
+        // the whole list back: the title is matched, not only the id.
+        view.key(Key::Backspace);
+        view.key(Key::Backspace);
+        for letter in "ABOUT".chars() {
+            view.key(Key::Char(letter));
+        }
+        let shown = rows(&mut view, COLS, 12);
+        assert_eq!(body(&shown).len(), 8, "{shown:?}");
+        assert!(shown[shown.len() - 1].contains("1 of 8"), "{shown:?}");
+    }
+
+    /// TC-CLI-PICK-9: the keys while the filter prompt is open.
+    /// Expected: `q` is a letter and not the quit key - a view that quit here
+    /// could not be used to look for `quota`; Backspace takes one letter back;
+    /// Enter accepts and hands the keys back with the list still narrow; Esc
+    /// drops the filter and the whole list is under the cursor again; and only
+    /// then does `q` mean quit.
+    #[test]
+    fn the_prompt_takes_the_printable_keys_while_it_is_open() {
+        let list = list(8);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+
+        view.key(Key::Char('/'));
+        assert_eq!(view.key(Key::Char('q')), Flow::Go, "`q` closed the view");
+        assert_eq!(view.filter, Filter::Typing("q".into()));
+
+        view.key(Key::Backspace);
+        for letter in "s3".chars() {
+            view.key(Key::Char(letter));
+        }
+        assert_eq!(view.key(Key::Enter), Flow::Go);
+        assert_eq!(view.filter, Filter::On("s3".into()));
+        assert_eq!(body(&rows(&mut view, COLS, 12)).len(), 1);
+
+        assert_eq!(view.key(Key::Esc), Flow::Go, "Esc closed the view");
+        assert_eq!(view.filter, Filter::Off);
+        assert_eq!(body(&rows(&mut view, COLS, 12)).len(), 8);
+        assert_eq!(view.key(Key::Char('q')), Flow::Stop);
+    }
+
+    /// TC-CLI-PICK-10: the cursor on the last of eight, then a filter leaving
+    /// one; then a filter leaving none.
+    /// Expected: the cursor comes back to a row that exists, and Enter opens
+    /// that row's own journal rather than the eighth of the whole list - a
+    /// picker that filtered the screen but not the choosing would open the
+    /// wrong file and still look like it had worked. A filter that matches
+    /// nothing says so on the page, and Enter on it opens nothing and does not
+    /// end the view.
+    #[test]
+    fn the_cursor_and_enter_follow_the_matches() {
+        let list = list(8);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let open = |path: &str| {
+            asked.borrow_mut().push(path.to_string());
+            Ok(journal())
+        };
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        rows(&mut view, COLS, 12);
+
+        view.key(Key::End);
+        assert_eq!(view.at, 7);
+        typed(&mut view, "s3");
+        assert_eq!(view.at, 0, "the cursor stayed off the end of the matches");
+
+        view.key(Key::Enter);
+        view.key(Key::Enter);
+        assert_eq!(asked.borrow().as_slice(), ["sessions/s3.jsonl"]);
+        assert_eq!(view.key(Key::Esc), Flow::Go, "the journal did not close");
+
+        typed(&mut view, "zz");
+        let shown = rows(&mut view, COLS, 12);
+        assert!(body(&shown)[0].contains("nothing matches"), "{shown:?}");
+        assert!(shown[shown.len() - 1].contains("0 of 0"), "{shown:?}");
+        view.key(Key::Enter);
+        assert_eq!(view.key(Key::Enter), Flow::Go, "Enter on no rows stopped");
+        assert_eq!(asked.borrow().len(), 1, "a journal opened with no row");
     }
 }
