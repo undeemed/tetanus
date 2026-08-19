@@ -18,24 +18,30 @@
 //!
 //! ```text
 //! color   ── policy: --color + environment + is-terminal → color on/off, charset, width
+//! theme   ── palette: Role → anstyle::Style, gated by that policy
+//! writer  ── Ui<W>: the only place a line is written; owns stream + theme + width
 //! ```
 //!
-//! Landing in the following slices of this lane: the palette that turns a
-//! semantic role into a style, the single writer every line goes through, the
-//! help-text surface, and the renderers for a turn's event stream and its
-//! progress.
+//! Landing in the following slices of this lane: the help-text surface, and
+//! the renderers for a turn's event stream and its progress.
 //!
 //! # Rationale
 //!
-//! Policy is its own layer because it fails differently from drawing. It is
-//! decided once, from inputs a test can state as plain data, and it never
-//! touches a stream. Folding it into a "print helper" is exactly how a CLI
-//! ends up with `println!` calls that ignore `NO_COLOR`, and how color becomes
-//! a thing you can only test by owning a pty.
+//! The three layers are separate because they fail differently. Policy is
+//! decided once, from inputs a test can state as plain data, and never touches
+//! a stream. The palette is a pure mapping with no I/O. The writer is the
+//! single I/O choke point, which is what stops a renderer from reaching
+//! `println!` and escaping the policy. Folding them into one "print helper" is
+//! exactly how a CLI ends up ignoring `NO_COLOR`, and how color becomes a
+//! thing you can only test by owning a pty.
 //!
 //! The crate holds no engine types. It formats what it is given, which is what
 //! keeps the presentation lane and the engine lane independently reviewable.
 
 pub mod color;
+pub mod theme;
+pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
+pub use theme::{Painted, Role, Theme};
+pub use writer::{buffered, Policy, Ui};
