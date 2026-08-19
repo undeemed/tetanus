@@ -4,6 +4,13 @@
 //! Nothing here knows where the events came from, so the same renderer serves
 //! a journal on disk, an in-process turn, and a WebSocket subscription.
 //!
+//! Composing a line and writing it are separate on purpose. [`Reader`] turns
+//! one event into the lines it produces and writes nothing; [`render`] is the
+//! reader of a finished turn, and hands those lines to a `Ui`. A live view
+//! keeps some of them on screen and rewrites them as the turn goes on, and it
+//! has to reach the same words this reader would - two composers would drift
+//! within a slice or two.
+//!
 //! Two rendering decisions worth naming.
 //!
 //! `assistant/chunk` is not drawn. The chunks are the streaming surface, and
@@ -20,97 +27,125 @@
 use std::io::{self, Write};
 
 use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason};
-use tetanus_ui::{truncate, wrap, Role, Ui};
+use tetanus_ui::{truncate, wrap, Role, Theme, Ui};
 
 /// Where a content line starts: two of indent, a five-column label, two more.
-const LABEL: usize = 5;
-const INDENT: &str = "  ";
+pub(super) const LABEL: usize = 5;
+pub(super) const INDENT: &str = "  ";
 
-/// Render a whole event stream.
-pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent]) -> io::Result<()> {
-    let mut open_call: Option<String> = None;
-    for event in events {
+/// What a reader has to remember between events: the tool call still waiting
+/// for its result.
+#[derive(Default)]
+pub struct Reader {
+    open_call: Option<String>,
+}
+
+impl Reader {
+    /// The lines one event produces, in order, and none for an event a
+    /// finished turn does not show.
+    pub fn lines(&mut self, theme: &Theme, width: usize, event: &SessionEvent) -> Vec<String> {
         match event.parse() {
-            Some(known) => draw(ui, &known, &mut open_call)?,
-            None => raw(ui, event)?,
+            Some(known) => self.draw(theme, width, &known),
+            None => vec![raw(theme, width, event)],
+        }
+    }
+
+    fn draw(&mut self, theme: &Theme, width: usize, event: &KnownEvent) -> Vec<String> {
+        match event {
+            KnownEvent::SessionStart { model, .. } => {
+                vec![format!("session on {}", theme.paint(Role::Accent, model))]
+            }
+            KnownEvent::TurnStart { turn } => vec![
+                String::new(),
+                theme
+                    .paint(Role::Heading, &format!("turn {turn}"))
+                    .to_string(),
+            ],
+            KnownEvent::StepStart { step, .. } => vec![theme
+                .paint(Role::Muted, &format!("{INDENT}step {step}"))
+                .to_string()],
+            KnownEvent::UserMessage { content } => said(theme, width, "you", Role::Accent, content),
+            KnownEvent::AssistantMessage {
+                content, reasoning, ..
+            } => {
+                let mut lines = match reasoning.is_empty() {
+                    true => Vec::new(),
+                    false => said(theme, width, "think", Role::Muted, reasoning),
+                };
+                lines.extend(said(theme, width, "ai", Role::Topic, content));
+                lines
+            }
+            KnownEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                self.open_call = Some(id.clone());
+                let glyph = theme.glyph("▸", ">");
+                vec![tool(
+                    theme,
+                    width,
+                    glyph,
+                    Role::Tool,
+                    name,
+                    &arguments.to_string(),
+                    None,
+                )]
+            }
+            KnownEvent::ToolResult {
+                call_id,
+                name,
+                ok,
+                content,
+            } => {
+                let (glyph, role) = match ok {
+                    true => (theme.glyph("✓", "+"), Role::Ok),
+                    false => (theme.glyph("✗", "!"), Role::Error),
+                };
+                // Silent when the result answers the call just made; named when
+                // it does not, which is the case a reader cannot infer.
+                let answers = match self.open_call.as_deref() {
+                    Some(open) if open == call_id => None,
+                    _ => Some(call_id.as_str()),
+                };
+                vec![tool(theme, width, glyph, role, name, content, answers)]
+            }
+            KnownEvent::TurnEnd {
+                turn,
+                steps,
+                stop_reason,
+                stop_veto,
+            } => {
+                let dot = theme.glyph("·", "-");
+                let shown = stopped(stop_reason);
+                let reason = theme.paint(Role::Ok, &shown);
+                let unit = if *steps == 1 { "step" } else { "steps" };
+                let mut lines = vec![
+                    String::new(),
+                    format!("turn {turn} {dot} {reason} {dot} {steps} {unit}"),
+                ];
+                if let Some(veto) = stop_veto {
+                    lines.push(format!("{INDENT}held open by {veto}"));
+                }
+                lines
+            }
+            // The streaming surface, and the frames of the turn. A finished
+            // turn reads better without them.
+            KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
+        }
+    }
+}
+
+/// Render a whole event stream, as a reader of a finished turn sees it.
+pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent]) -> io::Result<()> {
+    let (theme, width) = (*ui.theme(), ui.width());
+    let mut reader = Reader::default();
+    for event in events {
+        for line in reader.lines(&theme, width, event) {
+            ui.line(&line)?;
         }
     }
     Ok(())
-}
-
-fn draw<W: Write>(
-    ui: &mut Ui<W>,
-    event: &KnownEvent,
-    open_call: &mut Option<String>,
-) -> io::Result<()> {
-    match event {
-        KnownEvent::SessionStart { model, .. } => {
-            let model = ui.paint(Role::Accent, model).to_string();
-            ui.line(&format!("session on {model}"))
-        }
-        KnownEvent::TurnStart { turn } => ui.heading(&format!("turn {turn}")),
-        KnownEvent::StepStart { step, .. } => {
-            let step = ui
-                .paint(Role::Muted, &format!("{INDENT}step {step}"))
-                .to_string();
-            ui.line(&step)
-        }
-        KnownEvent::UserMessage { content } => said(ui, "you", Role::Accent, content),
-        KnownEvent::AssistantMessage {
-            content, reasoning, ..
-        } => {
-            if !reasoning.is_empty() {
-                said(ui, "think", Role::Muted, reasoning)?;
-            }
-            said(ui, "ai", Role::Topic, content)
-        }
-        KnownEvent::ToolCall {
-            id,
-            name,
-            arguments,
-        } => {
-            *open_call = Some(id.clone());
-            let glyph = ui.theme().glyph("▸", ">");
-            tool(ui, glyph, Role::Tool, name, &arguments.to_string(), None)
-        }
-        KnownEvent::ToolResult {
-            call_id,
-            name,
-            ok,
-            content,
-        } => {
-            let (glyph, role) = match ok {
-                true => (ui.theme().glyph("✓", "+"), Role::Ok),
-                false => (ui.theme().glyph("✗", "!"), Role::Error),
-            };
-            // Silent when the result answers the call just made; named when it
-            // does not, which is the case a reader cannot infer.
-            let answers = match open_call.as_deref() {
-                Some(open) if open == call_id => None,
-                _ => Some(call_id.as_str()),
-            };
-            tool(ui, glyph, role, name, content, answers)
-        }
-        KnownEvent::TurnEnd {
-            turn,
-            steps,
-            stop_reason,
-            stop_veto,
-        } => {
-            let dot = ui.theme().glyph("·", "-");
-            let reason = ui.paint(Role::Ok, &stopped(stop_reason)).to_string();
-            ui.blank()?;
-            let unit = if *steps == 1 { "step" } else { "steps" };
-            ui.line(&format!("turn {turn} {dot} {reason} {dot} {steps} {unit}"))?;
-            match stop_veto {
-                Some(veto) => ui.line(&format!("{INDENT}held open by {veto}")),
-                None => Ok(()),
-            }
-        }
-        // The streaming surface, and the frames of the turn. A finished turn
-        // reads better without them.
-        KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Ok(()),
-    }
 }
 
 /// Why the turn closed, in a reader's words rather than the wire's.
@@ -120,7 +155,7 @@ fn draw<W: Write>(
 /// build was compiled arrives as `Other` and is shown as the engine spelled
 /// it - rendering the fallback is what lets the engine add one in a minor
 /// version (contract §2).
-fn stopped(reason: &StopReason) -> String {
+pub(super) fn stopped(reason: &StopReason) -> String {
     match reason {
         StopReason::Natural => "natural".into(),
         StopReason::PreStepRejected => "rejected before the step".into(),
@@ -132,51 +167,53 @@ fn stopped(reason: &StopReason) -> String {
 
 /// A labelled block of text, folded to the width. Continuation lines align
 /// under the first.
-fn said<W: Write>(ui: &mut Ui<W>, who: &str, role: Role, text: &str) -> io::Result<()> {
+pub(super) fn said(theme: &Theme, width: usize, who: &str, role: Role, text: &str) -> Vec<String> {
     // The label is padded by the columns it occupies, not by the bytes it
     // takes: painted, it carries escape sequences that `{:<5}` would count.
-    let label = ui.paint(role, who).to_string();
+    let label = theme.paint(role, who).to_string();
     let gap = " ".repeat(LABEL.saturating_sub(who.chars().count()));
     let pad = " ".repeat(INDENT.len() + LABEL + 1);
-    let room = ui.width().saturating_sub(pad.chars().count());
+    let room = width.saturating_sub(pad.chars().count());
 
-    for (i, line) in wrap(text, room).into_iter().enumerate() {
-        match i {
-            0 => ui.line(&format!("{INDENT}{label}{gap} {line}"))?,
-            _ => ui.line(&format!("{pad}{line}"))?,
-        }
-    }
-    Ok(())
+    wrap(text, room)
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| match i {
+            0 => format!("{INDENT}{label}{gap} {line}"),
+            _ => format!("{pad}{line}"),
+        })
+        .collect()
 }
 
 /// One tool line: a glyph, the tool's name, and a value it authored.
-fn tool<W: Write>(
-    ui: &mut Ui<W>,
+pub(super) fn tool(
+    theme: &Theme,
+    width: usize,
     glyph: &str,
     role: Role,
     name: &str,
     value: &str,
     answers: Option<&str>,
-) -> io::Result<()> {
+) -> String {
     let head = format!("{INDENT}{glyph} {name}  ");
-    let room = ui.width().saturating_sub(head.chars().count());
+    let room = width.saturating_sub(head.chars().count());
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let value = truncate(&flat, room, ui.theme().charset());
-    let mark = ui.paint(role, glyph).to_string();
+    let value = truncate(&flat, room, theme.charset());
+    let mark = theme.paint(role, glyph);
     let line = format!("{INDENT}{mark} {name}  {value}");
     match answers {
-        Some(call) => ui.line(&format!("{line} (for {call})")),
-        None => ui.line(&line),
+        Some(call) => format!("{line} (for {call})"),
+        None => line,
     }
 }
 
 /// A type this build does not know. The contract says pass it through, so it
 /// is shown rather than dropped.
-fn raw<W: Write>(ui: &mut Ui<W>, event: &SessionEvent) -> io::Result<()> {
-    let ty = ui.paint(Role::Topic, &event.ty).to_string();
-    let room = ui.width().saturating_sub(event.ty.chars().count() + 4);
-    let data = truncate(&event.data.to_string(), room, ui.theme().charset());
-    ui.line(&format!("{INDENT}{ty}  {data}"))
+fn raw(theme: &Theme, width: usize, event: &SessionEvent) -> String {
+    let ty = theme.paint(Role::Topic, &event.ty);
+    let room = width.saturating_sub(event.ty.chars().count() + 4);
+    let data = truncate(&event.data.to_string(), room, theme.charset());
+    format!("{INDENT}{ty}  {data}")
 }
 
 /// Test Design Specification: the timeline renderer.
@@ -445,5 +482,38 @@ mod tests {
             }
         }
         out
+    }
+
+    /// TC-CLI-TL-9: the composer and the writer agree.
+    /// Expected: the lines `Reader` hands back are exactly the bytes `render`
+    /// writes. The live view builds its frames from this same reader, so the
+    /// day the two disagree is the day one turn is worded two ways.
+    #[test]
+    fn the_composer_hands_back_what_the_writer_writes() {
+        let events = [
+            event("turn/start", json!({ "turn": 1 })),
+            event("user/message", json!({ "content": "echo this" })),
+            event(
+                "assistant/chunk",
+                json!({ "chunk": "text", "delta": "on ", "turn": 1, "step": 1 }),
+            ),
+            event("assistant/message", json!({ "content": "on it" })),
+            event(
+                "turn/end",
+                json!({ "turn": 1, "steps": 2, "stop_reason": "natural" }),
+            ),
+        ];
+
+        let theme = Theme::new(false, Charset::Unicode);
+        let mut reader = Reader::default();
+        let composed: Vec<String> = events
+            .iter()
+            .flat_map(|event| reader.lines(&theme, 80, event))
+            .collect();
+
+        assert_eq!(
+            format!("{}\n", composed.join("\n")),
+            rendered(&events, Charset::Unicode, 80)
+        );
     }
 }
