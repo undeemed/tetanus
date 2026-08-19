@@ -27,8 +27,11 @@ use tetanus_turn::events::{
 };
 use tetanus_turn::llm::{LlmError, Message, ModelRequest, Role};
 use tetanus_turn::log::{derive_messages, topic};
-use tetanus_turn::tools::{EchoTool, Tool, ToolError, ToolOutcome, ToolRegistry, ToolSchema};
-use tetanus_turn::TurnError;
+use tetanus_turn::tools::{
+    EchoTool, Tool, ToolError, ToolOrder, ToolOrderError, ToolOutcome, ToolRegistry, ToolSchema,
+    TOOL_ORDER_REST,
+};
+use tetanus_turn::{TurnConfig, TurnError};
 
 /// TC-PORT-LOOP-1: a tool result reaches the next model request.
 ///
@@ -201,8 +204,8 @@ async fn an_empty_assembly_omits_the_system_message() {
 ///
 /// Input: two engines holding the same three tools, registered in opposite
 /// orders.
-/// Expected: both request the same canonical order. A configured order is not
-/// served yet, so upstream's other two cases stay rows in `docs/parity.md`.
+/// Expected: both request the same canonical order. What a configured order
+/// does instead is TC-PORT-LOOP-9.
 #[tokio::test]
 async fn registration_order_does_not_change_the_offered_tools() {
     let names = |registry: ToolRegistry| async {
@@ -374,6 +377,194 @@ async fn a_replayed_journal_derives_the_same_history() {
         live[..sent.len()].to_vec(),
         "the request carried that derived history"
     );
+}
+
+/// TC-PORT-LOOP-9: a configured order decides what the model is offered, and
+/// the tools it does not name go to the rest entry in canonical order.
+///
+/// Upstream: `tool-order.spec.ts`, "honors a configured toolOrder in the logged
+/// header and the dispatched request", and the system-prompt suite's "applies a
+/// configured toolOrder: listed positions, rest at the rest entry
+/// lexicographically". This is also the one place the rest entry's value is
+/// pinned; everything else names the constant.
+///
+/// Input: four registered tools, and the order `todo_write`, rest, `bash`.
+/// Expected: the rest entry is `<unlisted-tools>`, and the request offers
+/// `todo_write`, `echo_a`, `echo_b`, `bash` - the two unlisted tools
+/// lexicographically, in the one place the order left for them.
+#[tokio::test]
+async fn a_configured_order_places_the_tools_it_names_and_pools_the_rest() {
+    assert_eq!(TOOL_ORDER_REST, "<unlisted-tools>");
+
+    let tools = ToolRegistry::new()
+        .with(Arc::new(Named("bash")))
+        .with(Arc::new(Named("echo_b")))
+        .with(Arc::new(Named("todo_write")))
+        .with(Arc::new(Named("echo_a")));
+    let order = ToolOrder::new(["todo_write", TOOL_ORDER_REST, "bash"], &tools).expect("order");
+    let config = TurnConfig {
+        tool_order: Some(order),
+        ..TurnConfig::default()
+    };
+
+    let h = Harness::with_config("port-order-configured", tools, config).await;
+    let (requests, _record) = record_requests(h.bus());
+    h.engine.run_turn("what can you do").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    assert_eq!(
+        offered(&requests[0]),
+        vec!["todo_write", "echo_a", "echo_b", "bash"]
+    );
+}
+
+/// TC-PORT-LOOP-10: an order that names a tool nobody registered is refused,
+/// and the refusal names every such tool and what is registered instead.
+///
+/// Upstream: `tool-order.spec.ts`, "closes a no-step turn when toolOrder names
+/// an unregistered tool", and the system-prompt suite's two refusal cases.
+/// Upstream can only find this while a turn assembles, because its plugins
+/// register tools later, so the turn opens and closes with no step. A tetanus
+/// registry is settled first, so the refusal comes earlier: the order is
+/// unbuildable, and no engine exists to start a turn on.
+///
+/// Input: two ghost names against a registry of two tools, then one ghost name
+/// against an empty registry.
+/// Expected: both refusals are `Unregistered`, listing the ghosts in the order
+/// they were configured, and naming the registered tools - `(none)` when there
+/// are none.
+#[test]
+fn an_order_naming_an_unregistered_tool_is_refused_before_any_turn() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(Named("bash")))
+        .with(Arc::new(Named("todo_write")));
+    let refused = ToolOrder::new(["todo_write", "ghost", TOOL_ORDER_REST, "wraith"], &tools)
+        .expect_err("two names nobody registered");
+    assert!(matches!(refused, ToolOrderError::Unregistered { .. }));
+    assert_eq!(
+        refused.to_string(),
+        r#"tool order lists unregistered tools "ghost", "wraith"; registered: bash, todo_write"#
+    );
+
+    let refused = ToolOrder::new(["ghost", TOOL_ORDER_REST], &ToolRegistry::new())
+        .expect_err("one name, and nothing registered at all");
+    assert_eq!(
+        refused.to_string(),
+        r#"tool order lists unregistered tool "ghost"; registered: (none)"#
+    );
+}
+
+/// TC-PORT-LOOP-11: an order with no rest entry, or with one name twice, is
+/// refused.
+///
+/// Upstream: `tool-order.spec.ts`, "rejects %s at load (the rest entry is
+/// required)" and "rejects %s at load", both of which fail the plugin's own
+/// construction.
+///
+/// Input: four orders - empty, no rest entry, a name twice, and the rest entry
+/// twice.
+/// Expected: the first two are `NoRest`, the last two are `Duplicate` naming the
+/// repeated entry. A tool order is unbuildable in each case, so nothing has to
+/// decide later what half of it meant.
+#[test]
+fn an_order_without_a_rest_entry_or_with_a_repeat_is_refused() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(Named("bash")))
+        .with(Arc::new(Named("todo_write")));
+    let refuse = |names: Vec<&str>| ToolOrder::new(names, &tools).expect_err("refused");
+
+    let empty = refuse(vec![]);
+    assert!(matches!(empty, ToolOrderError::NoRest));
+    assert_eq!(
+        empty.to_string(),
+        r#"tool order must contain the "<unlisted-tools>" entry, which is where the tools it does not name go"#
+    );
+    assert!(matches!(
+        refuse(vec!["bash", "todo_write"]),
+        ToolOrderError::NoRest
+    ));
+
+    let twice = refuse(vec!["bash", "bash", TOOL_ORDER_REST]);
+    assert!(matches!(&twice, ToolOrderError::Duplicate(name) if name == "bash"));
+    assert_eq!(
+        twice.to_string(),
+        r#"tool order lists "bash" more than once"#
+    );
+    assert!(matches!(
+        refuse(vec![TOOL_ORDER_REST, "bash", TOOL_ORDER_REST]),
+        ToolOrderError::Duplicate(name) if name == TOOL_ORDER_REST
+    ));
+}
+
+/// TC-PORT-LOOP-12: a registry holding a tool named like the rest entry is
+/// refused.
+///
+/// Upstream: `tool-order.spec.ts`, "rejects a provider tool named like the
+/// reserved rest entry". Upstream refuses it whether or not an order is
+/// configured, because assembly always looks. tetanus looks when an order is
+/// read: with no order the name is one more tool name, and reserving it against
+/// a harness that will never arrange anything buys nothing.
+///
+/// Input: a registry holding `<unlisted-tools>`, and an order that is nothing
+/// but the rest entry.
+/// Expected: `Reserved`, so a tool cannot take the place the order keeps for
+/// everything it did not name.
+#[test]
+fn a_tool_named_like_the_rest_entry_is_refused() {
+    let tools = ToolRegistry::new().with(Arc::new(Named(TOOL_ORDER_REST)));
+    let refused = ToolOrder::new([TOOL_ORDER_REST], &tools).expect_err("the reserved name");
+    assert!(matches!(refused, ToolOrderError::Reserved));
+    assert_eq!(
+        refused.to_string(),
+        r#"a registered tool is named "<unlisted-tools>", which a tool order keeps for its rest entry"#
+    );
+}
+
+/// TC-PORT-LOOP-13: the order is applied before `system-prompt/assemble`, and a
+/// tool a listener adds there keeps the place that listener gave it.
+///
+/// Upstream: `tool-order.spec.ts`, "canonicalizes BEFORE the assemble
+/// waterfall: listeners see the ordered list and own their own edits".
+///
+/// Input: a configured order, and a listener that records what it was handed
+/// and appends one more tool.
+/// Expected: the listener sees the configured order, and the request offers that
+/// order with the appended tool last - the harness orders what the registry
+/// contributed, and a listener owns the determinism of what it emits.
+#[tokio::test]
+async fn the_order_is_settled_before_the_assemble_waterfall() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(Named("alpha")))
+        .with(Arc::new(Named("zulu")));
+    let order = ToolOrder::new(["zulu", TOOL_ORDER_REST], &tools).expect("order");
+    let config = TurnConfig {
+        tool_order: Some(order),
+        ..TurnConfig::default()
+    };
+
+    let h = Harness::with_config("port-order-waterfall", tools, config).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let _append = h.bus().on_waterfall::<AssemblePrompt, _>(move |ev, next| {
+        sink.lock()
+            .expect("seen")
+            .push(ev.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>());
+        ev.tools.push(Named("aardvark").schema());
+        Box::pin(next.run(ev))
+    });
+    let (requests, _record) = record_requests(h.bus());
+
+    h.engine.run_turn("what can you do").await.unwrap();
+
+    let seen = seen.lock().expect("seen").clone();
+    assert_eq!(seen[0], vec!["zulu", "alpha"]);
+    let requests = requests.lock().expect("requests").clone();
+    assert_eq!(offered(&requests[0]), vec!["zulu", "alpha", "aardvark"]);
+}
+
+/// The tool names one request offers, in the order it offers them.
+fn offered(request: &ModelRequest) -> Vec<String> {
+    request.tools.iter().map(|t| t.name.clone()).collect()
 }
 
 /// Record every request the driver builds, in step order.
