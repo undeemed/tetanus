@@ -187,6 +187,7 @@ A journal that will not open says why at the foot of the list and leaves the cur
 `/` narrows the list to the journals whose id or title holds what you type, as you type it, and marks the word on the rows it keeps; Enter accepts the word and gives the cursor back, and Esc gives the whole list back.
 Inside a journal, in `replay --ui` as well, `/` and a word move the page to the line that holds it and `n` walks the rest; the footer says which match you are on, and the word itself is marked wherever the page draws it.
 `--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
+Inside a journal `t` unfolds it too, and folds it back, so a folded row saying how many lines are behind it is a row you can open rather than a reason to close the view and run the command again; a journal whose answers were not thought about does not offer the key.
 
 `tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
 Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.

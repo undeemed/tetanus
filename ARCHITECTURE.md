@@ -300,6 +300,16 @@ The word is then marked wherever the page draws it, in reverse video rather than
 and the mark has to end without ending them.
 The list marks its filter the same way, on the rows it kept, so that a row says which of the two
 columns a filter reads is the one holding the word.
+A journal also answers `t`, which unfolds what the model thought and folds it back: the fold is a
+property of the composed line rather than of the journal, so the toggle is the same recompose a
+resize and a search already go through, and the reader keeps their distance from the newest line
+across it.
+It is offered - on the footer and on the card - only by a journal that holds thinking, because a
+card is read as a promise and a key that redraws the same page is worse than a key nobody knew
+about.
+The turn watched live does not answer it yet: it settles its lines as they arrive rather than
+keeping the events, so unfolding there is a recompose it has no store for.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
