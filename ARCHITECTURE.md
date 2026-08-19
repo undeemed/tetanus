@@ -390,6 +390,19 @@ own - a message ending in `note: run this` would be read as this build's advice 
 frame it is a line feed with no carriage return, which is the one thing
 [`Frame`](crates/ui/src/frame.rs) is careful never to write.
 
+Taming and that fold together are [`tame_line`](crates/ui/src/text.rs), which is what a value drawn
+as one whole row goes through, and a failure is not the only one.
+A journal is headed by what the reader chose - the path `replay` was handed on the command line, or
+the id the session list read out of that journal's own header - so the heading is tamed at the one
+place a journal is built ([`browse.rs`](crates/cli/src/render/browse.rs)), which is the constructor
+both callers use.
+The session list words one sentence of its own around an id, that a journal holds nothing to read
+([`pick.rs`](crates/cli/src/render/pick.rs)), and a run says what it is doing on a line naming the
+model a flag or a config file asked for ([`main.rs`](crates/cli/src/main.rs)).
+That name is tamed for the line that says it and for the heading of the watched view, and not for
+the lookup that chose the adapter: what was given is what selects, and what is drawn is what is
+drawn.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut

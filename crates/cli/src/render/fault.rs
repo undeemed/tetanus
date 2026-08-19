@@ -44,7 +44,7 @@
 //! reads, which is the cheapest moment to decide it.
 
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
-use tetanus_ui::{tame, wrap, Role, Theme};
+use tetanus_ui::{tame_line, wrap, Role, Theme};
 
 /// The same failure as rows of a transcript, for a surface that has no stderr
 /// to report it on.
@@ -82,11 +82,7 @@ pub fn lines(theme: &Theme, cols: usize, error: &RpcError) -> Vec<String> {
 /// sent, and a code added to the contract must not be able to miss this.
 pub fn wording(error: &RpcError) -> (String, Option<String>) {
     let (message, note) = said(error);
-    let message = tame(&message)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (message, note)
+    (tame_line(&message), note)
 }
 
 /// The same sentence, before it is tamed. Every arm is worded here.

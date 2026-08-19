@@ -289,3 +289,62 @@ fn a_piped_chat_prints_no_prompt_marker() {
         );
     }
 }
+
+/// The sequences a value from outside would carry: clear the screen, and
+/// rename the window. Named once, because every case below asks the same
+/// question of a different value.
+const ESC: char = '\u{1b}';
+
+/// TC-CLI-CHAT-9: a chat opened on values that hold terminal control
+/// sequences - the model a flag named, the path `-s` gave, and a command line
+/// typed at the marker.
+/// Expected: each one is still readable, and none of them reaches the terminal
+/// as a sequence. The opening page is drawn before a single question is typed,
+/// so a name that clears the screen clears the page that says where the
+/// conversation is being written.
+///
+/// The page is read down to the first turn, because the rows a turn draws are
+/// the timeline's and are covered where it is: this case owns the three values
+/// a chat itself puts on the screen.
+#[test]
+fn nothing_a_chat_was_opened_with_can_drive_the_terminal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let nasty = format!("mo{ESC}[2Jck{ESC}]0;pwned\u{7}");
+    let journal = format!("ta{ESC}[2Jlk.jsonl");
+
+    let out = chat(
+        dir.path(),
+        &[
+            "-a", "mock", "--model", &nasty, "-s", &journal, "--color", "never",
+        ],
+        &format!("/re{ESC}[2Jset\nasked\n"),
+    );
+    let whole = page(&out);
+    let opening = whole
+        .split("\nturn 1")
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(opening.contains("chat on"), "{opening}");
+    assert!(
+        opening.contains("mock"),
+        "the name stopped being readable:\n{opening}"
+    );
+    assert!(
+        opening.contains("lk.jsonl"),
+        "the path stopped being readable:\n{opening}"
+    );
+    assert!(stderr.contains("is not a command"), "{stderr}");
+    assert!(stderr.contains("running the turn on"), "{stderr}");
+
+    for (what, text) in [("the opening page", &opening), ("stderr", &stderr)] {
+        assert!(!text.contains(ESC), "{what} carries an escape:\n{text:?}");
+        assert!(!text.contains('\u{7}'), "{what} carries a bell:\n{text:?}");
+    }
+
+    // And the conversation still happened, on the journal that was named.
+    let events = tetanus_session::replay(dir.path().join(&journal)).expect("replays");
+    assert_eq!(asked(&events), vec!["asked"]);
+}

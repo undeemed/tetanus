@@ -44,7 +44,7 @@ use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::log::topic;
 use tetanus_turn::{TurnConfig, TurnEngine};
-use tetanus_ui::{Policy, Ui};
+use tetanus_ui::{tame_line, Policy, Ui};
 
 use crate::render;
 use crate::{AdapterChoice, Reported};
@@ -173,7 +173,11 @@ pub async fn chat<W: Write>(
     // in gets the transcript and nothing else, so its output is the journal
     // it just wrote and not a page with markers through it.
     let typing = std::io::stdin().is_terminal();
-    let phase = format!("running the turn on {model}");
+    // The same name as the banner drew, tamed for the line that says it -
+    // `tetanus run` words its phase line from a tamed name for the same
+    // reason. What was given still selects the adapter; what is drawn is
+    // drawn.
+    let phase = format!("running the turn on {}", tame_line(&model));
 
     loop {
         if typing {
@@ -208,7 +212,10 @@ pub async fn chat<W: Write>(
             Input::Unknown(command) => {
                 policy
                     .stderr()
-                    .note(&format!("{command} is not a command; /help lists them"))
+                    .note(&format!(
+                        "{} is not a command; /help lists them",
+                        tame_line(command)
+                    ))
                     .ok();
                 continue;
             }

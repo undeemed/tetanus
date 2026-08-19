@@ -3,13 +3,13 @@
 //! Features tested: cutting a value to a width and saying so, folding a
 //! paragraph to a width without losing a word, measuring and cutting a line
 //! that a theme has already painted, and making text the harness did not write
-//! safe to draw. Features NOT tested here: what any particular renderer does
+//! safe to draw, as a paragraph and as one row. Features NOT tested here: what any particular renderer does
 //! with the result - the status line owns its own cases in `progress.rs`, the
 //! timeline owns its own in `render/timeline.rs`.
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{fit, light, plain, tame, truncate, visible_width, wrap, Charset};
+use tetanus_ui::{fit, light, plain, tame, tame_line, truncate, visible_width, wrap, Charset};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -322,4 +322,27 @@ fn the_width_rules_measure_what_will_be_drawn() {
     // And a sequence cannot survive either of them.
     assert!(!truncate(painted, 40, Charset::Unicode).contains('\u{1b}'));
     assert!(!wrap(painted, 40).concat().contains('\u{1b}'));
+}
+
+/// TC-UI-TEXT-20: the same text, tamed for one row of a frame.
+/// Expected: every sequence and control gone as in TC-UI-TEXT-17 and
+/// TC-UI-TEXT-18, and additionally no newline, no run of blank space, and no
+/// space at either end. A row is written with no carriage return after it, so
+/// a newline inside one puts every row after it in the wrong column, and on a
+/// stream it gives a second line none of the wording that said what the first
+/// one was.
+#[test]
+fn a_row_is_tamed_and_folded_onto_one_line() {
+    assert_eq!(tame_line("one\ntwo"), "one two");
+    assert_eq!(tame_line("one\n\n\ntwo"), "one two");
+    assert_eq!(tame_line("  padded  "), "padded");
+    assert_eq!(tame_line("a\u{1b}[2Jb\nc"), "ab c");
+    assert_eq!(tame_line("\u{1b}]0;title\u{7}named"), "named");
+    for text in ["a\nb", "\u{1b}[31mred\n", "one\r\ntwo"] {
+        let row = tame_line(text);
+        assert!(!row.contains('\n'), "{text:?}");
+        assert!(!row.contains('\u{1b}'), "{text:?}");
+    }
+    // What was already one line is untouched.
+    assert_eq!(tame_line("deepseek-chat"), "deepseek-chat");
 }

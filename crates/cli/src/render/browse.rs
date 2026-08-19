@@ -82,7 +82,8 @@ use std::time::Duration;
 
 use tetanus_protocol::types::{KnownEvent, SessionEvent};
 use tetanus_ui::{
-    light, plain, show, size, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui, View,
+    light, plain, show, size, tame_line, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui,
+    View,
 };
 
 use super::keys::{self, Row};
@@ -220,6 +221,12 @@ pub(super) struct Journal {
 
 impl Journal {
     /// A journal filled and ready to draw at `size`.
+    ///
+    /// The title is tamed here, at the one place a journal is headed, because
+    /// neither caller has words of its own to put there: `replay` heads it
+    /// with the path it was handed on the command line, and the session list
+    /// heads it with the id it read out of a journal's own header. Both are
+    /// drawn as one end of one row, so both are folded onto one line.
     pub(super) fn new(
         theme: Theme,
         title: &str,
@@ -228,12 +235,13 @@ impl Journal {
         exit: Exit,
         size: (usize, usize),
     ) -> Self {
+        let title = tame_line(title);
         let mut journal = Self {
             events,
             theme,
             think,
-            title: title.to_string(),
-            page: Page::new(theme, NAME, title),
+            page: Page::new(theme, NAME, &title),
+            title,
             exit,
             help: false,
             // Not `size.0`: the fill below is what makes the page true at a
@@ -597,7 +605,8 @@ impl View for Journal {
 /// that `?` spells the keys out over the transcript, that any key takes the
 /// card down again, and that a footer with no room for the long wording keeps
 /// the two keys a reader cannot do without; and that `t` unfolds the thinking
-/// and folds it back, and is offered only by a journal that holds any.
+/// and folds it back, and is offered only by a journal that holds any; and
+/// that the title a caller heads the view with is drawn and not obeyed.
 ///
 /// Features NOT tested here: the wording of a line (owned by `timeline.rs`),
 /// the arrangement of a frame (owned by `tetanus_ui::Page`), the loop and its
@@ -1177,5 +1186,33 @@ mod tests {
 
         view.key(Key::Char('t'));
         assert_eq!(rows(&mut view, COLS, tall), before);
+    }
+
+    /// TC-CLI-BROWSE-17: a title with a sequence and a newline in it.
+    /// Expected: the heading names the title with the sequence gone and on one
+    /// row, and the frame is still exactly the rows it was asked for. Neither
+    /// caller of this constructor has words of its own to head the view with -
+    /// `replay` passes the path off the command line and the session list
+    /// passes the id it read out of a journal's header - so a heading drawn
+    /// unchanged clears the screen it is drawn on, and a newline in it puts
+    /// every row under it in the wrong column.
+    #[test]
+    fn a_title_a_caller_was_handed_is_drawn_and_not_obeyed() {
+        let events = turn();
+        let mut view = Journal::new(
+            theme(),
+            "na\u{1b}[2Jsty\u{1b}]0;pwned\u{7}\nname.jsonl",
+            events.clone(),
+            false,
+            Exit::Quit,
+            (COLS, 0),
+        );
+        let drawn = rows(&mut view, COLS, 12);
+
+        assert_eq!(drawn.len(), 12, "{drawn:?}");
+        assert!(drawn[0].contains("nasty name.jsonl"), "{drawn:?}");
+        let whole = drawn.join("\n");
+        assert!(!whole.contains('\u{1b}'), "{whole:?}");
+        assert!(!whole.contains('\u{7}'), "{whole:?}");
     }
 }

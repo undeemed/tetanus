@@ -86,6 +86,22 @@ pub fn tame(text: &str) -> String {
     out
 }
 
+/// Make text the harness did not write safe to draw on one row.
+///
+/// [`tame`] keeps newlines, because a paragraph is folded on them. A row of a
+/// frame is not a paragraph: a line feed inside one is written with no
+/// carriage return, and every row after it lands in the wrong column. On a
+/// stream it is worse than wrong - the second line arrives with none of the
+/// wording that said what the first one was, so it reads as this build's own
+/// words.
+///
+/// So the runs of blank space between the words become one space each, and
+/// the ones at the ends go. A heading, a footer, a fault and a cell of a table
+/// all want this; a transcript line wants [`tame`].
+pub fn tame_line(text: &str) -> String {
+    tame(text).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Step over the rest of one escape sequence, having read its `ESC`.
 ///
 /// Three shapes reach a terminal. `CSI` - `ESC [` - runs to a byte in `@` to
