@@ -467,3 +467,57 @@ fn json_beside_a_human_view_is_a_usage_error() {
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stdout(&out));
     }
 }
+
+/// TC-CLI-CAT-9: `tetanus models`, with and without the credential.
+/// Expected: both providers listed under the names `--adapter` accepts; the
+/// one whose key is absent names the variable to set, and the same command
+/// reads `ready` once that variable is exported. The catalogue is read at the
+/// moment it is asked for - a cached answer would tell a user who just fixed
+/// their key that it is still broken.
+#[test]
+fn the_model_page_answers_whether_a_provider_can_be_reached() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let bare = stdout(&run(dir.path(), &["models"], &[]));
+    assert!(bare.contains("mock"), "{bare}");
+    assert!(
+        bare.contains("deepseek  set DEEPSEEK_API_KEY"),
+        "the unreachable provider does not say what to do:\n{bare}"
+    );
+
+    let keyed = stdout(&run(
+        dir.path(),
+        &["models"],
+        &[("DEEPSEEK_API_KEY", "sk-x")],
+    ));
+    assert!(
+        keyed.contains("deepseek  ready"),
+        "the key was exported and the page did not notice:\n{keyed}"
+    );
+}
+
+/// TC-CLI-CAT-10: `tetanus models --json`.
+/// Expected: exactly one line, parsing as `ModelCatalogResult`, with its one
+/// documented field and no escape bytes even when colour is forced. Contract
+/// §4.7: a subcommand that does not stream prints exactly one line, and
+/// machine-readable output is never coloured.
+#[test]
+fn a_read_only_subcommand_prints_exactly_one_result_line() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = run(
+        dir.path(),
+        &["models", "--json"],
+        &[("CLICOLOR_FORCE", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let printed = stdout(&out);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.len(), 1, "more than one line:\n{printed}");
+    assert!(!printed.contains(ESC), "it was coloured:\n{printed}");
+
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("one JSON object");
+    let object = parsed.as_object().expect("an object");
+    assert_eq!(object.keys().collect::<Vec<_>>(), vec!["providers"]);
+    assert!(object["providers"].is_array(), "`providers` is not a list");
+}
