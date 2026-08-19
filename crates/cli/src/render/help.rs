@@ -82,6 +82,8 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus run                                 one offline turn, mock adapter
   tetanus run \"list the files\"                ask for something specific
   tetanus run -a deepseek -m deepseek-v4-pro  needs DEEPSEEK_API_KEY
+  tetanus chat                                talk to the model, turn by turn
+  tetanus chat -a mock -s /tmp/c.jsonl        the same offline, in that journal
   tetanus sessions                            every journal, newest first
   tetanus sessions --ui                       pick one of them and read it
   tetanus replay sessions/turn.jsonl          re-read a journal from before
@@ -98,6 +100,24 @@ pub fn root_epilogue(theme: &Theme) -> String {
   NO_COLOR          set to anything non-empty for plain output
   CLICOLOR_FORCE    set to keep colour through a pipe
   COLUMNS           override the detected line width"
+    )
+}
+
+/// The block under `tetanus chat --help`.
+pub fn chat_epilogue(theme: &Theme) -> String {
+    let examples = theme.paint(Role::Heading, "Examples:");
+    format!(
+        "\
+{examples}
+  tetanus chat                          DeepSeek; needs DEEPSEEK_API_KEY
+  tetanus chat -a mock                  the same conversation, offline
+  tetanus chat -s sessions/plan.jsonl   start or resume that conversation
+  tetanus chat --think                  unfold what the model thought
+  tetanus chat --max-steps 1            stop each turn after one step
+
+Type a message and press Enter. `/help` lists the commands, `/exit` or ctrl-d
+leaves, and every turn is appended to the journal, which is what the next chat
+on the same path reads back as memory."
     )
 }
 

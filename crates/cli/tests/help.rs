@@ -61,7 +61,9 @@ fn the_root_page_is_complete() {
     ] {
         assert!(page.contains(expected), "`{expected}` missing:\n{page}");
     }
-    for command in ["run", "config", "sessions", "replay", "serve", "info"] {
+    for command in [
+        "run", "chat", "config", "sessions", "replay", "serve", "info",
+    ] {
         assert!(
             block(&page, "Commands:")
                 .iter()
@@ -118,6 +120,7 @@ fn nothing_overruns_the_width_cap() {
     for args in [
         vec!["--help"],
         vec!["run", "--help"],
+        vec!["chat", "--help"],
         vec!["replay", "--help"],
         vec!["models", "--help"],
         vec!["tools", "--help"],
@@ -142,9 +145,11 @@ fn nothing_overruns_the_width_cap() {
 fn every_example_names_something_that_exists() {
     let root = help(&["--help"]);
     let run = help(&["run", "--help"]);
+    let chat = help(&["chat", "--help"]);
     let examples: Vec<&str> = block(&root, "Examples:")
         .into_iter()
         .chain(block(&run, "Examples:"))
+        .chain(block(&chat, "Examples:"))
         .collect();
     assert!(examples.len() >= 11, "the examples went missing:\n{root}");
 
@@ -207,7 +212,11 @@ fn every_example_model_is_offered_by_its_adapter() {
 /// the column that made the block scannable in the first place.
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
-    for (args, count) in [(vec!["--help"], 13), (vec!["run", "--help"], 9)] {
+    for (args, count) in [
+        (vec!["--help"], 15),
+        (vec!["run", "--help"], 9),
+        (vec!["chat", "--help"], 5),
+    ] {
         let page = help_at("80", &args);
         let examples = block(&page, "Examples:");
 
