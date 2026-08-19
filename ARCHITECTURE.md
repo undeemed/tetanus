@@ -188,6 +188,12 @@ still running.
 All three read their events from the session log the engine is writing rather than from the bus: the
 journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
 
+`tetanus replay` reads a finished journal through that same `Reader`, printed whole, played back at
+the pace it happened (`--live`), or on a page of its own (`--ui`,
+[crates/cli/src/render/browse.rs](crates/cli/src/render/browse.rs)).
+Its full-screen view is driven by `tetanus_ui::show` rather than by a loop of its own, which is what
+a view over something already finished can do and a view over a turn in flight cannot.
+
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,
 which `--trace` prints instead of the turn.

@@ -85,6 +85,7 @@ pub fn root_epilogue(theme: &Theme) -> String {
   tetanus sessions                            every journal, newest first
   tetanus replay sessions/turn.jsonl          re-read a journal from before
   tetanus replay sessions/turn.jsonl --live   watch that turn arrive again
+  tetanus replay sessions/turn.jsonl --ui     read it on a screen of its own
   tetanus config                              every key, and what set it
   tetanus models                              which providers are reachable
   tetanus tools                               what the agent is able to call

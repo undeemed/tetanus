@@ -8,10 +8,13 @@
 //! which of the two views - the turn, or the raw sequence - a command prints;
 //! that a model's thinking stays folded until it is asked for; that the
 //! journal a run leaves behind says what it ran under; that the session list
-//! finds those journals and names each by the id its store answers to; and
+//! finds those journals and names each by the id its store answers to; that a
+//! journal read full-screen is refused where there is no screen; and
 //! the shape of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
-//! `tetanus-ui`'s `color_policy.rs`) and the turn flow (owned by the
+//! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
+//! has a terminal (owned by `render::browse` and `tetanus_ui::Page`, neither
+//! of which needs one), and the turn flow (owned by the
 //! conformance suite in `tetanus-turn`).
 //!
 //! Environmental needs: none. Every case runs offline, and every case states
@@ -427,6 +430,37 @@ fn a_run_writes_a_journal_that_says_what_it_ran_under() {
         "a reopened journal gained a second header:\n{again}"
     );
     assert!(again.contains(r#""turn":2"#), "the turn did not carry on");
+}
+
+/// TC-CLI-UI-15: `tetanus replay --ui` with nowhere to draw.
+/// Expected: `InvalidParams`, exit 2 per contract §4.5, a message naming the
+/// terminal, and nothing printed - a piped `--ui` must not quietly fall back
+/// to the plain page, because a script that asked for a view and got a
+/// transcript has been answered a different question. It is refused before the
+/// path is read, so a `--ui` at a path that is not there says the same thing.
+/// The three flags it cannot be combined with are clap's to refuse.
+#[test]
+fn a_journal_read_full_screen_needs_a_screen() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    let piped = run(dir.path(), &["replay", "j.jsonl", "--ui"], &[]);
+    assert_eq!(piped.status.code(), Some(2), "{}", stdout(&piped));
+    assert!(stderr(&piped).contains("terminal"), "{}", stderr(&piped));
+    assert!(stdout(&piped).is_empty(), "{}", stdout(&piped));
+
+    let missing = run(dir.path(), &["replay", "nope.jsonl", "--ui"], &[]);
+    assert_eq!(missing.status.code(), Some(2), "{}", stdout(&missing));
+
+    for flag in ["--raw", "--live", "--json"] {
+        let clash = run(dir.path(), &["replay", "j.jsonl", "--ui", flag], &[]);
+        assert_eq!(clash.status.code(), Some(2), "{}", stdout(&clash));
+        assert!(stderr(&clash).contains(flag), "{}", stderr(&clash));
+    }
 }
 
 /// TC-CLI-JSON-1: `tetanus run --json`.
