@@ -323,7 +323,7 @@ not protocol-level.
 
 ## 7. Not built yet
 
-Layered config recompose at run time, live subtree remount, the rest of the tool pipeline
+A settings-file watcher, live subtree remount, the rest of the tool pipeline
 (permissions, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.
