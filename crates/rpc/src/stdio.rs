@@ -39,9 +39,7 @@ where
     let writer = tokio::spawn(write_frames(output, queued));
     let sink: Arc<dyn EventSink> = Arc::new(Frames(frames.clone()));
 
-    eprintln!("DBG serve start");
     let read = read_frames(&codec, &sink, &frames, input).await;
-    eprintln!("DBG read done: {read:?}");
 
     codec.close().await;
     // The sink may still be held by the engine, so the writer is told to stop
@@ -66,11 +64,9 @@ async fn read_frames<R: AsyncRead + Unpin>(
             // answering a question nobody asked.
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => {
-                eprintln!("DBG line in: {line}");
                 let (codec, sink, frames) = (codec.clone(), sink.clone(), frames.clone());
                 inflight.spawn(async move {
                     let answered = codec.frame(&line, sink).await;
-                    eprintln!("DBG answered: {answered:?}");
                     if let Some(answer) = answered {
                         let _ = frames.send(Some(answer));
                     }
@@ -91,9 +87,7 @@ async fn write_frames<W: AsyncWrite + Unpin>(
     mut output: W,
     mut queued: mpsc::UnboundedReceiver<Option<String>>,
 ) -> io::Result<()> {
-    eprintln!("DBG writer start");
     while let Some(Some(frame)) = queued.recv().await {
-        eprintln!("DBG writing {frame}");
         output.write_all(frame.as_bytes()).await?;
         output.write_all(b"\n").await?;
         // Flushed per frame: a peer waiting on an answer cannot know to wait

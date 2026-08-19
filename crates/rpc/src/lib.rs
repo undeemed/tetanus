@@ -10,6 +10,12 @@
 //! and writes what comes back, so the stdio carrier and the WebSocket carrier
 //! differ only in how they move a string.
 
+// Debug prints escaped into a release once: the stdio carrier wrote `DBG`
+// lines to stderr for every frame it moved. `-D warnings` did not catch them,
+// because both lints are allow-by-default. A carrier reports through its own
+// output or not at all, so denying them here is the guard.
+#![deny(clippy::print_stderr, clippy::print_stdout)]
+
 pub mod stdio;
 
 use std::sync::atomic::{AtomicBool, Ordering};
