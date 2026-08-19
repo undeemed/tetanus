@@ -3,10 +3,16 @@
 The frontend of this project is a terminal, so there is no markup to serve.
 `serve.py` serves the real thing instead.
 
-On every change under `crates/`, it rebuilds `tetanus`, runs a fixed set of
-scenarios through a pty so the binary sees a terminal and paints exactly as it
-would for a user, converts the escape codes to HTML, and pushes a reload to
-every open browser.
+On every change under `crates/`, and on every move of `HEAD`, it rebuilds
+`tetanus`, runs a fixed set of scenarios through a pty so the binary sees a
+terminal and paints exactly as it would for a user, converts the escape codes
+to HTML, and pushes a reload to every open browser.
+
+`HEAD` counts because the header names the branch and the commit a page was
+built from, and that is the only provenance a reviewer has. A commit writes
+nothing in the working tree, and a checkout between branches that differ only
+outside `crates/` writes nothing either, so watching the files alone would
+leave the header naming the previous commit over the current build.
 
 ```sh
 python3 tools/uiwatch/serve.py                  # http://15.204.113.4:5200
