@@ -231,6 +231,13 @@ while the prompt is open every printable key belongs to it - `q` included, becau
 on `q` could not be used to look for `quota`.
 In a journal `/` moves the window to the line holding the word instead of narrowing to it, because a
 line of a turn is not an answer without the turn around it, and `n` walks the rest of the matches.
+Every width these views measure is measured in columns rather than characters
+([crates/ui/src/text.rs](crates/ui/src/text.rs)), because a terminal draws a CJK character in two of
+them and a combining mark in none: prose folded by character count is drawn wider than the frame
+holding it, the terminal folds it again where the renderer did not mean it to, and every row under
+it lands in the wrong place for the rest of the screen.
+A cut lands between characters for the same reason - half of a two-column character is drawn as a
+replacement glyph, which is wider than the column the cut was protecting.
 
 `tetanus run` also observes the sequence with `TurnTrace`
 ([crates/turn/src/trace.rs](crates/turn/src/trace.rs)), one delegating listener per documented event,
