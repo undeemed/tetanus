@@ -7,8 +7,16 @@
 //!
 //! Environmental needs: none. TC-DS-LIVE-1 additionally needs `DEEPSEEK_API_KEY`
 //! and network, and reports itself skipped without them.
+//!
+//! The environment is process-wide, so a case that writes it changes what a
+//! case running beside it reads. Two rules keep that from being a flake, and
+//! both are needed: a case that writes a credential writes one no other case
+//! reads, and every case that touches the environment holds [`environment`]
+//! while it does.
 
 use std::sync::Arc;
+
+use tokio::sync::{Mutex, MutexGuard};
 
 use tetanus_turn::llm::deepseek::{
     take_frames, wire_request, DeepSeekAdapter, DeepSeekConfig, ReplayTransport, StreamDecoder,
@@ -16,6 +24,23 @@ use tetanus_turn::llm::deepseek::{
 };
 use tetanus_turn::llm::{CollectingSink, LlmAdapter, LlmError, Message, ModelRequest, StreamChunk};
 use tetanus_turn::tools::{ToolCall, ToolSchema};
+
+/// A credential variable only TC-DS-ADAPTER-1 reads. Writing the real one
+/// would decide, from another thread, whether TC-DS-LIVE-1 skips.
+const TEST_API_KEY_ENV: &str = "TETANUS_TEST_DEEPSEEK_API_KEY";
+
+static ENVIRONMENT: Mutex<()> = Mutex::const_new(());
+
+/// Serializes the cases that read or write the environment. Reading one
+/// variable while another thread writes a different one is still a data race,
+/// so the guard is taken for any access, not only for a shared name.
+///
+/// It is the async mutex because a case holds it across the adapter call it is
+/// testing, and a case that panics while holding it does not poison the ones
+/// that follow.
+async fn environment() -> MutexGuard<'static, ()> {
+    ENVIRONMENT.lock().await
+}
 
 fn request() -> ModelRequest {
     ModelRequest {
@@ -157,12 +182,17 @@ fn an_in_band_error_frame_fails_the_stream() {
 /// the serialized body; the response carries the tool call.
 #[tokio::test]
 async fn streams_through_the_transport_seam() {
-    // Safety: single-threaded test process section; the adapter reads the key
-    // from the environment exactly as it does in production.
-    std::env::set_var(DEFAULT_API_KEY_ENV, "sk-test-key");
+    let _environment = environment().await;
+    // The adapter reads its key from the environment exactly as it does in
+    // production, but from a variable this case owns.
+    std::env::set_var(TEST_API_KEY_ENV, "sk-test-key");
+    let config = DeepSeekConfig {
+        api_key_env: TEST_API_KEY_ENV.into(),
+        ..DeepSeekConfig::default()
+    };
 
     let transport = Arc::new(ReplayTransport::new(TOOL_CALL_STREAM.iter().copied()));
-    let adapter = DeepSeekAdapter::new(DeepSeekConfig::default(), transport.clone());
+    let adapter = DeepSeekAdapter::new(config, transport.clone());
     let mut sink = CollectingSink::default();
 
     let response = adapter.stream(&request(), &mut sink).await.expect("stream");
@@ -177,7 +207,7 @@ async fn streams_through_the_transport_seam() {
         "deepseek-v4-flash"
     );
 
-    std::env::remove_var(DEFAULT_API_KEY_ENV);
+    std::env::remove_var(TEST_API_KEY_ENV);
 }
 
 /// TC-DS-CRED-1: with no key anywhere the call fails before any network I/O,
@@ -185,6 +215,7 @@ async fn streams_through_the_transport_seam() {
 /// Expected: `LlmError::MissingCredential("TETANUS_TEST_ABSENT_KEY")`.
 #[tokio::test]
 async fn a_missing_key_fails_before_network_io() {
+    let _environment = environment().await;
     let config = DeepSeekConfig {
         api_key_env: "TETANUS_TEST_ABSENT_KEY".into(),
         ..DeepSeekConfig::default()
@@ -210,6 +241,9 @@ async fn a_missing_key_fails_before_network_io() {
 /// Expected: a non-empty answer, or a named provider/transport error.
 #[tokio::test]
 async fn live_call_when_a_key_is_present() {
+    // Held across the call: the key must still be there when the adapter reads
+    // it, not only when this case decided not to skip.
+    let _environment = environment().await;
     let Ok(key) = std::env::var(DEFAULT_API_KEY_ENV) else {
         eprintln!("TC-DS-LIVE-1 skipped: {DEFAULT_API_KEY_ENV} is not set");
         return;
