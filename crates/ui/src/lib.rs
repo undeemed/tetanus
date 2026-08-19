@@ -41,10 +41,12 @@
 
 pub mod color;
 pub mod progress;
+pub mod text;
 pub mod theme;
 pub mod writer;
 
 pub use color::{Charset, ColorChoice, Env};
 pub use progress::Progress;
+pub use text::truncate;
 pub use theme::{Painted, Role, Theme};
 pub use writer::{buffered, Policy, Ui};
