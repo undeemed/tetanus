@@ -1095,6 +1095,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tetanus-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "tetanus-hardness"
 version = "0.1.0"
 dependencies = [
