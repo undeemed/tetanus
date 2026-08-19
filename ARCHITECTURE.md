@@ -4,7 +4,7 @@
 
 - **System:** tetanus, the whole Cargo workspace.
 - **Version:** 0.1.0, Phase ①, tracking upstream deepseek-harness `0.1.0-rc.7`.
-- **Status:** implemented and covered by 46 offline tests.
+- **Status:** implemented, and covered by an offline suite that is the merge gate.
 - **Authoritative copy:** this file, in the tetanus repository.
 - **Scope:** the shape of the system. The turn itself has its own design description in
   [docs/turn-flow.md](docs/turn-flow.md); this file does not repeat it.
