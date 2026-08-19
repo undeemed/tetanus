@@ -48,11 +48,15 @@ impl Live {
     /// A view that has seen nothing yet. `phase` is what the turn is waiting
     /// on before its first event - a model that has not answered yet is the
     /// longest silence of a turn.
-    pub fn new(theme: Theme, width: usize, phase: &str) -> Self {
+    ///
+    /// `think` governs the settled lines only. The block shows the thinking as
+    /// it streams either way: it is erased when the message settles, so it
+    /// cannot bury anything.
+    pub fn new(theme: Theme, width: usize, phase: &str, think: bool) -> Self {
         Self {
             theme,
             width,
-            reader: Reader::default(),
+            reader: Reader::new(think),
             answer: String::new(),
             reasoning: String::new(),
             phase: phase.to_string(),
@@ -190,7 +194,7 @@ mod tests {
     }
 
     fn view(width: usize) -> Live {
-        Live::new(theme(), width, "asking the model")
+        Live::new(theme(), width, "asking the model", false)
     }
 
     fn turn() -> Vec<SessionEvent> {
@@ -236,7 +240,7 @@ mod tests {
         let settled: Vec<String> = events.iter().flat_map(|event| live.push(event)).collect();
 
         let mut ui = buffered(theme(), 80);
-        super::super::timeline::render(&mut ui, &events).expect("render");
+        super::super::timeline::render(&mut ui, &events, false).expect("render");
 
         assert_eq!(format!("{}\n", settled.join("\n")), ui.contents());
     }
