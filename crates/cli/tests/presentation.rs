@@ -268,3 +268,61 @@ fn config_shows_what_set_each_key() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "\nconfig\nlog.level  info  default\n");
 }
+
+/// TC-CLI-UI-11: `tetanus replay --live` into a pipe.
+/// Expected: exactly the bytes of a plain `tetanus replay`, and no waiting.
+/// `--live` is a way of watching a turn arrive, not a second wording of it,
+/// so a pipe - which has no one watching - gets the same output at once.
+#[test]
+fn a_piped_playback_is_the_plain_replay() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    let printed = stdout(&run(dir.path(), &["replay", "j.jsonl"], &[]));
+    let played = stdout(&run(dir.path(), &["replay", "j.jsonl", "--live"], &[]));
+
+    assert_eq!(played, printed);
+    assert!(
+        !played.contains(ESC),
+        "a pipe got escape codes:\n{played:?}"
+    );
+    assert!(played.contains("  ai    You said: echo this\n"), "{played}");
+}
+
+/// TC-CLI-UI-12: the two ways of asking for a playback that cannot happen.
+/// Expected: both are usage errors with clap's exit status of 2 - a raw dump
+/// has no block to animate, and a speed governs nothing without a playback.
+/// Neither may quietly print something else instead.
+#[test]
+fn a_playback_that_cannot_happen_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "j.jsonl"],
+        &[],
+    );
+
+    let clash = run(dir.path(), &["replay", "j.jsonl", "--live", "--raw"], &[]);
+    assert_eq!(clash.status.code(), Some(2), "{}", stdout(&clash));
+    assert!(stderr(&clash).contains("--raw"), "{}", stderr(&clash));
+
+    let orphan = run(dir.path(), &["replay", "j.jsonl", "--speed", "4"], &[]);
+    assert_eq!(orphan.status.code(), Some(2), "{}", stdout(&orphan));
+    assert!(stderr(&orphan).contains("--live"), "{}", stderr(&orphan));
+
+    let zero = run(
+        dir.path(),
+        &["replay", "j.jsonl", "--live", "--speed", "0"],
+        &[],
+    );
+    assert_eq!(zero.status.code(), Some(2), "{}", stdout(&zero));
+    assert!(
+        stderr(&zero).contains("greater than zero"),
+        "{}",
+        stderr(&zero)
+    );
+}

@@ -8,4 +8,5 @@
 pub mod config;
 pub mod help;
 pub mod live;
+pub mod replay;
 pub mod timeline;

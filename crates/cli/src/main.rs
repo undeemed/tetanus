@@ -59,6 +59,12 @@ enum Cmd {
         /// Print one line per durable event instead of the timeline
         #[arg(long)]
         raw: bool,
+        /// Play the turn back one event at a time, as it happened
+        #[arg(long, conflicts_with = "raw")]
+        live: bool,
+        /// How much faster than the recorded pace to play. Default 1.
+        #[arg(long, value_name = "N", requires = "live", value_parser = playback_speed)]
+        speed: Option<f64>,
     },
     /// Print version/build info
     Info,
@@ -143,6 +149,18 @@ impl Cli {
     }
 }
 
+/// Accept a playback speed, rejecting the values the arithmetic cannot use.
+///
+/// Zero, a negative and a NaN all make a duration that cannot be waited for,
+/// so they are usage errors caught by clap rather than a panic mid-playback.
+fn playback_speed(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(speed) if speed.is_finite() && speed > 0.0 => Ok(speed),
+        Ok(_) => Err("expected a number greater than zero".into()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 /// Map the validated flag value onto the policy's choice. Unreachable
 /// otherwise: clap rejected anything not in [`ColorChoice::NAMES`].
 fn color_choice(value: &str) -> ColorChoice {
@@ -169,7 +187,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             render::config::render(&mut out, &settings(&config)).ok();
             Ok(())
         }
-        Cmd::Replay { path, raw } => {
+        Cmd::Replay {
+            path,
+            raw,
+            live,
+            speed,
+        } => {
             let events = tetanus_session::replay(&path)
                 .map_err(|err| report(policy, &err.to_string(), None))?;
             if raw {
@@ -185,7 +208,14 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 }
                 return Ok(());
             }
-            render::timeline::render(&mut out, &boundary(events)).ok();
+            let events = boundary(events);
+            let animated = policy.stdout_is_terminal;
+            match live {
+                true => {
+                    render::replay::play(&mut out, animated, &events, speed.unwrap_or(1.0)).ok()
+                }
+                false => render::timeline::render(&mut out, &events).ok(),
+            };
             Ok(())
         }
         Cmd::Info => {
