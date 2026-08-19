@@ -217,9 +217,15 @@ which is what keeps its cases offline and free of a clock.
 
 A failed call is offered to `agent/request-error` before it ends the turn, and a listener there may
 ask for the same request to be sent again.
-That is the seam an executor of the policy occupies, and it is why the driver needs no clock of its
-own: the waiting belongs to whoever asked for the retry.
-Nothing listens yet, so today every failure still ends the turn
+That is the seam `retry::install` occupies, and it is why the driver needs no clock of its own: the
+waiting belongs to whoever asked for the retry.
+The listener is scoped to one provider, because a policy belongs to a provider rather than to the
+engine, and a failure from another route is delegated on untouched.
+Each scheduled retry is durable before its wait - `llm/retry`, then `llm/retry-started` when the wait
+is over ([docs/interface-contract.md](docs/interface-contract.md) section 4.3.2) - so a surface says
+"retrying" instead of showing a stalled turn, and so the attempt count is read back from the journal
+rather than held in the listener.
+Nothing resolves a policy out of settings yet, so a composer passes one in; that half is phase ②
 ([docs/parity.md](docs/parity.md) section 4).
 
 ### 4.7 Interface view - surfaces

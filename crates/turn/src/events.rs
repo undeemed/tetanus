@@ -151,9 +151,8 @@ pub enum RequestErrorAction {
 /// policy record its own wait durably before serving it.
 ///
 /// Parity: upstream's event of the same name, which its `llm-retry` package
-/// hooks (`packages/llm/llm-retry/src/index.ts`). tetanus's counterpart is a
-/// listener that serves [`crate::llm::retry::RetryPolicy`]; nothing installs
-/// one yet, so the point is live and unoccupied.
+/// hooks (`packages/llm/llm-retry/src/index.ts`). tetanus's executor is
+/// [`crate::llm::retry::install`].
 pub struct RequestError {
     pub turn: u64,
     pub step: u32,
