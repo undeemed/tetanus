@@ -8,10 +8,18 @@
 //! to protect.
 //!
 //! So the unit here is the frame, not the block. A view builds every row it
-//! wants, top to bottom, and paints the lot. Nothing is remembered between
-//! frames and nothing is diffed: at the sizes a terminal has, writing the rows
-//! costs less than deciding which of them changed, and a repaint that cannot
-//! disagree with the screen is one class of bug that does not exist.
+//! wants, top to bottom, and paints the lot. No row is diffed against the row
+//! under it: at the sizes a terminal has, writing the rows costs less than
+//! deciding which of them changed, and a repaint that cannot disagree with the
+//! screen is one class of bug that does not exist.
+//!
+//! A whole frame is a different question, and the type answers it by being
+//! comparable. A view driven by a clock rather than by a keystroke composes a
+//! frame every time the clock comes round, whether or not anything has
+//! happened, and once its subject stops changing every one of those frames is
+//! the frame already on the terminal. Comparing two frames is cheap and cannot
+//! disagree with the screen either, because the screen is the last frame that
+//! was painted. See `Watch::paint` in the binary, the one view with a clock.
 //!
 //! # What the type guarantees
 //!
@@ -40,6 +48,11 @@ use crate::text::fit;
 use crate::writer::Ui;
 
 /// A screen's worth of rows, waiting to be painted.
+///
+/// Comparable, so that a view whose clock runs faster than its content changes
+/// can tell that the screen it is about to paint is the screen already on the
+/// terminal. Painting it again would be the same bytes for the same picture.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Frame {
     cols: usize,
     rows: usize,
@@ -130,7 +143,8 @@ impl Frame {
 /// Features tested: that a frame paints exactly its own height whatever was
 /// added to it; that rows are cut to the width by what a terminal draws; that
 /// rows past the bottom are dropped; that rows are separated by `\r\n` and
-/// never by a bare `\n`; and that nothing follows the last row.
+/// never by a bare `\n`; that nothing follows the last row; and that two
+/// frames are equal exactly when they would paint the same screen.
 ///
 /// Features NOT tested here: the cut itself (owned by `text::fit`, asserted in
 /// `tests/text.rs`), the colour policy (owned by `theme`), and getting into
@@ -232,6 +246,28 @@ mod tests {
         assert_eq!(told.matches('\n').count(), told.matches("\r\n").count());
         assert_eq!(told.matches("\r\n").count(), 2, "{told:?}");
         assert!(told.ends_with("three\x1b[K\x1b[J"), "{told:?}");
+    }
+
+    /// TC-UI-FRAME-7: two frames that would paint the same screen.
+    /// Expected: equal, and unequal as soon as a row, the row count or the
+    /// size differs. A view with a clock skips the paint when the frame it
+    /// composed equals the one on the terminal, so an equality that missed a
+    /// change would leave the screen saying something that is no longer true.
+    #[test]
+    fn frames_that_paint_the_same_screen_are_equal() {
+        let build = |cols, rows, lines: &[&str]| {
+            let mut frame = Frame::new(cols, rows);
+            for line in lines {
+                frame.row(line);
+            }
+            frame
+        };
+
+        assert_eq!(build(10, 3, &["one", "two"]), build(10, 3, &["one", "two"]));
+        assert_ne!(build(10, 3, &["one", "two"]), build(10, 3, &["one", "TWO"]));
+        assert_ne!(build(10, 3, &["one", "two"]), build(10, 3, &["one"]));
+        assert_ne!(build(10, 3, &["one", "two"]), build(11, 3, &["one", "two"]));
+        assert_ne!(build(10, 3, &["one", "two"]), build(10, 4, &["one", "two"]));
     }
 
     /// TC-UI-FRAME-6: a terminal with no room at all.
