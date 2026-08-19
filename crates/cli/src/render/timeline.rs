@@ -29,6 +29,12 @@
 //! upstream's conversation view collapses the same text behind a disclosure
 //! row, and shows the first line of it. `--think` is the CLI's way of opening
 //! that row.
+//!
+//! What a call was given and what it produced are laid out differently. The
+//! arguments are JSON a reader recognises rather than reads, so they are cut
+//! to the line like any other value. The result is the work of the turn - a
+//! file, a command's output, a search - so it is folded to the width and read
+//! like prose, capped in height the way upstream caps a terminal card.
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -39,6 +45,21 @@ use tetanus_ui::{truncate, wrap, Role, Theme, Ui};
 /// Where a content line starts: two of indent, a five-column label, two more.
 pub(super) const LABEL: usize = 5;
 pub(super) const INDENT: &str = "  ";
+
+/// Lines of a tool's result drawn before the middle of it is folded away.
+///
+/// Sixteen, and sliced head and tail, because that is what upstream's terminal
+/// card does (`headTailCap` in `packages/client/ui-primitives`): the end of a
+/// command's output is where its errors and its exit line are, so a fold that
+/// kept only the head would hide the lines a reader came for. Same number and
+/// same split, so a result folds the same way in both front ends.
+///
+/// Lines the tool wrote, not rows the terminal draws. Counted in rows, the
+/// same result would fold differently at every width, the count would name a
+/// number the tool never produced, and the cut would land inside a line -
+/// and half a line, with its other half folded away, is a line nobody can
+/// read back.
+const CAP: usize = 16;
 
 /// What a reader has to remember between events: the tool call still waiting
 /// for its result, and what the turn has spent so far.
@@ -147,7 +168,7 @@ impl Reader {
                     Some(open) if open == call_id => None,
                     _ => Some(call_id.as_str()),
                 };
-                vec![tool(theme, width, glyph, role, name, content, answers)]
+                produced(theme, width, glyph, role, name, content, answers)
             }
             KnownEvent::TurnEnd {
                 turn,
@@ -292,8 +313,7 @@ fn folded(theme: &Theme, width: usize, reasoning: &str) -> Vec<String> {
     };
     let more = match said.count() {
         0 => String::new(),
-        1 => "  +1 line".to_string(),
-        rest => format!("  +{rest} lines"),
+        rest => format!("  {}", more(rest)),
     };
     let pad = INDENT.len() + LABEL + 1;
     let room = width.saturating_sub(pad + more.chars().count());
@@ -305,6 +325,10 @@ fn folded(theme: &Theme, width: usize, reasoning: &str) -> Vec<String> {
 }
 
 /// One tool line: a glyph, the tool's name, and a value it authored.
+///
+/// The call row. Its value is the arguments as JSON, flattened and cut,
+/// because a reader checks arguments against what they asked for rather than
+/// reading them - [`produced`] lays out the answer to them.
 pub(super) fn tool(
     theme: &Theme,
     width: usize,
@@ -326,6 +350,91 @@ pub(super) fn tool(
     }
 }
 
+/// How much of something a fold is hiding.
+///
+/// One wording, because a journal folds two things - a model's thinking and a
+/// tool's result - and a reader who has learnt to read one count should not
+/// have to learn the other.
+fn more(lines: usize) -> String {
+    match lines {
+        1 => "+1 line".to_string(),
+        rest => format!("+{rest} lines"),
+    }
+}
+
+/// What a tool call produced, folded to the width and capped in height.
+///
+/// [`tool`] cuts a value to one line. That is right for the arguments of a
+/// call and wrong for its result: the arguments are JSON a reader recognises,
+/// and the result is the work of the turn. Cut, a file the agent read was the
+/// first eighty columns of its first line, and no view in this binary would
+/// show the rest of it.
+///
+/// Folded like prose, so newlines the tool wrote are newlines on the page -
+/// command output is lines, and flattening them to one paragraph loses the
+/// shape a reader reads it by. Capped at [`CAP`], so one long result cannot
+/// push the answer it led to off the top of the screen.
+fn produced(
+    theme: &Theme,
+    width: usize,
+    glyph: &str,
+    role: Role,
+    name: &str,
+    content: &str,
+    answers: Option<&str>,
+) -> Vec<String> {
+    let head = format!("{INDENT}{glyph} {name}  ");
+    let says = answers.map(|call| format!(" (for {call})"));
+    let says = says.unwrap_or_default();
+    // The marker is folded around rather than added afterwards: a row that
+    // overran the width by its length would corrupt every row drawn under it.
+    let room = width
+        .saturating_sub(head.chars().count() + says.chars().count())
+        .max(1);
+    let pad = " ".repeat(head.chars().count());
+
+    let mut said: Vec<&str> = content.lines().collect();
+    let folded = said
+        .len()
+        .checked_sub(CAP)
+        .filter(|hidden| *hidden > 0)
+        .map(|hidden| {
+            let keep = CAP.div_ceil(2);
+            let tail = said.split_off(said.len() - (CAP - keep));
+            said.truncate(keep);
+            (hidden, tail)
+        });
+
+    let rows = match folded {
+        // `content` rather than the lines it was split into, so a result with
+        // no newline in it - and an empty one - is folded by the one rule.
+        None => wrap(content, room),
+        Some((hidden, tail)) => {
+            let mut rows = wrap(&said.join("\n"), room);
+            let fold = format!("{} {}", theme.glyph("…", "..."), more(hidden));
+            rows.push(theme.paint(Role::Muted, &fold).to_string());
+            rows.extend(wrap(&tail.join("\n"), room));
+            rows
+        }
+    };
+
+    let last = rows.len().saturating_sub(1);
+    let mark = theme.paint(role, glyph);
+    rows.into_iter()
+        .enumerate()
+        .map(|(at, line)| {
+            let says = match at == last {
+                true => says.as_str(),
+                false => "",
+            };
+            match at {
+                0 => format!("{INDENT}{mark} {name}  {line}{says}"),
+                _ => format!("{pad}{line}{says}"),
+            }
+        })
+        .collect()
+}
+
 /// A type this build does not know. The contract says pass it through, so it
 /// is shown rather than dropped.
 fn raw(theme: &Theme, width: usize, event: &SessionEvent) -> String {
@@ -339,8 +448,11 @@ fn raw(theme: &Theme, width: usize, event: &SessionEvent) -> String {
 ///
 /// Features tested: the shape of a whole turn, that streaming events are
 /// silent, correlation by `call_id`, a failed tool, an unknown type, the
-/// folding of a model's thinking, and the width rules. Features NOT tested here: the colour policy (owned by
-/// `tetanus-ui`) and the journal (owned by `tetanus-session`).
+/// folding of a model's thinking, the folding and the height cap of what a
+/// tool produced, and the width rules.
+///
+/// Features NOT tested here: the colour policy (owned by `tetanus-ui`) and the
+/// journal (owned by `tetanus-session`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`.
 #[cfg(test)]
@@ -884,5 +996,173 @@ mod tests {
             "the count went missing: {folded:?}"
         );
         assert!(folded.contains('\u{2026}'), "nothing was cut: {folded:?}");
+    }
+
+    /// A result of `lines` numbered rows, each one a line a wide terminal
+    /// draws whole and a narrow one folds.
+    fn produced(lines: usize) -> Vec<SessionEvent> {
+        let content: Vec<String> = (1..=lines)
+            .map(|at| format!("row {at} of the output that a tool produced"))
+            .collect();
+        vec![
+            event(
+                "tool/call",
+                json!({ "id": "c1", "name": "read", "arguments": {} }),
+            ),
+            event(
+                "tool/result",
+                json!({
+                    "call_id": "c1",
+                    "name": "read",
+                    "ok": true,
+                    "content": content.join("\n"),
+                }),
+            ),
+        ]
+    }
+
+    /// TC-CLI-TL-19: a result wider than the terminal.
+    /// Expected: folded under the value column rather than cut, with every
+    /// word kept and no ellipsis. A tool's result is the work of the turn, and
+    /// a reader who can see only its first line has to leave the journal to
+    /// find out what the agent actually got back.
+    #[test]
+    fn a_result_too_wide_for_the_line_is_folded_and_not_cut() {
+        let words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let out = rendered(
+            &[
+                event(
+                    "tool/call",
+                    json!({ "id": "c1", "name": "read", "arguments": {} }),
+                ),
+                event(
+                    "tool/result",
+                    json!({ "call_id": "c1", "name": "read", "ok": true, "content": words }),
+                ),
+            ],
+            Charset::Unicode,
+            40,
+        );
+
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        assert!(lines.len() > 1, "not folded: {lines:?}");
+        for line in &lines {
+            assert!(line.chars().count() <= 40, "`{line}` overruns 40");
+        }
+        assert!(!out.contains('\u{2026}'), "something was cut: {out:?}");
+        // Every word, and the continuations under the first one.
+        let whole = lines.join(" ");
+        let said: Vec<&str> = whole.split_whitespace().skip(2).collect();
+        assert_eq!(said.join(" "), words, "{lines:?}");
+        // Columns, not bytes: the mark in front of the name is one column and
+        // three bytes, which is the whole reason the padding is built the way
+        // it is.
+        let column = lines[0]
+            .split("alpha")
+            .next()
+            .expect("the value starts somewhere")
+            .chars()
+            .count();
+        for line in &lines[1..] {
+            let indent = line.chars().count() - line.trim_start().chars().count();
+            assert_eq!(indent, column, "{lines:?}");
+        }
+    }
+
+    /// TC-CLI-TL-20: a result longer than the cap.
+    /// Expected: the first eight lines, a count of what is folded away, and
+    /// the last eight - upstream's split, so the same result folds the same
+    /// way in both front ends. The tail is kept because that is where a
+    /// command puts its errors and its exit line.
+    #[test]
+    fn a_result_longer_than_the_cap_keeps_its_head_and_its_tail() {
+        let out = rendered(&produced(40), Charset::Unicode, 80);
+        let rows: Vec<&str> = out.lines().skip(1).collect();
+
+        assert_eq!(rows.len(), CAP + 1, "{rows:?}");
+        assert!(rows[0].contains("row 1 of"), "{rows:?}");
+        assert!(rows[7].contains("row 8 of"), "{rows:?}");
+        assert_eq!(rows[8].trim(), "\u{2026} +24 lines", "{rows:?}");
+        assert!(rows[9].contains("row 33 of"), "{rows:?}");
+        assert!(rows[CAP].contains("row 40 of"), "{rows:?}");
+    }
+
+    /// TC-CLI-TL-21: the same result at a width that folds every line of it.
+    /// Expected: the count is the same number, and the same eight lines are
+    /// kept either end. The cap counts what the tool wrote, so a reader who
+    /// resizes the terminal is not told a different story about the same
+    /// journal - and no cut lands inside a line, which would fold away half of
+    /// a line and leave the other half unreadable.
+    #[test]
+    fn the_count_is_of_the_lines_the_tool_wrote_not_the_ones_drawn() {
+        let wide = rendered(&produced(40), Charset::Unicode, 80);
+        let narrow = rendered(&produced(40), Charset::Unicode, 30);
+
+        assert!(narrow.lines().count() > wide.lines().count(), "{narrow}");
+        for out in [&wide, &narrow] {
+            assert!(out.contains("+24 lines"), "{out}");
+            assert!(out.contains("row 8 of"), "{out}");
+            assert!(!out.contains("row 9 of"), "{out}");
+            assert!(out.contains("row 33 of"), "{out}");
+            assert!(!out.contains("row 32 of"), "{out}");
+        }
+    }
+
+    /// TC-CLI-TL-22: a result exactly the length of the cap, and one row over.
+    /// Expected: nothing is folded at the cap, and one row over folds with a
+    /// count of one. An off-by-one here reads as a view that hides a row and
+    /// says nothing about it.
+    #[test]
+    fn the_cap_folds_nothing_until_it_is_passed() {
+        let flat = rendered(&produced(CAP), Charset::Unicode, 80);
+        assert_eq!(flat.lines().skip(1).count(), CAP, "{flat}");
+        assert!(flat.contains("row 8 of"), "{flat}");
+        assert!(!flat.contains('\u{2026}'), "{flat}");
+
+        let over = rendered(&produced(CAP + 1), Charset::Unicode, 80);
+        assert!(over.contains("+1 line\n"), "{over}");
+        assert!(!over.contains("+1 lines"), "{over}");
+    }
+
+    /// TC-CLI-TL-23: a folded result that answers a call out of order.
+    /// Expected: the marker is on the last row, and no row overruns the width.
+    /// The marker is the one part of the line a reader cannot work out, so it
+    /// is folded around rather than added to a row that was already full.
+    #[test]
+    fn a_folded_result_names_its_call_without_overrunning() {
+        let out = rendered(
+            &[
+                event(
+                    "tool/call",
+                    json!({ "id": "c1", "name": "read", "arguments": {} }),
+                ),
+                event(
+                    "tool/call",
+                    json!({ "id": "c2", "name": "list", "arguments": {} }),
+                ),
+                event(
+                    "tool/result",
+                    json!({
+                        "call_id": "c1",
+                        "name": "read",
+                        "ok": true,
+                        "content": "alpha bravo charlie delta echo foxtrot golf hotel india",
+                    }),
+                ),
+            ],
+            Charset::Unicode,
+            40,
+        );
+
+        let lines: Vec<&str> = out.lines().collect();
+        for line in &lines {
+            assert!(line.chars().count() <= 40, "`{line}` overruns 40");
+        }
+        assert!(out.ends_with("(for c1)\n"), "{out}");
+        assert_eq!(
+            out.matches("(for c1)").count(),
+            1,
+            "said on more than one row: {out}"
+        );
     }
 }

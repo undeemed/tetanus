@@ -188,6 +188,8 @@ A journal that will not open says why at the foot of the list and leaves the cur
 Inside a journal, in `replay --ui` as well, `/` and a word move the page to the line that holds it and `n` walks the rest; the footer says which match you are on, and the word itself is marked wherever the page draws it.
 `--think` unfolds the model's reasoning in whatever journal is opened, `--json` cannot be combined with it, and like the other two views it needs a terminal.
 Inside a journal `t` unfolds it too, and folds it back, so a folded row saying how many lines are behind it is a row you can open rather than a reason to close the view and run the command again; a journal whose answers were not thought about does not offer the key.
+What a tool produced is read rather than glimpsed: every view folds it to the width under the tool's own name, keeps the lines the tool wrote as lines, and a result longer than sixteen of them keeps its first eight and its last eight with a count of what is between - the same cap upstream's terminal card uses, so the same result folds the same way in both front ends.
+The arguments of the call above it stay cut to one line, because arguments are checked rather than read.
 
 `tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
 Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.
