@@ -33,6 +33,14 @@ use crate::catalog::Catalogs;
 use crate::session::{SessionDefaults, SessionStore};
 use crate::subscribe::Hub;
 
+/// Where journals land when no caller names a directory.
+///
+/// A missing root here is a history nobody has written yet; a missing root the
+/// caller named is a path that is wrong. [`session::SessionStore`] turns the
+/// two into different answers, so the reader knows whether to run a turn or to
+/// fix the path.
+pub const DEFAULT_SESSIONS_ROOT: &str = "sessions";
+
 /// Everything the engine needs that is not a call.
 #[derive(Clone)]
 pub struct EngineConfig {
@@ -56,7 +64,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            sessions_root: PathBuf::from("sessions"),
+            sessions_root: PathBuf::from(DEFAULT_SESSIONS_ROOT),
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
