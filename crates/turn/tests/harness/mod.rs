@@ -15,6 +15,9 @@ use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 
 /// The complete documented sequence one mock turn emits: a first step that
 /// calls a tool, a second step that answers, then the terminal checkpoint.
+// The turn-flow suite asserts against the whole sequence; the other suites
+// sharing this fixture do not, and a test binary lints what it does not use.
+#[allow(dead_code)]
 pub const MOCK_TURN_FLOW: &[&str] = &[
     "turn/start",
     // step 1: the model asks for a tool
@@ -59,14 +62,25 @@ pub struct Harness {
 
 impl Harness {
     pub async fn new(name: &str) -> Self {
+        Self::with_tools(name, ToolRegistry::new().with(Arc::new(EchoTool))).await
+    }
+
+    /// The same fixture with a caller-supplied registry, for cases about what
+    /// the model is offered and what a call actually runs.
+    pub async fn with_tools(name: &str, tools: ToolRegistry) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let log_path = dir.path().join(format!("{name}.jsonl"));
 
         let bus = EventBus::new();
         let log: Arc<dyn SessionLog> =
             JsonlSessionLog::create(name, &log_path, bus.clone()).expect("journal");
-        let tools = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
-        let ctx = boot(bus.clone(), Arc::new(MockAdapter::new()), tools, log).expect("boot");
+        let ctx = boot(
+            bus.clone(),
+            Arc::new(MockAdapter::new()),
+            Arc::new(tools),
+            log,
+        )
+        .expect("boot");
 
         let trace = TurnTrace::attach(&bus);
         let engine = TurnEngine::from_context(&ctx, TurnConfig::default()).expect("engine");
