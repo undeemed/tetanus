@@ -431,6 +431,17 @@ fails TC-CLI-HELP-8. Several codes share a status, so a row says what they have 
 than naming a code a reader of a help page has never met. Only `--help` carries the block; `-h` is
 the summary a person skims for a flag, and a status is for the script around them.
 
+A status the caller reads has to be the same status for the same mistake.
+Every flag that takes a path takes a `PathBuf`, and clap refuses an empty one before this build is
+reached; the three values that stay text (`run --model`, the journal `replay` reads, and the address
+`serve` binds) took the empty string and carried it further on, so one mistake had four answers: a
+run announced on a model with no name, `error: no journal at ` with nothing after it, `error: :
+invalid socket address`, and clap's own refusal for the other two.
+All five now take clap's rule ([crates/cli/src/main.rs](crates/cli/src/main.rs)) and refuse it in
+clap's words with the status §4.5 gives a wrong command line.
+Only the empty string is refused: a name made of spaces is a name this build cannot judge, and
+refusing it would be the presentation lane deciding what a path may be.
+
 That block folds its own rows, and clap is given the width the rest of the binary uses
 ([`Policy::width`](crates/ui/src/writer.rs)) so that it agrees. clap measures the terminal itself,
 which is a different answer at both ends of that clamp, and a block folded twice continues in the

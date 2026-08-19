@@ -97,7 +97,7 @@ enum Cmd {
     /// Replay a session journal
     Replay {
         /// Path to a JSONL journal a previous run wrote
-        #[arg(value_name = "PATH")]
+        #[arg(value_name = "PATH", value_parser = named())]
         path: String,
         /// Print one line per journal line, including any the timeline refuses
         #[arg(long)]
@@ -125,7 +125,7 @@ enum Cmd {
         #[arg(long, value_name = "PATH", default_value = "sessions")]
         dir: PathBuf,
         /// Serve the WebSocket carrier on this address instead of on stdio
-        #[arg(long, value_name = "ADDR")]
+        #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
     },
     /// Print version/build info
@@ -144,7 +144,7 @@ struct RunArgs {
     #[arg(short, long, value_enum, default_value_t = AdapterChoice::Mock)]
     adapter: AdapterChoice,
     /// Model id. Defaults to the adapter's first catalog entry.
-    #[arg(short, long, value_name = "ID")]
+    #[arg(short, long, value_name = "ID", value_parser = named())]
     model: Option<String>,
     /// Where the session journal lands
     #[arg(
@@ -244,6 +244,24 @@ impl Cli {
         <Self as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
             .unwrap_or_else(|err| err.exit())
     }
+}
+
+/// Refuse a value that names nothing.
+///
+/// Every flag that takes a path takes a `PathBuf`, and clap already refuses an
+/// empty one. The three values that stay text - a model id, the journal
+/// `replay` reads, and the address `serve` binds - had no such rule, and each
+/// carried the empty string somewhere further on: a run announced itself on a
+/// model with no name, `replay` reported a journal missing when none had been
+/// named, and `serve` said `: invalid socket address`. This is clap's own
+/// rule, so all five now refuse the same mistake in the same words, with the
+/// exit Â§4.5 gives a bad argument.
+///
+/// Only the empty string. A name made of spaces is a name this build cannot
+/// judge - a file may be called that - and refusing it would be this module
+/// deciding what a path may be.
+fn named() -> clap::builder::NonEmptyStringValueParser {
+    clap::builder::NonEmptyStringValueParser::new()
 }
 
 /// Accept a playback speed, rejecting the values the arithmetic cannot use.
