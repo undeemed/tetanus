@@ -26,7 +26,7 @@ use tetanus_turn::events::{
     ToolsExecute,
 };
 use tetanus_turn::llm::{LlmError, Message, ModelRequest, Role};
-use tetanus_turn::log::topic;
+use tetanus_turn::log::{derive_messages, topic};
 use tetanus_turn::tools::{EchoTool, Tool, ToolError, ToolOutcome, ToolRegistry, ToolSchema};
 use tetanus_turn::TurnError;
 
@@ -340,6 +340,40 @@ async fn a_provider_failure_ends_the_turn_not_the_engine() {
         .filter(|e| e.ty == topic::TURN_START)
         .count();
     assert_eq!(starts, 2, "the failed attempt is on the journal too");
+}
+
+/// TC-PORT-LOOP-8: a replayed journal derives the same history as the live log.
+///
+/// Upstream: `loop.spec.ts`, "replays a session log into an identical derived
+/// history".
+///
+/// Input: one mock turn, flushed, then read back from disk.
+/// Expected: the derived history is identical either way, and it is the history
+/// the second request was actually built from.
+#[tokio::test]
+async fn a_replayed_journal_derives_the_same_history() {
+    let h = Harness::new("port-replay-history").await;
+    let (requests, _record) = record_requests(h.bus());
+
+    h.engine.run_turn("replay me").await.unwrap();
+    h.engine.flush().await.unwrap();
+
+    let live = derive_messages(&h.engine.log().events());
+    let replayed = derive_messages(&tetanus_session::replay(&h.log_path).unwrap());
+    assert_eq!(live, replayed, "replay is re-derivation, not a second copy");
+
+    let requests = requests.lock().expect("requests").clone();
+    let sent: Vec<Message> = requests[1]
+        .messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect();
+    assert_eq!(
+        sent,
+        live[..sent.len()].to_vec(),
+        "the request carried that derived history"
+    );
 }
 
 /// Record every request the driver builds, in step order.
