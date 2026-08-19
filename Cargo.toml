@@ -8,6 +8,7 @@ members = [
   "crates/protocol",
   "crates/ui",
   "crates/engine",
+  "crates/rpc",
   "crates/turn",
 ]
 
