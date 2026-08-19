@@ -1,0 +1,313 @@
+//! Conformance for the session surfaces: `session.create`, `session.list`
+//! and `session.events`.
+//!
+//! Test design: each case names the contract clause it fixes. Every case runs
+//! offline against a temporary journal root, so none needs a key or a network.
+
+use tempfile::TempDir;
+use tetanus_engine::session::{MAX_PAGE, SESSION_START};
+use tetanus_engine::{EngineConfig, HarnessEngine};
+use tetanus_protocol::methods::{
+    Engine, HelloParams, PeerInfo, SessionCreateParams, SessionEventsParams,
+};
+use tetanus_protocol::rpc::ErrorCode;
+use tetanus_protocol::types::AgentState;
+use tetanus_protocol::PROTOCOL_VERSION;
+
+fn engine() -> (HarnessEngine, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    });
+    (engine, dir)
+}
+
+/// TC-SESS-1: a fresh session opens an empty journal whose first line is the
+/// header, so a cold reader needs no sidecar file.
+#[tokio::test]
+async fn a_new_session_opens_with_its_header() {
+    let (engine, dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams {
+            model: Some("some-model".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("create");
+
+    assert_eq!(info.model, "some-model");
+    assert_eq!(info.last_seq, 0, "the header is the only event");
+    assert_eq!(info.state, AgentState::Idle);
+    assert_eq!(
+        info.path,
+        dir.path()
+            .join(format!("{}.jsonl", info.session_id))
+            .display()
+            .to_string()
+    );
+}
+
+/// TC-SESS-2: reopening an id keeps the header the journal was created with.
+/// The model a turn already ran under is a fact of the log, not of the call.
+#[tokio::test]
+async fn reopening_a_session_keeps_its_original_header() {
+    let (engine, _dir) = engine();
+    let first = engine
+        .session_create(SessionCreateParams {
+            session_id: Some("resume-me".into()),
+            model: Some("first-model".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("create");
+
+    let second = engine
+        .session_create(SessionCreateParams {
+            session_id: Some("resume-me".into()),
+            model: Some("second-model".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("reopen");
+
+    assert_eq!(second.model, "first-model");
+    assert_eq!(second.session_id, first.session_id);
+    assert_eq!(second.last_seq, 0, "reopening appends no second header");
+}
+
+/// TC-SESS-3: a cold journal left behind by a restart is listed from its own
+/// header, with no live handle involved.
+#[tokio::test]
+async fn list_finds_cold_journals() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+
+    let cold = HarnessEngine::new(config.clone());
+    let created = cold
+        .session_create(SessionCreateParams {
+            model: Some("cold-model".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("create");
+    drop(cold);
+
+    let restarted = HarnessEngine::new(config);
+    let listed = restarted.session_list().await.expect("list").sessions;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, created.session_id);
+    assert_eq!(listed[0].model, "cold-model");
+    assert_eq!(listed[0].last_seq, 0);
+}
+
+/// TC-SESS-4: an id that would reach outside the journal root is
+/// `InvalidParams`, never a filesystem error.
+#[tokio::test]
+async fn ids_that_name_a_path_are_rejected() {
+    let (engine, _dir) = engine();
+
+    for id in ["../escape", "with/slash", "..", ""] {
+        let error = engine
+            .session_create(SessionCreateParams {
+                session_id: Some(id.into()),
+                ..SessionCreateParams::default()
+            })
+            .await
+            .expect_err("an id that names a path outside the root must be refused");
+        assert_eq!(
+            error.kind(),
+            Some(ErrorCode::InvalidParams),
+            "`{id}` must be InvalidParams"
+        );
+        assert_eq!(
+            error.data.expect("data")["field"],
+            serde_json::json!("session_id")
+        );
+    }
+}
+
+/// TC-SESS-5: a capability is a promise that the call behind it is served.
+/// This build serves no optional call, so `rpc.hello` promises none.
+#[tokio::test]
+async fn no_capability_is_advertised_before_its_call_is_served() {
+    let (engine, _dir) = engine();
+    let result = engine
+        .hello(HelloParams {
+            protocol_version: PROTOCOL_VERSION.into(),
+            client: PeerInfo {
+                name: "test".into(),
+                version: "0".into(),
+            },
+        })
+        .await
+        .expect("hello");
+    assert!(
+        result.capabilities.is_empty(),
+        "advertised {:?} while the calls behind them answer NotImplemented",
+        result.capabilities
+    );
+}
+/// TC-PAGE-1: a durable event crosses the boundary with the journal's own
+/// field names, asserted against literal JSON rather than against the
+/// converter that produced it.
+#[tokio::test]
+async fn a_session_event_crosses_the_boundary_unchanged() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id.clone(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("events");
+
+    let first = serde_json::to_value(&page.events[0]).expect("serialize");
+    assert_eq!(first["type"], serde_json::json!(SESSION_START));
+    assert_eq!(first["seq"], serde_json::json!(0));
+    assert_eq!(
+        first["data"]["session_id"],
+        serde_json::json!(info.session_id)
+    );
+    assert!(
+        first.get("sourceEventSeqs").is_none(),
+        "a header cites nothing"
+    );
+}
+
+/// TC-PAGE-2: paging is by seq. A page reports the seq the next one starts at,
+/// and only the last page is `eof`.
+#[tokio::test]
+async fn events_page_by_seq() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    let live = engine.sessions().live(&info.session_id).expect("live");
+    for n in 0..4 {
+        tetanus_session::SessionLog::append(
+            live.log.as_ref(),
+            "turn/start",
+            serde_json::json!({ "turn": n }),
+        )
+        .expect("append");
+    }
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id.clone(),
+            from_seq: 1,
+            limit: Some(2),
+        })
+        .await
+        .expect("first page");
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[0].seq, 1);
+    assert_eq!(page.next_seq, 3);
+    assert!(!page.eof);
+
+    let rest = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: page.next_seq,
+            limit: Some(MAX_PAGE),
+        })
+        .await
+        .expect("last page");
+    assert_eq!(rest.events.len(), 2);
+    assert!(rest.eof);
+}
+
+/// TC-PAGE-3: a limit above the server's maximum is clamped, not refused,
+/// which is what the contract's "server clamps to its own maximum" promises.
+#[tokio::test]
+async fn an_oversized_limit_is_clamped() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: 0,
+            limit: Some(MAX_PAGE * 100),
+        })
+        .await
+        .expect("events");
+    assert_eq!(page.events.len(), 1);
+    assert!(page.eof);
+}
+
+/// TC-PAGE-4: a cold journal pages from disk, so a surface can replay a
+/// session this process never opened.
+#[tokio::test]
+async fn a_cold_journal_pages_from_disk() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+
+    let cold = HarnessEngine::new(config.clone());
+    let created = cold
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    drop(cold);
+
+    let page = HarnessEngine::new(config)
+        .session_events(SessionEventsParams {
+            session_id: created.session_id.clone(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("events");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].ty, SESSION_START);
+    assert!(page.eof);
+}
+
+/// TC-PAGE-5: an unknown session is `SessionNotFound`, and an id that would
+/// reach outside the journal root is `InvalidParams`, never a filesystem
+/// error leaking through the boundary.
+#[tokio::test]
+async fn paging_a_session_that_is_not_there_is_the_documented_code() {
+    let (engine, _dir) = engine();
+
+    let missing = engine
+        .session_events(SessionEventsParams {
+            session_id: "nope".into(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect_err("unknown session");
+    assert_eq!(missing.kind(), Some(ErrorCode::SessionNotFound));
+    assert_eq!(
+        missing.data.expect("data")["session_id"],
+        serde_json::json!("nope")
+    );
+
+    let escape = engine
+        .session_events(SessionEventsParams {
+            session_id: "../escape".into(),
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect_err("an id that names a path outside the root");
+    assert_eq!(escape.kind(), Some(ErrorCode::InvalidParams));
+}
