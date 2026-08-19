@@ -5,6 +5,7 @@
 //! offline against a temporary journal root, so none needs a key or a network.
 
 use tempfile::TempDir;
+use tetanus_engine::session::MAX_TITLE;
 use tetanus_engine::session::{MAX_PAGE, SESSION_START};
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
@@ -310,4 +311,92 @@ async fn paging_a_session_that_is_not_there_is_the_documented_code() {
         .await
         .expect_err("an id that names a path outside the root");
     assert_eq!(escape.kind(), Some(ErrorCode::InvalidParams));
+}
+
+/// TC-PATH-1: contract §4.7. Naming a path opens the journal there, and the
+/// id comes from the journal's own header, so a path becomes an id every
+/// other call accepts.
+#[tokio::test]
+async fn a_named_path_opens_the_journal_there() {
+    let (engine, dir) = engine();
+    let elsewhere = dir.path().join("nested").join("mine.jsonl");
+
+    let made = engine
+        .session_create(SessionCreateParams {
+            path: Some(elsewhere.display().to_string()),
+            session_id: Some("by-path".into()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("create at a path");
+    assert_eq!(made.session_id, "by-path");
+    assert_eq!(made.path, elsewhere.display().to_string());
+    assert!(
+        elsewhere.exists(),
+        "the journal is written where it was named"
+    );
+
+    // A second engine knows nothing about this journal until it is named.
+    let reader = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    });
+    let reopened = reader
+        .session_create(SessionCreateParams {
+            path: Some(elsewhere.display().to_string()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect("reopen by path alone");
+    assert_eq!(
+        reopened.session_id, "by-path",
+        "the id is read from the journal, not invented"
+    );
+}
+
+/// TC-PATH-2: `title` is the first user message, cut to one line, and absent
+/// until there is one. A surface renders "no title" rather than a guess.
+#[tokio::test]
+async fn title_is_the_first_user_message() {
+    let (engine, _dir) = engine();
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    assert_eq!(info.title, None, "a session with no prompt has no title");
+
+    let live = engine.sessions().live(&info.session_id).expect("live");
+    let long = "x".repeat(MAX_TITLE + 10);
+    for content in [format!("{long}\nsecond line"), "later".into()] {
+        tetanus_session::SessionLog::append(
+            live.log.as_ref(),
+            "user/message",
+            serde_json::json!({ "content": content }),
+        )
+        .expect("append");
+    }
+
+    let listed = engine.session_list().await.expect("list").sessions;
+    let title = listed[0].title.clone().expect("a title");
+    assert_eq!(title, format!("{}...", "x".repeat(MAX_TITLE)));
+    assert!(!title.contains('\n'), "a title is one line");
+}
+
+/// TC-PATH-3: contract §4.7. A path whose file is not a journal is
+/// `LogCorrupt`, not a silent empty session and not an IO error.
+#[tokio::test]
+async fn a_path_that_is_not_a_journal_is_corrupt() {
+    let (engine, dir) = engine();
+    let junk = dir.path().join("notes.jsonl");
+    std::fs::write(&junk, "this is not a journal\n").expect("write");
+
+    let error = engine
+        .session_create(SessionCreateParams {
+            path: Some(junk.display().to_string()),
+            ..SessionCreateParams::default()
+        })
+        .await
+        .expect_err("not a journal");
+    assert_eq!(error.kind(), Some(ErrorCode::LogCorrupt));
+    assert_eq!(error.data.expect("data")["line"], serde_json::json!(1));
 }
