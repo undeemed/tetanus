@@ -425,6 +425,15 @@ That block folds its own rows, and clap is given the width the rest of the binar
 which is a different answer at both ends of that clamp, and a block folded twice continues in the
 number column - where a wrapped meaning reads as a status whose number went missing.
 
+The examples are laid out the same way and for the same reason. They are held as the command and
+what it is for, not as a hand-aligned line, so the gap between the two columns is measured from the
+widest command rather than counted by hand, and a window with no room for a second column gets each
+description under its own command instead. Two columns are what makes the block scannable - the eye
+runs down one or the other and never reads a line to find out which it is looking at - and clap
+folding a row that does not fit continues it in the command column, where the rest of a description
+reads as the start of another invocation. Under 44 columns the widest example command does not fit
+on a line at all, which is the one row on the page this layout leaves to clap.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
