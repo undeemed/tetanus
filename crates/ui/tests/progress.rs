@@ -3,7 +3,8 @@
 //! Features tested: what an animated line writes and re-writes, that a plain
 //! stream gets whole lines and no frames, that a repeated phase is silent,
 //! that an over-long label is cut instead of wrapping, that clearing erases
-//! exactly what was drawn, and that the charset chooses the glyphs.
+//! exactly what was drawn - by the columns drawn and not the characters
+//! written - and that the charset chooses the glyphs.
 //!
 //! Features NOT tested here: terminal detection (owned by `Policy`, and a
 //! one-line call to `IsTerminal`) and the colour rules (owned by
@@ -135,4 +136,20 @@ fn a_colour_theme_styles_the_frame_and_finish_returns_the_stream() {
     let out = ui.contents();
     assert!(out.contains('\u{1b}'), "the frame was not styled: {out:?}");
     assert!(out.ends_with("\r          \rdone\n"), "{out:?}");
+}
+
+/// TC-UI-PROG-8: a label the terminal draws two columns per character.
+/// Expected: the erase is as many spaces as the frame drew columns - eighteen
+/// here, not the fourteen characters it was written with. A status line that
+/// erases by characters leaves the tail of a wide label on the row, under
+/// whatever the caller writes next.
+#[test]
+fn a_wide_label_is_erased_by_the_columns_it_drew() {
+    let mut progress = animated(Charset::Unicode, 40);
+    progress.set("calling 模型模型").expect("write");
+    progress.clear().expect("write");
+
+    // The glyph, a space, eight ASCII columns, and four characters of two.
+    let out = written(progress);
+    assert!(out.ends_with(&format!("\r{}\r", " ".repeat(18))), "{out:?}");
 }

@@ -18,7 +18,7 @@
 use std::io::{self, Write};
 
 use crate::color::Charset;
-use crate::text::truncate;
+use crate::text::{truncate, visible_width};
 use crate::theme::Role;
 use crate::writer::Ui;
 
@@ -115,7 +115,11 @@ impl<W: Write> Progress<W> {
         let charset = self.ui.theme().charset();
         let glyph = frame(charset, self.frame);
         let text = truncate(&format!("{glyph} {label}"), self.ui.width(), charset);
-        let cols = text.chars().count();
+        // Columns, not characters. A label the terminal draws two columns
+        // wide per character - a model named in Chinese, an emoji in a tool's
+        // name - would otherwise be erased with too few spaces, and its tail
+        // would stay on the line under whatever the caller wrote next.
+        let cols = visible_width(&text);
         let painted = self.ui.paint(Role::Accent, &text).to_string();
 
         if self.dirty > 0 {
