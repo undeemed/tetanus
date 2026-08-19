@@ -262,6 +262,10 @@ while the prompt is open every printable key belongs to it - `q` included, becau
 on `q` could not be used to look for `quota`.
 In a journal `/` moves the window to the line holding the word instead of narrowing to it, because a
 line of a turn is not an answer without the turn around it, and `n` walks the rest of the matches.
+`?` puts the whole key map of whichever view is up on a screen of its own
+([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
+again, so a footer with more keys than it has room for gives up its wording rather than being cut
+mid-word: each view names the keys it answers, and the shared part is only the shape.
 Every width these views measure is measured in columns rather than characters
 ([crates/ui/src/text.rs](crates/ui/src/text.rs)), because a terminal draws a CJK character in two of
 them and a combining mark in none: prose folded by character count is drawn wider than the frame

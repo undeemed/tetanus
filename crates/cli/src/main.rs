@@ -986,14 +986,9 @@ async fn with_page<W: std::io::Write, F: std::future::Future>(
     let (cols, rows) = tetanus_ui::size();
     let mut watch = Watch {
         log,
+        theme,
         live: Live::new(theme, cols, phase, think),
         page: Page::new(theme, "tetanus", title),
-        theme,
-        keys: format!(
-            "{} scroll {dot} ? keys {dot} q quit",
-            theme.glyph("↑↓", "up/dn"),
-            dot = theme.glyph("·", "-")
-        ),
         size: (cols, rows),
         seen: 0,
         help: false,
@@ -1048,9 +1043,6 @@ struct Watch<'a> {
     theme: Theme,
     live: Live,
     page: Page,
-    /// The left of the footer. Built once, because a charset does not change
-    /// under a running view.
-    keys: String,
     /// Columns and rows, as of the last resize the terminal reported.
     size: (usize, usize),
     /// Journal events already settled onto the page.
@@ -1061,6 +1053,20 @@ struct Watch<'a> {
 }
 
 impl Watch<'_> {
+    /// The left of the footer, in the longest wording this width has room for.
+    /// The short one keeps the card that says the rest, and the way out.
+    fn hint(&self, cols: usize) -> String {
+        let dot = self.theme.glyph("·", "-");
+        render::keys::hint(
+            cols,
+            &format!(
+                "{} scroll {dot} ? keys {dot} q quit",
+                self.theme.glyph("↑↓", "up/dn")
+            ),
+            &format!("? keys {dot} q quit"),
+        )
+    }
+
     /// Every key this view answers, in the order a reader meets them.
     ///
     /// The turn's own card. A journal's says how to search, which a turn
@@ -1105,7 +1111,7 @@ impl View for Watch<'_> {
             return render::keys::card(&self.theme, cols, rows, "turn", &self.map());
         }
         let block = self.live.block(self.started.elapsed());
-        self.page.frame(cols, rows, &block, &self.keys)
+        self.page.frame(cols, rows, &block, &self.hint(cols))
     }
 
     fn key(&mut self, key: Key) -> Flow {

@@ -20,6 +20,7 @@
 //!
 //! ```text
 //! card ── the frame: a heading, a row per key, and how to get back
+//! hint ── which of a footer's two wordings this width has room for
 //! ```
 //!
 //! Each view owns its own table, because each view knows its own keys, and a
@@ -47,6 +48,11 @@ const CHROME: usize = 4;
 
 /// Columns between the keys and what they do.
 const GAP: usize = 2;
+
+/// Columns a footer keeps for its right end: the widest counter a view puts
+/// there, and the gap before it. A hint that would not leave this much room
+/// is the short one.
+const ROOM: usize = 12;
 
 /// One row of a key map: which keys, and what they do.
 pub type Row = (&'static str, &'static str);
@@ -105,12 +111,27 @@ pub fn card(theme: &Theme, cols: usize, rows: usize, what: &str, keys: &[Row]) -
     frame
 }
 
-/// Test Design Specification: the key card.
+/// The wording of a footer's left end this terminal has room for.
+///
+/// `full` while it fits beside the counter on the right of the same row, and
+/// `short` when it does not. A hint cut mid-word says less than a shorter one
+/// that is whole, and every view that can be cut this way now has a `?` that
+/// says the rest.
+pub fn hint(cols: usize, full: &str, short: &str) -> String {
+    if visible_width(full) + ROOM <= cols {
+        return full.to_string();
+    }
+    short.to_string()
+}
+
+/// Test Design Specification: the key card and the footer that abbreviates.
 ///
 /// Features tested: that a card holds one row per key with the keys in a
 /// column of their own, headed by the view it belongs to and footed by the way
-/// out of it; and that a card with more keys than a short terminal has rows
-/// says how many it could not show rather than dropping them in silence.
+/// out of it; that a card with more keys than a short terminal has rows says
+/// how many it could not show rather than dropping them in silence; and that a
+/// footer takes the long wording only while there is room for the counter
+/// beside it.
 ///
 /// Features NOT tested here: which keys a view has and what they do (owned by
 /// each view, asserted by TC-CLI-BROWSE-10 and TC-CLI-PICK-12), the exact
@@ -209,6 +230,33 @@ mod tests {
                 .iter()
                 .any(|row| row.contains("any key goes back") && row.contains("this card")),
             "a key row was written over the footer: {rows:?}"
+        );
+    }
+
+    /// TC-CLI-KEYS-3: the same footer at three widths.
+    /// Expected: the long wording while the counter beside it still has room,
+    /// the short one as soon as it does not. The boundary is stated here, once,
+    /// because three views ask for it and a rule each would drift.
+    #[test]
+    fn a_footer_gives_up_its_wording_before_it_is_cut() {
+        let full = "up/dn scroll · / find · ? keys · q quit";
+        let short = "? keys · q quit";
+        let width = visible_width(full);
+
+        assert_eq!(
+            hint(width + ROOM, full, short),
+            full,
+            "room and it was dropped"
+        );
+        assert_eq!(
+            hint(width + ROOM - 1, full, short),
+            short,
+            "no room and it was kept"
+        );
+        assert_eq!(
+            hint(width / 2, full, short),
+            short,
+            "half the row and it was kept"
         );
     }
 }

@@ -304,10 +304,11 @@ impl<'a> Picker<'a> {
                 self.theme.paint(Role::Muted, "esc clear"),
             ),
             (None, Filter::Off) => {
-                let keys = format!(
+                let full = format!(
                     "{} move {dot} enter read {dot} / filter {dot} ? keys {dot} q quit",
                     self.theme.glyph("↑↓", "up/dn"),
                 );
+                let keys = keys::hint(cols, &full, &format!("? keys {dot} q quit"));
                 self.theme.paint(Role::Muted, &keys).to_string()
             }
         };
@@ -540,8 +541,9 @@ impl View for Picker<'_> {
 /// without ending the view; that `/` narrows the list to the journals that
 /// match, takes the printable keys while it is being typed, and moves the
 /// cursor and Enter on to the matches; and that `?` spells the list's own keys
-/// out over it, and that a journal showing its card keeps the keys that would
-/// close it.
+/// out over it, that a journal showing its card keeps the keys that would
+/// close it, and that a footer with no room for the long wording keeps the two
+/// keys a reader cannot do without.
 ///
 /// Features NOT tested here: the wording and widths of a row (owned by
 /// `sessions.rs`), the arrangement of a frame (owned by `tetanus_ui::Frame`),
@@ -1012,5 +1014,41 @@ mod tests {
 
         assert_eq!(view.key(Key::Char('q')), Flow::Go);
         assert!(view.reading.is_none(), "the journal did not close");
+    }
+
+    /// TC-CLI-PICK-14: the list's footer on a terminal too narrow for its keys.
+    /// Expected: at 80 columns the whole key list is on it; at 34 the card and
+    /// the way out are, and nothing else claims room it does not have.
+    #[test]
+    fn a_narrow_footer_keeps_the_card_and_the_way_out() {
+        let list = list(3);
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+
+        let wide = rows(&mut view, 80, 12);
+        let footer = wide[wide.len() - 1].clone();
+        assert!(
+            footer.contains("enter read"),
+            "the wide footer lost the keys: {footer}"
+        );
+        assert!(
+            footer.contains("? keys"),
+            "the wide footer never says `?`: {footer}"
+        );
+
+        let narrow = rows(&mut view, 34, 12);
+        let footer = narrow[narrow.len() - 1].clone();
+        assert!(
+            footer.contains("? keys"),
+            "the narrow footer lost the card: {footer}"
+        );
+        assert!(
+            footer.contains("q quit"),
+            "the narrow footer lost the way out: {footer}"
+        );
+        assert!(
+            !footer.contains("filter"),
+            "the narrow footer kept the long wording: {footer}"
+        );
     }
 }
