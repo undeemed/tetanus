@@ -242,27 +242,6 @@ fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
         .collect()
 }
 
-/// Carry resolved config across to the contract shape the view reads.
-///
-/// The second and last crossing, and the same story as [`boundary`]: the
-/// layers agree one for one, so this is a copy. It goes when the engine serves
-/// `config.dump`, and `render::config` does not notice.
-fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
-    config
-        .provenance()
-        .map(|(key, resolved)| protocol::ConfigEntry {
-            key: key.clone(),
-            value: resolved.value.clone(),
-            layer: match resolved.layer {
-                tetanus_config::Layer::Default => protocol::ConfigLayer::Default,
-                tetanus_config::Layer::File => protocol::ConfigLayer::File,
-                tetanus_config::Layer::Env => protocol::ConfigLayer::Env,
-                tetanus_config::Layer::Flag => protocol::ConfigLayer::Flag,
-            },
-        })
-        .collect()
-}
-
 /// Write a diagnostic, with an optional next step, and pick an exit status.
 fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
     let mut err = policy.stderr();
