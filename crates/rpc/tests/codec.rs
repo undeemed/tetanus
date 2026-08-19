@@ -1,12 +1,10 @@
-//! Conformance for the JSON-RPC codec's envelope and handshake.
+//! Conformance for the JSON-RPC codec.
 //!
 //! Test design: the codec is a translation, so every case asserts against
 //! literal JSON on one side and a recorded engine call on the other. The
 //! engine here is a scripted double, which is what lets a case pin *which*
 //! trait method a method name reaches - something a real engine would hide
-//! behind a plausible-looking answer. The calls this build does not dispatch
-//! are `unreachable!` in the double, so wiring one without a case for it
-//! fails loudly instead of passing quietly.
+//! behind a plausible-looking answer.
 //!
 //! Environmental needs: none. No case opens a file, a socket or a session.
 
@@ -14,13 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult, ConfigDumpResult, Engine,
-    EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo, SessionCreateParams,
-    SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
-    SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
+    method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
+    ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
+    SessionCreateParams, SessionEventPush, SessionEventsParams, SessionEventsResult,
+    SessionListResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
+    SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
-use tetanus_protocol::types::SessionInfo;
+use tetanus_protocol::types::{AgentState, SessionInfo, StopReason, TurnSummary};
 use tetanus_protocol::PROTOCOL_VERSION;
 use tetanus_rpc::Codec;
 
@@ -30,6 +29,8 @@ struct Script {
     calls: Mutex<Vec<(&'static str, serde_json::Value)>>,
     /// When set, every call fails with this instead of answering.
     fail: Option<RpcError>,
+    /// Set when `session.subscribe` was given a sink.
+    sink: Mutex<Option<Arc<dyn EventSink>>>,
 }
 
 impl Script {
@@ -52,12 +53,29 @@ impl Script {
             .map(|(name, _)| *name)
             .collect()
     }
+
+    fn params(&self) -> serde_json::Value {
+        self.calls
+            .lock()
+            .expect("calls")
+            .last()
+            .expect("a call")
+            .1
+            .clone()
+    }
 }
 
-/// The answer to a call this build does not dispatch. Reaching one is a wiring
-/// mistake, not a test failure to be asserted on.
-fn undispatched<T>() -> T {
-    unreachable!("this build dispatches only the handshake")
+fn info() -> SessionInfo {
+    SessionInfo {
+        session_id: "s1".into(),
+        path: "/tmp/s1.jsonl".into(),
+        provider: "mock".into(),
+        model: "mock-echo-1".into(),
+        created_time: 0,
+        last_seq: 0,
+        title: None,
+        state: AgentState::Idle,
+    }
 }
 
 #[async_trait::async_trait]
@@ -73,47 +91,95 @@ impl Engine for Script {
             capabilities: vec!["session.subscribe".into()],
         })
     }
-
-    async fn session_create(&self, _: SessionCreateParams) -> Result<SessionInfo, RpcError> {
-        undispatched()
+    async fn session_create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
+        self.record(method::SESSION_CREATE, params)?;
+        Ok(info())
+    }
+    async fn session_list(&self) -> Result<SessionListResult, RpcError> {
+        self.record(method::SESSION_LIST, json!({}))?;
+        Ok(SessionListResult {
+            sessions: vec![info()],
+        })
     }
     async fn session_events(
         &self,
-        _: SessionEventsParams,
+        params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError> {
-        undispatched()
-    }
-    async fn session_unsubscribe(&self, _: SessionUnsubscribeParams) -> Result<Ack, RpcError> {
-        undispatched()
-    }
-    async fn agent_prompt(&self, _: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {
-        undispatched()
-    }
-    async fn agent_status(&self, _: SessionRef) -> Result<AgentStatusResult, RpcError> {
-        undispatched()
-    }
-    async fn agent_interrupt(&self, _: SessionRef) -> Result<Ack, RpcError> {
-        undispatched()
-    }
-    async fn session_list(&self) -> Result<SessionListResult, RpcError> {
-        undispatched()
+        self.record(method::SESSION_EVENTS, params)?;
+        Ok(SessionEventsResult {
+            events: Vec::new(),
+            next_seq: 0,
+            eof: true,
+        })
     }
     async fn session_subscribe(
         &self,
-        _: SessionSubscribeParams,
-        _: Arc<dyn EventSink>,
+        params: SessionSubscribeParams,
+        sink: Arc<dyn EventSink>,
     ) -> Result<SessionSubscribeResult, RpcError> {
-        undispatched()
+        self.record(method::SESSION_SUBSCRIBE, params)?;
+        *self.sink.lock().expect("sink") = Some(sink);
+        Ok(SessionSubscribeResult {
+            subscription_id: "sub-1".into(),
+            last_seq: 0,
+        })
+    }
+    async fn session_unsubscribe(&self, params: SessionUnsubscribeParams) -> Result<Ack, RpcError> {
+        self.record(method::SESSION_UNSUBSCRIBE, params)?;
+        Ok(Ack { ok: true })
+    }
+    async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError> {
+        self.record(method::AGENT_PROMPT, params)?;
+        Ok(AgentPromptResult {
+            summary: TurnSummary {
+                turn: 1,
+                steps: 2,
+                stop_reason: StopReason::Natural,
+                stop_veto: None,
+                content: "done".into(),
+                duration_ms: None,
+                usage: None,
+            },
+        })
+    }
+    async fn agent_status(&self, params: SessionRef) -> Result<AgentStatusResult, RpcError> {
+        self.record(method::AGENT_STATUS, params)?;
+        Ok(AgentStatusResult {
+            status: AgentStatusPush {
+                session_id: "s1".into(),
+                state: AgentState::Idle,
+                turn: None,
+                step: None,
+            },
+        })
+    }
+    async fn agent_interrupt(&self, params: SessionRef) -> Result<Ack, RpcError> {
+        self.record(method::AGENT_INTERRUPT, params)?;
+        Ok(Ack { ok: false })
     }
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError> {
-        undispatched()
+        self.record(method::CATALOG_TOOLS, json!({}))?;
+        Ok(ToolCatalogResult { tools: Vec::new() })
     }
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError> {
-        undispatched()
+        self.record(method::CATALOG_MODELS, json!({}))?;
+        Ok(ModelCatalogResult {
+            providers: Vec::new(),
+        })
     }
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError> {
-        undispatched()
+        self.record(method::CONFIG_DUMP, json!({}))?;
+        Ok(ConfigDumpResult {
+            entries: Vec::new(),
+        })
     }
+}
+
+struct Discard;
+
+impl EventSink for Discard {
+    fn session_event(&self, _: SessionEventPush) {}
+    fn agent_status(&self, _: AgentStatusPush) {}
 }
 
 fn hello(id: serde_json::Value) -> serde_json::Value {
@@ -139,7 +205,7 @@ async fn greeted() -> (Codec, Arc<Script>) {
 
 async fn send(codec: &Codec, frame: serde_json::Value) -> serde_json::Value {
     let answer = codec
-        .frame(&frame.to_string())
+        .frame(&frame.to_string(), Arc::new(Discard))
         .await
         .expect("a request is answered");
     serde_json::from_str(&answer).expect("an answer is JSON")
@@ -172,7 +238,10 @@ async fn a_request_is_answered_on_its_own_id() {
 async fn an_unreadable_frame_is_answered_with_a_null_id() {
     let codec = Codec::new(Arc::new(Script::default()));
 
-    let unparseable = codec.frame("{ not json").await.expect("an answer");
+    let unparseable = codec
+        .frame("{ not json", Arc::new(Discard))
+        .await
+        .expect("an answer");
     let unparseable: serde_json::Value = serde_json::from_str(&unparseable).expect("JSON");
     assert!(
         unparseable["id"].is_null(),
@@ -199,7 +268,10 @@ async fn a_frame_that_asked_nothing_gets_no_answer() {
     let response = json!({ "jsonrpc": "2.0", "id": 1, "result": {} });
     for frame in [notification, response] {
         assert!(
-            codec.frame(&frame.to_string()).await.is_none(),
+            codec
+                .frame(&frame.to_string(), Arc::new(Discard))
+                .await
+                .is_none(),
             "nothing is written back to {frame}"
         );
     }
@@ -239,7 +311,7 @@ async fn a_call_before_the_handshake_is_refused() {
     // The handshake is connection state, not process state.
     let (greeted, _) = greeted().await;
     assert!(
-        send(&greeted, early).await["error"]["code"] != json!(ErrorCode::InvalidRequest as i32),
+        send(&greeted, early).await.get("result").is_some(),
         "a greeted connection is past the gate"
     );
 }
@@ -286,4 +358,126 @@ async fn bad_params_name_the_field_at_fault() {
         "the one field serde named is the one reported"
     );
     assert!(engine.reached().is_empty(), "no engine call was reached");
+}
+
+/// TC-RPC-7: an engine error crosses the boundary with its code, message and
+/// data intact. The codec never remaps one code onto another.
+#[tokio::test]
+async fn an_engine_error_crosses_the_boundary_intact() {
+    let engine = Arc::new(Script {
+        fail: Some(
+            RpcError::new(ErrorCode::UnsupportedProtocolVersion, "1.0 only")
+                .with_data(json!({ "supported": ["1.0"] })),
+        ),
+        ..Script::default()
+    });
+    let codec = Codec::new(engine);
+
+    let answer = send(&codec, hello(json!(4))).await;
+
+    assert_eq!(answer["id"], 4, "a failed call is still correlated");
+    assert_eq!(
+        answer["error"]["code"],
+        ErrorCode::UnsupportedProtocolVersion as i32
+    );
+    assert_eq!(answer["error"]["message"], "1.0 only");
+    assert_eq!(answer["error"]["data"]["supported"][0], "1.0");
+    assert!(answer.get("result").is_none(), "an error is not a result");
+}
+
+/// TC-RPC-8: contract section 4.2. Every method in the table reaches the trait
+/// method of the same name, and no other. This is the case that stops a rename
+/// or a mis-wired arm from turning into a plausible-looking wrong answer.
+#[tokio::test]
+async fn every_method_reaches_its_own_call() {
+    let (codec, engine) = greeted().await;
+    let calls = [
+        (method::SESSION_CREATE, json!({})),
+        (method::SESSION_LIST, json!({})),
+        (
+            method::SESSION_EVENTS,
+            json!({ "session_id": "s1", "from_seq": 0 }),
+        ),
+        (method::SESSION_SUBSCRIBE, json!({ "session_id": "s1" })),
+        (
+            method::SESSION_UNSUBSCRIBE,
+            json!({ "subscription_id": "sub-1" }),
+        ),
+        (
+            method::AGENT_PROMPT,
+            json!({ "session_id": "s1", "content": "hi" }),
+        ),
+        (method::AGENT_STATUS, json!({ "session_id": "s1" })),
+        (method::AGENT_INTERRUPT, json!({ "session_id": "s1" })),
+        (method::CATALOG_TOOLS, json!({})),
+        (method::CATALOG_MODELS, json!({})),
+        (method::CONFIG_DUMP, json!({})),
+    ];
+
+    for (name, params) in &calls {
+        let answer = send(
+            &codec,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": name, "params": params }),
+        )
+        .await;
+        assert!(
+            answer.get("result").is_some(),
+            "`{name}` answered an error: {answer}"
+        );
+    }
+
+    let expected: Vec<&str> = calls.iter().map(|(name, _)| *name).collect();
+    assert_eq!(engine.reached(), expected);
+}
+
+/// TC-RPC-9: the params a call receives are the params the frame carried, and
+/// a subscription is given the carrier's sink, which the wire cannot supply.
+#[tokio::test]
+async fn params_cross_the_boundary_unchanged() {
+    let (codec, engine) = greeted().await;
+
+    send(
+        &codec,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": method::SESSION_EVENTS,
+                "params": { "session_id": "s1", "from_seq": 4, "limit": 2 } }),
+    )
+    .await;
+    assert_eq!(
+        engine.params(),
+        json!({ "session_id": "s1", "from_seq": 4, "limit": 2 })
+    );
+
+    send(
+        &codec,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": method::SESSION_SUBSCRIBE,
+                "params": { "session_id": "s1" } }),
+    )
+    .await;
+    assert!(
+        engine.sink.lock().expect("sink").is_some(),
+        "the carrier's sink reaches the engine, though no frame carried it"
+    );
+}
+
+/// TC-RPC-10: contract section 4.2. A call with no params accepts an absent
+/// `params` and `{}` alike, and a call whose params are all optional accepts
+/// both too.
+#[tokio::test]
+async fn an_absent_params_and_an_empty_one_are_alike() {
+    let (codec, _engine) = greeted().await;
+
+    for params in [None, Some(json!({}))] {
+        let mut frame = json!({ "jsonrpc": "2.0", "id": 1, "method": method::CATALOG_TOOLS });
+        if let Some(params) = params.clone() {
+            frame["params"] = params;
+        }
+        assert!(send(&codec, frame).await.get("result").is_some());
+
+        let mut frame = json!({ "jsonrpc": "2.0", "id": 2, "method": method::SESSION_CREATE });
+        if let Some(params) = params {
+            frame["params"] = params;
+        }
+        let answer = send(&codec, frame).await;
+        assert_eq!(answer["result"]["session_id"], json!("s1"));
+    }
 }

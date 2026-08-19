@@ -6,9 +6,6 @@
 //! finds the call, hands the typed params to the engine, and writes the answer
 //! back. It runs no turn, opens no journal and holds no session.
 //!
-//! Contract section 4.2's method table is wired call by call. This build
-//! carries the handshake.
-//!
 //! It owns no transport either. A carrier reads bytes, calls [`Codec::frame`]
 //! and writes what comes back, so the stdio carrier and the WebSocket carrier
 //! differ only in how they move a string.
@@ -17,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
-use tetanus_protocol::methods::{method, Engine};
+use tetanus_protocol::methods::{method, Engine, EventSink};
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Request, Response, RpcError, V2};
 
 /// One connection's codec.
@@ -44,8 +41,12 @@ impl Codec {
     /// asked no question: a notification, or a response to a request this
     /// server made. Every other frame is answered, malformed ones included,
     /// because a client that is waiting has to be released.
-    pub async fn frame(&self, raw: &str) -> Option<String> {
-        let response = self.answer(raw).await?;
+    ///
+    /// `sink` is where this connection wants its pushes. It is an argument
+    /// rather than a field so a carrier may route a subscription somewhere
+    /// other than the connection that asked for it.
+    pub async fn frame(&self, raw: &str, sink: Arc<dyn EventSink>) -> Option<String> {
+        let response = self.answer(raw, sink).await?;
         // A response that cannot be serialized is a bug in this crate, not in
         // the frame, so it is reported as one rather than dropped.
         Some(serde_json::to_string(&response).unwrap_or_else(|error| {
@@ -58,7 +59,7 @@ impl Codec {
         }))
     }
 
-    async fn answer(&self, raw: &str) -> Option<Response> {
+    async fn answer(&self, raw: &str, sink: Arc<dyn EventSink>) -> Option<Response> {
         let value: serde_json::Value = match serde_json::from_str(raw) {
             Ok(value) => value,
             Err(error) => return Some(refusal(ErrorCode::ParseError, error.to_string())),
@@ -78,14 +79,14 @@ impl Codec {
             // A response answers a request this server made. It is not a
             // question, so it gets no answer.
             Ok(Message::Response(_)) => None,
-            Ok(Message::Request(request)) => Some(self.dispatch(request).await),
+            Ok(Message::Request(request)) => Some(self.dispatch(request, sink).await),
             Err(error) => Some(refusal(ErrorCode::InvalidRequest, error.to_string())),
         }
     }
 
-    async fn dispatch(&self, request: Request) -> Response {
+    async fn dispatch(&self, request: Request, sink: Arc<dyn EventSink>) -> Response {
         let id = request.id.clone();
-        match self.call(request).await {
+        match self.call(request, sink).await {
             Ok(result) => Response {
                 jsonrpc: V2,
                 id,
@@ -99,7 +100,11 @@ impl Codec {
         }
     }
 
-    async fn call(&self, request: Request) -> Result<serde_json::Value, RpcError> {
+    async fn call(
+        &self,
+        request: Request,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<serde_json::Value, RpcError> {
         let method = request.method.as_str();
         if method != method::HELLO && !self.greeted.load(Ordering::Acquire) {
             // Section 4.4.1. The handshake settles the protocol version, so a
@@ -121,6 +126,21 @@ impl Codec {
                 self.greeted.store(true, Ordering::Release);
                 Ok(result)
             }
+            method::SESSION_CREATE => encode(engine.session_create(typed(params)?).await?),
+            method::SESSION_LIST => encode(engine.session_list().await?),
+            method::SESSION_EVENTS => encode(engine.session_events(typed(params)?).await?),
+            method::SESSION_SUBSCRIBE => {
+                encode(engine.session_subscribe(typed(params)?, sink).await?)
+            }
+            method::SESSION_UNSUBSCRIBE => {
+                encode(engine.session_unsubscribe(typed(params)?).await?)
+            }
+            method::AGENT_PROMPT => encode(engine.agent_prompt(typed(params)?).await?),
+            method::AGENT_STATUS => encode(engine.agent_status(typed(params)?).await?),
+            method::AGENT_INTERRUPT => encode(engine.agent_interrupt(typed(params)?).await?),
+            method::CATALOG_TOOLS => encode(engine.catalog_tools().await?),
+            method::CATALOG_MODELS => encode(engine.catalog_models().await?),
+            method::CONFIG_DUMP => encode(engine.config_dump().await?),
             unknown => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
                 format!("no method `{unknown}`"),
