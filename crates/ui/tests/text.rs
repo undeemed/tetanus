@@ -1,14 +1,15 @@
 //! Test Design Specification: the text rules every renderer shares.
 //!
 //! Features tested: cutting a value to a width and saying so, folding a
-//! paragraph to a width without losing a word, and measuring and cutting a
-//! line that a theme has already painted. Features NOT tested here: what
-//! any particular renderer does with the result - the status line owns its own
-//! cases in `progress.rs`, the timeline owns its own in `render/timeline.rs`.
+//! paragraph to a width without losing a word, measuring and cutting a line
+//! that a theme has already painted, and making text the harness did not write
+//! safe to draw. Features NOT tested here: what any particular renderer does
+//! with the result - the status line owns its own cases in `progress.rs`, the
+//! timeline owns its own in `render/timeline.rs`.
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{fit, light, plain, truncate, visible_width, wrap, Charset};
+use tetanus_ui::{fit, light, plain, tame, truncate, visible_width, wrap, Charset};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -266,4 +267,59 @@ fn a_cut_lands_between_characters_not_inside_one() {
             "`{painted}` overruns {width} columns"
         );
     }
+}
+
+/// TC-UI-TEXT-17: an escape sequence in text the harness did not write.
+/// Expected: taken out whole, in each of the three shapes a terminal reads,
+/// with the words either side of it kept and no fragment of the sequence left
+/// behind. A tool returns whatever it returns, and a result drawn unchanged
+/// can clear the screen it is being drawn on, rename the window, or paint a
+/// colour under `--color never`.
+#[test]
+fn a_sequence_a_tool_wrote_is_taken_out_whole() {
+    // CSI: colour, and erasing the display.
+    assert_eq!(tame("safe \u{1b}[31mred\u{1b}[0m end"), "safe red end");
+    assert_eq!(tame("before \u{1b}[2J\u{1b}[H after"), "before  after");
+    // OSC, ended either way it is allowed to end.
+    assert_eq!(tame("a \u{1b}]0;title\u{7}b"), "a b");
+    assert_eq!(tame("a \u{1b}]0;title\u{1b}\\b"), "a b");
+    // Two characters, and a sequence with nothing after it.
+    assert_eq!(tame("a \u{1b}7b"), "a b");
+    assert_eq!(tame("a \u{1b}[31m"), "a ");
+    // Nothing of the escape survives to be drawn.
+    for text in ["\u{1b}[31mred", "\u{1b}]0;t\u{7}", "\u{1b}[2J"] {
+        assert!(!tame(text).contains('\u{1b}'), "{text:?}");
+        assert!(!tame(text).contains('['), "{text:?}");
+    }
+}
+
+/// TC-UI-TEXT-18: control characters that are not part of a sequence.
+/// Expected: each becomes one space, so a byte between two words cannot join
+/// them; newlines survive, because they are what a paragraph is folded on and
+/// a tool that wrote lines meant lines.
+#[test]
+fn a_stray_control_becomes_a_space_and_a_newline_survives() {
+    assert_eq!(tame("one\rtwo"), "one two");
+    assert_eq!(tame("ring\u{7}ing"), "ring ing");
+    assert_eq!(tame("a\u{0}b\u{7f}c"), "a b c");
+    assert_eq!(tame("one\ttwo"), "one two");
+    assert_eq!(tame("first\n\nsecond"), "first\n\nsecond");
+    assert_eq!(tame("plain text"), "plain text");
+}
+
+/// TC-UI-TEXT-19: the width rules on text a tool wrote.
+/// Expected: both tame before they measure. A sequence counted as characters
+/// and taken out afterwards would have been paid for in columns the reader
+/// never sees, so the value would come back short and the cut would land in
+/// the wrong place.
+#[test]
+fn the_width_rules_measure_what_will_be_drawn() {
+    // Eleven characters of sequence in front of four of text.
+    let painted = "\u{1b}[31mfour\u{1b}[0m five six";
+    assert_eq!(truncate(painted, 8, Charset::Unicode), "four fi…");
+    assert_eq!(truncate(painted, 13, Charset::Unicode), "four five six");
+    assert_eq!(wrap(painted, 5), vec!["four", "five", "six"]);
+    // And a sequence cannot survive either of them.
+    assert!(!truncate(painted, 40, Charset::Unicode).contains('\u{1b}'));
+    assert!(!wrap(painted, 40).concat().contains('\u{1b}'));
 }

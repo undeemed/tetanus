@@ -324,6 +324,26 @@ The cap counts the lines the tool wrote and not the rows a terminal draws, so a 
 is told the same number about the same journal, and no cut lands inside a line - half a line, with
 its other half folded away, is a line nobody can read back.
 
+Text the harness did not write is tamed before it is sized, in
+[`tame`](crates/ui/src/text.rs).
+A tool's result is whatever the tool returned and a model's answer is whatever the model wrote, so
+either can carry a sequence that does more than be read: `ESC [ 2 J` clears the frame it is being
+drawn into, `ESC ] 0 ;` renames the window, `BEL` rings, and a colour written this way arrives even
+under `--color never`, which the surface promises will write none.
+An escape sequence is therefore taken out whole - it drew nothing, so nothing is what it leaves -
+and a stray control character becomes a space, which keeps two words from being joined by a byte
+between them; newlines survive, because they are what a paragraph is folded on.
+It is done inside [`truncate`](crates/ui/src/text.rs) and [`wrap`](crates/ui/src/text.rs) rather
+than at each renderer, because those two are exactly the functions that size foreign text, and a
+sequence taken out after it was measured would already have been paid for in columns the reader
+never sees.
+`fit`, `light`, `plain` and `visible_width` keep the sequences they read, because those are the
+theme's own.
+A tool's colour is dropped rather than honoured: upstream's terminal card parses ANSI and draws the
+colours it finds, but the family of sequences that carries a colour is the family that carries a
+cursor move, so a filter is what this is until a parser is written - and a parser would still have
+to end here for everything it refused.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
