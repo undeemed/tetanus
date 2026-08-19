@@ -20,7 +20,13 @@ use render::help;
 #[command(
     name = "tetanus",
     version,
-    about = "tetanus - rust agent harness. everything deepseek-harness has, but better."
+    about = "tetanus - rust agent harness. everything deepseek-harness has, but better.",
+    long_about = "tetanus - rust agent harness. everything deepseek-harness has, but better.\n\n\
+                  A turn is the unit of work: the agent claims your prompt, assembles a prompt \
+                  and a tool catalogue, calls a model, runs whatever tools the model asked for, \
+                  and stops. Every durable fact lands on an append-only JSONL journal you can \
+                  replay afterwards.",
+    max_term_width = 100
 )]
 struct Cli {
     /// When to colour output
@@ -120,7 +126,9 @@ impl Cli {
         let theme = policy.stdout;
         let command = <Self as clap::CommandFactory>::command()
             .color(help::command_style(theme.color()))
-            .styles(help::styles());
+            .styles(help::styles())
+            .after_help(help::root_epilogue(&theme))
+            .mut_subcommand("run", |run| run.after_help(help::run_epilogue(&theme)));
         <Self as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
             .unwrap_or_else(|err| err.exit())
     }
