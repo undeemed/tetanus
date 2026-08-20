@@ -310,6 +310,20 @@ about.
 The turn watched live does not answer it yet: it settles its lines as they arrive rather than
 keeping the events, so unfolding there is a recompose it has no store for.
 
+What a call was given and what it produced are laid out differently, in
+[`timeline.rs`](crates/cli/src/render/timeline.rs) and therefore in every view that reads through
+it.
+The arguments are JSON a reader checks against what they asked for, so they stay one cut line.
+The result is the work of the turn - a file, a command's output, a search - so it folds to the width
+under the tool's name the way a message folds under its speaker, and a result of more than
+[`CAP`](crates/cli/src/render/timeline.rs) lines keeps its first eight and its last eight with a
+count between them.
+Sixteen and that split are upstream's, from the terminal card in `packages/client/ui-primitives`:
+the tail is kept because a command's errors and its exit line are at the end of it.
+The cap counts the lines the tool wrote and not the rows a terminal draws, so a reader who resizes
+is told the same number about the same journal, and no cut lands inside a line - half a line, with
+its other half folded away, is a line nobody can read back.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut
