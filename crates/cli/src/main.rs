@@ -51,6 +51,13 @@ struct Cli {
         value_parser = clap::builder::PossibleValuesParser::new(ColorChoice::NAMES)
     )]
     color: String,
+    /// Settings document to read, instead of the one under the harness home
+    ///
+    /// The harness home is `$TETANUS_HOME` when that is set and `~/.tetanus`
+    /// when it is not, and the document in it is `settings.yaml`. That one is
+    /// allowed to be missing; a document named here is not.
+    #[arg(long, value_name = "PATH", global = true)]
+    settings: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -266,8 +273,8 @@ impl Cli {
 /// carried the empty string somewhere further on: a run announced itself on a
 /// model with no name, `replay` reported a journal missing when none had been
 /// named, and `serve` said `: invalid socket address`. This is clap's own
-/// rule, so all five now refuse the same mistake in the same words, with the
-/// exit Â§4.5 gives a bad argument.
+/// rule, so every one of them now refuses the same mistake in the same words,
+/// with the exit §4.5 gives a bad argument.
 ///
 /// Only the empty string. A name made of spaces is a name this build cannot
 /// judge - a file may be called that - and refusing it would be this module
@@ -300,20 +307,26 @@ fn color_choice(value: &str) -> ColorChoice {
 
 fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
     let mut out = policy.stdout();
+    // Which document every boot below reads, settled once and for all of
+    // them. `--settings` is global, so a path that names nothing is the same
+    // mistake whichever subcommand it was typed at, and one answer here is
+    // what keeps `tetanus config` describing the document the next command
+    // will read.
+    let document = settings::document(policy, cli.settings)?;
     match cli.cmd {
         Cmd::Run(args) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            runtime.block_on(run(policy, &mut out, args))
+            runtime.block_on(run(policy, &document, &mut out, args))
         }
         Cmd::Chat(args) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            let held = runtime.block_on(chat::chat(policy, &mut out, args));
+            let held = runtime.block_on(chat::chat(policy, &document, &mut out, args));
             // The line reader is a blocking read that nothing can cancel, so a
             // chat left with Ctrl-C exits with one still parked on standard
             // input. Dropping the runtime waits for its pool; this does not,
@@ -321,7 +334,9 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { dir, json } => settings::page(policy, &mut out, dir.as_deref(), json),
+        Cmd::Config { dir, json } => {
+            settings::page(policy, &document, &mut out, dir.as_deref(), json)
+        }
         Cmd::Models { json } => {
             let catalog = providers();
             if json {
@@ -364,6 +379,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // would be two harnesses wearing one name.
             let engine = tetanus_engine::HarnessEngine::new(settings::booted(
                 policy,
+                &document,
                 &settings::root(dir.as_deref()),
             )?);
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -424,7 +440,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // an empty session is how a typo becomes a blank page and a zero
             // exit. The lookup is here, before any view is chosen, so every
             // shape of `replay` finds and fails the same way.
-            let path = journal_named(policy, &path, dir.as_deref())?;
+            let path = journal_named(policy, &document, &path, dir.as_deref())?;
             // `--raw` is the view for a journal the reader below refuses,
             // so it opens the file itself. Asking for a log first would make
             // the one command that reads a broken journal fail on exactly the
@@ -513,7 +529,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // cannot read is a fault to report, not a server to start on the
             // defaults: the sessions the caller asked for would land
             // somewhere else, and the banner would say so too late to matter.
-            let booted = settings::booted(policy, &settings::root(dir.as_deref()))?;
+            let booted = settings::booted(policy, &document, &settings::root(dir.as_deref()))?;
             // Multi-threaded, because both carriers' properties are
             // concurrency properties: `agent.interrupt` is answered while the
             // prompt it interrupts still runs, and a push overtakes the answer
@@ -857,6 +873,7 @@ fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) 
 /// nothing on disk asks where the sessions live.
 fn journal_named(
     policy: &Policy,
+    document: &std::path::Path,
     target: &str,
     dir: Option<&std::path::Path>,
 ) -> Result<String, Reported> {
@@ -864,7 +881,7 @@ fn journal_named(
     if named.exists() {
         return Ok(target.to_string());
     }
-    let sessions = settings::booted(policy, &settings::root(dir))?.sessions_root;
+    let sessions = settings::booted(policy, document, &settings::root(dir))?.sessions_root;
     match [
         sessions.join(target),
         sessions.join(format!("{target}.jsonl")),
@@ -1528,6 +1545,7 @@ fn settle<W: std::io::Write>(
 
 async fn run<W: std::io::Write>(
     policy: &Policy,
+    document: &std::path::Path,
     out: &mut Ui<W>,
     args: RunArgs,
 ) -> Result<(), Reported> {
@@ -1548,6 +1566,7 @@ async fn run<W: std::io::Write>(
     // journal goes when `--session` did not.
     let settled = settings::turn_settings(
         policy,
+        document,
         settings::TurnFlags {
             adapter: args.adapter,
             model: args.model,

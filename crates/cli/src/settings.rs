@@ -40,11 +40,12 @@ use crate::{fail, misconfigured, report, AdapterChoice, Reported};
 /// print that credential.
 pub fn page<W: Write>(
     policy: &Policy,
+    document: &Path,
     out: &mut Ui<W>,
     dir: Option<&Path>,
     json: bool,
 ) -> Result<(), Reported> {
-    let engine = tetanus_engine::HarnessEngine::new(booted(policy, &root(dir))?);
+    let engine = tetanus_engine::HarnessEngine::new(booted(policy, document, &root(dir))?);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -78,13 +79,13 @@ pub fn page<W: Write>(
 /// the user configured on paper and unconfigured in fact.
 pub fn booted(
     policy: &Policy,
+    document: &std::path::Path,
     flags: &[(&'static str, serde_json::Value)],
 ) -> Result<tetanus_engine::EngineConfig, Reported> {
-    let document = document();
-    let mut settings = tetanus_engine::boot::document(&document).map_err(|err| {
+    let mut settings = tetanus_engine::boot::document(document).map_err(|err| {
         misconfigured(
             policy,
-            &document,
+            document,
             &tetanus_engine::convert::config_error(&err),
         )
     })?;
@@ -104,14 +105,14 @@ pub fn booted(
             .and_then(serde_json::Value::as_str);
         match blamed.is_some_and(|key| flags.iter().any(|(set, _)| *set == key)) {
             true => fail(policy, &fault),
-            false => misconfigured(policy, &document, &fault),
+            false => misconfigured(policy, document, &fault),
         }
     })
 }
 
 /// `--dir` as the one settings key it overrides, or nothing when it was not
 /// passed. Nothing is the point: it is what leaves the document able to win.
-pub fn root(dir: Option<&Path>) -> Vec<(&'static str, serde_json::Value)> {
+pub fn root(dir: Option<&std::path::Path>) -> Vec<(&'static str, serde_json::Value)> {
     dir.map(|dir| {
         (
             tetanus_engine::catalog::key::SESSIONS_ROOT,
@@ -122,9 +123,44 @@ pub fn root(dir: Option<&Path>) -> Vec<(&'static str, serde_json::Value)> {
     .collect()
 }
 
-/// Where this run's settings document lives.
-pub fn document() -> PathBuf {
-    tetanus_config::file::document_path(&tetanus_config::home::home(None))
+/// Where this run's settings document lives: the path `--settings` named, or
+/// `settings.yaml` under the harness home.
+///
+/// A document nobody named may be absent. A first run has none, the answer is
+/// then the compiled defaults, and every case in the suite would otherwise
+/// need one written before the binary would start.
+///
+/// A document the user named may not. They typed a path because something is
+/// in it, and reading the defaults instead would run a harness they did not
+/// configure and say nothing about it - the same fault the boot already
+/// refuses to fall back on, arriving one step earlier. The reader below
+/// reports every other way a document can be wrong, including a path whose
+/// extension it cannot parse and a directory where the file should be; a
+/// path with nothing at all there is the one it cannot tell from a first run,
+/// so it is checked here.
+pub fn document(policy: &Policy, named: Option<PathBuf>) -> Result<PathBuf, Reported> {
+    let Some(path) = named else {
+        return Ok(tetanus_config::file::document_path(
+            &tetanus_config::home::home(None),
+        ));
+    };
+    match path.exists() {
+        true => Ok(path),
+        false => Err(fail(policy, &missing_document(&path))),
+    }
+}
+
+/// A settings document the user named that is not there.
+///
+/// `Io` is §4.5's code for a path the filesystem could not answer for, and it
+/// carries the same exit 1 as a document that cannot be parsed: both mean the
+/// harness could not be configured the way it was asked to be.
+pub fn missing_document(path: &std::path::Path) -> RpcError {
+    RpcError::new(
+        ErrorCode::Io,
+        format!("no settings document at {}", path.display()),
+    )
+    .with_data(serde_json::json!({ "path": path.display().to_string() }))
 }
 
 /// The flags a command that runs turns was given, before the document has
@@ -160,6 +196,7 @@ pub struct Turn {
 /// somebody wrote can, and that is what the layer is read for below.
 pub fn turn_settings(
     policy: &Policy,
+    document: &std::path::Path,
     flags: TurnFlags,
     fallback: AdapterChoice,
     journal: &str,
@@ -176,7 +213,7 @@ pub fn turn_settings(
     if let Some(steps) = flags.max_steps {
         overrides.push((key::MAX_STEPS, serde_json::json!(steps)));
     }
-    let settings = booted(policy, &overrides)?;
+    let settings = booted(policy, document, &overrides)?;
 
     // A key still on its compiled layer is a key nobody has an opinion about,
     // and the command's own default stands. Anything above it - a document, an
@@ -191,7 +228,7 @@ pub fn turn_settings(
 
     Ok(Turn {
         provider: match written(key::PROVIDER) {
-            true => provider_named(policy, &settings.default_provider)?,
+            true => provider_named(policy, document, &settings.default_provider)?,
             false => fallback,
         },
         // Not the settled value when nobody set it: the engine's compiled
@@ -212,7 +249,11 @@ pub fn turn_settings(
 /// clap refuses an unknown `--adapter`, so a name that gets this far came out
 /// of a document or an environment, and is reported the way any other value
 /// in one is: it names the key, and it names the file that has to be edited.
-pub fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported> {
+pub fn provider_named(
+    policy: &Policy,
+    document: &std::path::Path,
+    name: &str,
+) -> Result<AdapterChoice, Reported> {
     [AdapterChoice::Mock, AdapterChoice::Deepseek]
         .into_iter()
         .find(|choice| choice.route() == name)
@@ -222,7 +263,7 @@ pub fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Repo
                 .join(" or ");
             misconfigured(
                 policy,
-                &document(),
+                document,
                 &RpcError::new(
                     ErrorCode::InvalidParams,
                     format!("must be a provider this build can reach, {known}, not {name:?}"),
