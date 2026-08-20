@@ -37,6 +37,10 @@ fn chat_with_key(dir: &Path, args: &[&str], typed: &str, key: Option<&str>) -> O
     cmd.current_dir(dir)
         .arg("chat")
         .args(args)
+        // The harness home is the case's own directory, so a settings
+        // document on the machine running the suite cannot decide what a
+        // chat runs on.
+        .env("TETANUS_HOME", dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

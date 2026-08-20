@@ -42,14 +42,17 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         "CLICOLOR_FORCE",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
-        // A settings document is read from the harness home, so a home the
-        // person running the suite happens to have configured would otherwise
-        // decide what these cases see.
-        "TETANUS_HOME",
     ] {
         cmd.env_remove(name);
     }
-    cmd.env("TERM", "xterm-256color").env("COLUMNS", "100");
+    // Every subcommand that builds an engine now reads the settings document
+    // under the harness home, so the home is the case's own directory and
+    // never the one the person running the suite happens to have configured.
+    // A case that is about a document names a home of its own below, and that
+    // one wins because it is applied last.
+    cmd.env("TETANUS_HOME", dir)
+        .env("TERM", "xterm-256color")
+        .env("COLUMNS", "100");
     for (name, value) in env {
         cmd.env(name, value);
     }
@@ -537,6 +540,156 @@ fn the_json_config_says_what_the_page_says() {
         told.contains(&("agent.max_steps".to_string(), "file".to_string())),
         "{json}"
     );
+}
+
+/// TC-CLI-CONF-5: `--dir` against a document that sets `sessions.root`.
+/// Expected: without the flag the listing is the document's directory; with
+/// it, the flag's. A build where the flag lost would make the document
+/// impossible to overrule for one command; a build where the document could
+/// never win would make it decorative.
+///
+/// And the provenance follows the same rule: a flag is only on the `Flag`
+/// layer of the process it was typed at, so a page asked for on its own says
+/// `file`, and the same page asked with `--dir` says `flag` and carries the
+/// flag's value.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the document
+/// below, and the working directory holds two journals a real run wrote, in
+/// two directories of their own.
+#[test]
+fn a_flag_beats_the_document_and_says_so() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for (prompt, path) in [
+        ("written down", "documented/a.jsonl"),
+        ("typed out", "flagged/b.jsonl"),
+    ] {
+        let out = run(dir.path(), &["run", "-p", prompt, "--session", path], &env);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: documented\n",
+    )
+    .expect("the document is written");
+
+    let ids = |args: &[&str]| -> Vec<String> {
+        let out = run(dir.path(), args, &env);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout(&out)).expect("one JSON object");
+        parsed["sessions"]
+            .as_array()
+            .expect("the sessions")
+            .iter()
+            .map(|session| {
+                session["session_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    assert_eq!(ids(&["sessions", "--json"]), ["a"], "the document lost");
+    assert_eq!(
+        ids(&["sessions", "--dir", "flagged", "--json"]),
+        ["b"],
+        "the flag lost"
+    );
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    assert!(
+        layers(&page).contains(&("sessions.root".to_string(), "file".to_string())),
+        "{page}"
+    );
+
+    let asked = stdout(&run(
+        dir.path(),
+        &["config", "--dir", "flagged", "--color", "never"],
+        &env,
+    ));
+    assert!(
+        layers(&asked).contains(&("sessions.root".to_string(), "flag".to_string())),
+        "{asked}"
+    );
+    assert!(
+        asked
+            .lines()
+            .any(|line| line.starts_with("sessions.root") && line.contains("flagged")),
+        "{asked}"
+    );
+}
+
+/// TC-CLI-CONF-6: a document that cannot be read, on the two subcommands that
+/// run an engine rather than describe one.
+/// Expected: exit 1 and the path, from both, and no listing and no banner. A
+/// boot that fell back to the defaults would put the sessions somewhere the
+/// user did not ask for and say nothing about it, which is worse than not
+/// starting: the run is lost either way, and only one of the two tells them.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding a document
+/// that does not parse.
+#[test]
+fn a_document_that_cannot_be_read_stops_every_engine() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    std::fs::write(&document, "sessions: [1, 2\n").expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    for args in [vec!["sessions"], vec!["sessions", "--json"], vec!["serve"]] {
+        let out = run(dir.path(), &args, &env);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "`{args:?}` printed a page");
+        assert!(
+            stderr(&out).contains(&document.display().to_string()),
+            "`{args:?}` did not name the document: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// TC-CLI-CONF-7: a document that holds a credential.
+/// Expected: the key keeps its row and its layer, so a reader can still see
+/// that it is set, and the value is `<redacted>` in both views. The page is
+/// the engine's own `config.dump`, which §4.3 of the contract says never
+/// publishes a secret's value; a surface that printed the resolved layers for
+/// itself would print the credential to whoever is reading the terminal, and
+/// into whatever the terminal is being logged to.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the document
+/// below.
+#[test]
+fn a_credential_in_the_document_is_not_printed() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "llm:\n  providers:\n    deepseek:\n      api_key: sekrit-value\n",
+    )
+    .expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    let json = stdout(&run(dir.path(), &["config", "--json"], &env));
+
+    let key = "llm.providers.deepseek.api_key";
+    assert!(
+        layers(&page).contains(&(key.to_string(), "file".to_string())),
+        "the key lost its row or its layer:\n{page}"
+    );
+    assert!(page.contains("<redacted>"), "{page}");
+    assert!(
+        !page.contains("sekrit-value"),
+        "the page printed it:\n{page}"
+    );
+    assert!(!json.contains("sekrit-value"), "--json printed it:\n{json}");
 }
 
 /// TC-CLI-UI-11: `tetanus replay --live` into a pipe.

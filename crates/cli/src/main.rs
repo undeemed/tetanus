@@ -5,7 +5,7 @@ mod prompt;
 mod render;
 
 use tetanus_protocol::methods::{
-    AgentPromptResult, ConfigDumpResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
+    AgentPromptResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as protocol;
@@ -62,6 +62,10 @@ enum Cmd {
     Chat(chat::ChatArgs),
     /// Show resolved config with provenance
     Config {
+        /// Answer as though `--dir <PATH>` had been given to a subcommand
+        /// that takes it, so the layer a flag settles on can be read
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -80,9 +84,10 @@ enum Cmd {
     },
     /// List the session journals this build has written
     Sessions {
-        /// Directory the journals live in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals live in. Defaults to `sessions.root` in
+        /// the settings document, or `sessions` when nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Move a cursor down the list on a screen of its own, and read the
         /// journal under it with Enter
         #[arg(long, conflicts_with = "json")]
@@ -121,9 +126,11 @@ enum Cmd {
     },
     /// Host the JSON-RPC protocol on stdin and stdout
     Serve {
-        /// Directory the journals this server writes will land in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals this server writes land in. Defaults to
+        /// `sessions.root` in the settings document, or `sessions` when
+        /// nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Serve the WebSocket carrier on this address instead of on stdio
         #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
@@ -309,30 +316,31 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { json } => {
-            // What the engine would run on, not what this surface believes.
-            // The document is read by `boot::settings` and the values in it
-            // are settled by `from_settings`, so the page reports the keys the
-            // engine has and the layer each came from. A surface that read the
-            // file for itself would be a second answer to the one question
-            // this command exists to answer.
+        Cmd::Config { dir, json } => {
+            // What the engine would run on, not what this surface believes:
+            // the same boot every other subcommand does, so the page reports
+            // the keys the engine has and the layer each came from.
             //
-            // Both steps can fail, and a failure is reported rather than
-            // stepped over: a document the harness ignored leaves the user
-            // configured on paper and unconfigured in fact.
-            let document = tetanus_config::file::document_path(&tetanus_config::home::home(None));
-            let engine = tetanus_engine::boot::document(&document)
-                .and_then(tetanus_engine::EngineConfig::from_settings)
-                .map_err(|err| {
-                    misconfigured(
-                        policy,
-                        &document,
-                        &tetanus_engine::convert::config_error(&err),
-                    )
-                })?;
-            let dump = ConfigDumpResult {
-                entries: settings(&engine.resolved),
-            };
+            // A flag is only on the `Flag` layer of the process it was typed
+            // at, so a page with no flags can never print `flag` - and the
+            // flag layer is exactly what a reader comes to this command to
+            // understand. `--dir` is that flag, asked here as a question
+            // rather than as an instruction: it lists nothing and opens
+            // nothing, it says what a subcommand given it would run on.
+            //
+            // The page is the engine's own `config.dump`, not a copy of the
+            // resolved layers: the engine reports the value it will actually
+            // use for a key it settles, and it drops the value of a key whose
+            // name says it holds a credential (contract §4.3). A surface that
+            // printed the layers itself would print that credential.
+            let engine = tetanus_engine::HarnessEngine::new(booted(policy, &root(dir.as_deref()))?);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let dump = runtime
+                .block_on(tetanus_protocol::methods::Engine::config_dump(&engine))
+                .map_err(|err| fail(policy, &err))?;
             if json {
                 return render::json::line(&mut out, &dump)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -374,10 +382,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // holds, and which of them a turn is running on. No surface can
             // assemble that from a path, which is why this is the first
             // subcommand whose whole answer comes from the engine.
-            let engine = tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                sessions_root: dir,
-                ..Default::default()
-            });
+            //
+            // Which directory is the settings document's answer unless the
+            // flag overrode it, and the engine is built from the whole of
+            // that boot rather than from a path and the compiled defaults:
+            // a listing under one set of settings and a run under another
+            // would be two harnesses wearing one name.
+            let engine = tetanus_engine::HarnessEngine::new(booted(policy, &root(dir.as_deref()))?);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -523,6 +534,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // WebSocket carrier does not touch stdout either way, and reads
             // the same page in the same place.
             let mut err = policy.stderr();
+            // Before anything is bound or announced. A document the harness
+            // cannot read is a fault to report, not a server to start on the
+            // defaults: the sessions the caller asked for would land
+            // somewhere else, and the banner would say so too late to matter.
+            let settings = booted(policy, &root(dir.as_deref()))?;
             // Multi-threaded, because both carriers' properties are
             // concurrency properties: `agent.interrupt` is answered while the
             // prompt it interrupts still runs, and a push overtakes the answer
@@ -571,17 +587,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 &mut err,
                 &render::serve::Serving {
                     carrier,
-                    sessions: &dir,
+                    sessions: &settings.sessions_root,
                     protocol: tetanus_protocol::PROTOCOL_VERSION,
                 },
             )
             .ok();
-            let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                    sessions_root: dir,
-                    ..Default::default()
-                }),
-            );
+            let engine: Arc<dyn tetanus_protocol::methods::Engine> =
+                Arc::new(tetanus_engine::HarnessEngine::new(settings));
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
                 // the accept fails, so the interrupt is the shutdown and not
@@ -788,27 +800,6 @@ fn registry() -> ToolRegistry {
     ToolRegistry::new().with(Arc::new(EchoTool))
 }
 
-/// Carry resolved config across to the contract shape the view reads.
-///
-/// The same story as [`boundary`]: the
-/// layers agree one for one, so this is a copy. It goes when the engine serves
-/// `config.dump`, and `render::config` does not notice.
-fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
-    config
-        .provenance()
-        .map(|(key, resolved)| protocol::ConfigEntry {
-            key: key.clone(),
-            value: resolved.value.clone(),
-            layer: match resolved.layer {
-                tetanus_config::Layer::Default => protocol::ConfigLayer::Default,
-                tetanus_config::Layer::File => protocol::ConfigLayer::File,
-                tetanus_config::Layer::Env => protocol::ConfigLayer::Env,
-                tetanus_config::Layer::Flag => protocol::ConfigLayer::Flag,
-            },
-        })
-        .collect()
-}
-
 /// Ctrl-C, as a future that resolves when it arrives.
 ///
 /// Only the two surfaces that draw a block in place wait on this. Everywhere
@@ -873,6 +864,67 @@ fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) 
             .ok();
     }
     Reported(render::fault::status(error))
+}
+/// The settings the harness will run on: the document under the harness home,
+/// with whatever the user typed on top of it.
+///
+/// Every subcommand that builds an engine comes through here, so `tetanus
+/// config` describes the settings the next command will actually use. A
+/// subcommand that resolved its own would be a second answer to the question
+/// this binary has one command for.
+///
+/// `flags` are the keys the user set on the command line, on the layer that
+/// says so: `Flag` outranks `File`, which is what makes a flag win, and
+/// `config.dump` then reports the value as `flag`. A flag the user did not
+/// pass is not in the list at all - a clap default put on this layer would be
+/// a document that could never win.
+///
+/// Neither step falls back on failure. A document the harness ignored leaves
+/// the user configured on paper and unconfigured in fact.
+fn booted(
+    policy: &Policy,
+    flags: &[(&'static str, serde_json::Value)],
+) -> Result<tetanus_engine::EngineConfig, Reported> {
+    let document = tetanus_config::file::document_path(&tetanus_config::home::home(None));
+    let mut settings = tetanus_engine::boot::document(&document).map_err(|err| {
+        misconfigured(
+            policy,
+            &document,
+            &tetanus_engine::convert::config_error(&err),
+        )
+    })?;
+    for (key, value) in flags {
+        settings.set(key, value.clone(), tetanus_config::Layer::Flag);
+    }
+    tetanus_engine::EngineConfig::from_settings(settings).map_err(|err| {
+        let fault = tetanus_engine::convert::config_error(&err);
+        // Whoever set the value is who the report is for. A value the flags
+        // put there is a flag to retype, and `fail` sends the reader to
+        // `--help` as it does for any other bad argument; everything else
+        // came off the document, and is fixed by editing it.
+        let blamed = fault
+            .data
+            .as_ref()
+            .and_then(|data| data.get("field"))
+            .and_then(serde_json::Value::as_str);
+        match blamed.is_some_and(|key| flags.iter().any(|(set, _)| *set == key)) {
+            true => fail(policy, &fault),
+            false => misconfigured(policy, &document, &fault),
+        }
+    })
+}
+
+/// `--dir` as the one settings key it overrides, or nothing when it was not
+/// passed. Nothing is the point: it is what leaves the document able to win.
+fn root(dir: Option<&std::path::Path>) -> Vec<(&'static str, serde_json::Value)> {
+    dir.map(|dir| {
+        (
+            tetanus_engine::catalog::key::SESSIONS_ROOT,
+            serde_json::json!(dir.display().to_string()),
+        )
+    })
+    .into_iter()
+    .collect()
 }
 
 /// A path the user named that is not there.

@@ -23,7 +23,9 @@ use common::without_duration;
 
 fn run(dir: &Path, args: &[&str], key: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tetanus"));
-    cmd.current_dir(dir).args(args);
+    // The harness home is the case's own directory, so a settings document on
+    // the machine running the suite cannot decide what a run runs on.
+    cmd.current_dir(dir).args(args).env("TETANUS_HOME", dir);
     match key {
         Some(value) => cmd.env("DEEPSEEK_API_KEY", value),
         None => cmd.env_remove("DEEPSEEK_API_KEY"),
@@ -36,6 +38,7 @@ fn piped(dir: &Path, args: &[&str], typed: &str) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_tetanus"))
         .current_dir(dir)
         .args(args)
+        .env("TETANUS_HOME", dir)
         .env_remove("DEEPSEEK_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
