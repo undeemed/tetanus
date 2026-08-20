@@ -55,12 +55,17 @@ pub const MOCK_TURN_FLOW: &[&str] = &[
 
 pub struct Harness {
     pub engine: TurnEngine,
+    /// Where the journal is on disk, for the suites that replay it rather than
+    /// read the live log. A test binary lints the parts of a shared fixture its
+    /// own cases do not reach.
+    #[allow(dead_code)]
     pub log_path: PathBuf,
     /// The prompt-section registry the engine assembles from. Only the
     /// system-prompt suite reaches for it, and a test binary lints the parts
     /// of a shared fixture it does not use.
     #[allow(dead_code)]
     pub sections: Arc<PromptRegistry>,
+    #[allow(dead_code)]
     trace: TurnTrace,
     // Not every suite sharing this fixture listens on the bus, and a test
     // binary lints the parts of it that its own cases do not reach.
@@ -117,6 +122,7 @@ impl Harness {
         &self.bus
     }
 
+    #[allow(dead_code)]
     pub fn trace(&self) -> Vec<String> {
         self.trace.topics()
     }
