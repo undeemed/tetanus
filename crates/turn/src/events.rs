@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tetanus_core::events::{DispatchMode, Event};
 
 use crate::llm::{ChunkSink, LlmError, ModelRequest, ModelResponse};
+use crate::prompt::{interpolate, PromptError, Variables};
 use crate::tools::{ToolCall, ToolError, ToolOutcome, ToolSchema};
 
 /// One named piece of the system prompt. Plugins contribute sections; the
@@ -21,33 +22,51 @@ pub struct PromptSection {
     pub text: String,
 }
 
-/// The assembled prompt: ordered sections plus the tool schemas the model may
-/// call this step.
+/// The assembled prompt: ordered sections, the tool schemas the model may call
+/// this step, and the variables those sections may name.
+///
+/// Section text is carried as it was contributed, references and all. It
+/// becomes the text the model reads at [`render`](Self::render), which is the
+/// last thing that happens to it, so a listener that rewrites a section or
+/// adds a variable is writing into the same assembly the substitution reads.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SystemPrompt {
     pub sections: Vec<PromptSection>,
     pub tools: Vec<ToolSchema>,
+    /// Every name a section may reference, with the value its provider gave
+    /// for this assembly. A name that is absent is registered nowhere; a name
+    /// present with no value is registered and had nothing to say this time.
+    pub variables: Variables,
 }
 
 impl SystemPrompt {
-    /// The model-facing text: every section that has any, in order, separated
-    /// by a blank line.
+    /// The model-facing text: every section substituted, then every section
+    /// that has any text, in order, separated by a blank line.
     ///
     /// An empty section contributes nothing at all. A deployment that
     /// configures no persona does not pay a blank gap for the section it left
     /// unfilled, and an assembly whose sections are all empty renders as the
     /// empty string, which is what keeps the system message off the request
-    /// entirely.
+    /// entirely. A section is measured after substitution, so one whose only
+    /// content is a variable with an empty value drops out too.
+    ///
+    /// Substitution is strict, and a section that names a variable this
+    /// assembly cannot give it fails the render rather than reaching the model
+    /// as prose it would have read as an instruction. [`interpolate`] says
+    /// which mistakes those are.
     ///
     /// Parity: upstream `renderPrompt`, `packages/core/system-prompt/src`,
-    /// "drop empty sections, and join the rest with blank lines".
-    pub fn text(&self) -> String {
-        self.sections
-            .iter()
-            .map(|s| s.text.as_str())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    /// "interpolate strict `{{variable}}` references, drop empty sections, and
+    /// join the rest with blank lines".
+    pub fn render(&self) -> Result<String, PromptError> {
+        let mut rendered = Vec::with_capacity(self.sections.len());
+        for section in &self.sections {
+            let text = interpolate(&section.text, &section.id, &self.variables)?;
+            if !text.is_empty() {
+                rendered.push(text);
+            }
+        }
+        Ok(rendered.join("\n\n"))
     }
 }
 
@@ -78,6 +97,9 @@ pub struct AssemblePrompt {
     pub step: u32,
     pub sections: Vec<PromptSection>,
     pub tools: Vec<ToolSchema>,
+    /// The registry's variables, resolved for this assembly. A listener may
+    /// add a name or replace a value, and the render reads what it left.
+    pub variables: Variables,
 }
 impl Event for AssemblePrompt {
     const TOPIC: &'static str = "system-prompt/assemble";

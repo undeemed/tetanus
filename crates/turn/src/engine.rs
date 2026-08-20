@@ -44,13 +44,19 @@ use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, Message, ModelRequest, ModelResponse, StreamChunk,
 };
 use crate::log::{derive_messages, topic, with_system};
-use crate::prompt::{AssembleAt, PromptRegistry};
+use crate::prompt::{AssembleAt, PromptError, PromptRegistry};
 use crate::tools::{ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// The assembly could not be rendered, so the step never asked anything.
+    /// A section named a variable this assembly could not give it, which is a
+    /// mistake in what a plugin registered rather than anything the model or
+    /// the provider did.
+    #[error(transparent)]
+    Prompt(#[from] PromptError),
     #[error(transparent)]
     Llm(#[from] LlmError),
     #[error(transparent)]
@@ -322,7 +328,8 @@ impl TurnEngine {
             // Model history is derived from the log, never stored beside it.
             let history = derive_messages(&self.log.events());
 
-            let sections = self.prompt.assemble(&AssembleAt { turn, step });
+            let at = AssembleAt { turn, step };
+            let sections = self.prompt.assemble(&at);
             // A section registered as the whole prompt is kept aside here and
             // restored below. The assembly still runs in full, so tool schemas
             // and every other contribution still resolve and every listener
@@ -337,6 +344,7 @@ impl TurnEngine {
                 step,
                 sections,
                 tools: self.offered_tools(),
+                variables: self.prompt.variables(&at),
             };
             let mut prompt = self.bus.waterfall(&mut assemble, assemble_prompt()).await;
             if let Some(section) = complete {
@@ -349,7 +357,7 @@ impl TurnEngine {
                 request: ModelRequest {
                     provider: self.llm.provider().to_string(),
                     model: self.config.model.clone(),
-                    messages: with_system(&prompt.text(), history),
+                    messages: with_system(&prompt.render()?, history),
                     tools: prompt.tools.clone(),
                     max_tokens: self.config.max_tokens,
                 },
@@ -662,6 +670,7 @@ fn assemble_prompt() -> Terminal<AssemblePrompt> {
             SystemPrompt {
                 sections: std::mem::take(&mut ev.sections),
                 tools: std::mem::take(&mut ev.tools),
+                variables: std::mem::take(&mut ev.variables),
             }
         })
     })

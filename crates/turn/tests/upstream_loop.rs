@@ -180,6 +180,7 @@ async fn an_empty_assembly_omits_the_system_message() {
             SystemPrompt {
                 sections: Vec::new(),
                 tools: std::mem::take(&mut ev.tools),
+                variables: std::mem::take(&mut ev.variables),
             }
         })
     });

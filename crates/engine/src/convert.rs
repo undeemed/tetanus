@@ -103,6 +103,11 @@ pub fn turn_error(
     match error {
         TurnError::Session(e) => journal_error(session_id, journal, e),
         TurnError::Service(e) => internal(e),
+        // A section that names a variable the assembly cannot give it is a
+        // mistake in what this build registered, so the reader's next move is
+        // the one every internal fault asks for: report it. Retrying sends the
+        // same sections through the same registry.
+        TurnError::Prompt(e) => internal(format!("the system prompt could not be assembled: {e}")),
         TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
             RpcError::new(
                 ErrorCode::MissingCredential,

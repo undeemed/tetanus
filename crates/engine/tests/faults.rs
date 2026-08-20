@@ -27,6 +27,7 @@ use tetanus_engine::convert::{config_error, journal_error, turn_error};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_session::SessionError;
 use tetanus_turn::llm::LlmError;
+use tetanus_turn::prompt::PromptError;
 use tetanus_turn::TurnError;
 
 const SESSION: &str = "s-1";
@@ -157,6 +158,11 @@ fn every_shape_a_turn_can_fail_in_has_a_known_code() {
         TurnError::Llm(LlmError::Transport("x".to_string())),
         TurnError::Session(SessionError::NotSerializable("event".to_string())),
         TurnError::Session(SessionError::Corrupt(1)),
+        TurnError::Prompt(PromptError::UnknownVariable {
+            section: "persona".to_string(),
+            name: "modle".to_string(),
+            registered: vec!["model".to_string()],
+        }),
     ];
 
     for shape in shapes {
@@ -228,6 +234,26 @@ fn a_value_the_key_does_not_take_names_the_key_and_exits_two() {
         "must be a whole number of steps, at least 1, not 0"
     );
     assert_eq!(ErrorCode::InvalidParams.exit_status(), 2);
+}
+
+/// TC-FAULT-10: a prompt that could not be assembled is this build's fault.
+///
+/// Input: a section that named a variable the assembly had no value for.
+/// Expected: `Internal`, no `data`, and exit 1. Not `ProviderError`, because
+/// the request never left and retrying sends the same sections through the
+/// same registry; what the reader does next is report the build, which is what
+/// the table's `Internal` row means.
+#[test]
+fn a_prompt_that_could_not_be_assembled_is_internal_and_exits_one() {
+    let fault = mapped(TurnError::Prompt(PromptError::NoValue {
+        section: "persona".to_string(),
+        name: "cwd".to_string(),
+    }));
+
+    assert_eq!(fault.kind(), Some(ErrorCode::Internal));
+    assert_eq!(fault.data, None, "{fault:?}");
+    assert!(fault.message.contains("persona"), "{fault:?}");
+    assert_eq!(ErrorCode::Internal.exit_status(), 1);
 }
 
 fn mapped(error: TurnError) -> RpcError {
