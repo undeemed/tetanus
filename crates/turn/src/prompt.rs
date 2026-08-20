@@ -4,14 +4,16 @@
 //! Upstream keeps this registry on its `systemPrompt` service. A section has a
 //! unique name, an explicit order, and text that is either fixed or produced
 //! for each assembly, and one section may declare itself the whole prompt.
+//! Section text may name prompt variables, which [`interpolate`] substitutes.
 //! tetanus keeps that shape. What upstream also keeps there and tetanus has no
-//! surface for - scopes, prompt variables and runtime-context providers - stays
-//! a row in `docs/parity.md`.
+//! surface for - scopes, the variable registry itself and runtime-context
+//! providers - stays a row in `docs/parity.md`.
 //!
 //! The registry is the assembly's input, not its decision. It produces the
 //! ordered sections the engine hands to the `system-prompt/assemble`
 //! waterfall, which is still what has the last word.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use tetanus_core::EffectHandle;
@@ -28,6 +30,19 @@ pub const BASE_SECTION: &str = "base";
 /// order, and its deployment persona at `0`.
 pub const BASE_ORDER: i32 = -100;
 
+/// How a prompt variable's name is written, both where it is registered and
+/// where a section names it between braces.
+pub const VARIABLE_NAME: &str = "^[a-z][a-z0-9_]*$";
+
+/// What one assembly knows about its variables: every registered name, and the
+/// value it has for this assembly, if it has one.
+///
+/// A name that is absent is not registered at all, and a section that names it
+/// is a mistake; a name present with no value is registered but has nothing to
+/// say this time, which is a different mistake. [`interpolate`] refuses both,
+/// in those words.
+pub type Variables = BTreeMap<String, Option<String>>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PromptError {
     #[error("prompt section \"{0}\" is already registered")]
@@ -36,6 +51,34 @@ pub enum PromptError {
     Reserved(String),
     #[error("prompt section \"{refused}\" cannot be the whole prompt: \"{held}\" already is")]
     Complete { held: String, refused: String },
+    /// The text opened a reference that never became one complete group, and a
+    /// later `}}` says the author meant it as a reference.
+    #[error("malformed prompt variable reference at {at:?} in section {section:?} (references are complete simple {{{{name}}}} groups)")]
+    MalformedReference { section: String, at: String },
+    /// A complete group whose name no reference could carry.
+    #[error("malformed prompt variable reference {:?} in section {section:?} (variable names match {VARIABLE_NAME})", reference(.name))]
+    BadReference { section: String, name: String },
+    #[error("unknown prompt variable {:?} in section {section:?}; registered variables: {}", reference(.name), listed(.registered))]
+    UnknownVariable {
+        section: String,
+        name: String,
+        registered: Vec<String>,
+    },
+    #[error("prompt variable {:?} has no value for this assembly (section {section:?})", reference(.name))]
+    NoValue { section: String, name: String },
+}
+
+/// A variable's name as a section writes it.
+fn reference(name: &str) -> String {
+    ["{{", name, "}}"].concat()
+}
+
+fn listed(names: &[String]) -> String {
+    if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 /// What one assembly tells a section provider about itself.
@@ -234,4 +277,96 @@ fn remove(owner: &Weak<PromptRegistry>, seq: u64) {
         let mut inner = registry.inner.lock().expect("prompt registry");
         inner.entries.retain(|e| e.seq != seq);
     }
+}
+
+fn is_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Substitute one section's `{{name}}` references from this assembly's
+/// variables.
+///
+/// Strict, in three ways that are all mistakes worth a failed turn rather than
+/// prose the model would have read as an instruction: a reference to a name
+/// nothing registered, a reference to a registered name with no value this
+/// time, and text that opened a reference it never closed properly.
+///
+/// The one thing that is not a mistake: a lone `{{` with no `}}` after it
+/// anywhere is prose, and stays exactly as written - a shell default like
+/// `${X:-{{fallback}` is not a prompt variable. A substituted value is never
+/// scanned again either, so a value that itself contains braces is text, not a
+/// second reference.
+///
+/// `section` names the section the text came from, so a message says where to
+/// go and fix it.
+pub fn interpolate(
+    text: &str,
+    section: &str,
+    variables: &Variables,
+) -> Result<String, PromptError> {
+    let mut out = String::new();
+    let mut last = 0;
+    while let Some(offset) = text[last..].find("{{") {
+        let open = last + offset;
+        let Some(name) = group_at(&text[open..]) else {
+            // A later closing brace says a reference was meant; without one
+            // the braces are prose.
+            if text[open + 2..].contains("}}") {
+                return Err(PromptError::MalformedReference {
+                    section: section.to_string(),
+                    at: head(&text[open..]),
+                });
+            }
+            out.push_str(&text[last..open + 2]);
+            last = open + 2;
+            continue;
+        };
+        if !is_variable_name(name) {
+            return Err(PromptError::BadReference {
+                section: section.to_string(),
+                name: name.to_string(),
+            });
+        }
+        let value = match variables.get(name) {
+            None => {
+                return Err(PromptError::UnknownVariable {
+                    section: section.to_string(),
+                    name: name.to_string(),
+                    registered: variables.keys().cloned().collect(),
+                })
+            }
+            Some(None) => {
+                return Err(PromptError::NoValue {
+                    section: section.to_string(),
+                    name: name.to_string(),
+                })
+            }
+            Some(Some(value)) => value,
+        };
+        out.push_str(&text[last..open]);
+        out.push_str(value);
+        last = open + name.len() + 4;
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
+}
+
+/// The name in the complete `{{name}}` group this text opens with, if it opens
+/// with one. A brace anywhere inside is not part of a group.
+fn group_at(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("{{")?;
+    let end = rest.find(['{', '}'])?;
+    rest[end..].starts_with("}}").then(|| &rest[..end])
+}
+
+/// As much of a malformed reference as a message needs to point at it.
+fn head(text: &str) -> String {
+    let mut out: String = text.chars().take(16).collect();
+    out.push('\u{2026}');
+    out
 }
