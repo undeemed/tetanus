@@ -196,6 +196,7 @@ An escape sequence - a screen clear, a window title, a bell, a colour of its own
 The list pages are the same: a provider and the models it advertises, a tool and its arguments, a config key and the layer that settled it, and the id of a session, which `tetanus sessions` reads out of the journal's header rather than off the file it found.
 A name a terminal draws two columns to the character takes those columns in the list it is in, so every row beside it stays lined up.
 A failure report is the same, and it is one line however the failure was written: the sentence is composed out of what the engine sent - a path, a session id, a tool, a method, a provider - and a second line under `error:` would read as a second report.
+So is what a view is headed with and what a run says it is doing: the path you typed, the id read out of a journal's header, and the model a flag or a config file named are drawn as their words, on the one row each is given.
 This holds in every view and under every `--color` setting.
 `--raw` prints the payload as the JSON it is, where an escape is six characters no terminal acts on.
 

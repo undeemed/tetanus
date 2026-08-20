@@ -92,7 +92,7 @@ use std::time::Duration;
 use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{SessionEvent, SessionInfo};
 use tetanus_ui::{
-    bar, light, show, size, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View,
+    bar, light, show, size, tame_line, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View,
 };
 
 use super::browse::{Exit, Journal, NAME};
@@ -510,7 +510,12 @@ impl<'a> Picker<'a> {
             // find - `session.create` writes one - and a page holding no rows
             // does not say that, it looks like a view that failed to draw.
             Ok(events) if events.is_empty() => {
-                self.fault = Some(format!("{} holds nothing to read", chosen.session_id));
+                // The id came out of that journal's own header, and this is
+                // drawn as the left end of the footer.
+                self.fault = Some(format!(
+                    "{} holds nothing to read",
+                    tame_line(&chosen.session_id)
+                ));
             }
             Ok(events) => {
                 // Headed by the id, not the path: the id is what the reader
@@ -578,8 +583,9 @@ impl View for Picker<'_> {
 /// and Enter on to the matches, and is marked on the rows it kept and only on
 /// a terminal that was given colour; and that `?` spells the list's own keys
 /// out over it, that a journal showing its card keeps the keys that would
-/// close it, and that a footer with no room for the long wording keeps the two
-/// keys a reader cannot do without.
+/// close it, that an id read out of a header is drawn and not obeyed wherever
+/// this view composes one, and that a footer with no room for the long
+/// wording keeps the two keys a reader cannot do without.
 ///
 /// Features NOT tested here: the wording and widths of a row (owned by
 /// `sessions.rs`), the arrangement of a frame (owned by `tetanus_ui::Frame`),
@@ -1131,5 +1137,41 @@ mod tests {
         // compared.
         let past = |row: &str| row.trim_start_matches(['\u{203a}', ' ']).to_string();
         assert_eq!(past(&plain[0]), past(&before[1]), "a plain list was marked");
+    }
+
+    /// TC-CLI-PICK-16: an id off a journal's header, in both places the
+    /// picker composes it.
+    /// Expected: the journal it opens is headed by the id with the sequence
+    /// gone and on one row, and a journal holding nothing says so in a footer
+    /// with the same id in it, drawn the same way. The id is read out of the
+    /// file the list found, which is a file this build did not write.
+    #[test]
+    fn an_id_out_of_a_header_is_drawn_and_not_obeyed() {
+        let mut one = session("s0", 1);
+        one.session_id = "na\u{1b}[2Jsty\u{1b}]0;pwned\u{7}\nid".into();
+        let list = SessionListResult {
+            sessions: vec![one],
+        };
+
+        // A journal that opens: the id is the heading of the inner view.
+        let open = |_: &str| Ok(journal());
+        let mut view = Picker::new(theme(), &list, false, &open, COLS);
+        view.key(Key::Enter);
+        let read = rows(&mut view, COLS, 12);
+        assert_eq!(read.len(), 12, "{read:?}");
+        assert!(read[0].contains("nasty id"), "{read:?}");
+        assert!(!read.join("\n").contains('\u{1b}'), "{read:?}");
+
+        // A journal that holds nothing: the id is the footer's own sentence.
+        let empty = |_: &str| Ok(Vec::new());
+        let mut view = Picker::new(theme(), &list, false, &empty, COLS);
+        view.key(Key::Enter);
+        let told = rows(&mut view, COLS, 12);
+        assert_eq!(told.len(), 12, "{told:?}");
+        assert!(
+            told[told.len() - 1].contains("nasty id holds nothing to read"),
+            "{told:?}"
+        );
+        assert!(!told.join("\n").contains('\u{7}'), "{told:?}");
     }
 }

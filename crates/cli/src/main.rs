@@ -21,8 +21,8 @@ use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 use tetanus_ui::{
-    ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Stop, Theme, Tty, Ui,
-    View,
+    tame_line, ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen, Stop, Theme,
+    Tty, Ui, View,
 };
 
 use render::help;
@@ -1437,7 +1437,12 @@ async fn run<W: std::io::Write>(
     )
     .map_err(|err| report(policy, &err.to_string(), None))?;
 
-    let phase = format!("running the turn on {model}");
+    // The name is drawn in the phase line and as the heading of the watched
+    // view, and it arrived on a flag or out of a config file. The value that
+    // chose the adapter above is the one that was given; this is the one that
+    // is drawn.
+    let named = tame_line(&model);
+    let phase = format!("running the turn on {named}");
     let turn = engine.run_turn(&asked);
     let finished = match (args.trace, args.json, args.ui) {
         // The trace prints the sequence afterwards, so nothing may be written
@@ -1448,7 +1453,7 @@ async fn run<W: std::io::Write>(
             let watched = Watched {
                 phase: &phase,
                 think: args.think,
-                title: &model,
+                title: &named,
             };
             with_page(policy, out, &log, watched, turn, |err| {
                 turn_fault(err, &opened.session_id, args.adapter.route(), &args.session)

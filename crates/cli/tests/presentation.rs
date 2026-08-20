@@ -9,7 +9,8 @@
 //! that a model's thinking stays folded until it is asked for; that the
 //! journal a run leaves behind says what it ran under; that the session list
 //! finds those journals and names each by the id its store answers to; that a
-//! journal read full-screen is refused where there is no screen; and
+//! journal read full-screen is refused where there is no screen; that a model
+//! named from outside is drawn and not obeyed on the line that says it; and
 //! the shape of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
@@ -494,6 +495,46 @@ fn a_session_picker_needs_a_screen() {
     let alone = run(dir.path(), &["sessions", "--think"], &[]);
     assert_eq!(alone.status.code(), Some(2), "{}", stdout(&alone));
     assert!(stderr(&alone).contains("--ui"), "{}", stderr(&alone));
+}
+
+/// TC-CLI-UI-17: the phase line, with the model named from outside.
+/// Expected: the line still says what is being done and still names the model
+/// readably, and carries none of the sequence the name held - under both
+/// colour settings, because the one that promises no colour is the one a
+/// sequence written this way would arrive under anyway. TC-CLI-UI-7 asserts
+/// the same line holds no escape at all under a default model; this is the
+/// case where the value came from a flag, which is also where a config file's
+/// value arrives.
+#[test]
+fn a_model_named_from_outside_cannot_drive_the_terminal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let nasty = format!("mo{ESC}[2Jck{ESC}]0;pwned\u{7}");
+
+    for colour in ["never", "always"] {
+        let out = run(
+            dir.path(),
+            &["run", "-p", "hi", "--model", &nasty, "--color", colour],
+            &[],
+        );
+        let err = stderr(&out);
+        assert!(out.status.success(), "{err}");
+        assert!(err.contains("running the turn on"), "{err:?}");
+        assert!(
+            err.contains("mock"),
+            "the name stopped being readable: {err:?}"
+        );
+        assert!(!err.contains(&format!("{ESC}[2J")), "{err:?}");
+        assert!(!err.contains(&format!("{ESC}]0;")), "{err:?}");
+        assert!(!err.contains('\u{7}'), "{err:?}");
+    }
+
+    // And with no colour at all, the line is plain text through and through.
+    let plain = run(
+        dir.path(),
+        &["run", "-p", "hi", "--model", &nasty, "--color", "never"],
+        &[],
+    );
+    assert!(!stderr(&plain).contains(ESC), "{:?}", stderr(&plain));
 }
 
 /// TC-CLI-JSON-1: `tetanus run --json`.

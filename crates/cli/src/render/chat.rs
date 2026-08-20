@@ -22,7 +22,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_ui::{Role, Ui};
+use tetanus_ui::{tame_line, Role, Ui};
 
 /// Width of the label column on the opening page. `journal` is the longest
 /// label, and `run` prints its own journal line at this width, so the two land
@@ -40,10 +40,17 @@ pub struct Opened<'a> {
 }
 
 /// The page a chat opens on.
+///
+/// The two values that came from outside - the model a flag or a config file
+/// named, and the path a `-s` gave - are drawn through `tame_line` on the way
+/// in. A writer draws what it is handed, so making them safe is this page's
+/// job, and both are drawn as one row each: a sequence in either would clear
+/// the screen it is opening on, or rename the window, before a single question
+/// has been typed.
 pub fn banner<W: Write>(ui: &mut Ui<W>, opened: &Opened) -> io::Result<()> {
-    let model = ui.paint(Role::Accent, opened.model).to_string();
+    let model = ui.paint(Role::Accent, &tame_line(opened.model)).to_string();
     ui.heading(&format!("chat on {model}"))?;
-    ui.field("journal", LABEL, opened.journal)?;
+    ui.field("journal", LABEL, &tame_line(opened.journal))?;
     // Only when there are some. A chat that starts a journal has no history to
     // report, and a row saying `0 turns` would read as one that lost some.
     if opened.turns > 0 {
@@ -168,6 +175,33 @@ mod tests {
             });
             assert!(page.contains(expected), "{page}");
         }
+    }
+
+    /// TC-CLI-CHAT-PAGE-5: the two values the page took from outside.
+    /// Expected: what is left of each one is the readable text it held, on the
+    /// row it arrived on, and the page is otherwise the page above. A name off
+    /// a flag and a path off `-s` are the whole of what a caller puts on this
+    /// page, and it is drawn before the reader has typed anything.
+    #[test]
+    fn a_name_or_a_path_from_outside_is_drawn_not_obeyed() {
+        let page = rendered(Charset::Unicode, |ui| {
+            banner(
+                ui,
+                &Opened {
+                    model: "mo\u{1b}[2Jck",
+                    journal: "se\u{1b}]0;pwned\u{7}ssions/chat.jsonl",
+                    turns: 0,
+                },
+            )
+            .expect("banner");
+        });
+
+        assert_eq!(
+            page,
+            "\nchat on mock\n\
+             journal  sessions/chat.jsonl\n\
+             keys     /help for the commands \u{b7} ctrl-d to leave\n"
+        );
     }
 
     /// TC-CLI-CHAT-PAGE-3: the marker.
