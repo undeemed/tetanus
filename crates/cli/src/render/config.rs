@@ -10,6 +10,13 @@
 //! string loses its JSON quotes. Every other shape keeps its own spelling,
 //! which is what still tells `true` the boolean apart from `"true"` the string.
 //!
+//! # Why the document is on the heading
+//!
+//! Half the question is "where do I change it", and a `file` layer on a row
+//! answers only half of that: which file is a fact about the machine this ran
+//! on, not about the row. So the document the page read is drawn beside the
+//! heading, where it is read once rather than repeated down a column.
+//!
 //! A key, its value and the layer that settled it all came out of a file, an
 //! environment or a flag, so all three are tamed before they are drawn. The
 //! value is tamed by the width rule that cuts it; the other two are drawn as
@@ -23,9 +30,20 @@ use tetanus_ui::{tame, truncate, visible_width, Role, Ui};
 /// Space between the key, value and layer columns.
 const GAP: usize = 2;
 
-/// Render every resolved key on one aligned table.
-pub fn render<W: Write>(ui: &mut Ui<W>, entries: &[ConfigEntry]) -> io::Result<()> {
-    ui.heading("config")?;
+/// Render every resolved key on one aligned table, headed by the document
+/// this page read.
+///
+/// `read` is `None` for the page that read no document at all, where naming
+/// one would be naming a file this answer did not come from.
+pub fn render<W: Write>(
+    ui: &mut Ui<W>,
+    entries: &[ConfigEntry],
+    read: Option<&str>,
+) -> io::Result<()> {
+    match read {
+        Some(document) => ui.heading_at("config", document)?,
+        None => ui.heading("config")?,
+    }
     if entries.is_empty() {
         // An empty table is a fact, not an error: a build with no defaults is
         // a build that resolved nothing, and saying so beats printing a
@@ -93,9 +111,12 @@ fn layer(layer: &ConfigLayer) -> String {
 ///
 /// Features tested: column alignment, how a JSON value is spelled, a value too
 /// long for the terminal, a layer this build does not know, an empty table, a
-/// key and a layer that carry escape sequences, and a key column beside a key
-/// a terminal draws twice as wide. Features NOT tested here: which layer wins a key (owned by
-/// `tetanus-config`) and the colour policy (owned by `tetanus-ui`).
+/// key and a layer that carry escape sequences, a key column beside a key a
+/// terminal draws twice as wide, and the document on the heading against the
+/// page that read none. Features NOT tested here: which layer wins a key
+/// (owned by `tetanus-config`), which document this run reads and how its
+/// path is written (owned by the binary, and asserted end to end in
+/// `tests/presentation.rs`), and the colour policy (owned by `tetanus-ui`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`.
 #[cfg(test)]
@@ -114,8 +135,12 @@ mod tests {
     }
 
     fn rendered(entries: &[ConfigEntry], width: usize) -> String {
+        headed(entries, width, None)
+    }
+
+    fn headed(entries: &[ConfigEntry], width: usize, read: Option<&str>) -> String {
         let mut ui = buffered(Theme::new(false, Charset::Unicode), width);
-        render(&mut ui, entries).expect("render");
+        render(&mut ui, entries, read).expect("render");
         ui.contents()
     }
 
@@ -254,5 +279,25 @@ mod tests {
                 "the value does not start where the other one does: {line:?}"
             );
         }
+    }
+
+    /// TC-CLI-CFG-8: the document the page read, and the page that read none.
+    /// Expected: the document sits on the heading row, two spaces after the
+    /// title, and every row under it is unchanged - the reader who asks "where
+    /// do I change it" is answered once, not down a column. A page told of no
+    /// document is headed by the bare title, because naming a file that
+    /// answer did not come from would be worse than naming none.
+    #[test]
+    fn the_page_says_which_document_it_read() {
+        let entries = [entry("model", json!("deepseek-v4"), ConfigLayer::File)];
+
+        let named = headed(&entries, 80, Some("/home/u/.tetanus/settings.yaml"));
+        assert_eq!(
+            named,
+            "\nconfig  /home/u/.tetanus/settings.yaml\nmodel  deepseek-v4  file\n"
+        );
+
+        let none = headed(&entries, 80, None);
+        assert_eq!(none, "\nconfig\nmodel  deepseek-v4  file\n");
     }
 }

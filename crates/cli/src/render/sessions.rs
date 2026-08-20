@@ -19,6 +19,14 @@
 //! creation time, newest first, and leaves the call's own order to `--json`,
 //! which prints the result verbatim.
 //!
+//! # Why the root is on the heading
+//!
+//! Which directory was listed is a fact about the answer, not about any row
+//! in it: `--dir`, the settings document and the harness home can each name a
+//! different one, and an empty page under the wrong root reads exactly like
+//! an empty page under the right one. So the root is drawn beside the
+//! heading, on the full page and the empty one alike.
+//!
 //! # Why there is no date column
 //!
 //! `created_time` is milliseconds since the epoch. Rendering it as a date
@@ -99,9 +107,9 @@ fn pad(cell: &str, width: usize) -> String {
     " ".repeat(width.saturating_sub(visible_width(cell)))
 }
 
-/// Print the list under a heading.
-pub fn render<W: Write>(ui: &mut Ui<W>, list: &SessionListResult) -> io::Result<()> {
-    ui.heading("sessions")?;
+/// Print the list under a heading that names the root it was read from.
+pub fn render<W: Write>(ui: &mut Ui<W>, list: &SessionListResult, root: &str) -> io::Result<()> {
+    ui.heading_at("sessions", root)?;
     if list.sessions.is_empty() {
         let empty = ui
             .paint(Role::Muted, "no sessions yet - tetanus run writes one")
@@ -171,13 +179,14 @@ fn width(cells: impl Iterator<Item = usize>) -> usize {
 /// session is first and a tie is still settled; that an empty journal reads
 /// `0 events` and a one-event journal is singular; that a session with no
 /// prompt yet says so; that a title too long for the terminal is cut while
-/// the id is not; the empty list; an id and a state that carry escape
-/// sequences; and an id a terminal draws twice as wide.
+/// the id is not; the empty list, which carries the root like the full page
+/// does; an id and a state that carry escape sequences; and an id a terminal
+/// draws twice as wide.
 ///
-/// Features NOT tested here: which sessions this build finds (owned by
-/// `tetanus-engine`, and asserted end to end in `tests/presentation.rs`), the
-/// JSON form (owned by `render::json`), and the colour policy (owned by
-/// `tetanus-ui`).
+/// Features NOT tested here: which sessions this build finds and which root it
+/// looked in (owned by `tetanus-engine` and the binary, and asserted end to
+/// end in `tests/presentation.rs`), the JSON form (owned by `render::json`),
+/// and the colour policy (owned by `tetanus-ui`).
 ///
 /// Environmental needs: none. Every case renders into a `Vec<u8>`, so no case
 /// touches the filesystem or reads an environment variable.
@@ -201,8 +210,12 @@ mod tests {
     }
 
     fn shown(sessions: Vec<SessionInfo>, width: usize) -> String {
+        under(sessions, width, "/srv/j")
+    }
+
+    fn under(sessions: Vec<SessionInfo>, width: usize, root: &str) -> String {
         let mut ui = buffered(Theme::new(false, Charset::Unicode), width);
-        render(&mut ui, &SessionListResult { sessions }).expect("render");
+        render(&mut ui, &SessionListResult { sessions }, root).expect("render");
         ui.contents()
     }
 
@@ -222,7 +235,7 @@ mod tests {
 
         assert_eq!(
             out,
-            "\nsessions\n\
+            "\nsessions  /srv/j\n\
              s1755  18 events  idle  summarise the release notes\n\
              turn    6 events  idle  echo this\n"
         );
@@ -338,13 +351,16 @@ mod tests {
     }
 
     /// TC-CLI-SESS-6: nothing written yet.
-    /// Expected: the view says so, and says what writes one. This is the page
-    /// a first-time user reaches before they have run anything.
+    /// Expected: the view says so, says what writes one, and names the root it
+    /// looked in. This is the page a first-time user reaches before they have
+    /// run anything, and the one page whose whole content is a claim about a
+    /// directory - a reader who cannot see which directory cannot tell an
+    /// empty root from the wrong root.
     #[test]
     fn an_empty_list_says_what_writes_one() {
         assert_eq!(
-            shown(Vec::new(), 80),
-            "\nsessions\nno sessions yet - tetanus run writes one\n"
+            under(Vec::new(), 80, "/srv/j"),
+            "\nsessions  /srv/j\nno sessions yet - tetanus run writes one\n"
         );
     }
 }

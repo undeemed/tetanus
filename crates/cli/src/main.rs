@@ -383,11 +383,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // that boot rather than from a path and the compiled defaults:
             // a listing under one set of settings and a run under another
             // would be two harnesses wearing one name.
-            let engine = tetanus_engine::HarnessEngine::new(settings::booted(
-                policy,
-                &document,
-                &settings::root(dir.as_deref()),
-            )?);
+            let booted = settings::booted(policy, &document, &settings::root(dir.as_deref()))?;
+            // Read off the settled settings rather than off `--dir`, so the
+            // page names the directory that was actually listed even when
+            // nobody passed a flag and the document chose it.
+            let under = place(&booted.sessions_root);
+            let engine = tetanus_engine::HarnessEngine::new(booted);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -408,7 +409,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                         .map(boundary)
                         .map_err(|err| journal_fault(&err, std::path::Path::new(path)).message)
                 };
-                return match render::pick::pick(&mut out, &list, think, &open) {
+                return match render::pick::pick(&mut out, &list, &under, think, &open) {
                     Ok(Stop::Interrupted) => Err(stopped(policy)),
                     Ok(Stop::Quit) => Ok(()),
                     // The list is worth more than the view of it, and by here
@@ -418,12 +419,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                             .stderr()
                             .note(&format!("no full-screen view: {err}"))
                             .ok();
-                        render::sessions::render(&mut out, &list).ok();
+                        render::sessions::render(&mut out, &list, &under).ok();
                         Ok(())
                     }
                 };
             }
-            render::sessions::render(&mut out, &list).ok();
+            render::sessions::render(&mut out, &list, &under).ok();
             Ok(())
         }
         Cmd::Replay {
@@ -861,6 +862,34 @@ fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) 
             .ok();
     }
     Reported(render::fault::status(error))
+}
+
+/// A path as a page names it: absolute, tamed, and marked when nothing is
+/// there yet.
+///
+/// A page that says where it read from is answering "where do I change it",
+/// and a relative path only answers that from the directory this run started
+/// in - which the page does not print. So the path is made absolute first,
+/// without asking the filesystem to resolve it, because a path that is not
+/// there yet still has to be named.
+///
+/// It is tamed for the reason every other path this binary draws is: it can
+/// come off a document, an environment or a flag, and none of the three is
+/// ours to trust with the cursor.
+///
+/// A path with nothing at it is still the right answer - it is the file to
+/// write, or the directory the first run will make - so it is named and
+/// marked rather than left out. The mark matters most on the two pages that
+/// have it: a config page of nothing but `default` rows, and a sessions page
+/// that lists nothing, both read the same whether the place is empty or the
+/// reader is looking at the wrong one.
+fn place(path: &std::path::Path) -> String {
+    let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let named = tame_line(&full.display().to_string());
+    match full.exists() {
+        true => named,
+        false => format!("{named} (not there yet)"),
+    }
 }
 
 /// The journal a target names: the path if there is one there, and otherwise
