@@ -15,6 +15,7 @@ pub mod convert;
 pub mod retry;
 pub mod session;
 pub mod subscribe;
+pub mod tools;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,6 +54,9 @@ pub struct EngineConfig {
     /// Model a `session.create` with no override resolves to.
     pub default_model: String,
     pub max_steps: u32,
+    /// The order the model reads its tools in, or `None` for the canonical
+    /// one. Read against [`EngineConfig::tools`] by [`crate::tools::order`].
+    pub tool_order: Option<tetanus_turn::tools::ToolOrder>,
     /// What a turn does with a model request that failed, on the route the
     /// session names. Resolved from the document by [`crate::retry::policy`].
     pub retry: tetanus_turn::llm::retry::RetryPolicy,
@@ -73,6 +77,7 @@ impl Default for EngineConfig {
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
+            tool_order: None,
             retry: tetanus_turn::llm::retry::RetryPolicy::default(),
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
@@ -106,6 +111,7 @@ impl HarnessEngine {
                 Arc::clone(&config.providers),
                 Arc::clone(&config.tools),
                 config.retry.clone(),
+                config.tool_order.clone(),
             )),
             catalogs: Catalogs::new(
                 config.providers,
