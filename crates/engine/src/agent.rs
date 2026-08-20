@@ -18,6 +18,7 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
 use tetanus_session::{SessionEvent, SessionLog};
 use tetanus_turn::boot::boot;
+use tetanus_turn::llm::retry::{self, RetryPolicy};
 use tetanus_turn::llm::{mock, LlmAdapter};
 use tetanus_turn::log::topic;
 use tetanus_turn::tools::ToolRegistry;
@@ -60,6 +61,10 @@ struct SessionAgent {
     engine: TurnEngine,
     /// True from the moment a prompt is accepted until its turn closes.
     busy: AtomicBool,
+    /// The retry executor for this session's route. Declared before the
+    /// context so it is removed first: it listens on the same bus the context
+    /// unwinds.
+    _retry: tetanus_core::EffectHandle,
     /// The boot context owns the plugin registrations. Dropping it would
     /// unwind them, so it lives exactly as long as the engine it built.
     _ctx: tetanus_core::Context,
@@ -78,14 +83,22 @@ impl Drop for BusyGuard<'_> {
 pub struct Runtime {
     providers: Arc<dyn Providers>,
     tools: Arc<ToolRegistry>,
+    /// What every route on this engine does with a failed model request,
+    /// until a document can say something different per provider.
+    retry: RetryPolicy,
     agents: Mutex<BTreeMap<String, Arc<SessionAgent>>>,
 }
 
 impl Runtime {
-    pub fn new(providers: Arc<dyn Providers>, tools: Arc<ToolRegistry>) -> Self {
+    pub fn new(
+        providers: Arc<dyn Providers>,
+        tools: Arc<ToolRegistry>,
+        retry: RetryPolicy,
+    ) -> Self {
         Self {
             providers,
             tools,
+            retry,
             agents: Mutex::new(BTreeMap::new()),
         }
     }
@@ -217,6 +230,17 @@ impl Runtime {
             Arc::clone(&session.log) as Arc<dyn SessionLog>,
         )
         .map_err(internal)?;
+        // The executor is scoped to the route the session named, which is
+        // the route every request of this turn goes out on. A policy is a
+        // provider's, not an engine's, so installing it per session is what
+        // lets one document configure many routes later without moving this.
+        let retry = retry::install(
+            &session.bus,
+            Arc::clone(&session.log) as Arc<dyn SessionLog>,
+            session.header.provider.clone(),
+            self.retry.clone(),
+            retry::clock_jitter(),
+        );
         let engine = TurnEngine::from_context(
             &ctx,
             TurnConfig {
@@ -230,6 +254,7 @@ impl Runtime {
         let agent = Arc::new(SessionAgent {
             engine,
             busy: AtomicBool::new(false),
+            _retry: retry,
             _ctx: ctx,
         });
         // Another caller may have booted the same session meanwhile; the one

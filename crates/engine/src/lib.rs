@@ -105,6 +105,7 @@ impl HarnessEngine {
             runtime: Arc::new(Runtime::new(
                 Arc::clone(&config.providers),
                 Arc::clone(&config.tools),
+                config.retry.clone(),
             )),
             catalogs: Catalogs::new(
                 config.providers,
