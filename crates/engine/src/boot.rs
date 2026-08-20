@@ -7,8 +7,8 @@
 //! value two surfaces can disagree about, and `config.dump` would then report
 //! provenance for one of them.
 //!
-//! The keys are the ones [`crate::catalog::key`] and [`crate::retry::key`]
-//! name, so the list a `tetanus config` prints and the list a document may set
+//! The keys are the ones [`crate::catalog::key`], [`crate::retry::key`] and
+//! [`crate::tools::key`] name, so the list a `tetanus config` prints and the list a document may set
 //! cannot drift apart. A key a document does not set keeps the compiled
 //! default, and says so.
 
@@ -62,6 +62,7 @@ pub fn defaults() -> Document {
         ),
     ]);
     document.extend(crate::retry::defaults());
+    document.extend(crate::tools::defaults());
     document
 }
 
@@ -80,6 +81,7 @@ impl EngineConfig {
             default_provider: text(&settings, key::PROVIDER)?.unwrap_or(base.default_provider),
             default_model: text(&settings, key::MODEL)?.unwrap_or(base.default_model),
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
+            tool_order: crate::tools::order(&settings, &base.tools)?,
             retry: crate::retry::policy(&settings)?,
             providers: base.providers,
             tools: base.tools,

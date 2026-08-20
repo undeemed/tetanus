@@ -21,7 +21,7 @@ use tetanus_turn::boot::boot;
 use tetanus_turn::llm::retry::{self, RetryPolicy};
 use tetanus_turn::llm::{mock, LlmAdapter};
 use tetanus_turn::log::topic;
-use tetanus_turn::tools::ToolRegistry;
+use tetanus_turn::tools::{ToolOrder, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnError};
 
 use crate::convert::{internal, stop_reason};
@@ -86,6 +86,9 @@ pub struct Runtime {
     /// What every route on this engine does with a failed model request,
     /// until a document can say something different per provider.
     retry: RetryPolicy,
+    /// The order every turn on this engine offers its tools in, read against
+    /// `tools` before the engine was built.
+    tool_order: Option<ToolOrder>,
     agents: Mutex<BTreeMap<String, Arc<SessionAgent>>>,
 }
 
@@ -94,11 +97,13 @@ impl Runtime {
         providers: Arc<dyn Providers>,
         tools: Arc<ToolRegistry>,
         retry: RetryPolicy,
+        tool_order: Option<ToolOrder>,
     ) -> Self {
         Self {
             providers,
             tools,
             retry,
+            tool_order,
             agents: Mutex::new(BTreeMap::new()),
         }
     }
@@ -246,6 +251,7 @@ impl Runtime {
             TurnConfig {
                 model: session.header.model.clone(),
                 max_steps: session.header.max_steps,
+                tool_order: self.tool_order.clone(),
                 ..TurnConfig::default()
             },
         )
