@@ -425,6 +425,89 @@ async fn paging_a_session_that_is_not_there_is_the_documented_code() {
     assert_eq!(escape.kind(), Some(ErrorCode::InvalidParams));
 }
 
+/// TC-PAGE-6: contract §4.4.5. A zero limit reads as an absent one.
+///
+/// Input: a journal of four events, paged once with `limit: Some(0)` and once
+/// with `limit: None`, from the same seq.
+/// Expected: the two pages are identical, and the zero one is not the empty
+/// page that would stall a pager - `next_seq` advances past `from_seq` and
+/// `eof` is true.
+#[tokio::test]
+async fn a_zero_limit_pages_like_an_absent_one() {
+    let (engine, _dir) = engine();
+    let id = journal_of_four(&engine).await;
+
+    let zero = engine
+        .session_events(SessionEventsParams {
+            session_id: id.clone(),
+            from_seq: 1,
+            limit: Some(0),
+        })
+        .await
+        .expect("events");
+    let absent = engine
+        .session_events(SessionEventsParams {
+            session_id: id,
+            from_seq: 1,
+            limit: None,
+        })
+        .await
+        .expect("events");
+
+    assert_eq!(
+        zero.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        absent.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+    );
+    assert_eq!(zero.next_seq, absent.next_seq);
+    assert_eq!(zero.eof, absent.eof);
+    assert!(zero.next_seq > 1, "a pager that asked for zero still moves");
+    assert!(zero.eof);
+}
+
+/// TC-PAGE-7: contract §4.4.5. A `from_seq` past the tail is a resync that had
+/// nothing to catch up on, not a fault.
+///
+/// Input: the same journal, paged from a seq it never reached.
+/// Expected: an empty page, `eof: true`, and a `next_seq` at the real tail, so
+/// the caller is told where the journal actually ends rather than being handed
+/// an error or its own seq back.
+#[tokio::test]
+async fn a_from_seq_past_the_tail_answers_an_empty_page_at_the_tail() {
+    let (engine, _dir) = engine();
+    let id = journal_of_four(&engine).await;
+
+    let page = engine
+        .session_events(SessionEventsParams {
+            session_id: id,
+            from_seq: 99,
+            limit: None,
+        })
+        .await
+        .expect("a seq past the tail is not an error");
+    assert!(page.events.is_empty());
+    assert!(page.eof);
+    assert_eq!(page.next_seq, 4, "the tail, not the seq that was asked for");
+}
+
+/// A session whose journal holds its header and three appends, so seqs 0..=3
+/// exist and 4 does not.
+async fn journal_of_four(engine: &HarnessEngine) -> String {
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("create");
+    let live = engine.sessions().live(&info.session_id).expect("live");
+    for n in 1..=3 {
+        SessionLog::append(
+            live.log.as_ref(),
+            "turn/start",
+            serde_json::json!({ "turn": n }),
+        )
+        .expect("append");
+    }
+    info.session_id
+}
+
 /// TC-PATH-1: contract §4.7. Naming a path opens the journal there, and the
 /// id comes from the journal's own header, so a path becomes an id every
 /// other call accepts.

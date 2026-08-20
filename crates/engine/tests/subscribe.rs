@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
-    capability, AgentStatusPush, Engine, EventSink, HelloParams, PeerInfo, SessionCreateParams,
-    SessionEventPush, SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
+    capability, AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams, PeerInfo,
+    SessionCreateParams, SessionEventPush, SessionRef, SessionSubscribeParams,
+    SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::PROTOCOL_VERSION;
@@ -21,6 +22,7 @@ use tetanus_session::SessionLog;
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<SessionEventPush>>,
+    statuses: Mutex<Vec<AgentStatusPush>>,
 }
 
 impl Recorder {
@@ -32,13 +34,26 @@ impl Recorder {
             .map(|push| push.event.seq)
             .collect()
     }
+
+    /// The session named on every frame this sink was handed, of either kind.
+    fn sessions(&self) -> Vec<String> {
+        let events = self.events.lock().expect("events");
+        let statuses = self.statuses.lock().expect("statuses");
+        events
+            .iter()
+            .map(|push| push.session_id.clone())
+            .chain(statuses.iter().map(|push| push.session_id.clone()))
+            .collect()
+    }
 }
 
 impl EventSink for Recorder {
     fn session_event(&self, push: SessionEventPush) {
         self.events.lock().expect("events").push(push);
     }
-    fn agent_status(&self, _: AgentStatusPush) {}
+    fn agent_status(&self, push: AgentStatusPush) {
+        self.statuses.lock().expect("statuses").push(push);
+    }
 }
 
 fn engine() -> (HarnessEngine, TempDir) {
@@ -260,5 +275,111 @@ async fn every_advertised_capability_is_served_and_no_other() {
             capability::SESSION_SUBSCRIBE.to_string(),
             capability::AGENT_INTERRUPT.to_string(),
         ]
+    );
+}
+
+/// TC-SUB-6: contract §4.4.5. `from_seq` on a subscription is a seq and is
+/// inclusive, and one past the tail replays nothing rather than failing.
+///
+/// Input: a journal of four events (seqs 0..=3), subscribed twice: from seq 2,
+/// and from a seq the journal never reached.
+/// Expected: the first replays seqs 2 and 3 and no earlier one; the second
+/// replays nothing. Both report `last_seq: 3`, the true tail, so a caller that
+/// over-asked still learns where live delivery begins.
+#[tokio::test]
+async fn from_seq_is_inclusive_and_a_seq_past_the_tail_replays_nothing() {
+    let (engine, _dir) = engine();
+    let id = session(&engine).await;
+    for n in 1..=3 {
+        append(&engine, &id, n);
+    }
+
+    let midway = Arc::new(Recorder::default());
+    let result = engine
+        .session_subscribe(
+            SessionSubscribeParams {
+                session_id: id.clone(),
+                from_seq: Some(2),
+            },
+            midway.clone(),
+        )
+        .await
+        .expect("subscribe");
+    assert_eq!(midway.seqs(), vec![2, 3], "the named seq replays too");
+    assert_eq!(result.last_seq, 3);
+
+    let over = Arc::new(Recorder::default());
+    let result = engine
+        .session_subscribe(
+            SessionSubscribeParams {
+                session_id: id.clone(),
+                from_seq: Some(99),
+            },
+            over.clone(),
+        )
+        .await
+        .expect("a seq past the tail is not an error");
+    assert!(over.seqs().is_empty(), "there was nothing to catch up on");
+    assert_eq!(result.last_seq, 3, "the true tail, not the seq asked for");
+
+    append(&engine, &id, 4);
+    assert_eq!(midway.seqs(), vec![2, 3, 4]);
+    assert_eq!(over.seqs(), vec![4], "live delivery starts at the tail");
+}
+
+/// TC-SUB-7: contract §4.4.5. A push reaches only the subscriptions on its own
+/// session, for both frames.
+///
+/// Input: one engine, two sessions, one subscription on each, and a whole
+/// prompt run on the first.
+/// Expected: every frame the second sink was handed - `session/event` and
+/// `agent/status` alike - is empty, while the first sink saw both kinds. One
+/// connection may hold subscriptions on several sessions, so a sink that saw
+/// another session's traffic would be leaking it to that connection.
+#[tokio::test]
+async fn a_push_reaches_only_its_own_session() {
+    let (engine, _dir) = engine();
+    let mine = session(&engine).await;
+    let other = session(&engine).await;
+
+    let here = Arc::new(Recorder::default());
+    let there = Arc::new(Recorder::default());
+    for (id, sink) in [(&mine, &here), (&other, &there)] {
+        engine
+            .session_subscribe(
+                SessionSubscribeParams {
+                    session_id: id.clone(),
+                    from_seq: None,
+                },
+                sink.clone(),
+            )
+            .await
+            .expect("subscribe");
+    }
+
+    engine
+        .agent_prompt(AgentPromptParams {
+            session_id: mine.clone(),
+            content: "please answer".into(),
+        })
+        .await
+        .expect("the turn ran");
+
+    assert!(
+        !here.seqs().is_empty(),
+        "the turn's own subscription saw its events"
+    );
+    assert!(
+        !here.statuses.lock().expect("statuses").is_empty(),
+        "the turn's own subscription saw its status"
+    );
+    assert!(
+        here.sessions().iter().all(|id| *id == mine),
+        "a sink saw a frame for a session it did not subscribe to"
+    );
+    assert!(
+        there.sessions().is_empty(),
+        "the other session's subscription saw {:?}",
+        there.sessions()
     );
 }

@@ -197,7 +197,10 @@ impl SessionStore {
         limit: Option<u32>,
     ) -> Result<SessionEventsResult, RpcError> {
         let events = self.read_all(session_id)?;
-        let limit = limit.unwrap_or(MAX_PAGE).min(MAX_PAGE) as usize;
+        // Contract section 4.4.5: zero reads as absent. A page of no events
+        // stalls a pager - `next_seq` would not advance and `eof` would stay
+        // false - so the one page size a caller cannot mean is not served.
+        let limit = limit.filter(|n| *n > 0).unwrap_or(MAX_PAGE).min(MAX_PAGE) as usize;
         let start = (from_seq as usize).min(events.len());
         let end = start.saturating_add(limit).min(events.len());
         Ok(SessionEventsResult {

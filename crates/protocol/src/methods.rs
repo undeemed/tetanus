@@ -112,10 +112,14 @@ pub struct SessionListResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionEventsParams {
     pub session_id: String,
-    /// First seq to return. `0` reads from the start.
+    /// First seq to return, inclusive. `0` reads from the start, and a seq
+    /// past the tail answers an empty page with `eof` and `next_seq` at that
+    /// tail (contract section 4.4.5).
     #[serde(default)]
     pub from_seq: u64,
-    /// Server clamps to its own maximum; omit for that maximum.
+    /// Page size, clamped down to the server's own maximum. Omit for that
+    /// maximum; `0` reads as absent, because a page of no events would stall a
+    /// pager (contract section 4.4.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -132,8 +136,9 @@ pub struct SessionEventsResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSubscribeParams {
     pub session_id: String,
-    /// Replay from this seq before live delivery starts. Omit to receive live
-    /// events only.
+    /// Replay from this seq, inclusive, before live delivery starts. Omit to
+    /// receive live events only. A seq past the tail replays nothing and is
+    /// not an error (contract section 4.4.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_seq: Option<u64>,
 }
