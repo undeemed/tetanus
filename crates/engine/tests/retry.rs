@@ -1,9 +1,11 @@
 //! Test Design Specification: the retry policy a document configures.
 //!
-//! Feature under test: [`tetanus_engine::retry::policy`], which turns the
-//! settings document into the policy the engine will run on. Upstream's
-//! `resolveRetryPolicy` (`packages/llm/llm/src/retry-policy.ts`) is the rule
-//! set being ported.
+//! Features under test: [`tetanus_engine::retry::policy`], which turns the
+//! settings document into the policy the engine will run on, and
+//! [`tetanus_engine::retry::provider_policy`] with
+//! [`tetanus_engine::retry::provider_policies`], which do the same for the
+//! block one provider writes for itself. Upstream's `resolveRetryPolicy`
+//! (`packages/llm/llm/src/retry-policy.ts`) is the rule set being ported.
 //!
 //! Approach: every case reads a real document off disk, because the key
 //! constants are only correct if the reader's flattening produces them from
@@ -11,9 +13,10 @@
 //!
 //! Features NOT tested here: what the executor does with a policy
 //! (`crates/turn/tests/upstream_retry_executor.rs`), what the policy decides
-//! (`upstream_retry_policy.rs`), and the installation of the resolved policy
-//! on a live route, which lands with the executor's caller. Neither is
-//! restated.
+//! (`upstream_retry_policy.rs`), and the installation of a resolved policy on
+//! a live route - the general one is `crates/engine/tests/retry_route.rs`, and
+//! a per-provider one is installed by the slice that reads these calls. None
+//! is restated.
 //!
 //! Environmental needs: a writable temp directory. No case reaches a network
 //! or an API key.
@@ -21,13 +24,15 @@
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
 
+use std::collections::BTreeMap;
+
 use tempfile::TempDir;
 use tetanus_config::ConfigError;
 use tetanus_engine::retry::key;
 use tetanus_engine::{boot, retry, EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::Engine;
 use tetanus_protocol::types::ConfigLayer;
-use tetanus_turn::llm::retry::{Backoff, RetryPolicy};
+use tetanus_turn::llm::retry::{Backoff, RetryPolicy, DEFAULT_RETRYABLE_CODES};
 
 /// TC-RETRY-1: a build with no document runs the compiled policy, and says so.
 ///
@@ -185,4 +190,233 @@ fn document(text: &str) -> (TempDir, tetanus_config::Config) {
     std::fs::write(&path, text).expect("write");
     let settings = boot::document(&path).expect("read");
     (dir, settings)
+}
+
+/// TC-RETRY-8: a document with no provider block has no per-provider policy.
+///
+/// Input: a document that configures the general block only.
+/// Expected: `provider_policies` is empty and `provider_policy` is `None` for
+/// the provider that block would otherwise cover. A general block that also
+/// counted as every provider's own would make the two indistinguishable, and
+/// the route could never fall back.
+#[test]
+fn a_general_block_is_no_provider_s_own() {
+    let (_dir, settings) = document(
+        "llm:
+  retry:
+    mode: always",
+    );
+
+    assert!(retry::provider_policies(&settings)
+        .expect("resolve")
+        .is_empty());
+    assert_eq!(
+        retry::provider_policy(&settings, "deepseek").expect("resolve"),
+        None
+    );
+}
+
+/// TC-RETRY-9: each provider's block resolves to that provider's policy.
+///
+/// Input: two nested provider blocks, one unbounded and one bounded, written
+/// as a reader would write them.
+/// Expected: a map of exactly those two names, each carrying the policy its
+/// own block states, and `None` for a provider neither block names.
+#[test]
+fn each_provider_block_resolves_to_its_own_policy() {
+    let (_dir, settings) = document(
+        "llm:
+  providers:
+    deepseek:
+      retry:
+        mode: always
+        backoff:
+          initial_delay_ms: 25
+          max_delay_ms: 250
+          jitter_ratio: 0
+    mock:
+      retry:
+        max_retries: 1
+        retryable_codes: [TIMEOUT]",
+    );
+
+    let deepseek = RetryPolicy::Always {
+        backoff: Backoff {
+            initial_delay_ms: 25.0,
+            max_delay_ms: 250.0,
+            jitter_ratio: 0.0,
+        },
+    };
+    let mock = RetryPolicy::Normal {
+        max_retries: 1,
+        retryable_codes: vec!["TIMEOUT".to_string()],
+        backoff: Backoff::default(),
+    };
+
+    assert_eq!(
+        retry::provider_policies(&settings).expect("resolve"),
+        BTreeMap::from([
+            ("deepseek".to_string(), deepseek.clone()),
+            ("mock".to_string(), mock.clone()),
+        ])
+    );
+    assert_eq!(
+        retry::provider_policy(&settings, "deepseek").expect("resolve"),
+        Some(deepseek)
+    );
+    assert_eq!(
+        retry::provider_policy(&settings, "mock").expect("resolve"),
+        Some(mock)
+    );
+    assert_eq!(
+        retry::provider_policy(&settings, "absent").expect("resolve"),
+        None
+    );
+}
+
+/// TC-RETRY-10: a provider block is the whole policy for its route.
+///
+/// Input: a general block with a bound and its own waits, beside a provider
+/// block that only names the unbounded mode.
+/// Expected: the provider's policy is unbounded with the compiled backoff, not
+/// the general block's waits, and the general policy is unchanged. Layering
+/// the two would hand `mode: always` a `max_retries` its author never wrote,
+/// which TC-RETRY-5 refuses.
+#[test]
+fn a_provider_block_does_not_inherit_the_general_one() {
+    let (_dir, settings) = document(
+        "llm:
+  retry:
+    max_retries: 7
+    backoff:
+      initial_delay_ms: 20
+      max_delay_ms: 99
+  providers:
+    deepseek:
+      retry:
+        mode: always",
+    );
+
+    assert_eq!(
+        retry::provider_policy(&settings, "deepseek").expect("resolve"),
+        Some(RetryPolicy::Always {
+            backoff: Backoff::default(),
+        })
+    );
+    assert_eq!(
+        retry::policy(&settings).expect("resolve"),
+        RetryPolicy::Normal {
+            max_retries: 7,
+            retryable_codes: DEFAULT_RETRYABLE_CODES
+                .iter()
+                .map(|code| code.to_string())
+                .collect(),
+            backoff: Backoff {
+                initial_delay_ms: 20.0,
+                max_delay_ms: 99.0,
+                ..Backoff::default()
+            },
+        }
+    );
+}
+
+/// TC-RETRY-11: a provider block is held to every rule the general one is.
+///
+/// Input: TC-RETRY-4's refusal table and TC-RETRY-5's unusable bound, written
+/// under one provider instead of under `llm.retry`.
+/// Expected: each is `BadValue` naming that provider's own key, so the message
+/// points at the block the reader has to edit rather than at the general one.
+#[test]
+fn a_provider_block_is_refused_by_the_same_rules() {
+    let block = retry::key::provider_retry("deepseek");
+    let refused = [
+        ("mode: sometimes", format!("{block}.mode")),
+        ("max_retries: -1", format!("{block}.max_retries")),
+        ("retryable_codes: []", format!("{block}.retryable_codes")),
+        (
+            "retryable_codes: [SERVER, SERVER]",
+            format!("{block}.retryable_codes"),
+        ),
+        (
+            "backoff: {initial_delay_ms: 0}",
+            format!("{block}.backoff.initial_delay_ms"),
+        ),
+        (
+            "backoff: {max_delay_ms: soon}",
+            format!("{block}.backoff.max_delay_ms"),
+        ),
+        (
+            "backoff: {jitter_ratio: 1.5}",
+            format!("{block}.backoff.jitter_ratio"),
+        ),
+        (
+            "backoff: {initial_delay_ms: 900, max_delay_ms: 100}",
+            format!("{block}.backoff.initial_delay_ms"),
+        ),
+        (
+            "mode: always\n        max_retries: 3",
+            format!("{block}.max_retries"),
+        ),
+    ];
+
+    for (setting, expected) in refused {
+        let (_dir, settings) = document(&format!(
+            "llm:\n  providers:\n    deepseek:\n      retry:\n        {setting}"
+        ));
+        let Err(ConfigError::BadValue { key, .. }) = retry::provider_policy(&settings, "deepseek")
+        else {
+            panic!("{setting} was accepted");
+        };
+        assert_eq!(key, expected, "{setting}");
+        let Err(ConfigError::BadValue { key, .. }) = retry::provider_policies(&settings) else {
+            panic!("{setting} was accepted for the whole document");
+        };
+        assert_eq!(key, expected, "{setting}");
+    }
+}
+
+/// TC-RETRY-12: a block written under no provider name is refused.
+///
+/// Input: `llm.providers` with an empty name holding a retry block.
+/// Expected: `BadValue` naming the flattened key. A nameless block matches no
+/// route, so accepting it would silently configure nothing.
+#[test]
+fn a_block_under_no_name_is_refused() {
+    let (_dir, settings) = document(
+        "llm:
+  providers:
+    \"\":
+      retry:
+        mode: always",
+    );
+
+    let Err(ConfigError::BadValue { key, .. }) = retry::provider_policies(&settings) else {
+        panic!("the nameless block was accepted");
+    };
+    assert_eq!(key, "llm.providers..retry.mode");
+}
+
+/// TC-RETRY-13: the general block's published keys are the prefixed six.
+///
+/// Input: the constants `crate::retry::key` publishes.
+/// Expected: each is `llm.retry` plus its own suffix. The resolver builds both
+/// blocks' keys from a prefix, so this is what pins the published names to the
+/// ones it reads.
+#[test]
+fn the_published_keys_are_the_general_prefix_suffixed() {
+    assert_eq!(key::RETRY, "llm.retry");
+    for (published, suffix) in [
+        (key::MODE, "mode"),
+        (key::MAX_RETRIES, "max_retries"),
+        (key::RETRYABLE_CODES, "retryable_codes"),
+        (key::INITIAL_DELAY_MS, "backoff.initial_delay_ms"),
+        (key::MAX_DELAY_MS, "backoff.max_delay_ms"),
+        (key::JITTER_RATIO, "backoff.jitter_ratio"),
+    ] {
+        assert_eq!(published, format!("{}.{suffix}", key::RETRY));
+    }
+    assert_eq!(
+        retry::key::provider_retry("deepseek"),
+        "llm.providers.deepseek.retry"
+    );
 }
