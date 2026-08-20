@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use tetanus_config::{Config, Layer};
 use tetanus_protocol::methods::{ConfigDumpResult, ModelCatalogResult, ToolCatalogResult};
-use tetanus_protocol::types::{ConfigEntry, ConfigLayer, ProviderDescriptor, ToolDescriptor};
+use tetanus_protocol::types::{
+    ConfigEntry, ConfigLayer, ProviderDescriptor, ToolDescriptor, REDACTED,
+};
 use tetanus_turn::tools::ToolRegistry;
 
 use crate::agent::Providers;
@@ -106,6 +108,11 @@ impl Catalogs {
     /// `Default` when the caller never named it. Every other key the caller
     /// resolved is reported as the caller has it, so a config surface shows
     /// one list rather than two that have to be reconciled.
+    ///
+    /// A key whose name says it holds a credential keeps its entry and loses
+    /// its value, as section 4.3 of `docs/interface-contract.md` states. This
+    /// answer goes to whoever is on the carrier, so the document's own
+    /// secrets must not ride out on it.
     pub fn dump(&self) -> ConfigDumpResult {
         let mut entries: Vec<ConfigEntry> = self
             .effective
@@ -131,6 +138,11 @@ impl Catalogs {
             });
         }
         entries.sort_by(|a, b| a.key.cmp(&b.key));
+        for entry in &mut entries {
+            if tetanus_config::secret::names_a_secret(&entry.key) {
+                entry.value = serde_json::Value::String(REDACTED.to_string());
+            }
+        }
         ConfigDumpResult { entries }
     }
 }

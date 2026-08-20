@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub mod file;
 pub mod home;
 pub mod recompose;
+pub mod secret;
 
 /// A fault reading the settings document.
 ///
