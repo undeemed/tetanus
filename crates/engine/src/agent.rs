@@ -7,6 +7,7 @@
 //! on each transition, and read back by `agent.status`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -89,6 +90,9 @@ pub struct Runtime {
     /// The order every turn on this engine offers its tools in, read against
     /// `tools` before the engine was built.
     tool_order: Option<ToolOrder>,
+    /// How many parallel-safe tool calls of one step every turn on this engine
+    /// may have in flight at once.
+    max_parallel_tool_calls: NonZeroUsize,
     agents: Mutex<BTreeMap<String, Arc<SessionAgent>>>,
 }
 
@@ -98,12 +102,14 @@ impl Runtime {
         tools: Arc<ToolRegistry>,
         retry: RetryPolicy,
         tool_order: Option<ToolOrder>,
+        max_parallel_tool_calls: NonZeroUsize,
     ) -> Self {
         Self {
             providers,
             tools,
             retry,
             tool_order,
+            max_parallel_tool_calls,
             agents: Mutex::new(BTreeMap::new()),
         }
     }
@@ -252,6 +258,7 @@ impl Runtime {
                 model: session.header.model.clone(),
                 max_steps: session.header.max_steps,
                 tool_order: self.tool_order.clone(),
+                max_parallel_tool_calls: self.max_parallel_tool_calls,
                 ..TurnConfig::default()
             },
         )

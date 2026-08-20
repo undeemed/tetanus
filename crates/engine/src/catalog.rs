@@ -4,7 +4,6 @@
 //! Which providers are usable, which tools exist and where a setting came from
 //! are facts of the running engine. A surface that worked any of them out again
 //! would be a second source of truth, free to disagree with the first.
-use std::path::Path;
 use std::sync::Arc;
 
 use tetanus_config::{Config, Layer};
@@ -22,6 +21,7 @@ pub mod key {
     pub const PROVIDER: &str = "provider.default";
     pub const MODEL: &str = "model.default";
     pub const MAX_STEPS: &str = "agent.max_steps";
+    pub const MAX_PARALLEL_TOOL_CALLS: &str = "agent.max_parallel_tool_calls";
 }
 
 /// Answers the read-only calls from one place, so `tetanus tools`, a model
@@ -36,27 +36,26 @@ pub struct Catalogs {
 }
 
 impl Catalogs {
-    pub fn new(
-        providers: Arc<dyn Providers>,
-        tools: Arc<ToolRegistry>,
-        resolved: Arc<Config>,
-        sessions_root: &Path,
-        provider: &str,
-        model: &str,
-        max_steps: u32,
-    ) -> Self {
+    /// Built from the whole resolved configuration rather than from a list of
+    /// values, so a key the engine settles cannot be added to
+    /// [`crate::EngineConfig`] and forgotten here.
+    pub fn new(config: &crate::EngineConfig) -> Self {
         Self {
-            providers,
-            tools,
-            resolved,
+            providers: Arc::clone(&config.providers),
+            tools: Arc::clone(&config.tools),
+            resolved: Arc::clone(&config.resolved),
             effective: vec![
                 (
                     key::SESSIONS_ROOT,
-                    serde_json::json!(sessions_root.display().to_string()),
+                    serde_json::json!(config.sessions_root.display().to_string()),
                 ),
-                (key::PROVIDER, serde_json::json!(provider)),
-                (key::MODEL, serde_json::json!(model)),
-                (key::MAX_STEPS, serde_json::json!(max_steps)),
+                (key::PROVIDER, serde_json::json!(config.default_provider)),
+                (key::MODEL, serde_json::json!(config.default_model)),
+                (key::MAX_STEPS, serde_json::json!(config.max_steps)),
+                (
+                    key::MAX_PARALLEL_TOOL_CALLS,
+                    serde_json::json!(config.max_parallel_tool_calls.get()),
+                ),
             ],
         }
     }

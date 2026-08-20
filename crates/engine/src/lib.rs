@@ -17,6 +17,7 @@ pub mod session;
 pub mod subscribe;
 pub mod tools;
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +55,9 @@ pub struct EngineConfig {
     /// Model a `session.create` with no override resolves to.
     pub default_model: String,
     pub max_steps: u32,
+    /// How many parallel-safe tool calls of one step may be in flight at once,
+    /// carried to every turn this engine runs.
+    pub max_parallel_tool_calls: NonZeroUsize,
     /// The order the model reads its tools in, or `None` for the canonical
     /// one. Read against [`EngineConfig::tools`] by [`crate::tools::order`].
     pub tool_order: Option<tetanus_turn::tools::ToolOrder>,
@@ -77,6 +81,7 @@ impl Default for EngineConfig {
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
+            max_parallel_tool_calls: tetanus_turn::engine::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             tool_order: None,
             retry: tetanus_turn::llm::retry::RetryPolicy::default(),
             // Offline by default: a build with no configuration still runs a
@@ -112,16 +117,9 @@ impl HarnessEngine {
                 Arc::clone(&config.tools),
                 config.retry.clone(),
                 config.tool_order.clone(),
+                config.max_parallel_tool_calls,
             )),
-            catalogs: Catalogs::new(
-                config.providers,
-                config.tools,
-                config.resolved,
-                &config.sessions_root,
-                &config.default_provider,
-                &config.default_model,
-                config.max_steps,
-            ),
+            catalogs: Catalogs::new(&config),
         }
     }
 
