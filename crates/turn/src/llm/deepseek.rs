@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
 
+use crate::llm::attribution::{attribution_headers, AppIdentity};
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse, Role, StreamChunk, Usage,
 };
@@ -646,21 +647,23 @@ impl SseTransport for ReqwestTransport {
         api_key: &str,
         body: serde_json::Value,
     ) -> Result<FrameStream, LlmError> {
-        let response = self
+        // Every request says which product sent it, so a provider can tell
+        // one client from another (`llm::attribution`).
+        let mut request = self
             .client
             .post(url)
             .bearer_auth(api_key)
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    LlmError::Timeout(self.idle_message(url))
-                } else {
-                    LlmError::Transport(format!("request to {url} failed: {e}"))
-                }
-            })?;
+            .header("accept", "text/event-stream");
+        for (name, value) in attribution_headers(&AppIdentity::default()) {
+            request = request.header(name, value);
+        }
+        let response = request.json(&body).send().await.map_err(|e| {
+            if e.is_timeout() {
+                LlmError::Timeout(self.idle_message(url))
+            } else {
+                LlmError::Transport(format!("request to {url} failed: {e}"))
+            }
+        })?;
 
         let status = response.status();
         if !status.is_success() {
