@@ -63,6 +63,10 @@ enum Cmd {
     Chat(chat::ChatArgs),
     /// Show resolved config with provenance
     Config {
+        /// Answer as though `--dir <PATH>` had been given to a subcommand
+        /// that takes it, so the layer a flag settles on can be read
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -81,9 +85,10 @@ enum Cmd {
     },
     /// List the session journals this build has written
     Sessions {
-        /// Directory the journals live in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals live in. Defaults to `sessions.root` in
+        /// the settings document, or `sessions` when nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Move a cursor down the list on a screen of its own, and read the
         /// journal under it with Enter
         #[arg(long, conflicts_with = "json")]
@@ -122,9 +127,11 @@ enum Cmd {
     },
     /// Host the JSON-RPC protocol on stdin and stdout
     Serve {
-        /// Directory the journals this server writes will land in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals this server writes land in. Defaults to
+        /// `sessions.root` in the settings document, or `sessions` when
+        /// nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Serve the WebSocket carrier on this address instead of on stdio
         #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
@@ -310,7 +317,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { json } => settings::page(policy, &mut out, json),
+        Cmd::Config { dir, json } => settings::page(policy, &mut out, dir.as_deref(), json),
         Cmd::Models { json } => {
             let catalog = providers();
             if json {
@@ -345,10 +352,16 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // holds, and which of them a turn is running on. No surface can
             // assemble that from a path, which is why this is the first
             // subcommand whose whole answer comes from the engine.
-            let engine = tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                sessions_root: dir,
-                ..Default::default()
-            });
+            //
+            // Which directory is the settings document's answer unless the
+            // flag overrode it, and the engine is built from the whole of
+            // that boot rather than from a path and the compiled defaults:
+            // a listing under one set of settings and a run under another
+            // would be two harnesses wearing one name.
+            let engine = tetanus_engine::HarnessEngine::new(settings::booted(
+                policy,
+                &settings::root(dir.as_deref()),
+            )?);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -494,6 +507,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // WebSocket carrier does not touch stdout either way, and reads
             // the same page in the same place.
             let mut err = policy.stderr();
+            // Before anything is bound or announced. A document the harness
+            // cannot read is a fault to report, not a server to start on the
+            // defaults: the sessions the caller asked for would land
+            // somewhere else, and the banner would say so too late to matter.
+            let booted = settings::booted(policy, &settings::root(dir.as_deref()))?;
             // Multi-threaded, because both carriers' properties are
             // concurrency properties: `agent.interrupt` is answered while the
             // prompt it interrupts still runs, and a push overtakes the answer
@@ -542,17 +560,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 &mut err,
                 &render::serve::Serving {
                     carrier,
-                    sessions: &dir,
+                    sessions: &booted.sessions_root,
                     protocol: tetanus_protocol::PROTOCOL_VERSION,
                 },
             )
             .ok();
-            let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                    sessions_root: dir,
-                    ..Default::default()
-                }),
-            );
+            let engine: Arc<dyn tetanus_protocol::methods::Engine> =
+                Arc::new(tetanus_engine::HarnessEngine::new(booted));
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
                 // the accept fails, so the interrupt is the shutdown and not
