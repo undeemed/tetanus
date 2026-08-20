@@ -317,6 +317,8 @@ session driven through a pty.
 `tetanus replay` reads a finished journal through that same `Reader`, printed whole, played back at
 the pace it happened (`--live`), or on a page of its own (`--ui`,
 [crates/cli/src/render/browse.rs](crates/cli/src/render/browse.rs)).
+It is handed a path or an id, and a target that is nothing on disk is looked for under the settled `sessions.root` as `<root>/<target>.jsonl` - the path a store resolves an id to - so the ids `tetanus sessions` prints are the ids this command opens.
+A target that is a path is opened as it was given and the settings document is not read at all: a journal the reader can see is the one they meant, whatever a document says about roots.
 Its full-screen view is driven by `tetanus_ui::show` rather than by a loop of its own, which is what
 a view over something already finished can do and a view over a turn in flight cannot.
 `tetanus sessions --ui` ([crates/cli/src/render/pick.rs](crates/cli/src/render/pick.rs)) puts a
@@ -442,7 +444,7 @@ frame it is a line feed with no carriage return, which is the one thing
 
 Taming and that fold together are [`tame_line`](crates/ui/src/text.rs), which is what a value drawn
 as one whole row goes through, and a failure is not the only one.
-A journal is headed by what the reader chose - the path `replay` was handed on the command line, or
+A journal is headed by what the reader chose - the target `replay` was handed on the command line, or
 the id the session list read out of that journal's own header - so the heading is tamed at the one
 place a journal is built ([`browse.rs`](crates/cli/src/render/browse.rs)), which is the constructor
 both callers use.

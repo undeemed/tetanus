@@ -79,10 +79,12 @@ pub fn lines(theme: &Theme, cols: usize, error: &RpcError) -> Vec<String> {
 ///
 /// The sentence is tamed and folded onto one line here rather than in each
 /// arm of [`said`], because every arm composes it out of something the engine
-/// sent, and a code added to the contract must not be able to miss this.
+/// sent, and a code added to the contract must not be able to miss this. The
+/// way out is tamed for the same reason: an arm that names a directory names
+/// one a document could have written.
 pub fn wording(error: &RpcError) -> (String, Option<String>) {
     let (message, note) = said(error);
-    (tame_line(&message), note)
+    (tame_line(&message), note.map(|note| tame_line(&note)))
 }
 
 /// The same sentence, before it is tamed. Every arm is worded here.
@@ -131,9 +133,18 @@ fn said(error: &RpcError) -> (String, Option<String>) {
         // mistakes: one is a typo to fix here, the other is a session to
         // find again. They do not get the same way out.
         ErrorCode::SessionNotFound => match (field(error, "path"), field(error, "session_id")) {
+            // A target that was looked for under a root was not a path the
+            // user could see, so the way out names where it was looked for:
+            // the reader typed an id, and the id is right or the root is.
             (Some(path), _) => (
                 format!("no journal at {path}"),
-                Some("check the path, or list what there is with `tetanus sessions`".into()),
+                Some(match field(error, "root") {
+                    Some(root) => format!(
+                        "nothing there, and nothing named that under {root}; \
+                         list what there is with `tetanus sessions`"
+                    ),
+                    None => "check the path, or list what there is with `tetanus sessions`".into(),
+                }),
             ),
             (None, Some(id)) => (
                 format!("no session {id}"),

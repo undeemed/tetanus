@@ -101,9 +101,14 @@ enum Cmd {
     },
     /// Replay a session journal
     Replay {
-        /// Path to a JSONL journal a previous run wrote
-        #[arg(value_name = "PATH", value_parser = named())]
+        /// Path to a JSONL journal a previous run wrote, or the id
+        /// `tetanus sessions` printed for it
+        #[arg(value_name = "JOURNAL", value_parser = named())]
         path: String,
+        /// Directory an id is looked up in. Defaults to `sessions.root` in
+        /// the settings document, or `sessions` when nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Print one line per journal line, including any the timeline refuses
         #[arg(long)]
         raw: bool,
@@ -428,6 +433,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
         }
         Cmd::Replay {
             path,
+            dir,
             raw,
             live,
             speed,
@@ -441,14 +447,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             if ui && !policy.stdout_is_terminal {
                 return Err(fail(policy, &nowhere_to_draw()));
             }
-            // A path that is not there is a typo, and reading it as an
-            // empty session is how a typo becomes a blank page and a zero
-            // exit. The check is here, before any view is chosen, so every
-            // shape of `replay` fails the same way.
-            let file = std::path::Path::new(&path);
-            if !file.exists() {
-                return Err(fail(policy, &missing_journal(file)));
-            }
+            // A target that is nothing at all is a typo, and reading it as
+            // an empty session is how a typo becomes a blank page and a zero
+            // exit. The lookup is here, before any view is chosen, so every
+            // shape of `replay` finds and fails the same way.
+            let path = journal_named(policy, &path, dir.as_deref())?;
             // `--raw` is the view for a journal the reader below refuses,
             // so it opens the file itself. Asking for a log first would make
             // the one command that reads a broken journal fail on exactly the
@@ -1038,18 +1041,59 @@ fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported
         })
 }
 
-/// A path the user named that is not there.
+/// The journal a target names: the path if there is one there, and otherwise
+/// the id `tetanus sessions` printed for it, under the root the settings
+/// settled.
+///
+/// The page a reader takes an id off said `turn`, and until this the command
+/// they retyped it into answered `no journal at turn` - and sent them to that
+/// same page. The two now look in one place. A store resolves an id to
+/// `<root>/<id>.jsonl`, so that is what is looked for, and `<root>/<target>`
+/// beside it for an id given with the extension it is listed under.
+///
+/// A path that is there is opened as it was given, and the document is not
+/// read at all: a journal the user can see is a journal `replay` opens,
+/// whatever a document elsewhere says about roots. Only a target that is
+/// nothing on disk asks where the sessions live.
+fn journal_named(
+    policy: &Policy,
+    target: &str,
+    dir: Option<&std::path::Path>,
+) -> Result<String, Reported> {
+    let named = std::path::Path::new(target);
+    if named.exists() {
+        return Ok(target.to_string());
+    }
+    let sessions = booted(policy, &root(dir))?.sessions_root;
+    match [
+        sessions.join(target),
+        sessions.join(format!("{target}.jsonl")),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
+    {
+        Some(found) => Ok(found.display().to_string()),
+        None => Err(fail(policy, &missing_journal(named, Some(&sessions)))),
+    }
+}
+
+/// A journal the user named that is not there, and the root an id was looked
+/// for under when the target was not a path.
 ///
 /// The contract's §4.7 mapping sends `tetanus replay <path>` through
 /// `session.create`, which creates a journal at a path that has none. That is
 /// what `run --session` wants and the opposite of what a read wants, so this
 /// surface answers the read before it makes the call.
-fn missing_journal(path: &std::path::Path) -> RpcError {
+fn missing_journal(path: &std::path::Path, root: Option<&std::path::Path>) -> RpcError {
+    let mut data = serde_json::json!({ "path": path.display().to_string() });
+    if let Some(root) = root {
+        data["root"] = serde_json::json!(root.display().to_string());
+    }
     RpcError::new(
         ErrorCode::SessionNotFound,
         format!("no journal at {}", path.display()),
     )
-    .with_data(serde_json::json!({ "path": path.display().to_string() }))
+    .with_data(data)
 }
 
 /// `--ui` where there is no screen to draw on.
