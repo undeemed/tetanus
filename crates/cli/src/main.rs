@@ -3,9 +3,10 @@
 mod chat;
 mod prompt;
 mod render;
+mod settings;
 
 use tetanus_protocol::methods::{
-    AgentPromptResult, ConfigDumpResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
+    AgentPromptResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as protocol;
@@ -309,19 +310,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { json } => {
-            let mut config = tetanus_config::Config::default();
-            config.set("log.level", "info".into(), tetanus_config::Layer::Default);
-            let dump = ConfigDumpResult {
-                entries: settings(&config),
-            };
-            if json {
-                return render::json::line(&mut out, &dump)
-                    .map_err(|err| report(policy, &err.to_string(), None));
-            }
-            render::config::render(&mut out, &dump.entries).ok();
-            Ok(())
-        }
+        Cmd::Config { json } => settings::page(policy, &mut out, json),
         Cmd::Models { json } => {
             let catalog = providers();
             if json {
@@ -770,27 +759,6 @@ fn registry() -> ToolRegistry {
     ToolRegistry::new().with(Arc::new(EchoTool))
 }
 
-/// Carry resolved config across to the contract shape the view reads.
-///
-/// The same story as [`boundary`]: the
-/// layers agree one for one, so this is a copy. It goes when the engine serves
-/// `config.dump`, and `render::config` does not notice.
-fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
-    config
-        .provenance()
-        .map(|(key, resolved)| protocol::ConfigEntry {
-            key: key.clone(),
-            value: resolved.value.clone(),
-            layer: match resolved.layer {
-                tetanus_config::Layer::Default => protocol::ConfigLayer::Default,
-                tetanus_config::Layer::File => protocol::ConfigLayer::File,
-                tetanus_config::Layer::Env => protocol::ConfigLayer::Env,
-                tetanus_config::Layer::Flag => protocol::ConfigLayer::Flag,
-            },
-        })
-        .collect()
-}
-
 /// Ctrl-C, as a future that resolves when it arrives.
 ///
 /// Only the two surfaces that draw a block in place wait on this. Everywhere
@@ -833,6 +801,26 @@ fn fail(policy: &Policy, error: &RpcError) -> Reported {
     err.error(&message).ok();
     if let Some(hint) = hint {
         err.note(&hint).ok();
+    }
+    Reported(render::fault::status(error))
+}
+
+/// [`fail`], for a settings document the harness cannot run on.
+///
+/// The wording and the status are the same, because the fault crossed the
+/// boundary like any other. The next step is not: `wording` sends a refused
+/// value to `--help`, and nothing in a document is a flag. The file is where
+/// the value was written and where it has to be fixed, so the note names it -
+/// unless the sentence above has named it already, which is the case for
+/// every fault about the file itself rather than a value in it.
+fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) -> Reported {
+    let (message, _) = render::fault::wording(error);
+    let document = document.display().to_string();
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if !message.contains(&document) {
+        err.note(&format!("{document} is the document that sets it"))
+            .ok();
     }
     Reported(render::fault::status(error))
 }

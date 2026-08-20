@@ -42,6 +42,10 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         "CLICOLOR_FORCE",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
+        // A settings document is read from the harness home, so a home the
+        // person running the suite happens to have configured would otherwise
+        // decide what these cases see.
+        "TETANUS_HOME",
     ] {
         cmd.env_remove(name);
     }
@@ -317,18 +321,222 @@ fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
     assert!(traced.contains("You said: echo this\n"), "{traced}");
 }
 
-/// TC-CLI-UI-10: `tetanus config` end to end.
-/// Expected: one row per resolved key, carrying the value without its JSON
-/// quotes and the layer that settled it. The provenance column is the reason
-/// the command exists, so a build that printed the values alone has failed
-/// even though it printed something.
+/// The `key  value  layer` rows of a `tetanus config` page, as pairs of key
+/// and the layer that settled it.
+///
+/// Read as rows rather than compared whole: the engine owns which keys exist,
+/// and a case that asserted the whole table by equality would fail on the
+/// engine adding one - which is a change in another lane, not a fault in this
+/// one. What this lane owns is that every key it is handed is printed with
+/// where it came from.
+fn layers(page: &str) -> Vec<(String, String)> {
+    page.lines()
+        .skip_while(|line| line.trim() != "config")
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let key = columns.next().unwrap_or_default().to_string();
+            let layer = columns.last().unwrap_or_default().to_string();
+            (key, layer)
+        })
+        .collect()
+}
+
+/// TC-CLI-UI-10: `tetanus config` with no settings document.
+/// Expected: one row per key the engine settles, carrying the value without
+/// its JSON quotes and the layer that settled it - `default` for every one of
+/// them, because nothing has been configured. The provenance column is the
+/// reason the command exists, so a build that printed the values alone has
+/// failed even though it printed something.
+///
+/// Environmental needs: `TETANUS_HOME` names an empty directory, so the home
+/// of whoever runs the suite cannot decide what the case sees.
 #[test]
 fn config_shows_what_set_each_key() {
+    let home = tempfile::tempdir().expect("temp dir");
     let dir = tempfile::tempdir().expect("temp dir");
-    let out = run(dir.path(), &["config", "--color", "never"], &[]);
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
 
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "\nconfig\nlog.level  info  default\n");
+    let page = stdout(&out);
+    assert!(page.starts_with("\nconfig\n"), "{page}");
+    let rows = layers(&page);
+    assert!(
+        rows.iter().all(|(_, layer)| layer == "default"),
+        "a key came from somewhere with no document to come from:\n{page}"
+    );
+    for key in ["sessions.root", "agent.max_steps", "provider.default"] {
+        assert!(
+            rows.iter().any(|(name, _)| name == key),
+            "{key} is not on the page:\n{page}"
+        );
+    }
+}
+
+/// TC-CLI-CONF-1: `tetanus config` against a document that sets two keys.
+/// Expected: exit 0; those two keys report the written value and `file`, and
+/// every other key still reports `default`. A page that read the document but
+/// reported `default` for what it found would be worse than one that read
+/// nothing, because it would say the setting had not taken.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn config_reports_the_document_that_set_a_key() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: journals\nagent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let page = stdout(&out);
+    let rows = layers(&page);
+    let layer = |key: &str| {
+        rows.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, layer)| layer.clone())
+            .unwrap_or_else(|| panic!("{key} is not on the page:\n{page}"))
+    };
+    assert_eq!(layer("sessions.root"), "file", "{page}");
+    assert_eq!(layer("agent.max_steps"), "file", "{page}");
+    assert_eq!(layer("provider.default"), "default", "{page}");
+    assert!(page.contains("journals"), "{page}");
+}
+
+/// TC-CLI-CONF-2: a document whose value is one the key does not take.
+/// Expected: exit 2, per §4.5's status for `InvalidParams`; the field is
+/// named; the next step names the document rather than sending the reader to
+/// `--help`, because nothing in a document is a flag; and nothing is printed
+/// on stdout, because there is no resolved configuration to print.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn a_value_the_key_does_not_take_is_a_usage_error() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "agent:\n  max_steps: 0\n",
+    )
+    .expect("the document is written");
+
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let told = stderr(&out);
+    assert!(told.contains("agent.max_steps"), "{told}");
+    assert!(
+        told.contains(&home.path().join("settings.yaml").display().to_string()),
+        "{told}"
+    );
+    assert!(!told.contains("--help"), "{told}");
+    assert_eq!(stdout(&out), "");
+}
+
+/// TC-CLI-CONF-3: the two ways the document itself cannot be read.
+/// Expected: exit 1, per §4.5's status for `Io`; the path is named once and
+/// only once, because a reader deciding which file to open reads two copies
+/// of one path as two paths; and nothing on stdout.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding, in turn, a
+/// document that does not parse and a directory where the document should be.
+#[test]
+fn a_document_that_cannot_be_read_stops_the_command() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    let named = document.display().to_string();
+
+    std::fs::write(&document, "not: [valid\n").expect("the document is written");
+    let broken = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+    assert_eq!(broken.status.code(), Some(1), "{}", stderr(&broken));
+    assert_eq!(
+        stderr(&broken).matches(&named).count(),
+        1,
+        "{}",
+        stderr(&broken)
+    );
+    assert_eq!(stdout(&broken), "");
+
+    std::fs::remove_file(&document).expect("the document is removed");
+    std::fs::create_dir(&document).expect("a directory takes its place");
+    let directory = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+    assert_eq!(directory.status.code(), Some(1), "{}", stderr(&directory));
+    assert_eq!(
+        stderr(&directory).matches(&named).count(),
+        1,
+        "{}",
+        stderr(&directory)
+    );
+    assert_eq!(stdout(&directory), "");
+}
+
+/// TC-CLI-CONF-4: `tetanus config --json` against the same document.
+/// Expected: one object per §4.7, carrying every key the page carries with
+/// the same layer for each. Two views of one answer that disagreed would make
+/// a script and a person read the same build differently.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn the_json_config_says_what_the_page_says() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "agent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    let json = stdout(&run(dir.path(), &["config", "--json"], &env));
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+    let entries = parsed["entries"].as_array().expect("the entries");
+    let told: Vec<(String, String)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry["key"].as_str().unwrap_or_default().to_string(),
+                entry["layer"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(told, layers(&page), "{json}\n{page}");
+    assert!(
+        told.contains(&("agent.max_steps".to_string(), "file".to_string())),
+        "{json}"
+    );
 }
 
 /// TC-CLI-UI-11: `tetanus replay --live` into a pipe.

@@ -205,6 +205,14 @@ under the `llm.retry` keys upstream uses, because the decision and the executor
 ([crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs)) read no settings themselves.
 Which binary calls it, and with which flags, is the presentation lane's wiring.
 
+`tetanus config` is the first of that wiring, and it lives in [crates/cli/src/settings.rs](crates/cli/src/settings.rs) rather than in `main.rs`:
+`main.rs` is the binary's hub, and a command that keeps its body there widens the hub for every other command.
+It reads the document through `boot::document`, settles it through `EngineConfig::from_settings`, and prints the provenance the engine resolved rather than a list of its own -
+so the keys the page shows and the keys a document may set are one list, and a key the engine gains appears without this crate being told.
+Both steps can fail and neither failure is stepped over.
+A document that cannot be read is `Io`, exit 1, and names the path once, because the engine's own sentence already names it.
+A value a key does not take is `InvalidParams`, exit 2, and names the field; its next step names the document rather than `--help`, since nothing in a document is a flag.
+
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.
 [crates/turn/src/tokens.rs](crates/turn/src/tokens.rs) prices that surface, and any request, under
