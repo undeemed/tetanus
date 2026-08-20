@@ -150,6 +150,12 @@ still sees them, but the engine restores that section afterwards as the sole pro
 registry holds one at a time, so the second registration is refused rather than shadowing the
 first.
 
+The registry also holds the prompt variables a section's text names between braces. They ride the
+assembly as `SystemPrompt::variables`, so a listener may add a name or replace a value, and
+`SystemPrompt::render` substitutes them as the last thing that happens to section text. Strictly: a
+reference this assembly cannot fill fails the turn (`TurnError::Prompt`) rather than reaching the
+model as prose it would have read as an instruction.
+
 ### 4.5 Information view - the session log
 
 `SessionEvent` ([crates/session/src/lib.rs](crates/session/src/lib.rs)) is the durable record: a

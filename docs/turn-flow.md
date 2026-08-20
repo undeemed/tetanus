@@ -66,7 +66,7 @@ Each event below is declared with exactly one of them, and the bus panics when a
 | `session/event` | emit | none | every durable append, in registration order |
 | `session/flush` | parallel | none | the durability barrier; all listeners awaited together |
 | `agent/pre-step` | waterfall | `PreStepDecision` | rewrite or reject the claimed messages |
-| `system-prompt/assemble` | waterfall | `SystemPrompt` | add prompt sections and tool schemas |
+| `system-prompt/assemble` | waterfall | `SystemPrompt` | add prompt sections, tool schemas, and the variables the sections name |
 | `agent/request` | waterfall | `ModelRequest` | change the request before it leaves |
 | `llm/stream` | waterfall | `Result<ModelResponse, LlmError>` | wrap, replace or record the provider call |
 | `tools/pre-execute` | waterfall | `ToolCall` | rewrite a call |

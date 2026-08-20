@@ -7,8 +7,9 @@
 //!
 //! Approach: the same offline fixture the turn-flow suite uses, driven through
 //! the bus, plus a bare registry where a case is about registration alone.
-//! Prompt variables are covered where they live - on the registry, and in
-//! `interpolate` - because the assembly does not carry them to the model yet.
+//! Prompt variables are covered three times over, because they have three
+//! homes: registration on the registry, substitution in `interpolate`, and the
+//! assembly that carries the one to the other on its way to the model.
 //! Upstream's assembly still carries surfaces tetanus has not built:
 //! runtime-context providers and scoped layers. Cases that only exist because
 //! of those are not restated here as passing tests; they stay rows in
@@ -34,6 +35,7 @@ use tetanus_turn::prompt::{
     interpolate, AssembleAt, PromptError, PromptRegistry, Section, SectionText, Variables,
     VARIABLE_NAME,
 };
+use tetanus_turn::{TurnError, FAILED_STOP_REASON};
 
 /// TC-PORT-PROMPT-1: sections reach the model in the order they were
 /// contributed, joined by a blank line, and the registry's tool schemas ride
@@ -210,6 +212,7 @@ async fn a_listener_that_skips_next_short_circuits_the_assembly() {
                     text: "ONLY".into(),
                 }],
                 tools: Vec::new(),
+                variables: Variables::new(),
             }
         })
     });
@@ -857,6 +860,151 @@ fn a_variable_registered_mid_assembly_joins_the_next_one() {
     assert_eq!(during.keys().collect::<Vec<_>>(), ["first"]);
     assert_eq!(after.keys().collect::<Vec<_>>(), ["first", "late"]);
     assert_eq!(after["late"].as_deref(), Some("second"));
+}
+
+/// TC-PORT-PROMPT-27: a variable a plugin registered reaches the model, as the
+/// value it stood for.
+///
+/// Upstream: "interpolates {{name}} references in section text at render - the
+/// persona included".
+///
+/// This is the case that joins the other two homes of a variable up: the name
+/// is registered on the registry the engine assembles from, and what the
+/// request carries is the substituted text, not the reference.
+///
+/// Input: a section that names two registered variables, and a second section
+/// whose only content is a variable with an empty value.
+/// Expected: the system message reads the substituted persona; the section
+/// that rendered empty is dropped, exactly as a section written empty is, so
+/// it costs no blank gap.
+#[tokio::test]
+async fn a_registered_variable_reaches_the_model_as_its_value() {
+    let h = Harness::new("prompt-variables-render").await;
+    let (requests, _record) = record_requests(h.bus());
+    let _model = h
+        .sections
+        .variable("model", |_| Some("deepseek-v4".into()))
+        .expect("model");
+    let _cwd = h
+        .sections
+        .variable("cwd", |_| Some("/work".into()))
+        .expect("cwd");
+    let _blank = h
+        .sections
+        .variable("blank", |_| Some(String::new()))
+        .expect("blank");
+    let _persona = h
+        .sections
+        .section(Section::new(
+            "persona",
+            0,
+            "You run on {{model}} in {{cwd}}.",
+        ))
+        .expect("persona");
+    let _empty = h
+        .sections
+        .section(Section::new("empty", 1, "{{blank}}"))
+        .expect("empty");
+
+    h.engine.run_turn("substitute").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    let base = tetanus_turn::TurnConfig::default().base_prompt;
+    assert_eq!(
+        system_message(&requests[0]),
+        format!("{base}\n\nYou run on deepseek-v4 in /work.")
+    );
+}
+
+/// TC-PORT-PROMPT-28: a `system-prompt/assemble` listener may add a variable
+/// or replace one, and the render reads what the listener left.
+///
+/// Upstream: "lets a waterfall listener add or override variables before
+/// render".
+///
+/// Substitution is the last thing that happens to section text, which is what
+/// makes this work: the waterfall hands back one assembly, and both its
+/// sections and its variables are read from that same value.
+///
+/// Input: a section naming one registered variable and one nothing registered,
+/// and a listener that adds the missing name and overrides the registered one.
+/// Expected: the model reads both of the listener's values.
+#[tokio::test]
+async fn a_listener_may_add_or_override_a_variable_before_the_render() {
+    let h = Harness::new("prompt-variables-waterfall").await;
+    let (requests, _record) = record_requests(h.bus());
+    let _model = h
+        .sections
+        .variable("model", |_| Some("from-registry".into()))
+        .expect("model");
+    let _section = h
+        .sections
+        .section(Section::new("s", 0, "{{extra}} on {{model}}"))
+        .expect("s");
+    let _listener = h.bus().on_waterfall::<AssemblePrompt, _>(|ev, next| {
+        ev.variables
+            .insert("extra".to_string(), Some("from-waterfall".to_string()));
+        ev.variables
+            .insert("model".to_string(), Some("overridden".to_string()));
+        Box::pin(next.run(ev))
+    });
+
+    h.engine.run_turn("override").await.unwrap();
+
+    let requests = requests.lock().expect("requests").clone();
+    let base = tetanus_turn::TurnConfig::default().base_prompt;
+    assert_eq!(
+        system_message(&requests[0]),
+        format!("{base}\n\nfrom-waterfall on overridden")
+    );
+}
+
+/// TC-PORT-PROMPT-29: a section naming a variable the assembly cannot give it
+/// fails the turn, and the journal still closes.
+///
+/// Upstream: "throws on a reference to an unregistered variable, listing what
+/// exists". Upstream throws out of the render its caller drives; tetanus
+/// renders inside the step, so the failure is the turn's, and a turn that
+/// failed is closed on the journal like any other (TC-CLOSE-1).
+///
+/// Input: a section naming `{{modle}}` with `model` registered.
+/// Expected: `TurnError::Prompt` carrying `UnknownVariable`; no request ever
+/// built, so the provider is never asked; and the journal ends `step/end`,
+/// `turn/end` with the failed stop reason.
+#[tokio::test]
+async fn a_reference_the_assembly_cannot_fill_fails_the_turn() {
+    let h = Harness::new("prompt-variables-unknown").await;
+    let (requests, _record) = record_requests(h.bus());
+    let _model = h
+        .sections
+        .variable("model", |_| Some("m".into()))
+        .expect("model");
+    let _typo = h
+        .sections
+        .section(Section::new("persona", 0, "on {{modle}}"))
+        .expect("persona");
+
+    let failed = h.engine.run_turn("typo").await;
+
+    let Err(TurnError::Prompt(PromptError::UnknownVariable { section, name, .. })) = failed else {
+        panic!("a typo is not prose the model should read: {failed:?}");
+    };
+    assert_eq!((section.as_str(), name.as_str()), ("persona", "modle"));
+    assert!(
+        requests.lock().expect("requests").is_empty(),
+        "the step failed before it built a request"
+    );
+    let journal = tetanus_session::replay(&h.log_path).expect("journal");
+    let types: Vec<&str> = journal.iter().map(|e| e.ty.as_str()).collect();
+    assert_eq!(
+        &types[types.len() - 2..],
+        ["step/end", "turn/end"],
+        "{types:?}"
+    );
+    assert_eq!(
+        journal.last().expect("turn/end").data["stop_reason"],
+        FAILED_STOP_REASON
+    );
 }
 
 /// The variables of one assembly, as a case writes them.
