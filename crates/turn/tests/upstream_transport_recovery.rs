@@ -250,6 +250,7 @@ async fn route(name: &str, base_url: &str, delay_ms: f64) -> Route {
         base_url: base_url.to_string(),
         models: vec![MODEL.to_string()],
         max_tokens: None,
+        ..DeepSeekConfig::default()
     });
     let ctx = boot(
         bus.clone(),

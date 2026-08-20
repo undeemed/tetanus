@@ -174,6 +174,16 @@ pub enum LlmError {
     /// since the policy was ported; this is the error that reaches it.
     #[error("EMPTY_RESPONSE: {0}")]
     EmptyResponse(String),
+    /// A provider that stopped speaking: the connection stayed open, and
+    /// nothing arrived on it for longer than the adapter's idle window.
+    ///
+    /// It is its own failure and not a transport one. Nothing was refused and
+    /// nothing was lost - the service simply went quiet - and the reader's
+    /// next move is the one `TIMEOUT` names, which is the code upstream
+    /// reports for the same silence
+    /// (`packages/llm/llm-deepseek/src/adapter.ts`).
+    #[error("TIMEOUT: {0}")]
+    Timeout(String),
     #[error("SINK: {0}")]
     Sink(String),
 }
@@ -192,6 +202,7 @@ impl LlmError {
             LlmError::InvalidCredential(_) => "INVALID_CREDENTIAL",
             LlmError::Transport(_) => "TRANSPORT",
             LlmError::EmptyResponse(_) => "EMPTY_RESPONSE",
+            LlmError::Timeout(_) => "TIMEOUT",
             LlmError::Provider { status, .. } => match status {
                 408 => "TIMEOUT",
                 429 => "RATE_LIMIT",
