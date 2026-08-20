@@ -51,23 +51,22 @@ use crate::{AdapterChoice, Reported};
 
 #[derive(clap::Args)]
 pub struct ChatArgs {
-    /// Which model provider to talk to
-    #[arg(short, long, value_enum, default_value_t = AdapterChoice::Deepseek)]
-    pub adapter: AdapterChoice,
+    /// Which model provider to talk to. Defaults to `provider.default` in
+    /// the settings document, and to DeepSeek when nothing sets it
+    #[arg(short, long, value_enum)]
+    pub adapter: Option<AdapterChoice>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID")]
     pub model: Option<String>,
     /// The journal this conversation is kept in. An existing one is resumed.
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "sessions/chat.jsonl"
-    )]
-    pub session: PathBuf,
-    /// Step budget for each turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    pub max_steps: u32,
+    /// Defaults to `chat.jsonl` under `sessions.root` in the settings
+    /// document
+    #[arg(short, long, value_name = "PATH")]
+    pub session: Option<PathBuf>,
+    /// Step budget for each turn. Defaults to `agent.max_steps` in the
+    /// settings document
+    #[arg(long, value_name = "N")]
+    pub max_steps: Option<u32>,
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
     pub think: bool,
@@ -134,18 +133,41 @@ pub async fn chat<W: Write>(
     out: &mut Ui<W>,
     args: ChatArgs,
 ) -> Result<(), Reported> {
-    // Before the journal exists, as `run` refuses a prompt it will not send: a
-    // chat that cannot reach a model must say so at the point the adapter was
-    // named, not after it has written a journal holding no turns.
-    let (adapter, model) = crate::adapter(policy, args.adapter, args.model.clone())?;
+    // What every turn in this conversation runs on: the settings document,
+    // with the flags over it. Before the journal exists, because the document
+    // decides where the journal goes when `--session` did not.
+    let settled = crate::settings::turn_settings(
+        policy,
+        crate::settings::TurnFlags {
+            adapter: args.adapter,
+            model: args.model.clone(),
+            max_steps: args.max_steps,
+            session: args.session.clone(),
+        },
+        // A conversation with the mock adapter is a demonstration rather than
+        // a use, so an unconfigured chat is DeepSeek.
+        AdapterChoice::Deepseek,
+        "chat.jsonl",
+    )?;
 
-    let opened = crate::session(&args.session, args.adapter.route(), &model, args.max_steps)
-        .await
-        .map_err(|err| crate::fail(policy, &err))?;
+    // As `run` refuses a prompt it will not send: a chat that cannot reach a
+    // model must say so at the point the adapter was named, not after it has
+    // written a journal holding no turns.
+    let (adapter, model) = crate::adapter(policy, settled.provider, settled.model.clone())?;
+
+    let opened = crate::session(
+        settled.settings.clone(),
+        &settled.journal,
+        settled.provider.route(),
+        &model,
+        settled.max_steps,
+    )
+    .await
+    .map_err(|err| crate::fail(policy, &err))?;
 
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
-        .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &args.session)))?;
+    let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
+        .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &settled.journal)))?;
 
     let ctx = boot(bus, adapter, Arc::new(crate::registry()), log.clone())
         .map_err(|err| crate::report(policy, &err.to_string(), None))?;
@@ -153,7 +175,7 @@ pub async fn chat<W: Write>(
         &ctx,
         TurnConfig {
             model: model.clone(),
-            max_steps: args.max_steps,
+            max_steps: settled.max_steps,
             ..TurnConfig::default()
         },
     )
@@ -247,8 +269,8 @@ pub async fn chat<W: Write>(
                         &crate::turn_fault(
                             &err,
                             &opened.session_id,
-                            args.adapter.route(),
-                            &args.session,
+                            settled.provider.route(),
+                            &settled.journal,
                         ),
                     )
                 })?;

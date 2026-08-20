@@ -17,12 +17,13 @@
 //! hub wider for every other command.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_ui::{Policy, Ui};
 
 use crate::render;
-use crate::{fail, misconfigured, report, Reported};
+use crate::{fail, misconfigured, report, AdapterChoice, Reported};
 
 /// Write the page for the settings the next command would run on.
 ///
@@ -79,7 +80,7 @@ pub fn booted(
     policy: &Policy,
     flags: &[(&'static str, serde_json::Value)],
 ) -> Result<tetanus_engine::EngineConfig, Reported> {
-    let document = tetanus_config::file::document_path(&tetanus_config::home::home(None));
+    let document = document();
     let mut settings = tetanus_engine::boot::document(&document).map_err(|err| {
         misconfigured(
             policy,
@@ -119,4 +120,116 @@ pub fn root(dir: Option<&Path>) -> Vec<(&'static str, serde_json::Value)> {
     })
     .into_iter()
     .collect()
+}
+
+/// Where this run's settings document lives.
+pub fn document() -> PathBuf {
+    tetanus_config::file::document_path(&tetanus_config::home::home(None))
+}
+
+/// The flags a command that runs turns was given, before the document has
+/// been read. Every one of them is optional for the reason [`root`] gives.
+pub struct TurnFlags {
+    pub adapter: Option<AdapterChoice>,
+    pub model: Option<String>,
+    pub max_steps: Option<u32>,
+    pub session: Option<PathBuf>,
+}
+
+/// What a turn will run on, once the document and the flags have both been
+/// read.
+pub struct Turn {
+    /// The settled settings, so the engine the turn opens on is the one
+    /// `tetanus config` described.
+    pub settings: tetanus_engine::EngineConfig,
+    pub provider: AdapterChoice,
+    /// `None` leaves the model to the adapter's own catalogue, which is the
+    /// only sensible default for an adapter nobody configured.
+    pub model: Option<String>,
+    pub max_steps: u32,
+    pub journal: PathBuf,
+}
+
+/// Resolve one turn's settings out of the document and the flags.
+///
+/// `fallback` is the provider the command has when nobody said otherwise, and
+/// it is not always the engine's: `tetanus run` is the mock adapter because a
+/// first run must need no credential, and `tetanus chat` is DeepSeek because
+/// a conversation with the mock is a demonstration rather than a use. Which
+/// is why the compiled default of a key cannot decide this - only a layer
+/// somebody wrote can, and that is what the layer is read for below.
+pub fn turn_settings(
+    policy: &Policy,
+    flags: TurnFlags,
+    fallback: AdapterChoice,
+    journal: &str,
+) -> Result<Turn, Reported> {
+    use tetanus_engine::catalog::key;
+
+    let mut overrides: Vec<(&'static str, serde_json::Value)> = Vec::new();
+    if let Some(adapter) = flags.adapter {
+        overrides.push((key::PROVIDER, serde_json::json!(adapter.route())));
+    }
+    if let Some(model) = &flags.model {
+        overrides.push((key::MODEL, serde_json::json!(model)));
+    }
+    if let Some(steps) = flags.max_steps {
+        overrides.push((key::MAX_STEPS, serde_json::json!(steps)));
+    }
+    let settings = booted(policy, &overrides)?;
+
+    // A key still on its compiled layer is a key nobody has an opinion about,
+    // and the command's own default stands. Anything above it - a document, an
+    // environment, a flag - is somebody's opinion, and outranks the default
+    // this binary happens to compile in.
+    let written = |key: &str| {
+        settings
+            .resolved
+            .get(key)
+            .is_some_and(|resolved| resolved.layer > tetanus_config::Layer::Default)
+    };
+
+    Ok(Turn {
+        provider: match written(key::PROVIDER) {
+            true => provider_named(policy, &settings.default_provider)?,
+            false => fallback,
+        },
+        // Not the settled value when nobody set it: the engine's compiled
+        // model belongs to the engine's compiled provider, and offering it to
+        // an adapter that never advertised it would name a model that does
+        // not exist. An unset model is the adapter's first catalogue entry.
+        model: written(key::MODEL).then(|| settings.default_model.clone()),
+        max_steps: settings.max_steps,
+        journal: flags
+            .session
+            .unwrap_or_else(|| settings.sessions_root.join(journal)),
+        settings,
+    })
+}
+
+/// The adapter a provider name asks for.
+///
+/// clap refuses an unknown `--adapter`, so a name that gets this far came out
+/// of a document or an environment, and is reported the way any other value
+/// in one is: it names the key, and it names the file that has to be edited.
+pub fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported> {
+    [AdapterChoice::Mock, AdapterChoice::Deepseek]
+        .into_iter()
+        .find(|choice| choice.route() == name)
+        .ok_or_else(|| {
+            let known = [AdapterChoice::Mock, AdapterChoice::Deepseek]
+                .map(AdapterChoice::route)
+                .join(" or ");
+            misconfigured(
+                policy,
+                &document(),
+                &RpcError::new(
+                    ErrorCode::InvalidParams,
+                    format!("must be a provider this build can reach, {known}, not {name:?}"),
+                )
+                .with_data(serde_json::json!({
+                    "field": tetanus_engine::catalog::key::PROVIDER,
+                })),
+            )
+        })
 }
