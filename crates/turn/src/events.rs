@@ -237,6 +237,16 @@ pub enum StopReason {
     Interrupted,
 }
 
+/// The `turn/end` reason for a turn a failure ended
+/// (`docs/interface-contract.md` section 4.4.2).
+///
+/// A value on the journal rather than a [`StopReason`] variant, because no
+/// value of the enum could carry it: a turn that failed answers with its
+/// failure and produces no [`crate::TurnOutcome`], so this reason is only ever
+/// read off the event. Section 7.5 of the contract makes it a value of the
+/// growable wire enum, which is where a surface meets it.
+pub const FAILED_STOP_REASON: &str = "failed";
+
 impl StopReason {
     pub fn as_str(self) -> &'static str {
         match self {

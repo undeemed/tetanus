@@ -37,7 +37,7 @@ use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
     RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute, ToolsPostExecute,
-    ToolsPreExecute, TurnStopping,
+    ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
 };
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, Message, ModelRequest, ModelResponse, StreamChunk,
@@ -105,6 +105,26 @@ pub struct TurnOutcome {
     pub content: String,
     /// Set when an `agent/turn-stopping` listener bailed.
     pub stop_veto: Option<String>,
+}
+
+/// What a turn that reached its own end has to say for itself.
+///
+/// Not a [`TurnOutcome`]: the turn number and the step count belong to the
+/// caller that opened the turn, which holds them whether the steps ended or
+/// failed.
+struct Closing {
+    reason: StopReason,
+    content: String,
+    stop_veto: Option<String>,
+}
+
+/// What the caller that opened a turn holds while its steps run, so the
+/// closers it writes can report the turn whichever way the steps ended.
+#[derive(Default)]
+struct Progress {
+    steps: u32,
+    /// The step that has a `step/start` and no `step/end` yet.
+    open_step: Option<u32>,
 }
 
 pub struct TurnEngine {
@@ -178,6 +198,13 @@ impl TurnEngine {
     }
 
     /// Run one turn to completion.
+    ///
+    /// Whatever ends the turn closes it on the journal. A failure ends a turn
+    /// as surely as the model settling does, so `turn/end` is written before
+    /// the failure is returned, and a `turn/start` with no `turn/end` means a
+    /// process that died - which is what [`crate::repair`] answers.
+    /// `docs/interface-contract.md` section 4.4.2 states it as a promise of
+    /// the boundary.
     pub async fn run_turn(&self, input: &str) -> Result<TurnOutcome, TurnError> {
         // An interrupt that arrived while the session was idle stops nothing;
         // it must not stop the turn that starts next.
@@ -186,13 +213,77 @@ impl TurnEngine {
         self.log
             .append(topic::TURN_START, serde_json::json!({ "turn": turn }))?;
 
+        let mut progress = Progress::default();
+        let ran = self.run_steps(turn, input, &mut progress).await;
+        let closed = self.close(turn, &progress, &ran);
+
+        // The failure that ended the turn is the one the caller hears, even
+        // when the closers could not be written either: a journal that refused
+        // a closer is usually the journal that refused the step.
+        let closing = ran?;
+        closed?;
+        Ok(TurnOutcome {
+            turn,
+            steps: progress.steps,
+            reason: closing.reason,
+            content: closing.content,
+            stop_veto: closing.stop_veto,
+        })
+    }
+
+    /// Write the closers the turn owes its journal: the step it left open,
+    /// then the turn itself.
+    ///
+    /// The two are the pair `docs/interface-contract.md` section 4.4.4 gives
+    /// crash repair, in that order and with those payloads, because a reader
+    /// cannot tell the two journals apart and should not have to.
+    fn close(
+        &self,
+        turn: u64,
+        progress: &Progress,
+        ran: &Result<Closing, TurnError>,
+    ) -> Result<(), SessionError> {
+        if let Some(step) = progress.open_step {
+            self.log.append(
+                topic::STEP_END,
+                serde_json::json!({ "turn": turn, "step": step }),
+            )?;
+        }
+        self.log.append(
+            topic::TURN_END,
+            serde_json::json!({
+                "turn": turn,
+                "steps": progress.steps,
+                "stop_reason": match ran {
+                    Ok(closing) => closing.reason.as_str(),
+                    Err(_) => FAILED_STOP_REASON,
+                },
+                // A turn nobody held open, and a turn that never reached the
+                // checkpoint where it could be held, both report no veto.
+                "stop_veto": ran.as_ref().ok().and_then(|closing| closing.stop_veto.clone()),
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// The steps of one turn: everything between the two durable ends
+    /// [`Self::run_turn`] writes.
+    ///
+    /// The step count is the caller's rather than part of the answer, because
+    /// the closer reports how many steps a turn spent even when the last of
+    /// them failed.
+    async fn run_steps(
+        &self,
+        turn: u64,
+        input: &str,
+        progress: &mut Progress,
+    ) -> Result<Closing, TurnError> {
         let mut claimed = vec![Message::user(input)];
-        let mut steps = 0u32;
         let mut reason = StopReason::Natural;
         let mut content = String::new();
 
         loop {
-            let step = steps + 1;
+            let step = progress.steps + 1;
 
             let mut pre_step = PreStep {
                 turn,
@@ -211,12 +302,13 @@ impl TurnEngine {
                 }
                 PreStepDecision::Enter(messages) => messages,
             };
-            steps = step;
+            progress.steps = step;
 
             self.log.append(
                 topic::STEP_START,
                 serde_json::json!({ "turn": turn, "step": step }),
             )?;
+            progress.open_step = Some(step);
             for message in &entered {
                 self.log.append(
                     topic::USER_MESSAGE,
@@ -319,6 +411,7 @@ impl TurnEngine {
                 topic::STEP_END,
                 serde_json::json!({ "turn": turn, "step": step }),
             )?;
+            progress.open_step = None;
 
             // Tools owe another request -> claim -> next step. Phase ① has one
             // inbox holding one turn's input, so nothing new is claimed here.
@@ -331,7 +424,7 @@ impl TurnEngine {
                 reason = StopReason::Cancelled;
                 break;
             }
-            if steps >= self.config.max_steps {
+            if progress.steps >= self.config.max_steps {
                 reason = StopReason::MaxSteps;
                 break;
             }
@@ -339,11 +432,11 @@ impl TurnEngine {
 
         // The terminal checkpoint runs only for a turn that spent a step; a
         // rejected first claim closes a durable turn without one.
-        let stop_veto = if steps > 0 {
+        let stop_veto = if progress.steps > 0 {
             self.bus
                 .serial(&TurnStopping {
                     turn,
-                    steps,
+                    steps: progress.steps,
                     reason,
                 })
                 .await
@@ -352,19 +445,7 @@ impl TurnEngine {
             None
         };
 
-        self.log.append(
-            topic::TURN_END,
-            serde_json::json!({
-                "turn": turn,
-                "steps": steps,
-                "stop_reason": reason.as_str(),
-                "stop_veto": stop_veto,
-            }),
-        )?;
-
-        Ok(TurnOutcome {
-            turn,
-            steps,
+        Ok(Closing {
             reason,
             content,
             stop_veto,
