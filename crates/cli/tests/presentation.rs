@@ -1170,6 +1170,128 @@ fn an_empty_store_is_not_a_failure() {
     );
 }
 
+/// TC-CLI-SESS-10: the id `tetanus sessions` printed, typed into
+/// `tetanus replay`.
+/// Expected: exit 0 and the journal that id names, for the bare id and for the
+/// id with the extension it is listed under. The page a reader takes an id off
+/// and the command they retype it into are the pair this case exists for: the
+/// note on a missing journal sends them to that page, so a page whose ids the
+/// next command refuses is a loop with no way out of it.
+#[test]
+fn an_id_the_session_list_printed_is_one_replay_opens() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+    for prompt in ["echo this", "and again"] {
+        let out = run(
+            dir.path(),
+            &[
+                "run",
+                "-p",
+                prompt,
+                "--session",
+                &format!("journals/{}.jsonl", prompt.replace(' ', "-")),
+            ],
+            &[],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let listed = stdout(&run(dir.path(), &["sessions", "--color", "never"], &[]));
+    let mut ids: Vec<String> = listed
+        .lines()
+        .skip(2)
+        .filter_map(|row| row.split_whitespace().next().map(str::to_string))
+        .collect();
+    ids.sort();
+
+    assert_eq!(ids, vec!["and-again", "echo-this"], "{listed}");
+    for id in &ids {
+        let told = stdout(&run(dir.path(), &["replay", id, "--color", "never"], &[]));
+        assert!(told.contains("session on mock-echo-1"), "`{id}`: {told}");
+        let with_extension = stdout(&run(
+            dir.path(),
+            &["replay", &format!("{id}.jsonl"), "--color", "never"],
+            &[],
+        ));
+        assert_eq!(with_extension, told, "`{id}.jsonl` read something else");
+    }
+}
+
+/// TC-CLI-SESS-11: a target that is a path, against a document whose root
+/// holds a journal of the same name, and `--dir` over the document.
+/// Expected: the path is opened as it was given - a journal the user can see
+/// is the one they meant, whatever a document says about roots - and an id is
+/// looked up under `--dir` when one is passed.
+#[test]
+fn a_path_is_opened_as_given_and_a_flag_says_where_an_id_lives() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+    for (prompt, path) in [
+        ("under the root", "journals/same.jsonl"),
+        ("beside it", "same.jsonl"),
+        ("somewhere else", "elsewhere/other.jsonl"),
+    ] {
+        let out = run(dir.path(), &["run", "-p", prompt, "--session", path], &[]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let told = stdout(&run(
+        dir.path(),
+        &["replay", "same.jsonl", "--color", "never"],
+        &[],
+    ));
+    assert!(
+        told.contains("beside it"),
+        "the root's copy was opened: {told}"
+    );
+
+    let by_id = stdout(&run(
+        dir.path(),
+        &["replay", "same", "--color", "never"],
+        &[],
+    ));
+    assert!(by_id.contains("under the root"), "{by_id}");
+
+    let flagged = stdout(&run(
+        dir.path(),
+        &["replay", "other", "--dir", "elsewhere", "--color", "never"],
+        &[],
+    ));
+    assert!(flagged.contains("somewhere else"), "{flagged}");
+}
+
+/// TC-CLI-SESS-12: a target that is neither a path nor an id.
+/// Expected: exit 4, `SessionNotFound` in the contract's table; the message
+/// names what was typed rather than a path nobody typed; the way out names the
+/// root it was looked for under, because the reader typed an id and either the
+/// id is wrong or the root is; and nothing is printed on stdout.
+#[test]
+fn a_target_that_is_nothing_names_the_root_it_was_looked_for_under() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+
+    let out = run(dir.path(), &["replay", "nope", "--color", "never"], &[]);
+
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "", "a missing journal printed a page");
+    let told = stderr(&out);
+    assert!(told.contains("no journal at nope"), "{told}");
+    assert!(told.contains("journals"), "{told}");
+    assert!(told.contains("tetanus sessions"), "{told}");
+}
+
 /// TC-CLI-ERR-12: a provider that answers nothing.
 /// Expected: exit 6, `ProviderError` in the contract's table - not the 1 a
 /// build failure would exit with, and not the 5 a missing key exits with. The
@@ -1373,7 +1495,7 @@ fn a_value_that_names_nothing_is_a_usage_error() {
 
     for (args, named) in [
         (vec!["run", "--model", "", "-p", "hi"], "--model <ID>"),
-        (vec!["replay", ""], "<PATH>"),
+        (vec!["replay", ""], "<JOURNAL>"),
         (vec!["serve", "--listen", ""], "--listen <ADDR>"),
         // The two that were already refused, asserted here so that the five
         // cannot drift back into two answers for one mistake.
