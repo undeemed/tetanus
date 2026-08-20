@@ -259,6 +259,7 @@ fn fails_first(bus: &EventBus, per_step: u32) -> (Arc<AtomicU32>, EffectHandle) 
                 return Err(LlmError::Provider {
                     status: 503,
                     message: "upstream is down".into(),
+                    retry_after_ms: None,
                 });
             }
             next.run(ev).await

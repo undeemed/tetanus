@@ -185,6 +185,7 @@ fn fails_from(bus: &EventBus, answers: u32) -> (Arc<AtomicU32>, EffectHandle) {
             Err(LlmError::Provider {
                 status: 503,
                 message: "upstream is down".into(),
+                retry_after_ms: None,
             })
         })
     });

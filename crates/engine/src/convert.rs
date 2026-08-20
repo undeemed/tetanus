@@ -110,7 +110,12 @@ pub fn turn_error(
             )
             .with_data(serde_json::json!({ "provider": provider, "env": env }))
         }
-        TurnError::Llm(LlmError::Provider { status, message }) => RpcError::new(
+        // The wait the provider asked for is not published: section 4.5 fixes
+        // the fields this error's `data` carries, so adding one is a change to
+        // the contract and not to this table.
+        TurnError::Llm(LlmError::Provider {
+            status, message, ..
+        }) => RpcError::new(
             ErrorCode::ProviderError,
             format!("provider `{provider}` answered {status}: {message}"),
         )
