@@ -4,9 +4,9 @@
 //! Upstream keeps this registry on its `systemPrompt` service. A section has a
 //! unique name, an explicit order, and text that is either fixed or produced
 //! for each assembly, and one section may declare itself the whole prompt.
-//! Section text may name prompt variables, which [`interpolate`] substitutes.
-//! tetanus keeps that shape. What upstream also keeps there and tetanus has no
-//! surface for - scopes, the variable registry itself and runtime-context
+//! Section text may name prompt variables, which this registry also holds and
+//! [`interpolate`] substitutes. tetanus keeps that shape. What upstream also
+//! keeps there and tetanus has no surface for - scopes and runtime-context
 //! providers - stays a row in `docs/parity.md`.
 //!
 //! The registry is the assembly's input, not its decision. It produces the
@@ -35,7 +35,7 @@ pub const BASE_ORDER: i32 = -100;
 pub const VARIABLE_NAME: &str = "^[a-z][a-z0-9_]*$";
 
 /// What one assembly knows about its variables: every registered name, and the
-/// value it has for this assembly, if it has one.
+/// value its provider gave for this assembly, if it gave one.
 ///
 /// A name that is absent is not registered at all, and a section that names it
 /// is a mistake; a name present with no value is registered but has nothing to
@@ -51,6 +51,10 @@ pub enum PromptError {
     Reserved(String),
     #[error("prompt section \"{refused}\" cannot be the whole prompt: \"{held}\" already is")]
     Complete { held: String, refused: String },
+    #[error("prompt variable name {0:?} cannot be referenced: names match {VARIABLE_NAME}")]
+    BadVariableName(String),
+    #[error("prompt variable {0:?} is already registered")]
+    DuplicateVariable(String),
     /// The text opened a reference that never became one complete group, and a
     /// later `}}` says the author meant it as a reference.
     #[error("malformed prompt variable reference at {at:?} in section {section:?} (references are complete simple {{{{name}}}} groups)")]
@@ -89,6 +93,9 @@ pub struct AssembleAt {
 }
 
 type Provider = Arc<dyn Fn(&AssembleAt) -> String + Send + Sync>;
+
+/// A variable's value for one assembly, or nothing when it has none to give.
+type VariableProvider = Arc<dyn Fn(&AssembleAt) -> Option<String> + Send + Sync>;
 
 /// A section's text: settled once, or asked for at every assembly.
 #[derive(Clone)]
@@ -168,9 +175,18 @@ struct Entry {
     complete: bool,
 }
 
+struct VariableEntry {
+    seq: u64,
+    name: String,
+    provider: VariableProvider,
+}
+
 #[derive(Default)]
 struct Inner {
     entries: Vec<Entry>,
+    variables: Vec<VariableEntry>,
+    /// Shared by sections and variables, so a handle's number says which one it
+    /// takes back.
     next: u64,
 }
 
@@ -205,6 +221,40 @@ impl PromptRegistry {
         self.insert(section).ok_or(PromptError::Duplicate(id))
     }
 
+    /// Register a prompt variable: a name section text may write between
+    /// braces, and the provider asked for its value at every assembly.
+    ///
+    /// The name is checked here, not where a section names it, so a variable
+    /// no reference could ever carry is refused at the registration that made
+    /// the mistake. Dropping the returned handle unregisters it.
+    pub fn variable(
+        self: &Arc<Self>,
+        name: impl Into<String>,
+        provider: impl Fn(&AssembleAt) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<EffectHandle, PromptError> {
+        let name = name.into();
+        if !is_variable_name(&name) {
+            return Err(PromptError::BadVariableName(name));
+        }
+        let seq = {
+            let mut inner = self.inner.lock().expect("prompt registry");
+            if inner.variables.iter().any(|v| v.name == name) {
+                return Err(PromptError::DuplicateVariable(name));
+            }
+            let seq = inner.next;
+            inner.next += 1;
+            inner.variables.push(VariableEntry {
+                seq,
+                name,
+                provider: Arc::new(provider),
+            });
+            seq
+        };
+
+        let owner = Arc::downgrade(self);
+        Ok(EffectHandle::new(move || remove_variable(&owner, seq)))
+    }
+
     /// Fill the engine's own slot. Private to the crate because the engine
     /// owns it: it cannot collide, because [`section`](Self::section) refuses
     /// the name.
@@ -232,6 +282,33 @@ impl PromptRegistry {
             .map(|(_, _, id, text)| PromptSection {
                 id,
                 text: text.resolve(at),
+            })
+            .collect()
+    }
+
+    /// Every registered variable, each asked for this assembly's value.
+    ///
+    /// The set is snapshotted first, exactly as [`assemble`](Self::assemble)
+    /// snapshots sections: providers run with the lock released, so one that
+    /// registers another variable cannot deadlock the assembly that called it,
+    /// and the variable it registered joins the next assembly rather than this
+    /// one. Upstream iterates its variables live and includes such a late
+    /// registration in the same assembly; `docs/parity.md` records the
+    /// difference.
+    pub fn variables(&self, at: &AssembleAt) -> Variables {
+        let snapshot: Vec<(String, VariableProvider)> = {
+            let inner = self.inner.lock().expect("prompt registry");
+            inner
+                .variables
+                .iter()
+                .map(|v| (v.name.clone(), Arc::clone(&v.provider)))
+                .collect()
+        };
+        snapshot
+            .into_iter()
+            .map(|(name, provider)| {
+                let value = provider(at);
+                (name, value)
             })
             .collect()
     }
@@ -276,6 +353,13 @@ fn remove(owner: &Weak<PromptRegistry>, seq: u64) {
     if let Some(registry) = owner.upgrade() {
         let mut inner = registry.inner.lock().expect("prompt registry");
         inner.entries.retain(|e| e.seq != seq);
+    }
+}
+
+fn remove_variable(owner: &Weak<PromptRegistry>, seq: u64) {
+    if let Some(registry) = owner.upgrade() {
+        let mut inner = registry.inner.lock().expect("prompt registry");
+        inner.variables.retain(|v| v.seq != seq);
     }
 }
 
