@@ -15,7 +15,7 @@
 //! Environmental needs: none. Every case runs offline on the mock adapter, and
 //! the one case about a real provider is the case where it is never reached.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -45,12 +45,21 @@ fn chat_with_key(dir: &Path, args: &[&str], typed: &str, key: Option<&str>) -> O
         None => cmd.env_remove("DEEPSEEK_API_KEY"),
     };
     let mut child = cmd.spawn().expect("the binary runs");
-    child
+    let written = child
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(typed.as_bytes())
-        .expect("the questions are written");
+        .write_all(typed.as_bytes());
+    // A chat that refuses before it reads - TC-CLI-CHAT-5, where a credential
+    // is missing - can be gone by the time these bytes are offered, and then
+    // the pipe has no reader and the write ends in `BrokenPipe`. That is the
+    // case working, not a failure, so it is not an error here: what the run
+    // did is asserted from the output below, never from the write.
+    match written {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("the questions are written: {error}"),
+    }
     child.wait_with_output().expect("the binary exits")
 }
 
