@@ -33,6 +33,9 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
+# Upstream pins some contracts with fast-check property suites; this is the
+# Rust equivalent, and never more than a dev-dependency.
+proptest = "1"
 anstyle = "1"
 terminal_size = "0.4"
 # A terminal draws a CJK character in two columns and a combining mark in
