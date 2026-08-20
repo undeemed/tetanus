@@ -36,7 +36,7 @@ use std::io::{self, Write};
 
 use tetanus_protocol::methods::{ModelCatalogResult, ToolCatalogResult};
 use tetanus_protocol::types::{ProviderDescriptor, ToolDescriptor};
-use tetanus_ui::{truncate, Role, Ui};
+use tetanus_ui::{tame, truncate, visible_width, Role, Ui};
 
 /// Indent of a row that belongs to the entry above it.
 const INDENT: &str = "  ";
@@ -54,16 +54,23 @@ pub fn models<W: Write>(ui: &mut Ui<W>, catalog: &ModelCatalogResult) -> io::Res
         return ui.line(&empty);
     }
 
-    let pad = column(catalog.providers.iter().map(|p| p.provider.as_str()));
-    for (place, provider) in catalog.providers.iter().enumerate() {
+    // A provider names itself and its models, and a provider is something this
+    // build talks to over a network, so every name on this page is tamed.
+    let named: Vec<String> = catalog
+        .providers
+        .iter()
+        .map(|provider| tame(&provider.provider))
+        .collect();
+    let pad = column(named.iter().map(String::as_str));
+    for (place, (provider, name)) in catalog.providers.iter().zip(&named).enumerate() {
         if place > 0 {
             ui.blank()?;
         }
         let state = state(ui, provider);
         ui.line(&format!(
-            "{:<pad$}{}{state}",
-            ui.paint(Role::Accent, &provider.provider),
-            " ".repeat(GAP)
+            "{}{}{state}",
+            ui.paint(Role::Accent, name),
+            " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
         ))?;
         for (place, model) in provider.models.iter().enumerate() {
             // Only the first is tagged: tagging every other one `--model` is
@@ -72,7 +79,7 @@ pub fn models<W: Write>(ui: &mut Ui<W>, catalog: &ModelCatalogResult) -> io::Res
                 0 => format!("{}{}", " ".repeat(GAP), ui.paint(Role::Muted, "default")),
                 _ => String::new(),
             };
-            ui.line(&format!("{INDENT}{model}{tag}"))?;
+            ui.line(&format!("{INDENT}{}{tag}", tame(model)))?;
         }
         if provider.models.is_empty() {
             let none = ui
@@ -88,7 +95,9 @@ pub fn models<W: Write>(ui: &mut Ui<W>, catalog: &ModelCatalogResult) -> io::Res
 fn state<W: Write>(ui: &Ui<W>, provider: &ProviderDescriptor) -> String {
     match (provider.available, provider.credential_env.as_deref()) {
         (true, _) => ui.paint(Role::Ok, "ready").to_string(),
-        (false, Some(env)) => ui.paint(Role::Warn, &format!("set {env}")).to_string(),
+        (false, Some(env)) => ui
+            .paint(Role::Warn, &format!("set {}", tame(env)))
+            .to_string(),
         (false, None) => ui.paint(Role::Warn, "unavailable").to_string(),
     }
 }
@@ -102,17 +111,18 @@ pub fn tools<W: Write>(ui: &mut Ui<W>, catalog: &ToolCatalogResult) -> io::Resul
     }
 
     let charset = ui.theme().charset();
-    let pad = column(catalog.tools.iter().map(|tool| tool.name.as_str()));
+    let named: Vec<String> = catalog.tools.iter().map(|tool| tame(&tool.name)).collect();
+    let pad = column(named.iter().map(String::as_str));
     let room = ui.width().saturating_sub(pad + GAP);
-    for (place, tool) in catalog.tools.iter().enumerate() {
+    for (place, (tool, name)) in catalog.tools.iter().zip(&named).enumerate() {
         if place > 0 {
             ui.blank()?;
         }
         let said = truncate(&tool.description, room, charset);
         ui.line(&format!(
-            "{:<pad$}{}{said}",
-            ui.paint(Role::Tool, &tool.name),
-            " ".repeat(GAP)
+            "{}{}{said}",
+            ui.paint(Role::Tool, name),
+            " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
         ))?;
         // The parameters line up under the description, not under the name:
         // they belong to the sentence above them, not to the column of names.
@@ -147,6 +157,7 @@ fn arguments(tool: &ToolDescriptor) -> Vec<String> {
             let needed = required
                 .map(|list| list.iter().any(|held| held.as_str() == Some(name)))
                 .unwrap_or(false);
+            let (name, kind) = (tame(name), tame(kind));
             match needed {
                 true => format!("{name} ({kind}, required)"),
                 false => format!("{name} ({kind})"),
@@ -155,9 +166,13 @@ fn arguments(tool: &ToolDescriptor) -> Vec<String> {
         .collect()
 }
 
-/// The widest of a set of cells, in characters a terminal draws.
+/// The widest of a set of cells, in the columns a terminal draws them in.
+///
+/// Measured in columns and padded in columns, both here: a format width would
+/// count the characters of a name instead, and put every row beside a wide one
+/// out of place.
 fn column<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
-    cells.map(|cell| cell.chars().count()).max().unwrap_or(0)
+    cells.map(visible_width).max().unwrap_or(0)
 }
 
 /// Test Design Specification: the catalogue views.
@@ -165,8 +180,9 @@ fn column<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
 /// Features tested: the provider block and its three states; the tag on the
 /// model a bare `--adapter` would pick; a provider that advertises nothing; a
 /// tool's parameters lifted out of its JSON Schema, including a schema this
-/// view cannot read; a description too long for the terminal; and both empty
-/// catalogues.
+/// view cannot read; a description too long for the terminal; both empty
+/// catalogues; a name a provider sent that carries escape sequences; and a
+/// name column beside a name a terminal draws twice as wide.
 ///
 /// Features NOT tested here: which providers and tools this build registers
 /// (owned by `main.rs`, and asserted end to end in `tests/presentation.rs`),
@@ -340,5 +356,70 @@ mod tests {
     #[test]
     fn an_empty_tool_list_says_so() {
         assert_eq!(listed(Vec::new(), 80), "\ntools\nno tools are registered\n");
+    }
+
+    /// TC-CLI-CAT-9: a provider, a model, a credential variable, a tool and a
+    /// parameter whose names carry escape sequences.
+    /// Expected: no sequence reaches either page, every name is still read,
+    /// and the columns still line up. A provider is something this build
+    /// talks to over a network, and its catalogue is its answer, not ours.
+    #[test]
+    fn a_name_off_the_wire_cannot_drive_the_terminal() {
+        let clear = "\u{1b}[2J";
+        let page = shown(
+            vec![provider(
+                &format!("deep{clear}seek"),
+                &[&format!("v4{clear}pro")],
+                Some(&format!("DEEP{clear}KEY")),
+                false,
+            )],
+            80,
+        );
+        assert!(!page.contains('\u{1b}'), "{page:?}");
+        assert!(page.contains("deepseek"), "{page}");
+        assert!(page.contains("v4pro"), "{page}");
+        assert!(page.contains("set DEEPKEY"), "{page}");
+
+        let page = listed(
+            vec![tool(
+                &format!("ec{clear}ho"),
+                "Say it back.",
+                json!({ "properties": { format!("te{clear}xt"): { "type": format!("str{clear}ing") } } }),
+            )],
+            80,
+        );
+        assert!(!page.contains('\u{1b}'), "{page:?}");
+        assert!(page.contains("echo"), "{page}");
+        assert!(page.contains("text (string)"), "{page}");
+    }
+
+    /// TC-CLI-CAT-10: a tool named in a script a terminal draws twice as wide.
+    /// Expected: both descriptions start at the same column, counted in what
+    /// the terminal draws - fourteen columns of name plus the gap. A column
+    /// measured or padded in characters puts the row beside a wide name out of
+    /// place by one column for every character of it.
+    #[test]
+    fn the_name_column_is_measured_and_padded_in_columns() {
+        let out = listed(
+            vec![
+                tool(
+                    "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c4}\u{30fc}\u{30eb}",
+                    "Say it wide.",
+                    json!({}),
+                ),
+                tool("read", "Read a file.", json!({})),
+            ],
+            80,
+        );
+
+        for said in ["Say it wide.", "Read a file."] {
+            let line = out.lines().find(|line| line.contains(said)).expect(said);
+            let at = line.find(said).expect(said);
+            assert_eq!(
+                visible_width(&line[..at]),
+                14 + GAP,
+                "the description does not start where the other one does: {line:?}"
+            );
+        }
     }
 }

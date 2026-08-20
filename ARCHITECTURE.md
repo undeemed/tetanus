@@ -357,6 +357,20 @@ The same edit measures the room beside a name in columns rather than characters,
 value like any other and one in a wide script would otherwise push the value it labels past the
 frame.
 
+The three list pages tame the same class of value where they compose it: a provider, the models it
+advertises and the variable it asks to be set, a tool, its arguments and their types
+([`catalog.rs`](crates/cli/src/render/catalog.rs)); a config key and a layer this build does not
+know ([`config.rs`](crates/cli/src/render/config.rs)); a session id and a state this build does not
+know ([`sessions.rs`](crates/cli/src/render/sessions.rs)).
+An id is the one of those most likely to have come from somewhere else: the list reads it out of a
+journal's header, so it is a value the file carries and not the name of the file it was found in.
+Those pages line their columns up in what a terminal draws, and a format width cannot do that:
+`{:<8}` counts the characters of the value it pads, so a name in a wide script is padded as though
+it were half as wide and every column after it on that row starts somewhere else.
+Each page therefore writes the spaces it measured itself, and
+[`Ui::field`](crates/ui/src/writer.rs) does the same for the label column it owns, which is the one
+column a renderer hands over rather than composing.
+
 `?` puts the whole key map of whichever view is up on a screen of its own
 ([crates/cli/src/render/keys.rs](crates/cli/src/render/keys.rs)), and any key at all takes it down
 again, so a footer with more keys than it has room for gives up its wording rather than being cut

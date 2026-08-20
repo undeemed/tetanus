@@ -2,14 +2,15 @@
 //!
 //! Features tested: that a plain theme emits no escape bytes; that a colored
 //! theme wraps a span and resets it; that format width pads the text and not
-//! the escape sequences; the diagnostic tags; the charset-dependent glyphs.
+//! the escape sequences; that a field pads its label in the columns a
+//! terminal draws it in; the diagnostic tags; the charset-dependent glyphs.
 //!
 //! Features NOT tested here: the policy that produced the theme (see
 //! `color_policy.rs`) and the real process streams.
 //!
 //! Environmental needs: none. Every case writes into a `Vec<u8>`.
 
-use tetanus_ui::{buffered, Charset, Role, Theme};
+use tetanus_ui::{buffered, visible_width, Charset, Role, Theme};
 
 const ESC: char = '\u{1b}';
 
@@ -91,4 +92,27 @@ fn a_rule_follows_the_charset_and_the_width() {
     let mut ascii = buffered(Theme::plain(), 12);
     ascii.rule().expect("write");
     assert_eq!(ascii.contents(), "------------\n");
+}
+
+/// TC-UI-WRITE-6: a label in a script a terminal draws twice as wide.
+/// Expected: the value starts in the same column as it does beside a label of
+/// the same width in Latin characters. `field` pads the label itself, because
+/// a format width counts the characters of a label and would leave the wide
+/// row short by one column for every character of it.
+#[test]
+fn a_field_pads_its_label_in_the_columns_it_draws() {
+    let mut ui = buffered(Theme::plain(), 80);
+    ui.field("\u{65e5}\u{672c}\u{8a9e}", 9, "wide")
+        .expect("write");
+    ui.field("log.level", 9, "trace").expect("write");
+
+    let out = ui.contents();
+    for (line, value) in out.lines().zip(["wide", "trace"]) {
+        let at = line.find(value).expect(value);
+        assert_eq!(
+            visible_width(&line[..at]),
+            11,
+            "the value does not start where the other one does: {line:?}"
+        );
+    }
 }
