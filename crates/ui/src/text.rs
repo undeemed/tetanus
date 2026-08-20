@@ -1,4 +1,11 @@
 //! Text rules every renderer shares.
+//!
+//! Two families, and which one a renderer wants depends on where its text came
+//! from. [`truncate`] and [`wrap`] size text the harness did not write - a
+//! model's answer, a tool's result, a value out of a config file - and so they
+//! [`tame`] it first. [`fit`], [`light`], [`plain`] and [`visible_width`] read
+//! a line a [`Theme`](crate::Theme) has already painted, and keep the
+//! sequences in it, because those are the renderer's own.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -37,15 +44,95 @@ fn span(text: &[char]) -> usize {
     text.iter().copied().map(columns).sum()
 }
 
+/// Make text the harness did not write safe to draw.
+///
+/// A tool's result is whatever the tool returned, and a model's answer is
+/// whatever the model wrote. Sent to a terminal unchanged, either can do more
+/// than be read: `ESC [ 2 J` clears the screen the frame is being drawn on,
+/// `ESC ] 0 ;` renames the window, `BEL` rings, and any of them lands in the
+/// middle of a page the reader is holding still. A colour written this way
+/// also arrives under `--color never`, which the surface promises will write
+/// none.
+///
+/// So an escape sequence is taken out whole - it was a command that drew
+/// nothing, and nothing is what it should leave - and a stray control
+/// character becomes a space, so that a byte between two words cannot join
+/// them. Tabs become a space for the same reason and one of their own: a tab's
+/// width is a property of the terminal's stops, which no renderer here can
+/// know, so a tab drawn as a tab is a column count nothing can predict.
+///
+/// Newlines survive. They are what [`wrap`] folds a paragraph on, and a tool
+/// that wrote lines meant lines.
+///
+/// A tool's own colour is dropped rather than honoured. Upstream's terminal
+/// card parses the sequences and draws the colours it finds; that is a reader
+/// of ANSI, and this is a filter, because the family of sequences that carries
+/// a colour is the family that carries a cursor move. A parser is a later
+/// slice, and it would still have to end here for everything it refused.
+pub fn tame(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        match char {
+            '\n' => out.push('\n'),
+            '\t' => out.push(' '),
+            '\u{1b}' => skip(&mut chars),
+            // C0 and DEL. Everything above them is text, including the C1
+            // range, which a terminal reading UTF-8 does not act on.
+            char if char.is_control() => out.push(' '),
+            char => out.push(char),
+        }
+    }
+    out
+}
+
+/// Step over the rest of one escape sequence, having read its `ESC`.
+///
+/// Three shapes reach a terminal. `CSI` - `ESC [` - runs to a byte in `@` to
+/// `~`, and is what colour, cursor movement and erasing are written as. `OSC` -
+/// `ESC ]` - sets a window's title or its clipboard and runs to `BEL` or to
+/// `ST`. Anything else is `ESC` and one character. A sequence this does not
+/// recognise is still ended by the first of those rules that matches, which
+/// is the safe way to be wrong: a filter that gave up and passed the rest
+/// through would pass exactly the sequence it failed to read.
+fn skip(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    match chars.next() {
+        Some('[') => {
+            for char in chars.by_ref() {
+                if matches!(char, '@'..='~') {
+                    break;
+                }
+            }
+        }
+        Some(']') => {
+            while let Some(char) = chars.next() {
+                if char == '\u{7}' {
+                    break;
+                }
+                // `ST` is `ESC \`, so the escape is only the end of the
+                // sequence when the character after it is the backslash.
+                if char == '\u{1b}' && chars.peek() == Some(&'\\') {
+                    chars.next();
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Cut `text` to `width` columns, marking that it was cut.
 ///
 /// Used by the status line, where wrapping is worse than being short - the
 /// terminal scrolls and the next repaint lands on the wrong row - and by any
 /// renderer showing a value it did not author, such as a tool's arguments.
 pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
+    // Tamed before it is measured, not after: a sequence taken out afterwards
+    // would already have been paid for in columns the reader never sees.
+    let text = tame(text);
     let chars: Vec<char> = text.chars().collect();
     if span(&chars) <= width {
-        return text.to_string();
+        return text;
     }
     let mark = match charset {
         Charset::Unicode => "…",
@@ -183,6 +270,7 @@ pub fn fit(text: &str, width: usize, charset: Charset) -> String {
 /// overrun.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
+    let text = tame(text);
     let mut lines = Vec::new();
 
     for paragraph in text.split('\n') {
