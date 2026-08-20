@@ -57,7 +57,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited | Compaction, session query |
 | Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports, the usage and context projections |
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
-| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from, with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
+| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
 | Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
@@ -121,8 +121,8 @@ but never persisted.
 The session journal is append-only JSONL.
 Its first line is a `session/start` header naming the id, the provider, the model and the step
 budget, so a reader can open a journal nobody told them about.
-It lands at `sessions/turn.jsonl` under the current directory unless `--session <path>` says
-otherwise. Read it back with:
+It lands at `turn.jsonl` under `sessions.root` - `sessions` under the current directory unless the
+settings document says otherwise - and `--session <path>` overrides both. Read it back with:
 
 ```bash
 cargo run --bin tetanus -- replay sessions/turn.jsonl
@@ -206,8 +206,9 @@ This holds in every view and under every `--color` setting.
 
 `tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
 Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.
-That journal is `sessions/chat.jsonl` unless `-s/--session <path>` says otherwise, and a path that already holds a conversation is resumed rather than replaced: the opening page says how many turns it is carrying, and the next turn is numbered after them.
-It takes the same `--adapter`, `--model`, `--max-steps` and `--think` flags as `run`, and like `run` it defaults to DeepSeek, so a chat with no `DEEPSEEK_API_KEY` says so and stops before a journal is opened.
+That journal is `chat.jsonl` under `sessions.root`, unless `-s/--session <path>` says otherwise, and a path that already holds a conversation is resumed rather than replaced: the opening page says how many turns it is carrying, and the next turn is numbered after them.
+It takes the same `--adapter`, `--model`, `--max-steps` and `--think` flags as `run`, and where `run` is the mock adapter when nothing says otherwise a chat is DeepSeek, so a chat with no `DEEPSEEK_API_KEY` says so and stops before a journal is opened.
+A settings document that sets `provider.default` decides for both, since a flag that was not passed is not an opinion and a document is.
 A line that opens with a slash is a command: `/help` lists them, `/exit` leaves, and `//text` asks the model `/text` rather than running it as one.
 Ctrl-D leaves the way `/exit` does and exits 0, Ctrl-C stops what is running and exits 130, and either way every turn already written stays on the journal.
 Standard input can be a pipe as well as a keyboard - `tetanus chat -a mock < questions.txt` asks each line in turn - and a piped chat prints the transcript without the prompt marker.

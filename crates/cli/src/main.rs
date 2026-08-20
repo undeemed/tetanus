@@ -148,23 +148,22 @@ struct RunArgs {
     /// What to ask the agent, named rather than positional
     #[arg(short, long, value_name = "TEXT", conflicts_with = "ask")]
     prompt: Option<String>,
-    /// Which model provider to resolve into the registry
-    #[arg(short, long, value_enum, default_value_t = AdapterChoice::Mock)]
-    adapter: AdapterChoice,
+    /// Which model provider to resolve into the registry. Defaults to
+    /// `provider.default` in the settings document, and to the mock adapter
+    /// when nothing sets it
+    #[arg(short, long, value_enum)]
+    adapter: Option<AdapterChoice>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID", value_parser = named())]
     model: Option<String>,
-    /// Where the session journal lands
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "sessions/turn.jsonl"
-    )]
-    session: PathBuf,
-    /// Step budget for the turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    max_steps: u32,
+    /// Where the session journal lands. Defaults to `turn.jsonl` under
+    /// `sessions.root` in the settings document
+    #[arg(short, long, value_name = "PATH")]
+    session: Option<PathBuf>,
+    /// Step budget for the turn. Defaults to `agent.max_steps` in the
+    /// settings document
+    #[arg(long, value_name = "N")]
+    max_steps: Option<u32>,
     /// Print the raw event sequence instead of the turn
     #[arg(long)]
     trace: bool,
@@ -1500,7 +1499,24 @@ async fn run<W: std::io::Write>(
     let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
         .map_err(|err| fail(policy, &err))?;
 
-    let (adapter, model) = adapter(policy, args.adapter, args.model)?;
+    // What the turn runs on: the settings document, with the flags over it.
+    // Before the journal is opened, because the document decides where the
+    // journal goes when `--session` did not.
+    let settled = settings::turn_settings(
+        policy,
+        settings::TurnFlags {
+            adapter: args.adapter,
+            model: args.model,
+            max_steps: args.max_steps,
+            session: args.session,
+        },
+        // A first run must need no credential, so an unconfigured `run` is
+        // the mock adapter.
+        AdapterChoice::Mock,
+        "turn.jsonl",
+    )?;
+
+    let (adapter, model) = adapter(policy, settled.provider, settled.model.clone())?;
 
     // The journal is the engine's to open. `session.create` writes the
     // `session/start` header that makes the file self-describing - the model
@@ -1508,13 +1524,19 @@ async fn run<W: std::io::Write>(
     // reader open a journal nobody told them about. The turn below still runs
     // in this process; it moves behind `agent.prompt` in its own slice, and
     // nothing here changes when it does.
-    let opened = session(&args.session, args.adapter.route(), &model, args.max_steps)
-        .await
-        .map_err(|err| fail(policy, &err))?;
+    let opened = session(
+        settled.settings.clone(),
+        &settled.journal,
+        settled.provider.route(),
+        &model,
+        settled.max_steps,
+    )
+    .await
+    .map_err(|err| fail(policy, &err))?;
 
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
-        .map_err(|err| fail(policy, &journal_fault(&err, &args.session)))?;
+    let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
+        .map_err(|err| fail(policy, &journal_fault(&err, &settled.journal)))?;
 
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
@@ -1525,7 +1547,7 @@ async fn run<W: std::io::Write>(
         &ctx,
         TurnConfig {
             model: model.clone(),
-            max_steps: args.max_steps,
+            max_steps: settled.max_steps,
             ..TurnConfig::default()
         },
     )
@@ -1550,7 +1572,12 @@ async fn run<W: std::io::Write>(
                 title: &named,
             };
             with_page(policy, out, &log, watched, turn, |err| {
-                turn_fault(err, &opened.session_id, args.adapter.route(), &args.session)
+                turn_fault(
+                    err,
+                    &opened.session_id,
+                    settled.provider.route(),
+                    &settled.journal,
+                )
             })
             .await
         }
@@ -1574,8 +1601,8 @@ async fn run<W: std::io::Write>(
             &turn_fault(
                 &err,
                 &opened.session_id,
-                args.adapter.route(),
-                &args.session,
+                settled.provider.route(),
+                &settled.journal,
             ),
         )
     })?;
@@ -1656,6 +1683,7 @@ async fn run<W: std::io::Write>(
 /// turn, not about the name - so the call is made again without it and the
 /// store mints its own.
 async fn session(
+    settings: tetanus_engine::EngineConfig,
     path: &std::path::Path,
     provider: &str,
     model: &str,
@@ -1670,7 +1698,10 @@ async fn session(
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".")),
-        ..Default::default()
+        // Everything else is what the document settled: the retry policy a
+        // turn runs under is in there, and an engine built from the compiled
+        // defaults would quietly ignore it.
+        ..settings
     });
     let named = tetanus_protocol::methods::SessionCreateParams {
         session_id: path
