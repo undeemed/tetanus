@@ -602,8 +602,8 @@ fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
 
 /// Carry a stop reason across. The one crossing where neither enum contains
 /// the other: the contract names reasons only a served call can produce, and
-/// the engine names `Interrupted`, which the contract carries as a value of
-/// the growable `StopReason` rather than as a variant.
+/// the engine names `MaxTokens` and `Interrupted`, which the contract carries
+/// as values of the growable `StopReason` rather than as variants.
 ///
 /// The match has no wildcard arm on purpose. A reason the engine adds stops
 /// this crate from compiling until someone decides how it crosses, which is
@@ -614,12 +614,17 @@ fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
         tetanus_turn::StopReason::PreStepRejected => protocol::StopReason::PreStepRejected,
         tetanus_turn::StopReason::MaxSteps => protocol::StopReason::MaxSteps,
         tetanus_turn::StopReason::Cancelled => protocol::StopReason::Cancelled,
-        // Written by crash repair when a later run finds a journal left open,
-        // never by a turn this process ran. Contract §4.4.4 makes it a value
-        // of the growable enum and §7.5 fixes what a surface does with one, so
-        // it crosses as `Other` carrying the engine's own word for it - the
-        // same word the journal holds, and the one the timeline then prints.
-        tetanus_turn::StopReason::Interrupted => {
+        // Neither reason is one the contract names as a variant. Section 7.5
+        // makes both values of the growable enum and fixes what a surface does
+        // with one, so each crosses as `Other` carrying the engine's own word
+        // for it - the same word the journal holds, and the one the timeline
+        // then prints.
+        //
+        // `MaxTokens` is the provider stopping the completion at its output
+        // cap, so the answer is unfinished (§4.4.2). `Interrupted` is written
+        // by crash repair when a later run finds a journal left open (§4.4.4),
+        // never by a turn this process ran.
+        tetanus_turn::StopReason::MaxTokens | tetanus_turn::StopReason::Interrupted => {
             protocol::StopReason::Other(reason.as_str().to_string())
         }
     }
