@@ -252,10 +252,25 @@ impl ToolRegistry {
 
     /// Classify a pending call. A call naming no registered tool is exclusive:
     /// it is about to fail, and it fails on its own.
+    ///
+    /// A classifier that panics is exclusive for the reason [`contained`]
+    /// gives: the body is the tool author's, the answer is the scheduler's,
+    /// and the answer that cannot make things worse is the one that overlaps
+    /// nothing. Upstream fails the same way round (`executionMode` catches a
+    /// throwing `isConcurrencySafe`), and the call still runs - a classifier
+    /// with a bug in it costs concurrency, not the call.
     pub fn mode(&self, call: &ToolCall) -> ToolMode {
-        self.tools
-            .get(&call.name)
-            .map_or(ToolMode::Exclusive, |tool| tool.mode(&call.arguments))
+        let Some(tool) = self.tools.get(&call.name) else {
+            return ToolMode::Exclusive;
+        };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| tool.mode(&call.arguments))) {
+            Ok(mode) => mode,
+            Err(payload) => {
+                let fault = panicked(payload);
+                tracing::error!(tool = call.name, %fault, "a tool's classifier panicked");
+                ToolMode::Exclusive
+            }
+        }
     }
 
     /// Run one call. A tool that fails, and a call naming no tool at all, both
