@@ -322,6 +322,28 @@ The two are worth telling apart in a transcript, because the first is safe to re
 `stop_reason: "interrupted"` is a new value of the growable `StopReason`, and §7.5 already fixes what an old surface does with one.
 A balanced journal is untouched, so this is invisible to every session that closed normally.
 
+#### 4.4.5 Reading a journal: `from_seq`, `limit`, and the boundary
+
+`session.events` and `session.subscribe` both take a `from_seq`, and it means the same thing on each: a seq, not a count, and inclusive.
+The first event a caller receives is the one whose `seq` equals it.
+`session.subscribe` may omit it, which asks for live events only and replays nothing.
+
+A `from_seq` past the end of the journal is a resync that had nothing to catch up on, not a fault.
+`session.events` answers an empty page with `eof: true` and a `next_seq` at the tail, so a caller that asks from a seq the journal never reached is told where the journal actually ends.
+`session.subscribe` replays nothing and delivers live events from there.
+
+`limit` is a page size the server clamps to its own maximum, which is 500.
+Zero is read as absent, so `limit: 0` and no limit both name that maximum.
+A page of no events is never what a caller meant, and answering one would stall a pager: `next_seq` would not advance and `eof` would stay false, so the loop would never end.
+`next_seq` is the `from_seq` of the next page, and `eof` says this page reached the end; a caller that wants the whole journal pages until `eof`.
+
+`SessionSubscribeResult.last_seq` is the seq the subscription starts after (`-1` for a journal with no events).
+Every event with a higher seq arrives as a `session/event` push, so a caller needs no second call to find the boundary between what it was given and what it will be sent.
+Replay and live delivery join at that boundary with no gap and no repeat, whatever is appended while the replay runs.
+
+A push carries the session it belongs to, and reaches only the subscriptions on that session.
+Both frames follow the rule: one connection may hold subscriptions on several sessions and never sees another session's `session/event` or `agent/status`.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -523,6 +545,12 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
+| §4.4.5 `from_seq` is a seq and is inclusive, on both calls | TC-PAGE-2, TC-SUB-6 |
+| §4.4.5 a `from_seq` past the tail is a catch-up with nothing to catch up on | TC-PAGE-7, TC-SUB-6 |
+| §4.4.5 `limit` is clamped down, and zero reads as absent | TC-PAGE-3, TC-PAGE-6 |
+| §4.4.5 `next_seq` and `eof` page a journal to its end | TC-PAGE-2, TC-PAGE-4 |
+| §4.4.5 `last_seq` is the boundary replay and live delivery join at | TC-SUB-1, TC-SUB-2 |
+| §4.4.5 a push reaches only its own session's subscriptions | TC-SUB-7 |
 | §4.6 `agent/status` is pushed on both transitions | TC-AGENT-3 |
 | §4.6 `agent.status` reads the live state a missed push lost | TC-AGENT-5 |
 | §4.7 naming a path opens that journal, under the id the journal carries | TC-PATH-1, TC-ID-1 |
@@ -605,3 +633,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States that `config.dump` never publishes a secret's value (§4.3): a key whose last word names a credential is dumped with `types::REDACTED` in place of what the document holds, and keeps its key and its layer, so a surface can still show that it is set. One added constant, no type change, no version bump - the entry shape is what it was, and a client that does nothing new reads the sentinel as the string it is. The rule is by name because the engine has no schema for a key it does not settle. Until now every key a document held was echoed verbatim, to `tetanus config` and to any WebSocket client alike, so a credential written into the document was published to whoever was connected. The engine change that applies this lands beside it, with the cases §6 names (TC-CFG-SECRET-1..4); the presentation lane's own temporary copy of the dump in `crates/cli` (issue #157) is that lane's to fix. |
 | 1.0 | States what a turn the provider cut off at its output cap looks like (§4.4.2): `turn/end` carries `stop_reason: "max-tokens"`, `agent.prompt` still answers a summary, the reason is the turn's rather than the cut step's and does not leak into the next turn, and the truncated step dispatches no tool calls, because a completion that stopped mid-write can have stopped mid-arguments. Until now the boundary had no way to say an answer was incomplete: such a turn ended `"natural"`, which reads as a model that had finished. No type changes: `"max-tokens"` is a value of the growable `StopReason` by §7.5, and §7.6's mapping carries it as the fallback exactly as it carries `"interrupted"`. The engine change that ends such a turn lands on its own, with the §6 rows for these clauses; it adds a reason to `tetanus_turn::StopReason`, which by §3 no surface may match - the one surface that does today (`crates/cli/src/main.rs`) needs the arm that carries it, and that arm is the presentation lane's to write. |
 | 1.0 | States what the `assistant/message` of a cut-off step carries (§4.4.2): the §4.3.1 fields as always, with `tool_calls` empty and the provider's own finish reason kept. No type changes. The clause above says such a step dispatches nothing; it did not say what the durable message holds, and a call left on it is a call no `tool/result` answers, so the history a client derives asks the provider for a result that will never come and the next request on that session is refused. The raw calls stay on the cited `assistant/chunk` events. The engine change that does this lands with the rest of the cut-off behaviour. |
+| 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
