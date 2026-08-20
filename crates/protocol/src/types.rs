@@ -139,6 +139,14 @@ pub enum ConfigLayer {
     Other(String),
 }
 
+/// What stands in a [`ConfigEntry`] where a secret would be.
+///
+/// The engine never publishes a credential it read out of the settings
+/// document; the entry stays, so a surface can still say the key is set and
+/// where it was set, and this is what its value reads. Section 4.3 of
+/// `docs/interface-contract.md` names which keys it applies to.
+pub const REDACTED: &str = "<redacted>";
+
 /// One resolved config key with its provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigEntry {

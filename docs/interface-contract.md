@@ -202,6 +202,12 @@ Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only th
 **`ToolDescriptor`**, **`ProviderDescriptor`** and **`ConfigEntry`** are what a help surface, a model picker and `tetanus config` render.
 `ProviderDescriptor.available` is false when a provider is registered but its credential is absent, so a picker can grey the entry instead of failing at the first turn.
 
+`ConfigEntry.value` never carries a secret.
+A key whose last word is `key`, `secret`, `token`, `password` or `credential` - words split on `.`, `_`, `-` and a capital that starts one, so `api_key`, `apiKey`, `APIKey` and `client-secret` all match while `api_key_env`, `max_tokens` and `monkey` do not - is published with `types::REDACTED`, the string `<redacted>`, in place of the value the document holds.
+The entry itself stays, because a surface still has to say that the key is set and which layer set it; only the value is withheld.
+The rule reads the name because the engine has no schema for a key it does not settle: a document may hold a provider's credential under whatever name a future adapter reads, and `config.dump` is answered over every carrier, so an unredacted value would reach every connected client.
+A surface renders the sentinel as it renders any other value, and must not take it for the setting.
+
 **`Question`**, **`QuestionOption`** and **`Answer`** are the ask vocabulary of §4.4.3.
 `label` is both the user-facing text and the value the answer carries, so a caller reads the same field whatever the surface renders.
 
@@ -465,6 +471,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
 | §4.3.2 a staged type parses to `None` and keeps every documented key | TC-PROTO-16 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
+| §4.3 a withheld value is spelled one way and travels as an ordinary value | TC-PROTO-17 |
+| §4.3 the engine withholds a secret's value and keeps its entry | TC-CFG-SECRET-1 .. TC-CFG-SECRET-4 |
 | §4.1 stdio: one JSON object per line, correlated by id | TC-STDIO-1 |
 | §4.1 WebSocket: one JSON object per text frame, correlated by id | TC-WS-1 |
 | §4.1 a frame that asks nothing is answered with nothing | TC-STDIO-2, TC-WS-2 |
@@ -570,3 +578,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Publishes the third failure mapping (§4.5): `tetanus_engine::convert::config_error`, for the settings document a surface boots on. No code is added and no type changes - a document that cannot be turned into settings is `Io` with its path, and one value its key does not take is `InvalidParams` with that key as `field`. The rule against a surface deriving its own code applies to `tetanus_config::ConfigError` for the reason it applies to the others: it is an internal enum with no fallback, and it grew a variant in the change that gave the engine a settings boot. Issue #157 asked which code a settings fault takes; this is the answer, so the presentation lane's wiring of `tetanus_engine::boot` needs no decision of its own. |
 | 1.0 | States that a turn a failure ended still closes on the journal (§4.4.2): the step the failure interrupted gets its `step/end` and the turn gets a `turn/end` with `stop_reason: "failed"`, both written before `agent.prompt` answers its §4.5 error. Until now a failed turn left `turn/start` unbalanced, so §4.6's state machine was true only for a turn that succeeded and a reader had to wait for §4.4.4's repair on the next open to learn the turn was over. No type changes: `"failed"` is a value of the growable `StopReason` by §7.5, and the closer uses the payload §4.3.1 already fixes. The failure stays on the error object, where §4.5 puts it; the engine change that writes the closer lands on its own. |
 | 1.0 | No boundary change, and no type changes. Completes §6 so every clause a case already fixes names it: §4.4.1, §4.4.2, §4.4.3, §4.4.4, §4.6 and the engine-side half of §4.7 had cases but no row, which is the one gap the table cannot show, since a clause with no row reads the same whether it is unverified or only unrecorded. §4.4.3 stays reserved, and its row is the promise that goes with that: the capability behind an unserved call is not advertised. §6's preamble now also says which of §4.7 the presentation lane verifies, so a reviewer looking for the missing cases looks in the right suite. |
+| 1.0 | States that `config.dump` never publishes a secret's value (§4.3): a key whose last word names a credential is dumped with `types::REDACTED` in place of what the document holds, and keeps its key and its layer, so a surface can still show that it is set. One added constant, no type change, no version bump - the entry shape is what it was, and a client that does nothing new reads the sentinel as the string it is. The rule is by name because the engine has no schema for a key it does not settle. Until now every key a document held was echoed verbatim, to `tetanus config` and to any WebSocket client alike, so a credential written into the document was published to whoever was connected. The engine change that applies this lands beside it, with the cases §6 names (TC-CFG-SECRET-1..4); the presentation lane's own temporary copy of the dump in `crates/cli` (issue #157) is that lane's to fix. |

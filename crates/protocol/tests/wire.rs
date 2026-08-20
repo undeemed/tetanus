@@ -8,7 +8,8 @@ use serde_json::json;
 use tetanus_protocol::methods::{AgentStatusPush, SessionEventPush};
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
-    AgentState, Chunk, KnownEvent, SessionEvent, StopReason, TurnSummary, Usage,
+    AgentState, Chunk, ConfigEntry, ConfigLayer, KnownEvent, SessionEvent, StopReason, TurnSummary,
+    Usage, REDACTED,
 };
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
@@ -433,4 +434,27 @@ fn a_staged_type_parses_to_none_and_keeps_every_documented_key() {
         ..retry
     };
     assert_eq!(unbounded.data["max_retries"], json!(null));
+}
+
+/// TC-PROTO-17: contract section 4.3. A value the engine withholds is spelled
+/// the one way, so a surface that wants to mark the entry recognises it, and it
+/// travels as an ordinary string, so a surface that does nothing new still
+/// renders a whole dump. The entry keeps its key and its layer: what is
+/// withheld is the value, not the fact that the key is set.
+#[test]
+fn a_withheld_value_is_an_ordinary_value() {
+    let entry = ConfigEntry {
+        key: "llm.providers.deepseek.api_key".into(),
+        value: json!(REDACTED),
+        layer: ConfigLayer::File,
+    };
+
+    let wire = serde_json::to_value(&entry).expect("serialize");
+    assert_eq!(wire["key"], json!("llm.providers.deepseek.api_key"));
+    assert_eq!(wire["value"], json!("<redacted>"));
+    assert_eq!(wire["layer"], json!("file"));
+    assert_eq!(
+        serde_json::from_value::<ConfigEntry>(wire).expect("parse"),
+        entry
+    );
 }
