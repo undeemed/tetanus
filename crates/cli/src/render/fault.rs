@@ -116,6 +116,12 @@ fn said(error: &RpcError) -> (String, Option<String>) {
         ),
         ErrorCode::Io => (
             match field(error, "path") {
+                // The prefix is here for a sentence that says what went wrong
+                // without saying what it went wrong on. A sentence that names
+                // the path already needs no help, and naming it twice reads as
+                // two paths - which, for a reader deciding which file to open,
+                // is worse than either.
+                Some(path) if error.message.contains(&path) => error.message.clone(),
                 Some(path) => format!("{path}: {}", error.message),
                 None => error.message.clone(),
             },

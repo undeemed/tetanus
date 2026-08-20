@@ -310,10 +310,28 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             held
         }
         Cmd::Config { json } => {
-            let mut config = tetanus_config::Config::default();
-            config.set("log.level", "info".into(), tetanus_config::Layer::Default);
+            // What the engine would run on, not what this surface believes.
+            // The document is read by `boot::settings` and the values in it
+            // are settled by `from_settings`, so the page reports the keys the
+            // engine has and the layer each came from. A surface that read the
+            // file for itself would be a second answer to the one question
+            // this command exists to answer.
+            //
+            // Both steps can fail, and a failure is reported rather than
+            // stepped over: a document the harness ignored leaves the user
+            // configured on paper and unconfigured in fact.
+            let document = tetanus_config::file::document_path(&tetanus_config::home::home(None));
+            let engine = tetanus_engine::boot::document(&document)
+                .and_then(tetanus_engine::EngineConfig::from_settings)
+                .map_err(|err| {
+                    misconfigured(
+                        policy,
+                        &document,
+                        &tetanus_engine::convert::config_error(&err),
+                    )
+                })?;
             let dump = ConfigDumpResult {
-                entries: settings(&config),
+                entries: settings(&engine.resolved),
             };
             if json {
                 return render::json::line(&mut out, &dump)
@@ -833,6 +851,26 @@ fn fail(policy: &Policy, error: &RpcError) -> Reported {
     err.error(&message).ok();
     if let Some(hint) = hint {
         err.note(&hint).ok();
+    }
+    Reported(render::fault::status(error))
+}
+
+/// [`fail`], for a settings document the harness cannot run on.
+///
+/// The wording and the status are the same, because the fault crossed the
+/// boundary like any other. The next step is not: `wording` sends a refused
+/// value to `--help`, and nothing in a document is a flag. The file is where
+/// the value was written and where it has to be fixed, so the note names it -
+/// unless the sentence above has named it already, which is the case for
+/// every fault about the file itself rather than a value in it.
+fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) -> Reported {
+    let (message, _) = render::fault::wording(error);
+    let document = document.display().to_string();
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if !message.contains(&document) {
+        err.note(&format!("{document} is the document that sets it"))
+            .ok();
     }
     Reported(render::fault::status(error))
 }
