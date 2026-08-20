@@ -143,7 +143,7 @@ Without the key the command says so and stops before any network call.
 | `tetanus run` | Run one turn and print it as a conversation, or watch it full-screen with `--ui` |
 | `tetanus chat` | Hold a conversation: one journal, a turn per message you type, resumed by `--session` |
 | `tetanus sessions` | List the journals in a directory, newest first, or pick one to read with `--ui` |
-| `tetanus replay <path>` | Read a session journal back: at once, `--live`, or full-screen with `--ui` |
+| `tetanus replay <journal>` | Read a session journal back - by path, or by the id `tetanus sessions` printed: at once, `--live`, or full-screen with `--ui` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
 | `tetanus config` | Show resolved config with its provenance layer |
@@ -178,7 +178,10 @@ Closing it before the turn finishes stops the turn, and a stopped turn has no re
 It needs a terminal - a piped `--ui` is refused with the same exit status as any other bad argument, before a journal is opened - and it cannot be combined with `--trace` or `--json`.
 When the view comes down, the answer and the journal path are written on the ordinary screen, so what a run leaves in the scrollback is the same either way.
 
-`tetanus replay <path> --ui` reads a finished journal the same way and with the same keys, so a long turn is paged through instead of poured into the scrollback, which it leaves untouched.
+`tetanus replay` takes either a path or the id `tetanus sessions` listed the journal under, so an id read off that page can be typed straight back in.
+A path that is there is opened as it was given; an id is looked for under `sessions.root`, and `--dir <path>` says where instead.
+
+`tetanus replay <journal> --ui` reads a finished journal the same way and with the same keys, so a long turn is paged through instead of poured into the scrollback, which it leaves untouched.
 Nothing is arriving in that view, so the foot of the screen says `end` rather than `live`, and a terminal made narrower rewraps the journal rather than cutting it.
 Rewrapping counts the columns a terminal draws, not characters, so a prompt in a script drawn two columns to the character folds inside the frame like any other.
 `q` or Esc leaves it having read the journal, and exits 0; Ctrl-C is an interruption, and exits 130 like any other.
