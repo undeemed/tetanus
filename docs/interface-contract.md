@@ -441,6 +441,8 @@ The cases run offline.
 Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`.
 Those that hold a carrier to §4.1 live in `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs`, which drive the same engine double, so a claim proved for one carrier and not the other is a failing case rather than an omission.
 Those that hold the published failure mapping to §4.5 live in `crates/engine/tests/faults.rs`.
+Those over the interaction and state views (§4.4, §4.6) live in `crates/engine/tests/facade.rs`, `agent.rs`, `subscribe.rs`, `sessions.rs` and `resume.rs`, with the closer synthesis §4.4.4 applies pinned on its own in `crates/turn/tests/upstream_repair.rs`.
+Of §4.7, the clauses about which calls a subcommand makes and what it prints are the presentation lane's to verify, in `crates/cli/tests`; the clauses about what those calls do are below.
 
 | Clause | Case |
 | --- | --- |
@@ -481,6 +483,19 @@ Those that hold the published failure mapping to §4.5 live in `crates/engine/te
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
+| §4.2 every call in the method table is served | TC-ENG-3 |
+| §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
+| §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
+| §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
+| §4.4.3 a reserved call's capability is not advertised | TC-SUB-5 |
+| §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
+| §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
+| §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
+| §4.6 `agent/status` is pushed on both transitions | TC-AGENT-3 |
+| §4.6 `agent.status` reads the live state a missed push lost | TC-AGENT-5 |
+| §4.7 naming a path opens that journal, under the id the journal carries | TC-PATH-1, TC-ID-1 |
+| §4.7 a path whose file is not a journal is `LogCorrupt` | TC-PATH-3 |
+| §4.7 every id `session.list` reports is one `session.events` opens | TC-ID-2 |
 
 ## 7. Design rationale
 
@@ -554,3 +569,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Adds a ninth subcommand to §4.7: `tetanus chat`, an interactive conversation defined as `session.create`, `session.subscribe`, then one `agent.prompt` per message typed. No new calls, no new types, no version bump - the table is the closed list of what a subcommand may call, so a subcommand that calls nothing new still lands here to keep that list true. Section 4.7 states why a conversation needs no call of its own: a session is already the conversation, so many turns typed into one is the mechanism two `tetanus run --session <path>` invocations already use. |
 | 1.0 | Publishes the third failure mapping (§4.5): `tetanus_engine::convert::config_error`, for the settings document a surface boots on. No code is added and no type changes - a document that cannot be turned into settings is `Io` with its path, and one value its key does not take is `InvalidParams` with that key as `field`. The rule against a surface deriving its own code applies to `tetanus_config::ConfigError` for the reason it applies to the others: it is an internal enum with no fallback, and it grew a variant in the change that gave the engine a settings boot. Issue #157 asked which code a settings fault takes; this is the answer, so the presentation lane's wiring of `tetanus_engine::boot` needs no decision of its own. |
 | 1.0 | States that a turn a failure ended still closes on the journal (§4.4.2): the step the failure interrupted gets its `step/end` and the turn gets a `turn/end` with `stop_reason: "failed"`, both written before `agent.prompt` answers its §4.5 error. Until now a failed turn left `turn/start` unbalanced, so §4.6's state machine was true only for a turn that succeeded and a reader had to wait for §4.4.4's repair on the next open to learn the turn was over. No type changes: `"failed"` is a value of the growable `StopReason` by §7.5, and the closer uses the payload §4.3.1 already fixes. The failure stays on the error object, where §4.5 puts it; the engine change that writes the closer lands on its own. |
+| 1.0 | No boundary change, and no type changes. Completes §6 so every clause a case already fixes names it: §4.4.1, §4.4.2, §4.4.3, §4.4.4, §4.6 and the engine-side half of §4.7 had cases but no row, which is the one gap the table cannot show, since a clause with no row reads the same whether it is unverified or only unrecorded. §4.4.3 stays reserved, and its row is the promise that goes with that: the capability behind an unserved call is not advertised. §6's preamble now also says which of §4.7 the presentation lane verifies, so a reviewer looking for the missing cases looks in the right suite. |
