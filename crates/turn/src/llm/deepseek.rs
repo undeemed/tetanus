@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
 
@@ -41,6 +42,16 @@ pub const EMPTY_TOOL_RESULT: &str = "(no output)";
 /// reason.
 pub const STREAM_CLOSED: &str = "the stream ended without the [DONE] sentinel";
 
+/// How long the provider may say nothing before its stream is given up on.
+///
+/// This is silence on the connection, not the life of the stream: an answer
+/// that keeps arriving never times out however long it runs, and a provider
+/// that stops speaking is a failure rather than a turn that never ends.
+/// Upstream ships the same five minutes
+/// (`packages/llm/llm-deepseek/src/adapter.ts`,
+/// `DEFAULT_STREAM_IDLE_TIMEOUT_MS`).
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+
 /// The finish reason a stream that never states one is reported as. The
 /// provider omits the field on some plain completions, and an empty string
 /// downstream reads as a turn that ended for no stated reason.
@@ -56,6 +67,24 @@ pub struct DeepSeekConfig {
     pub models: Vec<String>,
     /// Adapter-configured output cap; an explicit request value wins.
     pub max_tokens: Option<u32>,
+    /// The idle window this route's transport runs with, in milliseconds.
+    ///
+    /// Upstream refuses a window of zero where it reads its configuration.
+    /// This adapter has no fallible constructor to refuse it in, so
+    /// [`DeepSeekConfig::idle_window`] reads a zero as the default rather than
+    /// as a window of no time, which would fail every request.
+    pub stream_idle_timeout_ms: u64,
+}
+
+impl DeepSeekConfig {
+    /// The window a connection may stay silent for, with a zero read as
+    /// [`DEFAULT_STREAM_IDLE_TIMEOUT_MS`].
+    pub fn idle_window(&self) -> Duration {
+        Duration::from_millis(match self.stream_idle_timeout_ms {
+            0 => DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+            ms => ms,
+        })
+    }
 }
 
 impl Default for DeepSeekConfig {
@@ -68,6 +97,7 @@ impl Default for DeepSeekConfig {
                 .unwrap_or_else(|| PUBLIC_BASE_URL.to_string()),
             models: vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
             max_tokens: None,
+            stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
         }
     }
 }
@@ -97,9 +127,11 @@ impl DeepSeekAdapter {
         Self { config, transport }
     }
 
-    /// The production wiring: a real HTTPS call.
+    /// The production wiring: a real HTTPS call, watched by the configured
+    /// idle window.
     pub fn with_http(config: DeepSeekConfig) -> Self {
-        Self::new(config, Arc::new(ReqwestTransport::default()))
+        let transport = ReqwestTransport::new(config.idle_window());
+        Self::new(config, Arc::new(transport))
     }
 
     pub fn config(&self) -> &DeepSeekConfig {
@@ -557,10 +589,53 @@ pub fn take_frames(buffer: &mut String) -> Vec<String> {
     frames
 }
 
-/// The production transport: one HTTPS request per `stream()` call.
-#[derive(Default)]
+/// The production transport: one HTTPS request per `stream()` call, watched by
+/// an idle window.
+///
+/// The watchdog sits on the connection and not around the decoded frames,
+/// because a keep-alive comment carries no frame: the provider sends `:` lines
+/// while a model thinks, and a window measured in frames would cut a stream
+/// that is alive. `read_timeout` is armed before the response head and rearmed
+/// on every read of the body, so what it measures is silence, and it covers a
+/// service that accepts a connection and then never answers at all.
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    /// Kept so a failure can name the window it exceeded.
+    idle: Duration,
+}
+
+impl ReqwestTransport {
+    /// A transport whose connection may stay silent for `idle` and no longer.
+    pub fn new(idle: Duration) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .read_timeout(idle)
+                // The same failure `reqwest::Client::default()` panics on: a
+                // build whose TLS backend cannot start has no transport to
+                // hand back and no request it could serve.
+                .build()
+                .expect("a reqwest client"),
+            idle,
+        }
+    }
+
+    /// What a stalled connection is reported as. The failure is
+    /// [`LlmError::Timeout`], whose code `TIMEOUT` is in
+    /// [`retry::DEFAULT_RETRYABLE_CODES`](crate::llm::retry::DEFAULT_RETRYABLE_CODES),
+    /// so a provider that goes quiet is asked again rather than ending the
+    /// turn.
+    fn idle_message(&self, url: &str) -> String {
+        format!(
+            "the stream from {url} was idle for {}ms",
+            self.idle.as_millis()
+        )
+    }
+}
+
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self::new(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
+    }
 }
 
 #[async_trait::async_trait]
@@ -579,7 +654,13 @@ impl SseTransport for ReqwestTransport {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Transport(format!("request to {url} failed: {e}")))?;
+            .map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::Timeout(self.idle_message(url))
+                } else {
+                    LlmError::Transport(format!("request to {url} failed: {e}"))
+                }
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -598,10 +679,17 @@ impl SseTransport for ReqwestTransport {
             });
         }
 
-        let bytes = response.bytes_stream().map(|chunk| {
-            chunk
-                .map(|b| b.to_vec())
-                .map_err(|e| LlmError::Transport(e.to_string()))
+        // Worded here and moved into the stream: the frames outlive this call,
+        // so they cannot borrow the transport to ask it later.
+        let stalled = self.idle_message(url);
+        let bytes = response.bytes_stream().map(move |chunk| {
+            chunk.map(|b| b.to_vec()).map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::Timeout(stalled.clone())
+                } else {
+                    LlmError::Transport(e.to_string())
+                }
+            })
         });
 
         let stream = futures_util::stream::unfold(
