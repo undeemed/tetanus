@@ -93,7 +93,7 @@ async fn a_listener_that_answers_retry_gets_the_request_sent_again() {
 /// Input: the same failing route, and an empty bus.
 /// Expected: the turn fails with the provider's words, the provider was asked
 /// exactly once, and the point fired once, between the call that failed and the
-/// end of the turn.
+/// closers the failed turn still owes its journal.
 #[tokio::test]
 async fn an_unoccupied_point_leaves_the_failure_alone() {
     let h = Harness::new("recover-unoccupied").await;
@@ -116,8 +116,13 @@ async fn an_unoccupied_point_leaves_the_failure_alone() {
             "agent/request",
             "llm/stream",
             "agent/request-error",
+            // The failure ends the turn, and a turn that ended is closed:
+            // `TurnEngine::close` writes the step the failure left open and
+            // then the turn, so the journal balances without crash repair.
+            "step/end",
+            "turn/end",
         ],
-        "the point fires once, after the call, and the turn ends there"
+        "the point fires once, after the call, and the turn closes there"
     );
 }
 

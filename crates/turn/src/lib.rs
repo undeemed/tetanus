@@ -25,5 +25,5 @@ pub mod tools;
 pub mod trace;
 
 pub use engine::{TurnConfig, TurnEngine, TurnError, TurnOutcome};
-pub use events::StopReason;
+pub use events::{StopReason, FAILED_STOP_REASON};
 pub use trace::{TraceEntry, TurnTrace};

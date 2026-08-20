@@ -52,6 +52,10 @@ Step 1 calls a tool, so the tool pipeline and the loop-back both run; step 2 ans
 `agent/turn-stopping` fires only when the turn spent at least one step.
 A turn closed by a rejected first claim emits `turn/start`, `agent/pre-step`, `turn/end` and nothing else (TC-TURN-4).
 
+A model request that no recovery listener saved ends the turn where it failed.
+The closers still run: the step the failure interrupted gets its `step/end`, and then `turn/end` carries `stop_reason: "failed"` (TC-CLOSE-1, TC-CLOSE-5).
+`agent/turn-stopping` is not offered such a turn, because the checkpoint is where a listener may hold a turn open and this one is already over (TC-CLOSE-2).
+
 ### 4.2 Dependency view - the four dispatch modes
 
 Upstream documents four modes for plugin authors.
