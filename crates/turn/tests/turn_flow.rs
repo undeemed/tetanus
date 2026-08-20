@@ -21,6 +21,9 @@ mod harness;
 
 use harness::{Harness, MOCK_TURN_FLOW};
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use tetanus_core::events::BoxFuture;
 use tetanus_session::SessionEvent;
 use tetanus_turn::events::{LlmStream, PreStep, PreStepDecision, StopReason, TurnStopVeto};
@@ -132,6 +135,114 @@ async fn a_rejected_first_claim_closes_a_turn_with_no_step() {
     assert_eq!(h.trace(), vec!["turn/start", "agent/pre-step", "turn/end"]);
     assert_eq!(outcome.steps, 0);
     assert_eq!(outcome.reason, StopReason::PreStepRejected);
+
+    let events = tetanus_session::replay(&h.log_path).unwrap();
+    let types: Vec<&str> = events.iter().map(|e| e.ty.as_str()).collect();
+    assert_eq!(types, vec![topic::TURN_START, topic::TURN_END]);
+}
+
+/// TC-TURN-9: a claim rejected after a step has run closes the turn the work
+/// already entered, and keeps that work.
+///
+/// Upstream: `coverage-edges.spec.ts`, "closes an entered turn as blocked when
+/// its next step is rejected". Upstream needs a plugin to inject a message so a
+/// second step is proposed at all; the mock's first step asks for a tool, so
+/// tetanus is already owed one.
+///
+/// Input: an `agent/pre-step` listener that delegates the first claim and
+/// rejects the second.
+/// Expected: two claims, one step, stop reason `pre-step-rejected` in the
+/// answer and on the journal's `turn/end`, the tool result of the step that
+/// did run still on the journal, and the terminal
+/// checkpoint fired between the refused claim and `turn/end`. A rejection ends
+/// the turn; it does not undo the step before it, and a turn that spent a step
+/// still reaches `agent/turn-stopping` whatever ended it - TC-TURN-4 pins the
+/// other side, where a turn that never entered a step has no checkpoint to
+/// run.
+#[tokio::test]
+async fn a_claim_rejected_after_a_step_closes_the_turn_it_entered() {
+    let h = Harness::new("rejected-next-claim").await;
+
+    let claims = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&claims);
+    let _reject = h.bus().on_waterfall::<PreStep, _>(move |ev, next| {
+        let counted = Arc::clone(&counted);
+        Box::pin(async move {
+            if counted.fetch_add(1, Ordering::AcqRel) == 0 {
+                next.run(ev).await
+            } else {
+                PreStepDecision::Reject("no second step".into())
+            }
+        })
+    });
+
+    let outcome = h.engine.run_turn("go").await.unwrap();
+
+    assert_eq!(
+        claims.load(Ordering::Acquire),
+        2,
+        "the second claim was made"
+    );
+    assert_eq!(outcome.steps, 1);
+    assert_eq!(outcome.reason, StopReason::PreStepRejected);
+
+    let trace = h.trace();
+    assert_eq!(
+        trace.iter().filter(|t| *t == "step/start").count(),
+        1,
+        "only the entered step ran"
+    );
+    let tail: Vec<&str> = trace
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        tail,
+        vec!["agent/pre-step", "agent/turn-stopping", "turn/end"],
+        "the refused claim, then the checkpoint a spent turn still runs, then the close: {trace:?}"
+    );
+
+    let events = h.engine.log().events();
+    assert!(
+        events.iter().any(|e| e.ty == topic::TOOL_RESULT),
+        "the work the entered step did is kept"
+    );
+    let end = events
+        .iter()
+        .rev()
+        .find(|e| e.ty == topic::TURN_END)
+        .expect("the turn is closed on the journal");
+    assert_eq!(end.data["stop_reason"], "pre-step-rejected");
+    assert_eq!(end.data["steps"], 1);
+}
+
+/// TC-TURN-10: a first claim rewritten to nothing closes the turn with no step.
+///
+/// An empty enter is not a rejection, so nothing says no; but a step with no
+/// message to send is a request the model has no reason to answer. The engine
+/// treats it as the claim it is - one that entered nothing - and closes the
+/// turn the same way a rejection does, rather than dispatching an empty
+/// conversation.
+///
+/// Input: an `agent/pre-step` listener that enters an empty message list.
+/// Expected: zero steps, stop reason `pre-step-rejected`, and a journal holding
+/// only the two ends of the turn.
+#[tokio::test]
+async fn a_first_claim_rewritten_to_nothing_closes_the_turn_with_no_step() {
+    let h = Harness::new("entered-nothing").await;
+
+    let _empty = h.bus().on_waterfall::<PreStep, _>(|_ev, _next| {
+        Box::pin(async move { PreStepDecision::Enter(Vec::new()) })
+    });
+
+    let outcome = h.engine.run_turn("go").await.unwrap();
+
+    assert_eq!(outcome.steps, 0);
+    assert_eq!(outcome.reason, StopReason::PreStepRejected);
+    assert_eq!(h.trace(), vec!["turn/start", "agent/pre-step", "turn/end"]);
 
     let events = tetanus_session::replay(&h.log_path).unwrap();
     let types: Vec<&str> = events.iter().map(|e| e.ty.as_str()).collect();
