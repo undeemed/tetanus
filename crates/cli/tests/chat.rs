@@ -3,7 +3,8 @@
 //! Features tested: many turns on one journal, that each turn is asked with
 //! the ones before it as history, that a chat resumes a journal it did not
 //! start, every way out of the loop, the lines that are commands rather than
-//! questions, and the failure when a real provider has no credential.
+//! questions, the failure when a real provider has no credential, and what the
+//! settings document decides for a chat that was given no flags.
 //!
 //! Features NOT tested here: what a typed line means (owned by `chat::parse`,
 //! asserted in its own module), what the page looks like (owned by
@@ -351,4 +352,35 @@ fn nothing_a_chat_was_opened_with_can_drive_the_terminal() {
     // And the conversation still happened, on the journal that was named.
     let events = tetanus_session::replay(dir.path().join(&journal)).expect("replays");
     assert_eq!(asked(&events), vec!["asked"]);
+}
+
+/// TC-CLI-CHAT-10: a document naming the provider, the root and the budget,
+/// against a bare `tetanus chat` with no credential in the environment.
+/// Expected: exit 0 on the offline adapter, the journal at `chat.jsonl` under
+/// the document's root, and its header holding the document's budget. A chat
+/// that ignored the document would take its own DeepSeek default and exit 5,
+/// which is what TC-CLI-CHAT-5 asserts for a chat nobody configured.
+#[test]
+fn a_document_decides_what_a_chat_runs_on() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "provider:\n  default: mock\nsessions:\n  root: journals\nagent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+
+    let out = chat(dir.path(), &["--color", "never"], "hello\n");
+
+    assert_eq!(out.status.code(), Some(0), "{}", page(&out));
+    let text = std::fs::read_to_string(dir.path().join("journals/chat.jsonl"))
+        .expect("the journal is under the document's root");
+    let head: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("a header")).expect("json");
+    assert_eq!(head["data"]["provider"], "mock", "{head}");
+    assert_eq!(head["data"]["max_steps"], 3, "{head}");
+
+    // And the flag still beats it, on the value a conversation is named by.
+    let flagged = chat(dir.path(), &["-s", "flagged/c.jsonl"], "hello\n");
+    assert_eq!(flagged.status.code(), Some(0), "{}", page(&flagged));
+    assert!(dir.path().join("flagged/c.jsonl").exists());
 }

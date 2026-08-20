@@ -205,6 +205,12 @@ Whoever set a refused value is who the report is for: a value off a flag reads a
 The page itself is the engine's own `config.dump` rather than a copy of the resolved layers, so a key whose name says it holds a credential keeps its row and its layer and loses its value, as section 4.3 of the interface contract requires.
 `tetanus config --dir <path>` asks the question rather than giving an instruction: it lists nothing and opens nothing, and it is how the `flag` layer can be read at all, since a flag is only on the layer of the process it was typed at.
 
+The two subcommands that run turns, `run` and `chat`, take four settings that way: the provider, the model, the step budget, and the root the journal is written under.
+Each has a command default that is not the engine's - `run` falls back to the mock adapter because a first run must need no credential, and `chat` falls back to DeepSeek because a conversation with the mock is a demonstration rather than a use.
+So the compiled default of a key cannot decide between them, and what is read instead is the layer: a key still on the `Default` layer is a key nobody has an opinion about and the command's own fallback stands, while anything above it - a document, an environment, a flag - is somebody's opinion and outranks a default this binary happens to compile in.
+A model nobody set stays unset rather than becoming the engine's compiled one, because that model belongs to the engine's compiled provider and offering it to an adapter that never advertised it would name a model that does not exist; an unset model is the adapter's first catalogue entry.
+A provider name no adapter in this build answers to is refused where the document is named, since clap refuses an unknown `--adapter` and a name that got this far came out of a document or an environment.
+
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.
 [crates/turn/src/tokens.rs](crates/turn/src/tokens.rs) prices that surface, and any request, under

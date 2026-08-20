@@ -147,23 +147,22 @@ struct RunArgs {
     /// What to ask the agent, named rather than positional
     #[arg(short, long, value_name = "TEXT", conflicts_with = "ask")]
     prompt: Option<String>,
-    /// Which model provider to resolve into the registry
-    #[arg(short, long, value_enum, default_value_t = AdapterChoice::Mock)]
-    adapter: AdapterChoice,
+    /// Which model provider to resolve into the registry. Defaults to
+    /// `provider.default` in the settings document, and to the mock adapter
+    /// when nothing sets it
+    #[arg(short, long, value_enum)]
+    adapter: Option<AdapterChoice>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID", value_parser = named())]
     model: Option<String>,
-    /// Where the session journal lands
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "sessions/turn.jsonl"
-    )]
-    session: PathBuf,
-    /// Step budget for the turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    max_steps: u32,
+    /// Where the session journal lands. Defaults to `turn.jsonl` under
+    /// `sessions.root` in the settings document
+    #[arg(short, long, value_name = "PATH")]
+    session: Option<PathBuf>,
+    /// Step budget for the turn. Defaults to `agent.max_steps` in the
+    /// settings document
+    #[arg(long, value_name = "N")]
+    max_steps: Option<u32>,
     /// Print the raw event sequence instead of the turn
     #[arg(long)]
     trace: bool,
@@ -885,7 +884,7 @@ fn booted(
     policy: &Policy,
     flags: &[(&'static str, serde_json::Value)],
 ) -> Result<tetanus_engine::EngineConfig, Reported> {
-    let document = tetanus_config::file::document_path(&tetanus_config::home::home(None));
+    let document = document();
     let mut settings = tetanus_engine::boot::document(&document).map_err(|err| {
         misconfigured(
             policy,
@@ -925,6 +924,118 @@ fn root(dir: Option<&std::path::Path>) -> Vec<(&'static str, serde_json::Value)>
     })
     .into_iter()
     .collect()
+}
+
+/// Where this run's settings document lives.
+fn document() -> PathBuf {
+    tetanus_config::file::document_path(&tetanus_config::home::home(None))
+}
+
+/// The flags a command that runs turns was given, before the document has
+/// been read. Every one of them is optional for the reason [`root`] gives.
+struct TurnFlags {
+    adapter: Option<AdapterChoice>,
+    model: Option<String>,
+    max_steps: Option<u32>,
+    session: Option<PathBuf>,
+}
+
+/// What a turn will run on, once the document and the flags have both been
+/// read.
+struct Turn {
+    /// The settled settings, so the engine the turn opens on is the one
+    /// `tetanus config` described.
+    settings: tetanus_engine::EngineConfig,
+    provider: AdapterChoice,
+    /// `None` leaves the model to the adapter's own catalogue, which is the
+    /// only sensible default for an adapter nobody configured.
+    model: Option<String>,
+    max_steps: u32,
+    journal: PathBuf,
+}
+
+/// Resolve one turn's settings out of the document and the flags.
+///
+/// `fallback` is the provider the command has when nobody said otherwise, and
+/// it is not always the engine's: `tetanus run` is the mock adapter because a
+/// first run must need no credential, and `tetanus chat` is DeepSeek because
+/// a conversation with the mock is a demonstration rather than a use. Which
+/// is why the compiled default of a key cannot decide this - only a layer
+/// somebody wrote can, and that is what the layer is read for below.
+fn turn_settings(
+    policy: &Policy,
+    flags: TurnFlags,
+    fallback: AdapterChoice,
+    journal: &str,
+) -> Result<Turn, Reported> {
+    use tetanus_engine::catalog::key;
+
+    let mut overrides: Vec<(&'static str, serde_json::Value)> = Vec::new();
+    if let Some(adapter) = flags.adapter {
+        overrides.push((key::PROVIDER, serde_json::json!(adapter.route())));
+    }
+    if let Some(model) = &flags.model {
+        overrides.push((key::MODEL, serde_json::json!(model)));
+    }
+    if let Some(steps) = flags.max_steps {
+        overrides.push((key::MAX_STEPS, serde_json::json!(steps)));
+    }
+    let settings = booted(policy, &overrides)?;
+
+    // A key still on its compiled layer is a key nobody has an opinion about,
+    // and the command's own default stands. Anything above it - a document, an
+    // environment, a flag - is somebody's opinion, and outranks the default
+    // this binary happens to compile in.
+    let written = |key: &str| {
+        settings
+            .resolved
+            .get(key)
+            .is_some_and(|resolved| resolved.layer > tetanus_config::Layer::Default)
+    };
+
+    Ok(Turn {
+        provider: match written(key::PROVIDER) {
+            true => provider_named(policy, &settings.default_provider)?,
+            false => fallback,
+        },
+        // Not the settled value when nobody set it: the engine's compiled
+        // model belongs to the engine's compiled provider, and offering it to
+        // an adapter that never advertised it would name a model that does
+        // not exist. An unset model is the adapter's first catalogue entry.
+        model: written(key::MODEL).then(|| settings.default_model.clone()),
+        max_steps: settings.max_steps,
+        journal: flags
+            .session
+            .unwrap_or_else(|| settings.sessions_root.join(journal)),
+        settings,
+    })
+}
+
+/// The adapter a provider name asks for.
+///
+/// clap refuses an unknown `--adapter`, so a name that gets this far came out
+/// of a document or an environment, and is reported the way any other value
+/// in one is: it names the key, and it names the file that has to be edited.
+fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported> {
+    [AdapterChoice::Mock, AdapterChoice::Deepseek]
+        .into_iter()
+        .find(|choice| choice.route() == name)
+        .ok_or_else(|| {
+            let known = [AdapterChoice::Mock, AdapterChoice::Deepseek]
+                .map(AdapterChoice::route)
+                .join(" or ");
+            misconfigured(
+                policy,
+                &document(),
+                &RpcError::new(
+                    ErrorCode::InvalidParams,
+                    format!("must be a provider this build can reach, {known}, not {name:?}"),
+                )
+                .with_data(serde_json::json!({
+                    "field": tetanus_engine::catalog::key::PROVIDER,
+                })),
+            )
+        })
 }
 
 /// A path the user named that is not there.
@@ -1588,7 +1699,24 @@ async fn run<W: std::io::Write>(
     let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
         .map_err(|err| fail(policy, &err))?;
 
-    let (adapter, model) = adapter(policy, args.adapter, args.model)?;
+    // What the turn runs on: the settings document, with the flags over it.
+    // Before the journal is opened, because the document decides where the
+    // journal goes when `--session` did not.
+    let settled = turn_settings(
+        policy,
+        TurnFlags {
+            adapter: args.adapter,
+            model: args.model,
+            max_steps: args.max_steps,
+            session: args.session,
+        },
+        // A first run must need no credential, so an unconfigured `run` is
+        // the mock adapter.
+        AdapterChoice::Mock,
+        "turn.jsonl",
+    )?;
+
+    let (adapter, model) = adapter(policy, settled.provider, settled.model.clone())?;
 
     // The journal is the engine's to open. `session.create` writes the
     // `session/start` header that makes the file self-describing - the model
@@ -1596,13 +1724,19 @@ async fn run<W: std::io::Write>(
     // reader open a journal nobody told them about. The turn below still runs
     // in this process; it moves behind `agent.prompt` in its own slice, and
     // nothing here changes when it does.
-    let opened = session(&args.session, args.adapter.route(), &model, args.max_steps)
-        .await
-        .map_err(|err| fail(policy, &err))?;
+    let opened = session(
+        settled.settings.clone(),
+        &settled.journal,
+        settled.provider.route(),
+        &model,
+        settled.max_steps,
+    )
+    .await
+    .map_err(|err| fail(policy, &err))?;
 
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
-        .map_err(|err| fail(policy, &journal_fault(&err, &args.session)))?;
+    let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
+        .map_err(|err| fail(policy, &journal_fault(&err, &settled.journal)))?;
 
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
@@ -1613,7 +1747,7 @@ async fn run<W: std::io::Write>(
         &ctx,
         TurnConfig {
             model: model.clone(),
-            max_steps: args.max_steps,
+            max_steps: settled.max_steps,
             ..TurnConfig::default()
         },
     )
@@ -1638,7 +1772,12 @@ async fn run<W: std::io::Write>(
                 title: &named,
             };
             with_page(policy, out, &log, watched, turn, |err| {
-                turn_fault(err, &opened.session_id, args.adapter.route(), &args.session)
+                turn_fault(
+                    err,
+                    &opened.session_id,
+                    settled.provider.route(),
+                    &settled.journal,
+                )
             })
             .await
         }
@@ -1662,8 +1801,8 @@ async fn run<W: std::io::Write>(
             &turn_fault(
                 &err,
                 &opened.session_id,
-                args.adapter.route(),
-                &args.session,
+                settled.provider.route(),
+                &settled.journal,
             ),
         )
     })?;
@@ -1744,6 +1883,7 @@ async fn run<W: std::io::Write>(
 /// turn, not about the name - so the call is made again without it and the
 /// store mints its own.
 async fn session(
+    settings: tetanus_engine::EngineConfig,
     path: &std::path::Path,
     provider: &str,
     model: &str,
@@ -1758,7 +1898,10 @@ async fn session(
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".")),
-        ..Default::default()
+        // Everything else is what the document settled: the retry policy a
+        // turn runs under is in there, and an engine built from the compiled
+        // defaults would quietly ignore it.
+        ..settings
     });
     let named = tetanus_protocol::methods::SessionCreateParams {
         session_id: path
