@@ -17,7 +17,7 @@ use tetanus_engine::agent::Providers;
 use tetanus_engine::catalog::key;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::Engine;
-use tetanus_protocol::types::{ConfigEntry, ConfigLayer};
+use tetanus_protocol::types::{ConfigEntry, ConfigLayer, REDACTED};
 use tetanus_turn::llm::{ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse};
 use tetanus_turn::tools::{EchoTool, Tool, ToolRegistry};
 
@@ -290,4 +290,143 @@ async fn the_dump_reports_the_engine_not_the_callers_copy() {
     );
     assert_eq!(entry(&entries, "ui.theme").value, serde_json::json!("dark"));
     assert_eq!(entry(&entries, "ui.theme").layer, ConfigLayer::File);
+}
+
+/// TC-CFG-SECRET-1: contract section 4.3. A key whose name says it holds a
+/// credential is dumped without its value, and with everything else it had.
+///
+/// Input: a document holding an API key, resolved at the file layer.
+/// Expected: the entry is in the dump, its value is the published sentinel,
+/// and its key and layer are what the caller resolved. A surface can still
+/// tell the user the key is set and which layer set it, which is what it needs
+/// to say for the user to find the value in the file they wrote it in.
+#[tokio::test]
+async fn a_secret_keeps_its_entry_and_loses_its_value() {
+    let mut resolved = Config::default();
+    resolved.set(
+        "llm.providers.deepseek.api_key",
+        serde_json::json!("sk-live-must-not-be-published"),
+        Layer::File,
+    );
+
+    let (engine, _dir) = engine(EngineConfig {
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let entries = engine.config_dump().await.expect("dump").entries;
+    let secret = entry(&entries, "llm.providers.deepseek.api_key");
+    assert_eq!(secret.value, serde_json::json!(REDACTED));
+    assert_eq!(secret.layer, ConfigLayer::File);
+}
+
+/// TC-CFG-SECRET-2: the value is nowhere in the answer, in any form.
+///
+/// Input: the same document, with a credential in three shapes a document
+/// writes them - the snake case name, the camel case name, and a bearer token
+/// under another provider.
+/// Expected: the serialized dump does not contain any of the three values.
+/// TC-CFG-SECRET-1 reads one field; this reads the whole frame, because a
+/// value that survives anywhere in it has been published, and it is the frame
+/// and not the field that goes to the carrier.
+#[tokio::test]
+async fn no_secret_survives_anywhere_in_the_dump() {
+    let mut resolved = Config::default();
+    for (key, value) in [
+        ("llm.providers.deepseek.api_key", "sk-snake"),
+        ("llm.providers.acme.apiKey", "sk-camel"),
+        ("llm.providers.acme.auth_token", "bearer-token"),
+    ] {
+        resolved.set(key, serde_json::json!(value), Layer::File);
+    }
+
+    let (engine, _dir) = engine(EngineConfig {
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let dump = engine.config_dump().await.expect("dump");
+    let frame = serde_json::to_string(&dump).expect("serialize");
+    for value in ["sk-snake", "sk-camel", "bearer-token"] {
+        assert!(
+            !frame.contains(value),
+            "`{value}` reached the carrier in `{frame}`"
+        );
+    }
+    assert_eq!(
+        frame.matches(REDACTED).count(),
+        3,
+        "each withheld value leaves its entry behind"
+    );
+}
+
+/// TC-CFG-SECRET-3: a key that only mentions a credential is published whole.
+///
+/// Input: the environment variable a key is read from, beside the key itself.
+/// Expected: the variable's name is dumped as the caller resolved it, and only
+/// the key is withheld. This is the case that costs a user something when it
+/// fails the other way: `api_key_env` is how they find out which variable to
+/// set, and a dump that hides it hides the answer to the question they opened
+/// it with.
+#[tokio::test]
+async fn a_key_that_only_mentions_a_credential_is_published() {
+    let mut resolved = Config::default();
+    resolved.set(
+        "llm.providers.deepseek.api_key_env",
+        serde_json::json!("DEEPSEEK_API_KEY"),
+        Layer::File,
+    );
+    resolved.set(
+        "llm.providers.deepseek.api_key",
+        serde_json::json!("sk-live"),
+        Layer::File,
+    );
+
+    let (engine, _dir) = engine(EngineConfig {
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let entries = engine.config_dump().await.expect("dump").entries;
+    assert_eq!(
+        entry(&entries, "llm.providers.deepseek.api_key_env").value,
+        serde_json::json!("DEEPSEEK_API_KEY")
+    );
+    assert_eq!(
+        entry(&entries, "llm.providers.deepseek.api_key").value,
+        serde_json::json!(REDACTED)
+    );
+}
+
+/// TC-CFG-SECRET-4: the layer a secret came from does not change the answer.
+///
+/// Input: one credential per layer above the default - file, environment and
+/// flag.
+/// Expected: all three are withheld, and each still reports its own layer. The
+/// rule is about the key, not about where the value came from: a credential
+/// passed on the command line is as published by a dump as one written in the
+/// document, and a surface still has to be able to say which one it is
+/// reading.
+#[tokio::test]
+async fn a_secret_is_withheld_whatever_layer_set_it() {
+    let mut resolved = Config::default();
+    resolved.set("a.api_key", serde_json::json!("from-file"), Layer::File);
+    resolved.set("b.api_key", serde_json::json!("from-env"), Layer::Env);
+    resolved.set("c.api_key", serde_json::json!("from-flag"), Layer::Flag);
+
+    let (engine, _dir) = engine(EngineConfig {
+        resolved: Arc::new(resolved),
+        ..EngineConfig::default()
+    });
+
+    let entries = engine.config_dump().await.expect("dump").entries;
+    for (key, layer) in [
+        ("a.api_key", ConfigLayer::File),
+        ("b.api_key", ConfigLayer::Env),
+        ("c.api_key", ConfigLayer::Flag),
+    ] {
+        let withheld = entry(&entries, key);
+        assert_eq!(withheld.value, serde_json::json!(REDACTED), "`{key}`");
+        assert_eq!(withheld.layer, layer, "`{key}`");
+    }
 }
