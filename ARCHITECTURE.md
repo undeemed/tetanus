@@ -208,6 +208,10 @@ A flag that was not passed sets nothing at all, which is what leaves the documen
 Whoever set a refused value is who the report is for: a value off a flag reads as any other bad argument, and a value off the document names the document.
 The page itself is the engine's own `config.dump` rather than a copy of the resolved layers, so a key whose name says it holds a credential keeps its row and its layer and loses its value, as section 4.3 of the interface contract requires.
 `tetanus config --dir <path>` asks the question rather than giving an instruction: it lists nothing and opens nothing, and it is how the `flag` layer can be read at all, since a flag is only on the layer of the process it was typed at.
+`tetanus config --defaults` asks the other question a reader has here: not what is set, but what this build settles when nothing is.
+It reads no document at all, so it answers about the build rather than about the machine, and it still answers when the document that would have covered it cannot be read - which is when the question is most often asked.
+A page that is not what the harness will run on has to say so, and it says it on stderr, so the bytes a script reads are the bytes the other page gives it.
+`--dir` with it is a usage error: a flag that overrides a setting and a page that reads no settings are two questions, and answering one while being asked both would print a `flag` row on a page whose whole claim is that nothing was set.
 
 The two subcommands that run turns, `run` and `chat`, take four settings that way: the provider, the model, the step budget, and the root the journal is written under.
 Each has a command default that is not the engine's - `run` falls back to the mock adapter because a first run must need no credential, and `chat` falls back to DeepSeek because a conversation with the mock is a demonstration rather than a use.

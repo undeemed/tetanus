@@ -146,7 +146,7 @@ Without the key the command says so and stops before any network call.
 | `tetanus replay <journal>` | Read a session journal back - by path, or by the id `tetanus sessions` printed: at once, `--live`, or full-screen with `--ui` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
-| `tetanus config` | Show resolved config with its provenance layer |
+| `tetanus config` | Show resolved config with its provenance layer, or `--defaults` for what this build compiles in |
 | `tetanus serve` | Host the JSON-RPC protocol on stdio, or on a socket with `--listen`, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 

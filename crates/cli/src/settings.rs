@@ -29,23 +29,42 @@ use crate::{fail, misconfigured, report, AdapterChoice, Reported};
 ///
 /// A flag is only on the `Flag` layer of the process it was typed at, so a
 /// page with no flags can never print `flag` - and the flag layer is exactly
-/// what a reader comes to this command to understand. `--dir` is that flag,
-/// asked here as a question rather than as an instruction: it lists nothing
-/// and opens nothing, it says what a subcommand given it would run on.
-///
-/// The page is the engine's own `config.dump`, not a copy of the resolved
-/// layers: the engine reports the value it will actually use for a key it
-/// settles, and it drops the value of a key whose name says it holds a
-/// credential (contract §4.3). A surface that printed the layers itself would
-/// print that credential.
+/// what a reader comes to this command to understand.
 pub fn page<W: Write>(
     policy: &Policy,
     document: &Path,
     out: &mut Ui<W>,
     dir: Option<&Path>,
+    defaults: bool,
     json: bool,
 ) -> Result<(), Reported> {
-    let engine = tetanus_engine::HarnessEngine::new(booted(policy, document, &root(dir))?);
+    // What the engine would run on, not what this surface believes:
+    // the same boot every other subcommand does, so the page reports
+    // the keys the engine has and the layer each came from.
+    //
+    // A flag is only on the `Flag` layer of the process it was typed
+    // at, so a page with no flags can never print `flag` - and the
+    // flag layer is exactly what a reader comes to this command to
+    // understand. `--dir` is that flag, asked here as a question
+    // rather than as an instruction: it lists nothing and opens
+    // nothing, it says what a subcommand given it would run on.
+    //
+    // The page is the engine's own `config.dump`, not a copy of the
+    // resolved layers: the engine reports the value it will actually
+    // use for a key it settles, and it drops the value of a key whose
+    // name says it holds a credential (contract §4.3). A surface that
+    // printed the layers itself would print that credential.
+    //
+    // `--defaults` asks the other question a reader has here: not
+    // "what is set", but "what does this build settle when nothing
+    // is". It is the page with the document left out, which is also
+    // the page a document that cannot be read still has - and that is
+    // when the question is asked most.
+    let settings = match defaults {
+        true => compiled(policy)?,
+        false => booted(policy, document, &root(dir))?,
+    };
+    let engine = tetanus_engine::HarnessEngine::new(settings);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -54,10 +73,21 @@ pub fn page<W: Write>(
         .block_on(tetanus_protocol::methods::Engine::config_dump(&engine))
         .map_err(|err| fail(policy, &err))?;
     if json {
-        return render::json::line(out, &dump)
-            .map_err(|err| report(policy, &err.to_string(), None));
+        render::json::line(out, &dump).map_err(|err| report(policy, &err.to_string(), None))?;
+    } else {
+        render::config::render(out, &dump.entries).ok();
     }
-    render::config::render(out, &dump.entries).ok();
+    if defaults {
+        // A page that is not what the harness will run on has to say
+        // so, in both views and on neither's stream: every row saying
+        // `default` is the same page a machine with no document has,
+        // and a reader who came here because theirs is not working
+        // would read it as proof that it is.
+        policy
+            .stderr()
+            .note("what this build compiles in, not what it will run on")
+            .ok();
+    }
     Ok(())
 }
 
@@ -161,6 +191,26 @@ pub fn missing_document(path: &std::path::Path) -> RpcError {
         format!("no settings document at {}", path.display()),
     )
     .with_data(serde_json::json!({ "path": path.display().to_string() }))
+}
+
+/// The compiled defaults alone: no document, no environment, no flags.
+///
+/// The same layer [`booted`] starts from, without the layers that answer for a
+/// machine. Building it here rather than reading a document is the whole
+/// point of `tetanus config --defaults`: the page is then an answer about the
+/// build, which is the same for everyone running this binary, and it is still
+/// there when the document that would have covered it cannot be read.
+pub fn compiled(policy: &Policy) -> Result<tetanus_engine::EngineConfig, Reported> {
+    let mut settings = tetanus_config::Config::default();
+    settings.load(
+        tetanus_config::Layer::Default,
+        tetanus_engine::boot::defaults(),
+    );
+    // Unreachable while the defaults are the engine's own, and reported rather
+    // than unwrapped because a build whose compiled defaults it refuses is a
+    // fault to name, not a panic to read a backtrace of.
+    tetanus_engine::EngineConfig::from_settings(settings)
+        .map_err(|err| fail(policy, &tetanus_engine::convert::config_error(&err)))
 }
 
 /// The flags a command that runs turns was given, before the document has
