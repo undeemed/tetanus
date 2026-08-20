@@ -156,6 +156,8 @@ Without the key the command says so and stops before any network call.
 and `--json`.
 `--settings <path>` and `--color <when>` are on every subcommand, before it or after it.
 The first names the settings document to read in place of the one under the harness home (`$TETANUS_HOME`, or `~/.tetanus`), and a path with nothing there is an error rather than a quiet fall back to the compiled defaults.
+Which document a run read is on the `tetanus config` heading, written out in full and marked when nothing is there yet, so "where do I change it" is answered by the page rather than by the flags you typed; `--defaults` names none, because it read none.
+`tetanus sessions` heads its list the same way, with the directory it listed, whether `--dir`, the settings document or the compiled default chose it.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.

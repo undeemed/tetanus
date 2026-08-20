@@ -478,6 +478,22 @@ folding a long one leaves it readable, and a cut one sends them back to the flag
 do - the config table and the build page hand it a row they painted themselves, and taming it there
 would take that paint out along with the sequences.
 
+A page that lists what is in a place says which place, beside its heading.
+`tetanus config` names the settings document it read and `tetanus sessions` the directory it
+listed, both through [`Ui::heading_at`](crates/ui/src/writer.rs) - one method rather than two
+compositions, because two shapes here would read as two kinds of answer.
+The place is a path off a document, an environment or a flag, so
+[`place`](crates/cli/src/main.rs) makes it absolute without asking the filesystem to resolve it,
+tames it, and marks it when nothing is there yet: a relative path only answers "where do I change
+it" from a working directory the page never prints, and a path with nothing at it is still the file
+to write.
+That mark is the reason the seam is worth having, because a config page of nothing but `default`
+rows and a session list with no rows read exactly the same whether the place is empty or the reader
+is looking at the wrong one.
+`config --defaults` keeps the bare title, since it read no document and naming one would name a
+file the answer did not come from; `--json` is unchanged in both views, which is what keeps a
+caller that asked for the machine form reading one object per line.
+
 Taming can leave nothing behind: a file whose whole name is an escape sequence is a file a reader
 can make, and after the fold there is no character of it to print.
 A row that stopped where its value should be reads as a value the reader failed to see rather than

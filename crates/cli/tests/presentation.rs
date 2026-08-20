@@ -15,8 +15,10 @@
 //! that a journal read full-screen is refused where there is no screen; that a
 //! model named from outside is drawn and not obeyed on the line that says it;
 //! which settings document a command boots from, what it does when the one it
-//! was told to read is not there, and the page that reads none at all; and the
-//! shape of the machine-readable output the interface contract fixes. NOT
+//! was told to read is not there, and the page that reads none at all; that
+//! the config page and the session list each name the place they read, in
+//! full and marked when nothing is there yet; and the shape of the
+//! machine-readable output the interface contract fixes. NOT
 //! tested here: the resolution rules themselves (owned by `tetanus-ui`'s
 //! `color_policy.rs`), what a full-screen view draws once it has a terminal
 //! (owned by `render::browse` and `tetanus_ui::Page`, neither of which needs
@@ -25,7 +27,7 @@
 //! Environmental needs: none. Every case runs offline, and every case states
 //! the colour-related variables it depends on rather than inheriting them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
@@ -59,6 +61,17 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         cmd.env(name, value);
     }
     cmd.output().expect("the binary runs")
+}
+
+/// The directory a run started in, as the run itself sees it.
+///
+/// A page that names a relative path absolutely resolves it against the
+/// working directory the process was given, and the process asks the
+/// operating system for that - which answers with symbolic links already
+/// followed. `tempfile` may hand back a path that goes through one, so a case
+/// comparing the two has to follow them here too.
+fn here(dir: &tempfile::TempDir) -> PathBuf {
+    dir.path().canonicalize().expect("the directory is there")
 }
 
 fn stdout(out: &Output) -> String {
@@ -336,7 +349,9 @@ fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
 /// where it came from.
 fn layers(page: &str) -> Vec<(String, String)> {
     page.lines()
-        .skip_while(|line| line.trim() != "config")
+        // The heading is `config` alone or `config  <document>`, so it is
+        // recognised by its first word rather than by the whole line.
+        .skip_while(|line| line.split_whitespace().next() != Some("config"))
         .skip(1)
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -369,7 +384,7 @@ fn config_shows_what_set_each_key() {
 
     assert!(out.status.success(), "{}", stderr(&out));
     let page = stdout(&out);
-    assert!(page.starts_with("\nconfig\n"), "{page}");
+    assert!(page.starts_with("\nconfig  "), "{page}");
     let rows = layers(&page);
     assert!(
         rows.iter().all(|(_, layer)| layer == "default"),
@@ -904,6 +919,59 @@ fn the_defaults_page_answers_json_and_refuses_a_flag_layer() {
     );
 }
 
+/// TC-CLI-CONF-16: which document the page says it read, in the four states a
+/// reader meets it in.
+/// Expected: the heading carries the document beside the title - the one under
+/// the harness home, the one `--settings` named written out in full even
+/// though it was typed relative, and the same path marked when nothing is
+/// there yet. `--defaults` carries no document at all, because it read none.
+///
+/// The question this page is opened with is "why is it that, and where do I
+/// change it", and the second half of it is unanswerable from the rows: a
+/// `file` layer says a document won, not which document. All four headings
+/// are asserted whole, because a heading that named the wrong file would be
+/// worse than one that named none.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory of the case's own,
+/// holding a document for the first state and nothing for the third.
+#[test]
+fn the_config_page_names_the_document_it_read() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let document = home.path().join("settings.yaml");
+    let heading = |args: &[&str]| {
+        let page = stdout(&run(dir.path(), args, &env));
+        page.lines().nth(1).unwrap_or_default().to_string()
+    };
+
+    std::fs::write(&document, "sessions:\n  root: documented\n").expect("the document");
+    assert_eq!(
+        heading(&["config", "--color", "never"]),
+        format!("config  {}", document.display())
+    );
+
+    std::fs::write(dir.path().join("named.yaml"), "sessions:\n  root: named\n")
+        .expect("the document");
+    assert_eq!(
+        heading(&["--settings", "named.yaml", "config", "--color", "never"]),
+        format!("config  {}/named.yaml", here(&dir).display()),
+        "a relative path was printed as it was typed"
+    );
+
+    std::fs::remove_file(&document).expect("the document goes");
+    assert_eq!(
+        heading(&["config", "--color", "never"]),
+        format!("config  {} (not there yet)", document.display())
+    );
+
+    assert_eq!(
+        heading(&["config", "--defaults", "--color", "never"]),
+        "config"
+    );
+}
+
 /// TC-CLI-UI-11: `tetanus replay --live` into a pipe.
 /// Expected: exactly the bytes of a plain `tetanus replay`, and no waiting.
 /// `--live` is a way of watching a turn arrive, not a second wording of it,
@@ -1339,7 +1407,7 @@ fn the_tool_page_lists_what_a_turn_can_call() {
     }
 }
 
-/// TC-CLI-SESS-7: `tetanus sessions` on a directory two runs wrote into.
+/// TC-CLI-SESS-13: `tetanus sessions` on a directory two runs wrote into.
 /// Expected: one row per journal, newest first, each carrying the size of the
 /// journal and the prompt that opened it. This is the page a user reads an id
 /// out of, so it is asserted against journals a real run wrote and not
@@ -1369,7 +1437,7 @@ fn sessions_lists_what_the_runs_wrote() {
     assert!(rows[0].contains("18 events"), "{told}");
 }
 
-/// TC-CLI-SESS-8: the id the page prints against the journal it names.
+/// TC-CLI-SESS-14: the id the page prints against the journal it names.
 /// Expected: the id is the journal's file name, because a store resolves an
 /// id to `<root>/<id>.jsonl` and an id that resolves to nothing is worth
 /// nothing to the reader who retypes it. `--json` carries both, verbatim.
@@ -1395,8 +1463,10 @@ fn the_id_a_session_is_listed_under_names_its_journal() {
 }
 
 /// TC-CLI-SESS-9: `tetanus sessions` before anything has been run.
-/// Expected: exit 0 and a page that says what writes one. An empty store is
-/// not a failure, and a missing directory is the ordinary first-run state.
+/// Expected: exit 0 and a page that says what writes one, headed by the root
+/// it looked in and marked as not there yet. An empty store is not a failure,
+/// and a missing directory is the ordinary first-run state - but it is also
+/// what the wrong root looks like, so the page names the one it read.
 #[test]
 fn an_empty_store_is_not_a_failure() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1405,11 +1475,83 @@ fn an_empty_store_is_not_a_failure() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        "\nsessions\nno sessions yet - tetanus run writes one\n"
+        format!(
+            "\nsessions  {}/sessions (not there yet)\n\
+             no sessions yet - tetanus run writes one\n",
+            here(&dir).display()
+        )
     );
     assert_eq!(
         stdout(&run(dir.path(), &["sessions", "--json"], &[])),
         "{\"sessions\":[]}\n"
+    );
+}
+
+/// TC-CLI-SESS-15: which root the listing says it read, against the three
+/// things that can choose it.
+/// Expected: the heading names the directory that was actually listed - the
+/// compiled default, the one the settings document set, and the one `--dir`
+/// overrode it with - each written out in full. `--json` is unchanged, because
+/// a caller that asked for the machine form already knows the root it passed.
+///
+/// A listing under the wrong root reads exactly like a listing under the right
+/// one, so this is the line that tells the two apart. It is asserted for a
+/// page with rows on it as well as an empty one, because the empty page is
+/// where a reader most needs it and the full page is where it is easiest to
+/// leave out.
+///
+/// Environmental needs: `TETANUS_HOME` is the case's own directory, and the
+/// document under it sets a root the flag then overrides.
+#[test]
+fn the_listing_names_the_root_it_read() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let heading = |args: &[&str]| {
+        let page = stdout(&run(dir.path(), args, &[]));
+        page.lines().nth(1).unwrap_or_default().to_string()
+    };
+    let out = run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "sessions/a.jsonl"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let root = format!("{}/sessions", here(&dir).display());
+    assert_eq!(
+        heading(&["sessions", "--color", "never"]),
+        format!("sessions  {root}")
+    );
+
+    // A root the document named has to be there - the engine refuses to read
+    // a caller's typo as an empty history - so this one is made before it is
+    // listed.
+    std::fs::create_dir(dir.path().join("documented")).expect("the root is made");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: documented\n",
+    )
+    .expect("the document is written");
+    assert_eq!(
+        heading(&["sessions", "--color", "never"]),
+        format!("sessions  {}/documented", here(&dir).display()),
+        "the document did not choose the root"
+    );
+    assert_eq!(
+        heading(&["sessions", "--dir", "sessions", "--color", "never"]),
+        format!("sessions  {root}"),
+        "the flag did not beat the document"
+    );
+
+    assert_eq!(
+        stdout(&run(
+            dir.path(),
+            &["sessions", "--dir", "sessions", "--json"],
+            &[]
+        ))
+        .lines()
+        .count(),
+        1,
+        "the machine form grew a heading"
     );
 }
 

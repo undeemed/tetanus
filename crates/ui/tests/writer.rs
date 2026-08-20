@@ -4,7 +4,8 @@
 //! theme wraps a span and resets it; that format width pads the text and not
 //! the escape sequences; that a field pads its label in the columns a
 //! terminal draws it in; what a field says when its value draws nothing; the
-//! diagnostic tags; the charset-dependent glyphs.
+//! diagnostic tags; the charset-dependent glyphs; and that a heading can
+//! carry the place a page read without cutting it.
 //!
 //! Features NOT tested here: the policy that produced the theme (see
 //! `color_policy.rs`) and the real process streams.
@@ -140,4 +141,39 @@ fn a_value_that_draws_nothing_is_said_and_not_left_blank() {
             "the row ends in blank space: {line:?}"
         );
     }
+}
+
+/// TC-UI-WRITE-8: a heading with the place the page read.
+/// Expected: one row - the title, two spaces, the place - after the blank a
+/// heading always writes, and the place drawn as it was handed over. With
+/// colour on, the title and the place are two spans and each is reset, so the
+/// muted place cannot bleed into the rows under it.
+#[test]
+fn a_heading_can_carry_the_place_a_page_read() {
+    let mut plain = buffered(Theme::plain(), 80);
+    plain
+        .heading_at("config", "/home/u/.tetanus/settings.yaml")
+        .expect("write");
+    assert_eq!(
+        plain.contents(),
+        "\nconfig  /home/u/.tetanus/settings.yaml\n"
+    );
+
+    let mut colored = buffered(Theme::new(true, Charset::Unicode), 80);
+    colored.heading_at("sessions", "/srv/j").expect("write");
+    let out = colored.contents();
+    assert!(out.contains("sessions"), "{out:?}");
+    assert!(out.contains("/srv/j"), "{out:?}");
+    assert_eq!(
+        out.matches("\u{1b}[0m").count(),
+        2,
+        "one reset per styled span: {out:?}"
+    );
+
+    // A place longer than the width is not cut: it is the value a reader
+    // copies, and a terminal folds it where a truncation would mislead.
+    let long = "/home/u/".to_string() + &"deep/".repeat(30) + "settings.yaml";
+    let mut narrow = buffered(Theme::plain(), 40);
+    narrow.heading_at("config", &long).expect("write");
+    assert!(narrow.contents().contains(&long), "the place was cut");
 }

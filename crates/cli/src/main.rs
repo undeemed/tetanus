@@ -364,9 +364,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // is". It is the page with the document left out, which is also
             // the page a document that cannot be read still has - and that is
             // when the question is asked most.
-            let settings = match defaults {
-                true => compiled(policy)?,
-                false => booted(policy, &document, &root(dir.as_deref()))?,
+            let (settings, read) = match defaults {
+                true => (compiled(policy)?, None),
+                false => (
+                    booted(policy, &document, &root(dir.as_deref()))?,
+                    Some(place(&document)),
+                ),
             };
             let engine = tetanus_engine::HarnessEngine::new(settings);
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -380,7 +383,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 render::json::line(&mut out, &dump)
                     .map_err(|err| report(policy, &err.to_string(), None))?;
             } else {
-                render::config::render(&mut out, &dump.entries).ok();
+                render::config::render(&mut out, &dump.entries, read.as_deref()).ok();
             }
             if defaults {
                 // A page that is not what the harness will run on has to say
@@ -435,11 +438,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // that boot rather than from a path and the compiled defaults:
             // a listing under one set of settings and a run under another
             // would be two harnesses wearing one name.
-            let engine = tetanus_engine::HarnessEngine::new(booted(
-                policy,
-                &document,
-                &root(dir.as_deref()),
-            )?);
+            let settings = booted(policy, &document, &root(dir.as_deref()))?;
+            // Read off the settled settings rather than off `--dir`, so the
+            // page names the directory that was actually listed even when
+            // nobody passed a flag and the document chose it.
+            let under = place(&settings.sessions_root);
+            let engine = tetanus_engine::HarnessEngine::new(settings);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -460,7 +464,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                         .map(boundary)
                         .map_err(|err| journal_fault(&err, std::path::Path::new(path)).message)
                 };
-                return match render::pick::pick(&mut out, &list, think, &open) {
+                return match render::pick::pick(&mut out, &list, &under, think, &open) {
                     Ok(Stop::Interrupted) => Err(stopped(policy)),
                     Ok(Stop::Quit) => Ok(()),
                     // The list is worth more than the view of it, and by here
@@ -470,12 +474,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                             .stderr()
                             .note(&format!("no full-screen view: {err}"))
                             .ok();
-                        render::sessions::render(&mut out, &list).ok();
+                        render::sessions::render(&mut out, &list, &under).ok();
                         Ok(())
                     }
                 };
             }
-            render::sessions::render(&mut out, &list).ok();
+            render::sessions::render(&mut out, &list, &under).ok();
             Ok(())
         }
         Cmd::Replay {
@@ -994,6 +998,34 @@ fn root(dir: Option<&std::path::Path>) -> Vec<(&'static str, serde_json::Value)>
     })
     .into_iter()
     .collect()
+}
+
+/// A path as a page names it: absolute, tamed, and marked when nothing is
+/// there yet.
+///
+/// A page that says where it read from is answering "where do I change it",
+/// and a relative path only answers that from the directory this run started
+/// in - which the page does not print. So the path is made absolute first,
+/// without asking the filesystem to resolve it, because a path that is not
+/// there yet still has to be named.
+///
+/// It is tamed for the reason every other path this binary draws is: it can
+/// come off a document, an environment or a flag, and none of the three is
+/// ours to trust with the cursor.
+///
+/// A path with nothing at it is still the right answer - it is the file to
+/// write, or the directory the first run will make - so it is named and
+/// marked rather than left out. The mark matters most on the two pages that
+/// have it: a config page of nothing but `default` rows, and a sessions page
+/// that lists nothing, both read the same whether the place is empty or the
+/// reader is looking at the wrong one.
+fn place(path: &std::path::Path) -> String {
+    let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let named = tame_line(&full.display().to_string());
+    match full.exists() {
+        true => named,
+        false => format!("{named} (not there yet)"),
+    }
 }
 
 /// Where this run's settings document lives: the path `--settings` named, or

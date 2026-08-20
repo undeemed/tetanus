@@ -69,6 +69,30 @@ impl<W: Write> Ui<W> {
         writeln!(self.out, "{}", self.theme.paint(Role::Heading, text))
     }
 
+    /// The same title, with the place the page read drawn muted beside it.
+    ///
+    /// A page that lists what is somewhere - the keys in a settings document,
+    /// the journals under a sessions root - is answering a question about a
+    /// place, and a reader who cannot see which place cannot act on the
+    /// answer. Two pages ask for that shape, so it is one method rather than
+    /// two compositions that drift apart.
+    ///
+    /// `place` is drawn as it is given, like [`line`](Self::line) and
+    /// [`field`](Self::field): it comes off a document, a flag or an
+    /// environment, so the caller tames it. It is never cut, because it is
+    /// the one value on the page a reader copies - a terminal folding a long
+    /// path leaves it readable, and a cut one sends them back to the flag
+    /// they typed it on.
+    pub fn heading_at(&mut self, text: &str, place: &str) -> io::Result<()> {
+        writeln!(self.out)?;
+        writeln!(
+            self.out,
+            "{}  {}",
+            self.theme.paint(Role::Heading, text),
+            self.theme.paint(Role::Muted, place)
+        )
+    }
+
     /// One `label  value` row. `pad` is the shared label column width, so a
     /// caller aligns a block by passing the same number for every row.
     ///
