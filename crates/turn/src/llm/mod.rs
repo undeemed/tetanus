@@ -121,6 +121,29 @@ pub struct ModelResponse {
     pub usage: Option<Usage>,
 }
 
+/// The finish reasons that mean "the model reached the cap on what it may
+/// write", in the words the providers use for it.
+///
+/// It is a list because the field is the provider's own word and not a
+/// normalized one: the OpenAI-compatible wire, which the DeepSeek route
+/// speaks, says `length`, and the other spelling is what a provider that
+/// names the setting rather than the effect writes. Upstream normalizes
+/// every provider to one `max-tokens` kind in its adapters; tetanus keeps the
+/// provider's word on the journal, where it is evidence, and judges it here.
+pub const TRUNCATED_FINISH_REASONS: [&str; 3] = ["length", "max_tokens", "max-tokens"];
+
+impl ModelResponse {
+    /// Whether the model stopped because it ran out of room rather than
+    /// because it had finished (`docs/interface-contract.md` section 4.4.2).
+    ///
+    /// What follows from it is a turn that ends `max-tokens` and a step that
+    /// dispatches none of the tool calls it carries: a completion that stopped
+    /// mid-write can have stopped in the middle of a call's arguments.
+    pub fn truncated(&self) -> bool {
+        TRUNCATED_FINISH_REASONS.contains(&self.finish_reason.as_str())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("MISSING_CREDENTIAL: no API key at {0}")]

@@ -35,9 +35,13 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
         tetanus_turn::StopReason::PreStepRejected => wire::StopReason::PreStepRejected,
         tetanus_turn::StopReason::MaxSteps => wire::StopReason::MaxSteps,
         tetanus_turn::StopReason::Cancelled => wire::StopReason::Cancelled,
-        // Crash repair's reason has no named wire variant: it arrived after
-        // contract 1.0, and section 7.5 is what lets it travel as the fallback.
-        tetanus_turn::StopReason::Interrupted => wire::StopReason::Other("interrupted".into()),
+        // Neither of these has a named wire variant: both arrived after
+        // contract 1.0, and section 7.5 is what lets them travel as the
+        // fallback. The word is the engine's own, which is also the word the
+        // journal carries, so a surface reading either sees one spelling.
+        reason @ (tetanus_turn::StopReason::MaxTokens | tetanus_turn::StopReason::Interrupted) => {
+            wire::StopReason::Other(reason.as_str().to_string())
+        }
     }
 }
 
