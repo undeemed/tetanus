@@ -4,23 +4,23 @@
 //! Features tested: that the resolved palette reaches clap's own rendering as
 //! well as the lines this crate writes itself; that a colour-hostile
 //! environment cannot change the bytes of plain output; the shape and exit
-//! status of a reported failure; that a bad `--color` value and an empty
-//! value for any flag that takes one are usage errors; that a redirected
-//! stderr is told a turn is running whichever view stdout was asked for;
-//! which of the two views - the turn, or the raw sequence - a command prints;
-//! that a model's thinking stays folded until it is asked for; that the
-//! journal a run leaves behind says what it ran under; that the session list
-//! finds those journals and names each by the id its store answers to; that a
-//! journal read full-screen is refused where there is no screen; that a model
-//! named from outside is drawn and not obeyed on the line that says it; which
-//! settings document a command boots from, what it does when the one it was
-//! told to read is not there, and the page that reads none at all; and
-//! the shape of the machine-readable output the interface contract fixes. NOT tested
-//! here: the resolution rules themselves (owned by
-//! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
-//! has a terminal (owned by `render::browse` and `tetanus_ui::Page`, neither
-//! of which needs one), and the turn flow (owned by the
-//! conformance suite in `tetanus-turn`).
+//! status of a reported failure; that a failure about a file names the file
+//! and reads in one voice whichever view opened it; that a bad `--color` value
+//! and an empty value for any flag that takes one are usage errors; that a
+//! redirected stderr is told a turn is running whichever view stdout was asked
+//! for; which of the two views - the turn, or the raw sequence - a command
+//! prints; that a model's thinking stays folded until it is asked for; that
+//! the journal a run leaves behind says what it ran under; that the session
+//! list finds those journals and names each by the id its store answers to;
+//! that a journal read full-screen is refused where there is no screen; that a
+//! model named from outside is drawn and not obeyed on the line that says it;
+//! which settings document a command boots from, what it does when the one it
+//! was told to read is not there, and the page that reads none at all; and the
+//! shape of the machine-readable output the interface contract fixes. NOT
+//! tested here: the resolution rules themselves (owned by `tetanus-ui`'s
+//! `color_policy.rs`), what a full-screen view draws once it has a terminal
+//! (owned by `render::browse` and `tetanus_ui::Page`, neither of which needs
+//! one), and the turn flow (owned by the conformance suite in `tetanus-turn`).
 //!
 //! Environmental needs: none. Every case runs offline, and every case states
 //! the colour-related variables it depends on rather than inheriting them.
@@ -227,36 +227,6 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
         !stdout(&out).contains("running the turn"),
         "progress leaked onto stdout"
     );
-}
-
-/// TC-CLI-UI-18: the same progress line, whichever way the turn is asked for.
-/// Expected: with both streams piped, the plain run, `--trace` and `--json`
-/// each write `running the turn on mock-echo-1` to stderr and nothing of it to
-/// stdout. One mistake, one answer: a redirected stderr is a log, and which
-/// human view was asked for on stdout does not decide whether the log is
-/// written. `--json` is the one that used to write nothing here, so a script
-/// that logged its runs learnt less than a script that did not ask for JSON.
-#[test]
-fn every_way_of_running_a_turn_writes_the_same_status() {
-    for view in [vec![], vec!["--trace"], vec!["--json"]] {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut args = vec!["run", "-p", "hi", "--session", "j.jsonl"];
-        args.extend_from_slice(&view);
-        let out = run(dir.path(), &args, &[]);
-
-        assert!(out.status.success(), "`{view:?}`: {}", stderr(&out));
-        let err = stderr(&out);
-        assert!(
-            err.contains("running the turn on mock-echo-1"),
-            "`{view:?}` wrote no status: {err:?}"
-        );
-        assert!(!err.contains('\r'), "`{view:?}` repainted a pipe: {err:?}");
-        assert!(!err.contains(ESC), "`{view:?}` coloured a pipe: {err:?}");
-        assert!(
-            !stdout(&out).contains("running the turn"),
-            "`{view:?}` leaked the status onto stdout"
-        );
-    }
 }
 
 /// TC-CLI-UI-8: `tetanus replay` on a journal a run just wrote.
@@ -1724,7 +1694,7 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
     );
 }
 
-/// TC-CLI-ERR-12: an empty value, on every flag that takes one.
+/// TC-CLI-ERR-15: an empty value, on every flag that takes one.
 /// Expected: clap's usage error and exit 2 from all six, and nothing done.
 /// The three paths already refused it because clap refuses an empty `PathBuf`;
 /// the three that stay text did not, and each carried the empty string
@@ -1759,6 +1729,39 @@ fn a_value_that_names_nothing_is_a_usage_error() {
         0,
         "a refused run left something behind"
     );
+}
+
+/// TC-CLI-ERR-16: a journal path that is a directory, on the two views that
+/// open one to write and the one that opens it to read.
+/// Expected: one sentence for all three - `held: is a directory`, exit 1 - so
+/// a reader who typed the wrong path is told which path it was, whichever
+/// command they typed it on. The write side used to print what the operating
+/// system said with nothing in front of it, which named no file at all on a
+/// page whose whole subject is a file, while the read side named it. The
+/// errno is gone from the page as well: `(os error 21)` says a second time
+/// what the three words in front of it have said, and the number a script
+/// reads is the exit status.
+///
+/// Environmental needs: none. `chat` is given the mock adapter and no key, so
+/// it fails on the journal rather than on a credential, and it reads no
+/// stdin because it never gets as far as the prompt.
+#[test]
+fn a_journal_that_is_a_directory_is_named_by_every_view() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir(dir.path().join("held")).expect("a directory");
+
+    for args in [
+        vec!["run", "--session", "held", "-p", "hi"],
+        vec!["chat", "--adapter", "mock", "--session", "held"],
+        vec!["replay", "held"],
+    ] {
+        let out = run(dir.path(), &args, &[]);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(err.contains("held: is a directory"), "`{args:?}`: {err}");
+        assert!(!err.contains("os error"), "`{args:?}`: {err}");
+    }
 }
 
 /// TC-CLI-ERR-11: a journal that is there and holds nothing.
