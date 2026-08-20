@@ -449,6 +449,11 @@ own - a message ending in `note: run this` would be read as this build's advice 
 frame it is a line feed with no carriage return, which is the one thing
 [`Frame`](crates/ui/src/frame.rs) is careful never to write.
 
+One arm carries a string this build did not word.
+`Io` is the operating system's own message, so the sentence is lowered onto the page's voice and the `(os error N)` tail is dropped: the words in front of it have already said it, the number a script reads is the exit status of §4.5's table, and a caller on the wire still gets the message whole.
+The capital is lowered only when the first word is an ordinary one, because a message opening on a path, on `I/O` or on the name of an environment variable would be naming something else once it was rewritten.
+Which file the failure is about is the surface's to supply: `session.create` reports what the filesystem said about a path without carrying that path, so `run` and `chat` fill in the `path` field §4.5 asks for from the journal they asked it to open ([`main.rs`](crates/cli/src/main.rs)), and one mistake reads one way whichever view met it.
+
 Taming and that fold together are [`tame_line`](crates/ui/src/text.rs), which is what a value drawn
 as one whole row goes through, and a failure is not the only one.
 A journal is headed by what the reader chose - the target `replay` was handed on the command line, or
