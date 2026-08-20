@@ -18,3 +18,4 @@ tetanus-turn = { path = "../turn" }
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }
