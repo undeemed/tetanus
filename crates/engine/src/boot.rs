@@ -90,6 +90,7 @@ impl EngineConfig {
                 .unwrap_or(base.max_parallel_tool_calls),
             tool_order: crate::tools::order(&settings, &base.tools)?,
             retry: crate::retry::policy(&settings)?,
+            provider_retry: crate::retry::provider_policies(&settings)?,
             providers: base.providers,
             tools: base.tools,
             resolved: Arc::new(settings),

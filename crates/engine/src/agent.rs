@@ -84,9 +84,13 @@ impl Drop for BusyGuard<'_> {
 pub struct Runtime {
     providers: Arc<dyn Providers>,
     tools: Arc<ToolRegistry>,
-    /// What every route on this engine does with a failed model request,
-    /// until a document can say something different per provider.
+    /// What a route with no block of its own does with a failed model
+    /// request.
     retry: RetryPolicy,
+    /// The routes whose provider wrote a block, and the policy it describes.
+    /// A block is the whole policy for its route, so a route named here never
+    /// reads `retry`.
+    provider_retry: BTreeMap<String, RetryPolicy>,
     /// The order every turn on this engine offers its tools in, read against
     /// `tools` before the engine was built.
     tool_order: Option<ToolOrder>,
@@ -101,6 +105,7 @@ impl Runtime {
         providers: Arc<dyn Providers>,
         tools: Arc<ToolRegistry>,
         retry: RetryPolicy,
+        provider_retry: BTreeMap<String, RetryPolicy>,
         tool_order: Option<ToolOrder>,
         max_parallel_tool_calls: NonZeroUsize,
     ) -> Self {
@@ -108,6 +113,7 @@ impl Runtime {
             providers,
             tools,
             retry,
+            provider_retry,
             tool_order,
             max_parallel_tool_calls,
             agents: Mutex::new(BTreeMap::new()),
@@ -222,6 +228,21 @@ impl Runtime {
             .is_some_and(|agent| agent.busy.load(Ordering::Acquire))
     }
 
+    /// The policy this route runs: its provider's own block when the document
+    /// wrote one, and the general block otherwise.
+    ///
+    /// A block is the whole policy for its route rather than a patch on the
+    /// general one, so the two are never layered here either - the same
+    /// reason `retry::provider_policy` resolves a block over the compiled
+    /// defaults. A route whose provider wrote `mode: always` would otherwise
+    /// inherit a `max_retries` its author never wrote.
+    fn policy_for(&self, provider: &str) -> RetryPolicy {
+        self.provider_retry
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| self.retry.clone())
+    }
+
     /// The turn engine for one session, booted on first use against the
     /// provider and model its header names.
     fn agent_for(&self, session: &LiveSession) -> Result<Arc<SessionAgent>, RpcError> {
@@ -249,7 +270,7 @@ impl Runtime {
             &session.bus,
             Arc::clone(&session.log) as Arc<dyn SessionLog>,
             session.header.provider.clone(),
-            self.retry.clone(),
+            self.policy_for(&session.header.provider),
             retry::clock_jitter(),
         );
         let engine = TurnEngine::from_context(

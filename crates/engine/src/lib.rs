@@ -17,6 +17,7 @@ pub mod session;
 pub mod subscribe;
 pub mod tools;
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,6 +65,11 @@ pub struct EngineConfig {
     /// What a turn does with a model request that failed, on the route the
     /// session names. Resolved from the document by [`crate::retry::policy`].
     pub retry: tetanus_turn::llm::retry::RetryPolicy,
+    /// The routes whose provider wrote a block of its own, and the policy that
+    /// block describes. A route named here never reads [`EngineConfig::retry`]
+    /// at all: a provider's block is the whole policy for its route. Resolved
+    /// from the document by [`crate::retry::provider_policies`].
+    pub provider_retry: BTreeMap<String, tetanus_turn::llm::retry::RetryPolicy>,
     /// The adapter behind each provider a session may name.
     pub providers: Arc<dyn Providers>,
     /// The tools every turn on this engine can call.
@@ -84,6 +90,7 @@ impl Default for EngineConfig {
             max_parallel_tool_calls: tetanus_turn::engine::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             tool_order: None,
             retry: tetanus_turn::llm::retry::RetryPolicy::default(),
+            provider_retry: BTreeMap::new(),
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
@@ -116,6 +123,7 @@ impl HarnessEngine {
                 Arc::clone(&config.providers),
                 Arc::clone(&config.tools),
                 config.retry.clone(),
+                config.provider_retry.clone(),
                 config.tool_order.clone(),
                 config.max_parallel_tool_calls,
             )),

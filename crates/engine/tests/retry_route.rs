@@ -2,12 +2,14 @@
 //!
 //! Feature under test: the installation in `tetanus_engine::agent` - the
 //! engine putting the policy `tetanus_engine::retry` resolved onto the route
-//! each session names.
+//! each session names, which is the general block for most routes and the
+//! provider's own block for a route whose provider wrote one.
 //!
-//! Approach: both cases run a whole `agent.prompt` against an adapter that
+//! Approach: every case runs a whole `agent.prompt` against an adapter that
 //! fails on demand, configured only by a document. Nothing here passes a
 //! policy in, so the only way the observed behaviour happens is the engine
-//! installing what it read.
+//! installing what it read. A per-provider case states a general block the
+//! route must not run, so a pass cannot come from both blocks agreeing.
 //!
 //! Features NOT tested here: the resolution itself
 //! (`crates/engine/tests/retry.rs`), what the executor does with a policy
@@ -86,6 +88,136 @@ async fn a_document_that_allows_no_retry_fails_the_turn() {
     assert_eq!(attempts.load(Ordering::Acquire), 1);
 }
 
+/// TC-RETRY-14: a provider's own block is what its route runs, and it runs
+/// instead of the general block rather than beside it.
+///
+/// Input: a general block allowing no retry, and a `flaky` block allowing one
+/// retry of `SERVER`.
+/// Expected: the prompt answers on attempt 2. Under the general block this
+/// turn fails on attempt 1 (TC-RETRY-7), so the retry can only have come from
+/// the provider's block.
+#[tokio::test]
+async fn a_provider_block_is_what_its_own_route_runs() {
+    let (engine, attempts, _dir) = engine_on(
+        "llm:
+  retry:
+    mode: normal
+    retryable_codes: [SERVER]
+    max_retries: 0
+    backoff:
+      initial_delay_ms: 1
+      max_delay_ms: 2
+  providers:
+    flaky:
+      retry:
+        mode: normal
+        retryable_codes: [SERVER]
+        max_retries: 1
+        backoff:
+          initial_delay_ms: 1
+          max_delay_ms: 2",
+    );
+    let session = open(&engine).await;
+
+    let answered = engine
+        .agent_prompt(AgentPromptParams {
+            session_id: session,
+            content: "please answer".to_string(),
+        })
+        .await
+        .expect("the block allowed the retry the general block refused");
+
+    assert_eq!(answered.summary.content, "answered on attempt 2");
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+}
+
+/// TC-RETRY-15: a provider's own block is the whole policy for its route, so
+/// it can refuse what the general block allows.
+///
+/// Input: a general block allowing one retry, and a `flaky` block allowing
+/// none.
+/// Expected: the prompt fails after one attempt. This is the direction that
+/// proves the two are not layered: a block read as a patch over the general
+/// one would still be allowed its retry here.
+#[tokio::test]
+async fn a_provider_block_can_refuse_what_the_general_block_allows() {
+    let (engine, attempts, _dir) = engine_on(
+        "llm:
+  retry:
+    mode: normal
+    retryable_codes: [SERVER]
+    max_retries: 1
+    backoff:
+      initial_delay_ms: 1
+      max_delay_ms: 2
+  providers:
+    flaky:
+      retry:
+        mode: normal
+        retryable_codes: [SERVER]
+        max_retries: 0
+        backoff:
+          initial_delay_ms: 1
+          max_delay_ms: 2",
+    );
+    let session = open(&engine).await;
+
+    let failed = engine
+        .agent_prompt(AgentPromptParams {
+            session_id: session,
+            content: "please answer".to_string(),
+        })
+        .await
+        .expect_err("the route's own block allowed no retry");
+
+    assert!(failed.message.contains("503"), "{failed:?}");
+    assert_eq!(attempts.load(Ordering::Acquire), 1);
+}
+
+/// TC-RETRY-16: a block written for another provider leaves this route alone.
+///
+/// Input: a general block allowing one retry, and a block allowing none for a
+/// provider this build has no adapter for.
+/// Expected: the prompt answers on attempt 2, so the route ran the general
+/// block. A document may name a provider that is not installed yet - the
+/// resolution reads the names out of the document, whatever this build has an
+/// adapter for (TC-RETRY-9) - and this is the case that says keeping such a
+/// name changes nothing for the routes that are installed.
+#[tokio::test]
+async fn another_providers_block_leaves_this_route_alone() {
+    let (engine, attempts, _dir) = engine_on(
+        "llm:
+  retry:
+    mode: normal
+    retryable_codes: [SERVER]
+    max_retries: 1
+    backoff:
+      initial_delay_ms: 1
+      max_delay_ms: 2
+  providers:
+    not-installed:
+      retry:
+        mode: normal
+        retryable_codes: [SERVER]
+        max_retries: 0
+        backoff:
+          initial_delay_ms: 1
+          max_delay_ms: 2",
+    );
+    let session = open(&engine).await;
+
+    let answered = engine
+        .agent_prompt(AgentPromptParams {
+            session_id: session,
+            content: "please answer".to_string(),
+        })
+        .await
+        .expect("the route runs the general block");
+
+    assert_eq!(answered.summary.content, "answered on attempt 2");
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+}
+
 const FLAKY: &str = "flaky";
 
 /// A provider whose first request fails with a retryable status and whose
@@ -142,13 +274,8 @@ fn document(text: &str) -> (TempDir, tetanus_config::Config) {
 /// An engine on the failing provider, configured by a document rather than by
 /// this function, and the attempt counter that provider increments.
 fn flaky_engine(setting: &str) -> (HarnessEngine, Arc<AtomicU32>, TempDir) {
-    let attempts = Arc::new(AtomicU32::new(0));
-    let (dir, settings) = document(&format!(
-        "provider:
-  default: {FLAKY}
-model:
-  default: flaky-1
-llm:
+    engine_on(&format!(
+        "llm:
   retry:
     mode: normal
     retryable_codes: [SERVER]
@@ -156,6 +283,19 @@ llm:
     backoff:
       initial_delay_ms: 1
       max_delay_ms: 2"
+    ))
+}
+
+/// The same engine under a caller-written `llm` block, for the cases about
+/// which block a route reads.
+fn engine_on(llm: &str) -> (HarnessEngine, Arc<AtomicU32>, TempDir) {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let (dir, settings) = document(&format!(
+        "provider:
+  default: {FLAKY}
+model:
+  default: flaky-1
+{llm}"
     ));
     let engine = HarnessEngine::new(EngineConfig {
         sessions_root: dir.path().to_path_buf(),
