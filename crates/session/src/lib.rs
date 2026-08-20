@@ -8,7 +8,7 @@
 //! `data` payload, and - on the three surface event types - the
 //! `sourceEventSeqs` an event cites.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -113,7 +113,15 @@ impl JsonlSessionLog {
             .create(true)
             .append(true)
             .open(&path)?;
-        let events = read_jsonl(&path)?;
+        // The crash tail is dropped from the file, not only from the reading.
+        // Appending after a half-written record would splice the next event
+        // onto it and leave one line no reader can parse.
+        let scan = scan(&path)?;
+        if scan.committed < file.metadata()?.len() {
+            file.set_len(scan.committed)?;
+            file.sync_all()?;
+        }
+        let events = scan.events;
         Ok(Arc::new(Self {
             id: id.into(),
             path,
@@ -185,8 +193,11 @@ impl SessionLog for JsonlSessionLog {
 
 /// Read a journal back from disk. `seq` contiguity is verified: a gap means the
 /// file is not a faithful copy of the log that produced it.
+///
+/// A record the writer did not finish is not a gap. See [`scan`] for which
+/// damage is read past and which is refused.
 pub fn replay(path: impl AsRef<Path>) -> Result<Vec<SessionEvent>, SessionError> {
-    let events = read_jsonl(path.as_ref())?;
+    let events = scan(path.as_ref())?.events;
     for (i, event) in events.iter().enumerate() {
         if event.seq != i as u64 {
             return Err(SessionError::Corrupt(i + 1));
@@ -195,21 +206,50 @@ pub fn replay(path: impl AsRef<Path>) -> Result<Vec<SessionEvent>, SessionError>
     Ok(events)
 }
 
-fn read_jsonl(path: &Path) -> Result<Vec<SessionEvent>, SessionError> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+/// What one pass over a journal file found.
+#[derive(Default)]
+struct Scan {
+    events: Vec<SessionEvent>,
+    /// Bytes of the file that end on a record boundary: everything up to and
+    /// including the last newline.
+    committed: u64,
+}
+
+/// Read every committed record of a journal.
+///
+/// The newline is the commit. An append writes one record and fsyncs it, so
+/// the only record a crash can cut short is the last one, and it is cut short
+/// exactly when the file does not end in a newline. That tail is dropped: it
+/// is a fact no `append` ever returned, so no caller was told it was durable.
+///
+/// Every other line must parse. A damaged line the writer *did* terminate is
+/// not a crash tail - the log it came from is not the log on disk - so it is
+/// refused rather than read past, and the caller is told which line it was.
+fn scan(path: &Path) -> Result<Scan, SessionError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Scan::default()),
         Err(e) => return Err(e.into()),
     };
-    let mut out = Vec::new();
-    for (i, line) in std::io::BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut found = Scan::default();
+    for (i, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let Some(record) = line.strip_suffix(b"\n") else {
+            break;
+        };
+        found.committed += line.len() as u64;
+        // A cut that lands inside a character leaves bytes that are no text
+        // at all, so the record is read as bytes and judged as one line.
+        let text = std::str::from_utf8(record)
+            .map_err(|_| SessionError::Corrupt(i + 1))?
+            .trim();
+        if text.is_empty() {
             continue;
         }
-        out.push(serde_json::from_str(&line).map_err(|_| SessionError::Corrupt(i + 1))?);
+        found
+            .events
+            .push(serde_json::from_str(text).map_err(|_| SessionError::Corrupt(i + 1))?);
     }
-    Ok(out)
+    Ok(found)
 }
 
 fn now_ms() -> u64 {
