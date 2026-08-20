@@ -394,12 +394,22 @@ impl TurnEngine {
             };
             let source_event_seqs = chunks.lock().expect("chunk seqs").clone();
 
+            // A completion the provider cut off at its output cap stopped
+            // mid-write, so it can have stopped in the middle of a call's
+            // arguments: what it asked for is not known. None of its calls is
+            // dispatched, and none is written to the anchor either, because a
+            // call no result ever answers is a message the next request could
+            // not carry (contract section 4.4.2). What did arrive stays on the
+            // chunks the anchor's sources name.
+            let truncated = response.truncated();
+            let asked: &[ToolCall] = if truncated { &[] } else { &response.tool_calls };
+
             self.log.append_with_sources(
                 topic::ASSISTANT_MESSAGE,
                 serde_json::json!({
                     "content": response.content,
                     "reasoning": response.reasoning,
-                    "tool_calls": response.tool_calls,
+                    "tool_calls": asked,
                     "finish_reason": response.finish_reason,
                     "usage": response.usage,
                 }),
@@ -407,7 +417,7 @@ impl TurnEngine {
             )?;
             content = response.content.clone();
 
-            self.run_tool_calls(turn, &response.tool_calls).await?;
+            self.run_tool_calls(turn, asked).await?;
 
             self.log.append(
                 topic::STEP_END,
@@ -415,6 +425,12 @@ impl TurnEngine {
             )?;
             progress.open_step = None;
 
+            // The answer is incomplete and no tool result is owed, so there
+            // is nothing a next step could carry.
+            if truncated {
+                reason = StopReason::MaxTokens;
+                break;
+            }
             // Tools owe another request -> claim -> next step. Phase ① has one
             // inbox holding one turn's input, so nothing new is claimed here.
             if response.tool_calls.is_empty() {

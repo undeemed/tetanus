@@ -238,6 +238,10 @@ pub enum StopReason {
     MaxSteps,
     /// `TurnEngine::cancel` asked the turn to stop at a step boundary.
     Cancelled,
+    /// The model reached the cap on what it may write, so the answer stops
+    /// mid-write rather than because it was finished
+    /// (`docs/interface-contract.md` section 4.4.2).
+    MaxTokens,
     /// The turn never ended: this reason is written by crash repair when a
     /// later run finds the journal open. See [`crate::repair`].
     Interrupted,
@@ -260,6 +264,7 @@ impl StopReason {
             StopReason::PreStepRejected => "pre-step-rejected",
             StopReason::MaxSteps => "max-steps",
             StopReason::Cancelled => "cancelled",
+            StopReason::MaxTokens => "max-tokens",
             StopReason::Interrupted => "interrupted",
         }
     }
