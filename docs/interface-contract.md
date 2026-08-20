@@ -268,6 +268,22 @@ So §4.6's `running --turn/end--> idle` holds for a failed turn exactly as it ho
 The failure itself travels on the error and not on the event: `turn/end` carries the four fields §4.3.1 fixes and nothing more.
 `"failed"` is a value of the growable `StopReason` (§7.5), not a new variant.
 
+A turn the provider cut off at its output cap closes too, and says so.
+When a completion ends because the model reached the cap on what it may write, rather than because it had finished writing, `turn/end` carries `stop_reason: "max-tokens"`.
+`agent.prompt` still answers a summary and not an error: the turn produced an answer, and what the reason adds is that the answer is incomplete.
+A surface that renders it as an ordinary end tells the reader that a sentence the model never finished is the whole reply.
+
+The reason belongs to the turn, not to the step that was cut off.
+A turn one of whose steps hit the cap ends `max-tokens` even when a later step completed, because the answer the reader is holding is still missing the part that was cut.
+It does not carry into the next turn: a turn whose own steps all completed ends `natural`, whatever happened in the turn before it.
+
+A step the cap cut off dispatches no tool calls.
+A completion that stopped mid-write can stop in the middle of a call's arguments, so what the model asked for is not known and cannot be repaired by guessing.
+The step ends with its `assistant/message` and no `tool/call`, and the turn ends there.
+
+`"max-tokens"` is a value of the growable `StopReason` (§7.5), not a new variant, so no wire type changes.
+The engine names it as a reason of its own, and §7.6's mapping carries it across as the fallback, the way §4.4.4's `"interrupted"` already travels.
+
 #### 4.4.3 Asking the user
 
 ```text
@@ -579,3 +595,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States that a turn a failure ended still closes on the journal (§4.4.2): the step the failure interrupted gets its `step/end` and the turn gets a `turn/end` with `stop_reason: "failed"`, both written before `agent.prompt` answers its §4.5 error. Until now a failed turn left `turn/start` unbalanced, so §4.6's state machine was true only for a turn that succeeded and a reader had to wait for §4.4.4's repair on the next open to learn the turn was over. No type changes: `"failed"` is a value of the growable `StopReason` by §7.5, and the closer uses the payload §4.3.1 already fixes. The failure stays on the error object, where §4.5 puts it; the engine change that writes the closer lands on its own. |
 | 1.0 | No boundary change, and no type changes. Completes §6 so every clause a case already fixes names it: §4.4.1, §4.4.2, §4.4.3, §4.4.4, §4.6 and the engine-side half of §4.7 had cases but no row, which is the one gap the table cannot show, since a clause with no row reads the same whether it is unverified or only unrecorded. §4.4.3 stays reserved, and its row is the promise that goes with that: the capability behind an unserved call is not advertised. §6's preamble now also says which of §4.7 the presentation lane verifies, so a reviewer looking for the missing cases looks in the right suite. |
 | 1.0 | States that `config.dump` never publishes a secret's value (§4.3): a key whose last word names a credential is dumped with `types::REDACTED` in place of what the document holds, and keeps its key and its layer, so a surface can still show that it is set. One added constant, no type change, no version bump - the entry shape is what it was, and a client that does nothing new reads the sentinel as the string it is. The rule is by name because the engine has no schema for a key it does not settle. Until now every key a document held was echoed verbatim, to `tetanus config` and to any WebSocket client alike, so a credential written into the document was published to whoever was connected. The engine change that applies this lands beside it, with the cases §6 names (TC-CFG-SECRET-1..4); the presentation lane's own temporary copy of the dump in `crates/cli` (issue #157) is that lane's to fix. |
+| 1.0 | States what a turn the provider cut off at its output cap looks like (§4.4.2): `turn/end` carries `stop_reason: "max-tokens"`, `agent.prompt` still answers a summary, the reason is the turn's rather than the cut step's and does not leak into the next turn, and the truncated step dispatches no tool calls, because a completion that stopped mid-write can have stopped mid-arguments. Until now the boundary had no way to say an answer was incomplete: such a turn ended `"natural"`, which reads as a model that had finished. No type changes: `"max-tokens"` is a value of the growable `StopReason` by §7.5, and §7.6's mapping carries it as the fallback exactly as it carries `"interrupted"`. The engine change that ends such a turn lands on its own, with the §6 rows for these clauses; it adds a reason to `tetanus_turn::StopReason`, which by §3 no surface may match - the one surface that does today (`crates/cli/src/main.rs`) needs the arm that carries it, and that arm is the presentation lane's to write. |
