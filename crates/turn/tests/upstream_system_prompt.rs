@@ -7,10 +7,10 @@
 //!
 //! Approach: the same offline fixture the turn-flow suite uses, driven through
 //! the bus, plus a bare registry where a case is about registration alone.
-//! Prompt-variable references are covered on `interpolate`, the rule that
-//! substitutes them, because nothing registers a variable and no assembly
-//! carries one yet. Upstream's assembly still carries surfaces tetanus has not
-//! built: a variable registry, runtime-context providers and scoped layers. Cases that only exist because
+//! Prompt variables are covered where they live - on the registry, and in
+//! `interpolate` - because the assembly does not carry them to the model yet.
+//! Upstream's assembly still carries surfaces tetanus has not built:
+//! runtime-context providers and scoped layers. Cases that only exist because
 //! of those are not restated here as passing tests; they stay rows in
 //! `docs/parity.md`. Upstream's non-finite order is unrepresentable in an
 //! `i32`, so that case has nothing to restate.
@@ -753,6 +753,110 @@ fn a_name_the_host_language_uses_is_an_ordinary_variable() {
         "{unknown}"
     );
     assert_eq!(registered, "own-value");
+}
+
+/// TC-PORT-PROMPT-24: a variable's provider is asked at every assembly, is
+/// told which assembly is asking, and the name goes when the handle does.
+///
+/// Upstream: "resolves each variable against the assemble context and emits
+/// change on register/unregister".
+///
+/// Expected: two assemblies read two values, each naming its own step; a
+/// provider that answers nothing leaves the name registered with no value; and
+/// after the drop the name is not in the map at all.
+#[test]
+fn a_variable_provider_is_asked_at_every_assembly() {
+    let sections = PromptRegistry::new();
+    let where_it_runs = sections
+        .variable("step", |at| Some(format!("step {}", at.step)))
+        .expect("step");
+    let _quiet = sections.variable("quiet", |_| None).expect("quiet");
+
+    let first = sections.variables(&AssembleAt { turn: 1, step: 1 });
+    let second = sections.variables(&AssembleAt { turn: 1, step: 2 });
+    drop(where_it_runs);
+    let after = sections.variables(&AssembleAt { turn: 1, step: 3 });
+
+    assert_eq!(first["step"].as_deref(), Some("step 1"));
+    assert_eq!(second["step"].as_deref(), Some("step 2"));
+    assert_eq!(first["quiet"], None, "registered, with nothing to say");
+    assert!(!after.contains_key("step"), "the handle took the name out");
+    assert!(after.contains_key("quiet"));
+}
+
+/// TC-PORT-PROMPT-25: a duplicate variable name is refused, and so is a name
+/// no reference could ever carry.
+///
+/// Upstream: "rejects a duplicate variable name and an unreferenceable name".
+///
+/// Expected: `DuplicateVariable` and `BadVariableName`, the second quoting the
+/// rule; the value registered first still stands.
+#[test]
+fn a_duplicate_or_unreferenceable_variable_name_is_refused() {
+    let sections = PromptRegistry::new();
+    let _first = sections
+        .variable("model", |_| Some("m1".into()))
+        .expect("model");
+
+    let Err(duplicate) = sections.variable("model", |_| Some("m2".into())) else {
+        panic!("a double-loaded plugin must fail, not shadow the first value");
+    };
+    let Err(unreferenceable) = sections.variable("Not Valid", |_| Some("x".into())) else {
+        panic!("a name no section could write is a mistake at registration");
+    };
+
+    assert_eq!(
+        duplicate.to_string(),
+        "prompt variable \"model\" is already registered"
+    );
+    assert_eq!(
+        unreferenceable.to_string(),
+        format!(
+            "prompt variable name \"Not Valid\" cannot be referenced: names match {VARIABLE_NAME}"
+        )
+    );
+    let live = sections.variables(&AssembleAt { turn: 1, step: 1 });
+    assert_eq!(live["model"].as_deref(), Some("m1"));
+    assert_eq!(live.len(), 1);
+}
+
+/// TC-PORT-PROMPT-26: a variable registered while another provider runs joins
+/// the next assembly, not the one already in flight.
+///
+/// Upstream: "live-iterates variables registered by an earlier provider" - it
+/// includes the late name in the same assembly. tetanus snapshots the set
+/// first, exactly as it snapshots sections, because providers run with the
+/// registry lock released; a late registration is one assembly behind instead
+/// of racing the iteration that caused it. `docs/parity.md` carries the
+/// difference.
+///
+/// Expected: the first assembly holds only `first`; the second holds both.
+#[test]
+fn a_variable_registered_mid_assembly_joins_the_next_one() {
+    let sections = PromptRegistry::new();
+    let late: Arc<Mutex<Option<EffectHandle>>> = Arc::new(Mutex::new(None));
+    let registry = Arc::clone(&sections);
+    let slot = Arc::clone(&late);
+    let _first = sections
+        .variable("first", move |_| {
+            let mut slot = slot.lock().expect("late");
+            if slot.is_none() {
+                *slot = Some(
+                    registry
+                        .variable("late", |_| Some("second".into()))
+                        .expect("late"),
+                );
+            }
+            Some("first value".to_string())
+        })
+        .expect("first");
+
+    let during = sections.variables(&AssembleAt { turn: 1, step: 1 });
+    let after = sections.variables(&AssembleAt { turn: 1, step: 2 });
+
+    assert_eq!(during.keys().collect::<Vec<_>>(), ["first"]);
+    assert_eq!(after.keys().collect::<Vec<_>>(), ["first", "late"]);
+    assert_eq!(after["late"].as_deref(), Some("second"));
 }
 
 /// The variables of one assembly, as a case writes them.
