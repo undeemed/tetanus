@@ -213,6 +213,7 @@ fn every_failure_carries_the_code_a_policy_reads() {
         LlmError::Provider {
             status,
             message: "..".into(),
+            retry_after_ms: None,
         }
         .code()
     };

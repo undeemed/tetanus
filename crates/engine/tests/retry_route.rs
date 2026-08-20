@@ -110,6 +110,7 @@ impl LlmAdapter for Flaky {
             return Err(LlmError::Provider {
                 status: 503,
                 message: "the route is busy".to_string(),
+                retry_after_ms: None,
             });
         }
         Ok(ModelResponse {

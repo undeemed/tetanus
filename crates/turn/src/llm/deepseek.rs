@@ -204,6 +204,92 @@ pub fn normalize_api_key(raw: &str, reference: &str) -> Result<String, LlmError>
     Ok(key.to_string())
 }
 
+/// The header a provider asks for a wait in (RFC 9110 section 10.2.3).
+pub const RETRY_AFTER_HEADER: &str = "retry-after";
+
+/// The month names an IMF-fixdate is written with, in calendar order.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The wait a `Retry-After` header asks for, in milliseconds, or `None` when
+/// it asks for nothing that can be honoured.
+///
+/// `now_ms` is the epoch time the date form is measured against. It is a
+/// parameter rather than a clock read so the judgement is a function of its
+/// inputs, and a case can state both sides of "in the past".
+///
+/// Both forms RFC 9110 defines are read: delta-seconds, and an IMF-fixdate.
+/// A value that is zero, negative, already past, unreadable, or larger than
+/// the seconds field can hold is not a wait, so it reads as nothing asked and
+/// the policy is left on its own backoff. Refusing an uninterpretable value is
+/// always safe; obeying one is not.
+///
+/// This lives on the one adapter with a response to read it from, as
+/// [`normalize_api_key`] lives on the one adapter that resolves a credential.
+/// It moves to a shared seam when a second adapter needs it.
+pub fn retry_after_ms(header: &str, now_ms: f64) -> Option<f64> {
+    let header = header.trim();
+    if let Ok(seconds) = header.parse::<u32>() {
+        return wait(f64::from(seconds) * 1000.0);
+    }
+    wait(imf_fixdate_ms(header)? - now_ms)
+}
+
+/// A wait is a positive, finite number of milliseconds. Everything else is a
+/// provider that asked for nothing.
+fn wait(ms: f64) -> Option<f64> {
+    Some(ms).filter(|ms| ms.is_finite() && *ms > 0.0)
+}
+
+/// The epoch milliseconds an IMF-fixdate names, for example
+/// `Sun, 06 Nov 1994 08:49:37 GMT`.
+///
+/// The two obsolete date formats RFC 9110 permits a recipient to accept are
+/// not read. No provider sends them, and a date this cannot read is a wait
+/// nobody asked for rather than a failure.
+fn imf_fixdate_ms(text: &str) -> Option<f64> {
+    let (_day_name, date) = text.strip_suffix(" GMT")?.split_once(", ")?;
+    let mut fields = date.split(' ');
+    let day: i64 = fields.next()?.parse().ok()?;
+    let month_name = fields.next()?;
+    let month = MONTHS.iter().position(|name| *name == month_name)? as i64 + 1;
+    let year: i64 = fields.next()?.parse().ok()?;
+    let mut clock = fields.next()?.split(':');
+    let hour: i64 = clock.next()?.parse().ok()?;
+    let minute: i64 = clock.next()?.parse().ok()?;
+    let second: i64 = clock.next()?.parse().ok()?;
+    if fields.next().is_some() || clock.next().is_some() {
+        return None;
+    }
+    // A leap second is minute 59 second 60, and it is a real value to read.
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    Some(seconds as f64 * 1000.0)
+}
+
+/// Days from the epoch to a proleptic-Gregorian date, by Howard Hinnant's
+/// `days_from_civil`. Calendar arithmetic is written once, from a published
+/// algorithm, rather than approximated.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Epoch milliseconds now, for measuring a date the provider sent against.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_millis() as f64)
+}
+
 /// Serialize a [`ModelRequest`] into the official wire body. Pure, so the
 /// contract is testable without a transport.
 pub fn wire_request(request: &ModelRequest, adapter_max_tokens: Option<u32>) -> serde_json::Value {
@@ -319,6 +405,9 @@ impl StreamDecoder {
             return Err(LlmError::Provider {
                 status: 200,
                 message: error.to_string(),
+                // An in-band error arrives inside a stream that already
+                // answered 200, so there is no header left to ask in.
+                retry_after_ms: None,
             });
         }
 
@@ -494,10 +583,18 @@ impl SseTransport for ReqwestTransport {
 
         let status = response.status();
         if !status.is_success() {
+            // Read before the body: taking the text consumes the response,
+            // and the wait it asked for is in the headers.
+            let asked = response
+                .headers()
+                .get(RETRY_AFTER_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| retry_after_ms(value, now_ms()));
             let message = response.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
                 message,
+                retry_after_ms: asked,
             });
         }
 

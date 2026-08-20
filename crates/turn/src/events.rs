@@ -121,8 +121,8 @@ pub struct RequestFailure {
     /// The provider's own words, or the transport's.
     pub message: String,
     /// The wait the provider asked for, in milliseconds, when it asked for
-    /// one. No tetanus adapter reads `Retry-After` yet, so it is `None` today
-    /// and a policy falls back to its own backoff.
+    /// one, from [`LlmError::retry_after_ms`]. A failure that asked for
+    /// nothing leaves a policy on its own backoff.
     pub provider_retry_after_ms: Option<f64>,
 }
 
@@ -131,7 +131,7 @@ impl From<&LlmError> for RequestFailure {
         Self {
             code: error.code().to_string(),
             message: error.to_string(),
-            provider_retry_after_ms: None,
+            provider_retry_after_ms: error.retry_after_ms(),
         }
     }
 }

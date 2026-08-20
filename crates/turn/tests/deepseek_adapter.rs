@@ -1,10 +1,13 @@
 //! Test Design Specification: the DeepSeek chat-completions adapter.
 //!
-//! Feature under test: wire serialization, SSE stream decoding, and how a
-//! stream ends, for the provider route `deepseek-official`, exercised through a
-//! replaying transport.
-//! Features NOT tested here: TLS, retry policy, thinking-mode configuration and
-//! the credential seam - Phase ② concerns.
+//! Feature under test: wire serialization, SSE stream decoding, how a stream
+//! ends, and the wait a throttled provider asks for, for the provider route
+//! `deepseek-official`, exercised through a replaying transport and - where the
+//! answer is an HTTP response rather than a stream - through the production
+//! transport against a loopback socket.
+//! Features NOT tested here: TLS, the policy that acts on a provider-asked wait
+//! (`upstream_retry_policy.rs` holds it), thinking-mode configuration and the
+//! credential seam - Phase ② concerns.
 //!
 //! Environmental needs: none. TC-DS-LIVE-1 additionally needs `DEEPSEEK_API_KEY`
 //! and network, and reports itself skipped without them.
@@ -17,11 +20,15 @@
 
 use std::sync::Arc;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, MutexGuard};
 
+use tetanus_turn::events::RequestFailure;
 use tetanus_turn::llm::deepseek::{
-    take_frames, wire_request, DeepSeekAdapter, DeepSeekConfig, ReplayTransport, StreamDecoder,
-    DEFAULT_API_KEY_ENV, PROVIDER, PUBLIC_BASE_URL, STREAM_CLOSED,
+    retry_after_ms, take_frames, wire_request, DeepSeekAdapter, DeepSeekConfig, ReplayTransport,
+    ReqwestTransport, SseTransport, StreamDecoder, DEFAULT_API_KEY_ENV, PROVIDER, PUBLIC_BASE_URL,
+    STREAM_CLOSED,
 };
 use tetanus_turn::llm::{CollectingSink, LlmAdapter, LlmError, Message, ModelRequest, StreamChunk};
 use tetanus_turn::tools::{ToolCall, ToolSchema};
@@ -519,6 +526,213 @@ async fn live_call_when_a_key_is_present() {
 
     assert!(!response.content.is_empty(), "the provider answered");
     assert!(!sink.chunks.is_empty(), "the answer arrived as a stream");
+}
+
+/// TC-DS-WAIT-1: the delta-seconds form of `Retry-After` is a wait in
+/// milliseconds.
+///
+/// Upstream: `adapter.spec.ts`, "retains status, Retry-After seconds, and
+/// provider request id as structured facts". Upstream also keeps the provider
+/// request id; tetanus carries no request id on a failure, so the wait is the
+/// whole assertion.
+///
+/// Input: `2`, and the same value with the whitespace a header may arrive with.
+/// Expected: `Some(2000.0)` for both. The clock is not read: a delta is
+/// measured from the answer, not from a date.
+#[test]
+fn a_wait_in_seconds_is_read_in_milliseconds() {
+    assert_eq!(retry_after_ms("2", 0.0), Some(2_000.0));
+    assert_eq!(retry_after_ms(" 5 ", 1_800_000_000_000.0), Some(5_000.0));
+}
+
+/// TC-DS-WAIT-2: the date form of `Retry-After` names an instant, so the wait
+/// is the distance from now to it.
+///
+/// Upstream: `adapter.spec.ts`, "parses a future Retry-After HTTP date and the
+/// DeepSeek request-id fallback". Upstream spies on the clock; tetanus passes
+/// the instant in, so the case states both sides of the subtraction.
+///
+/// Input: RFC 9110's own IMF-fixdate example, measured from the epoch and from
+/// three seconds before the instant it names.
+/// Expected: 784_111_777_000 ms and 3_000 ms. The first pins the calendar
+/// arithmetic against a published value; the second pins the subtraction.
+#[test]
+fn a_wait_as_a_date_is_the_distance_to_it() {
+    let example = "Sun, 06 Nov 1994 08:49:37 GMT";
+    assert_eq!(retry_after_ms(example, 0.0), Some(784_111_777_000.0));
+    assert_eq!(
+        retry_after_ms(example, 784_111_777_000.0 - 3_000.0),
+        Some(3_000.0)
+    );
+}
+
+/// TC-DS-WAIT-3: a date that has already passed asks for nothing.
+///
+/// Upstream: `adapter.spec.ts`, "omits zero, non-finite, invalid, and past
+/// Retry-After values" (the past-date value).
+///
+/// Input: the epoch itself, measured from a day later.
+/// Expected: `None`. A wait that ended before it was read is not a wait, and
+/// the policy is left on its own backoff rather than on a negative number.
+#[test]
+fn a_wait_that_has_already_passed_asks_for_nothing() {
+    assert_eq!(
+        retry_after_ms("Thu, 01 Jan 1970 00:00:00 GMT", 86_400_000.0),
+        None
+    );
+}
+
+/// TC-DS-WAIT-4: a value that is not a wait asks for nothing.
+///
+/// Upstream: `adapter.spec.ts`, "omits zero, non-finite, invalid, and past
+/// Retry-After values", extended with the malformed dates a fixed-width parser
+/// has to refuse.
+///
+/// Input: zero, a negative delta, 400 digits, empty, prose, a date with no
+/// zone, an impossible day, an unknown month, and a truncated clock.
+/// Expected: `None` for every one. Refusing an uninterpretable value costs one
+/// local backoff; obeying it could park a route for as long as the value says.
+#[test]
+fn a_value_that_is_not_a_wait_asks_for_nothing() {
+    for value in [
+        "0",
+        "-5",
+        &"9".repeat(400),
+        "",
+        "not-a-date",
+        "Sun, 06 Nov 1994 08:49:37",
+        "Sun, 32 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Foo 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:49 GMT",
+    ] {
+        assert_eq!(retry_after_ms(value, 0.0), None, "{value}");
+    }
+}
+
+/// TC-DS-WAIT-5: the wait a provider asked for reaches the policy that acts on
+/// it.
+///
+/// The recovery policy reads [`RequestFailure`], not the error, so a wait the
+/// adapter parsed and nobody carried would be a wait nobody honours.
+///
+/// Input: a provider failure carrying two seconds, and a transport failure.
+/// Expected: `Some(2000.0)` on the first, `None` on the second - a request
+/// that never reached the service has no header to have asked in.
+#[test]
+fn the_asked_wait_reaches_the_failure_a_policy_reads() {
+    let asked = LlmError::Provider {
+        status: 429,
+        message: "slow down".into(),
+        retry_after_ms: Some(2_000.0),
+    };
+    assert_eq!(
+        RequestFailure::from(&asked).provider_retry_after_ms,
+        Some(2_000.0)
+    );
+    assert_eq!(RequestFailure::from(&asked).code, "RATE_LIMIT");
+
+    let unreached = LlmError::Transport("connection refused".into());
+    assert_eq!(
+        RequestFailure::from(&unreached).provider_retry_after_ms,
+        None
+    );
+}
+
+/// TC-DS-WAIT-6: a throttled answer over a real socket carries its status, its
+/// words and the wait it asked for.
+///
+/// Upstream: `adapter.spec.ts`, "retains status, Retry-After seconds ... as
+/// structured facts", against upstream's mock server. This is the whole path:
+/// the production transport, a real HTTP response, and the header read before
+/// the body is taken.
+///
+/// Environmental needs: a loopback port. No network and no credential.
+/// Input: `HTTP 429` with `retry-after: 2` and a JSON error body.
+/// Expected: `LlmError::Provider` with status 429, the body as the message,
+/// and `Some(2000.0)`.
+#[tokio::test]
+async fn a_throttled_answer_carries_the_wait_it_asked_for() {
+    let body = r#"{"error":{"message":"slow down"}}"#;
+    let url = one_shot("429 Too Many Requests", "retry-after: 2\r\n", body).await;
+
+    // `expect_err` wants a `Debug` stream; a boxed one is not, so the refusal
+    // is taken by match instead.
+    let err = match ReqwestTransport::default()
+        .post_sse(&url, "test-key", serde_json::json!({}))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("the provider refused, so no stream should have opened"),
+    };
+
+    let LlmError::Provider {
+        status,
+        message,
+        retry_after_ms,
+    } = err
+    else {
+        panic!("expected a provider failure, got {err}");
+    };
+    assert_eq!(status, 429);
+    assert_eq!(message, body);
+    assert_eq!(retry_after_ms, Some(2_000.0));
+}
+
+/// TC-DS-WAIT-7: an answer that asked for nothing leaves the policy on its own
+/// backoff.
+///
+/// Input: `HTTP 500` with no `Retry-After` header.
+/// Expected: `LlmError::Provider` with status 500 and no wait. The absent
+/// header must read as "the provider said nothing", not as zero, or a server
+/// error would be retried with no pause at all.
+#[tokio::test]
+async fn an_answer_with_no_header_asks_for_nothing() {
+    let url = one_shot("500 Internal Server Error", "", "upstream is down").await;
+
+    // `expect_err` wants a `Debug` stream; a boxed one is not, so the refusal
+    // is taken by match instead.
+    let err = match ReqwestTransport::default()
+        .post_sse(&url, "test-key", serde_json::json!({}))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("the provider failed, so no stream should have opened"),
+    };
+
+    assert!(
+        matches!(err, LlmError::Provider { status: 500, ref retry_after_ms, .. } if retry_after_ms.is_none()),
+        "{err}"
+    );
+}
+
+/// One HTTP answer on a loopback port, for the cases that need the production
+/// transport rather than a replay. It answers the first connection and then
+/// drains it, so the client's own close is graceful and the answer is never
+/// lost to a reset.
+async fn one_shot(status_line: &str, headers: &str, body: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let url = format!(
+        "http://{}/chat/completions",
+        listener.local_addr().expect("the bound address")
+    );
+    let answer = format!(
+        "HTTP/1.1 {status_line}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("one connection");
+        let mut buffer = [0u8; 2048];
+        let _ = socket.read(&mut buffer).await;
+        socket
+            .write_all(answer.as_bytes())
+            .await
+            .expect("the answer");
+        socket.flush().await.expect("flushed");
+        while socket.read(&mut buffer).await.unwrap_or(0) > 0 {}
+    });
+    url
 }
 
 const TOOL_CALL_STREAM: &[&str] = &[

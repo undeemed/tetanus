@@ -153,7 +153,16 @@ pub enum LlmError {
     #[error("TRANSPORT: {0}")]
     Transport(String),
     #[error("PROVIDER: {status} {message}")]
-    Provider { status: u16, message: String },
+    Provider {
+        status: u16,
+        message: String,
+        /// The wait the provider asked for in its `Retry-After` header, in
+        /// milliseconds, when it asked for one that can be honoured.
+        ///
+        /// `None` is "the provider asked for nothing", not "wait for no time":
+        /// a policy that reads it falls back to its own backoff.
+        retry_after_ms: Option<f64>,
+    },
     #[error("PROTOCOL: {0}")]
     Protocol(String),
     /// A provider that completed normally and said nothing at all.
@@ -191,6 +200,18 @@ impl LlmError {
             },
             LlmError::Protocol(_) => "PROTOCOL",
             LlmError::Sink(_) => "SINK",
+        }
+    }
+
+    /// The wait the provider asked for, in milliseconds, when this failure
+    /// carries one.
+    ///
+    /// Only a provider response can ask: a transport that never reached the
+    /// service has no header to ask in.
+    pub fn retry_after_ms(&self) -> Option<f64> {
+        match self {
+            LlmError::Provider { retry_after_ms, .. } => *retry_after_ms,
+            _ => None,
         }
     }
 }

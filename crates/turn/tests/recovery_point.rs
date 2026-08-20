@@ -173,6 +173,7 @@ fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectH
                 return Err(LlmError::Provider {
                     status,
                     message: "upstream is down".into(),
+                    retry_after_ms: None,
                 });
             }
             next.run(ev).await
