@@ -919,7 +919,7 @@ mod tests {
         }
     }
 
-    /// TC-CLI-TL-12: the compact figure, at every scale.
+    /// TC-CLI-TL-26: the compact figure, at every scale.
     /// Expected: upstream's own rule - plain under a thousand, one decimal
     /// until the figure reaches three digits, then whole numbers. A turn's
     /// cost is read at a glance; `1234567 tokens` is not read at all.

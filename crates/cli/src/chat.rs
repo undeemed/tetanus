@@ -165,7 +165,7 @@ pub async fn chat<W: Write>(
         settled.max_steps,
     )
     .await
-    .map_err(|err| crate::fail(policy, &err))?;
+    .map_err(|err| crate::fail(policy, &crate::about(err, &settled.journal)))?;
 
     let bus = EventBus::new();
     let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())

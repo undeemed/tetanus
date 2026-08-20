@@ -296,7 +296,7 @@ fn interrupt(server: Child, page: BufReader<ChildStderr>) -> (Output, String) {
     (out, rest)
 }
 
-/// TC-CLI-SERVE-6: the WebSocket carrier, end to end through the binary.
+/// TC-CLI-SERVE-8: the WebSocket carrier, end to end through the binary.
 /// Expected: the banner names the port that was actually bound, a peer
 /// dialling that port completes the handshake, and the interrupt the banner
 /// named ends the process with status 0 and a closing line. Contract §4.7

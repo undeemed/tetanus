@@ -949,6 +949,29 @@ fn journal_lines(path: &str) -> Result<Vec<render::raw::Line>, tetanus_session::
         .collect())
 }
 
+/// The same failure, with the file it is about named on it.
+///
+/// `session.create` is handed a path and reports what the filesystem said
+/// about it, but the failure it sends back carries no `path`, so a page can
+/// read `is a directory` with no directory on it while `tetanus replay` names
+/// the same file on the same mistake. §4.5 asks an `Io` to carry the path
+/// when the caller knows one, and here the caller does: it is the file
+/// `--session` named. Only that field is filled in - the code, the message
+/// and every other field are the engine's and are passed on untouched, and a
+/// path the engine did name is never written over.
+fn about(mut error: RpcError, path: &std::path::Path) -> RpcError {
+    if error.kind() != Some(ErrorCode::Io) {
+        return error;
+    }
+    let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(fields) = data.as_object_mut() {
+        fields
+            .entry("path")
+            .or_insert_with(|| serde_json::json!(path.display().to_string()));
+    }
+    error
+}
+
 /// Carry a journal failure across to the contract's error view. A corrupt
 /// journal and an unreadable one are different codes, because they are
 /// different things for the user to do.
@@ -1568,7 +1591,7 @@ async fn run<W: std::io::Write>(
         settled.max_steps,
     )
     .await
-    .map_err(|err| fail(policy, &err))?;
+    .map_err(|err| fail(policy, &about(err, &settled.journal)))?;
 
     let bus = EventBus::new();
     let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
