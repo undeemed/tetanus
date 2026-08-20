@@ -11,7 +11,9 @@
 //! journal a run leaves behind says what it ran under; that the session list
 //! finds those journals and names each by the id its store answers to; that a
 //! journal read full-screen is refused where there is no screen; that a model
-//! named from outside is drawn and not obeyed on the line that says it; and
+//! named from outside is drawn and not obeyed on the line that says it; which
+//! settings document a command boots from, and what it does when the one it
+//! was told to read is not there; and
 //! the shape of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
@@ -659,6 +661,114 @@ fn a_credential_in_the_document_is_not_printed() {
         "the page printed it:\n{page}"
     );
     assert!(!json.contains("sekrit-value"), "--json printed it:\n{json}");
+}
+
+/// TC-CLI-CONF-11: `--settings` naming a document, with another under the
+/// harness home.
+/// Expected: the named document is the one every subcommand boots from - the
+/// page reports its values on the `file` layer and the listing is its root -
+/// and the home's document is not read at all. The flag is global, so it
+/// reads the same typed before the subcommand and after it; a flag that only
+/// worked in one position would be a flag a reader has to remember the shape
+/// of.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding one
+/// document, the working directory holds another, and a journal sits under
+/// each of the two roots they name.
+#[test]
+fn a_named_document_is_the_one_every_command_boots_from() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: at-home\n",
+    )
+    .expect("the home's document is written");
+    std::fs::write(dir.path().join("named.yaml"), "sessions:\n  root: named\n")
+        .expect("the named document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for path in ["at-home/home.jsonl", "named/flagged.jsonl"] {
+        run(dir.path(), &["run", "-p", "hi", "--session", path], &env);
+    }
+
+    let page = stdout(&run(
+        dir.path(),
+        &["--settings", "named.yaml", "config", "--color", "never"],
+        &env,
+    ));
+    assert!(
+        page.lines()
+            .any(|line| line.starts_with("sessions.root") && line.contains("named")),
+        "{page}"
+    );
+    assert!(
+        !page.contains("at-home"),
+        "the home's document was read:\n{page}"
+    );
+    assert!(
+        layers(&page).contains(&("sessions.root".to_string(), "file".to_string())),
+        "{page}"
+    );
+
+    for args in [
+        vec!["--settings", "named.yaml", "sessions", "--json"],
+        vec!["sessions", "--settings", "named.yaml", "--json"],
+    ] {
+        let out = run(dir.path(), &args, &env);
+
+        assert!(out.status.success(), "`{args:?}`: {}", stderr(&out));
+        let listed: serde_json::Value =
+            serde_json::from_str(&stdout(&out)).expect("one JSON object");
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .expect("the sessions")
+            .iter()
+            .map(|session| session["session_id"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(ids, vec!["flagged"], "`{args:?}`: {}", stdout(&out));
+    }
+}
+
+/// TC-CLI-CONF-12: `--settings` naming a path with nothing there.
+/// Expected: exit 1 and the path, from every subcommand that boots, and
+/// nothing done. A document nobody named may be absent, because a first run
+/// has none; a path the user typed is a path they typed because something is
+/// in it, and reading the compiled defaults instead would run a harness they
+/// did not configure and say nothing about it.
+///
+/// Environmental needs: `TETANUS_HOME` names an empty directory, so the only
+/// document in the case is the one that is not there.
+#[test]
+fn a_named_document_that_is_not_there_stops_the_command() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    for args in [
+        vec!["config"],
+        vec!["sessions"],
+        vec!["run", "-p", "hi"],
+        vec!["replay", "turn"],
+    ] {
+        let args = [vec!["--settings", "gone.yaml"], args].concat();
+        let out = run(dir.path(), &args, &env);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "`{args:?}` printed a page");
+        assert_eq!(
+            stderr(&out).matches("gone.yaml").count(),
+            1,
+            "`{args:?}`: {}",
+            stderr(&out)
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("read").count(),
+        0,
+        "a refused command left something behind"
+    );
 }
 
 /// TC-CLI-UI-11: `tetanus replay --live` into a pipe.
@@ -1482,8 +1592,8 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
 }
 
 /// TC-CLI-ERR-12: an empty value, on every flag that takes one.
-/// Expected: clap's usage error and exit 2 from all five, and nothing done.
-/// The two paths already refused it because clap refuses an empty `PathBuf`;
+/// Expected: clap's usage error and exit 2 from all six, and nothing done.
+/// The three paths already refused it because clap refuses an empty `PathBuf`;
 /// the three that stay text did not, and each carried the empty string
 /// somewhere further on - a run announced itself on a model with no name and
 /// wrote that name into the journal header, `replay` reported a journal
@@ -1497,10 +1607,11 @@ fn a_value_that_names_nothing_is_a_usage_error() {
         (vec!["run", "--model", "", "-p", "hi"], "--model <ID>"),
         (vec!["replay", ""], "<JOURNAL>"),
         (vec!["serve", "--listen", ""], "--listen <ADDR>"),
-        // The two that were already refused, asserted here so that the five
+        // The three that were already refused, asserted here so that the six
         // cannot drift back into two answers for one mistake.
         (vec!["run", "--session", "", "-p", "hi"], "--session <PATH>"),
         (vec!["sessions", "--dir", ""], "--dir <PATH>"),
+        (vec!["--settings", "", "config"], "--settings <PATH>"),
     ] {
         let out = run(dir.path(), &args, &[]);
 

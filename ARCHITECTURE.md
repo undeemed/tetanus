@@ -200,6 +200,9 @@ A value a key does not take is `InvalidParams`, exit 2, and names the field; its
 
 Every other subcommand that builds an engine boots the same way, through one reader in `crates/cli/src/main.rs`.
 A subcommand that resolved settings of its own would make `tetanus config` describe a harness the next command does not run.
+Which document that reader opens is settled once for the whole process, before any subcommand starts: `--settings <path>` names it, and without that flag it is `settings.yaml` under the harness home.
+The flag is global, so the same path governs whichever subcommand it was typed at and on whichever side of it, and one answer for the process is what keeps `tetanus config` describing the document the next command will read.
+A document nobody named may be absent, because a first run has none and the answer is then the compiled defaults; a document the user named may not, and a path with nothing there is `Io`, exit 1, reported before the harness has quietly started on those defaults.
 The flags the user typed go on top as the `Flag` layer, which outranks `File`: `--dir` sets `sessions.root`, so it still wins over a document and `config.dump` reports the key as `flag` rather than as `file`.
 A flag that was not passed sets nothing at all, which is what leaves the document able to win - a clap `default_value` on that layer would be a document that could never win, so the flags that override a setting are optional and their defaults are the engine's.
 Whoever set a refused value is who the report is for: a value off a flag reads as any other bad argument, and a value off the document names the document.

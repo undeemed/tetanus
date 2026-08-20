@@ -203,6 +203,7 @@ pub fn root_epilogue(theme: &Theme, width: usize) -> String {
 {}
 
 {environment}
+  TETANUS_HOME      where the settings document lives, unless `--settings` says
   DEEPSEEK_API_KEY  credential for `--adapter deepseek`
   NO_COLOR          set to anything non-empty for plain output
   CLICOLOR_FORCE    set to keep colour through a pipe

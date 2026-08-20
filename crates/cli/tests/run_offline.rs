@@ -5,7 +5,8 @@
 //! failure message when a real provider has no credential, the refusal of a
 //! full-screen view with no screen to draw on, the closing row that says where
 //! the journal went, and what the settings document decides for a run that was
-//! given no flags. Features NOT tested here: the
+//! given no flags, and the document a `--settings` path names in place of
+//! it. Features NOT tested here: the
 //! flow itself (owned by the conformance suite in `tetanus-turn`), any live
 //! provider, resolving a prompt from plain data (owned by `prompt`, asserted
 //! in its own module), and what a full-screen view draws once it has a
@@ -436,6 +437,50 @@ fn a_flag_beats_the_document_a_run_read() {
     assert_eq!(
         header(other.path(), "sessions/turn.jsonl")["provider"],
         "mock"
+    );
+}
+
+/// TC-CLI-CONF-13: `--settings` naming a document, with a different document
+/// under the harness home.
+/// Expected: the named document decides everything - where the journal goes,
+/// the model, the budget - and the home's own document decides nothing. A
+/// build that merged the two, or that let the home win, would make the flag a
+/// suggestion: the reason to type a path is to run on that file and no other.
+///
+/// Environmental needs: the case's own harness home holds a document, and a
+/// second document sits in a directory of its own.
+#[test]
+fn a_named_document_is_read_instead_of_the_one_at_home() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    document(
+        dir.path(),
+        "sessions:\n  root: at-home\nmodel:\n  default: home-model\nagent:\n  max_steps: 7\n",
+    );
+    let named = dir.path().join("elsewhere/other.yaml");
+    std::fs::create_dir_all(named.parent().expect("a parent")).expect("the directory is made");
+    std::fs::write(
+        &named,
+        "sessions:\n  root: named\nmodel:\n  default: named-model\nagent:\n  max_steps: 2\n",
+    )
+    .expect("the document is written");
+
+    let out = run(
+        dir.path(),
+        &["--settings", "elsewhere/other.yaml", "run", "-p", "hi"],
+        None,
+    );
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let head = header(dir.path(), "named/turn.jsonl");
+    assert_eq!(head["model"], "named-model", "{head}");
+    assert_eq!(head["max_steps"], 2, "{head}");
+    assert!(
+        !dir.path().join("at-home").exists(),
+        "the home's document was read as well"
     );
 }
 
