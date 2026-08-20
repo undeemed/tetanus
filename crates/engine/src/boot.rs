@@ -12,6 +12,7 @@
 //! cannot drift apart. A key a document does not set keeps the compiled
 //! default, and says so.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,6 +61,10 @@ pub fn defaults() -> Document {
             key::MAX_STEPS.to_string(),
             serde_json::json!(base.max_steps),
         ),
+        (
+            key::MAX_PARALLEL_TOOL_CALLS.to_string(),
+            serde_json::json!(base.max_parallel_tool_calls.get()),
+        ),
     ]);
     document.extend(crate::retry::defaults());
     document.extend(crate::tools::defaults());
@@ -81,6 +86,8 @@ impl EngineConfig {
             default_provider: text(&settings, key::PROVIDER)?.unwrap_or(base.default_provider),
             default_model: text(&settings, key::MODEL)?.unwrap_or(base.default_model),
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
+            max_parallel_tool_calls: parallel(&settings, key::MAX_PARALLEL_TOOL_CALLS)?
+                .unwrap_or(base.max_parallel_tool_calls),
             tool_order: crate::tools::order(&settings, &base.tools)?,
             retry: crate::retry::policy(&settings)?,
             providers: base.providers,
@@ -113,6 +120,27 @@ fn steps(settings: &Config, key: &str) -> Result<Option<u32>, ConfigError> {
         _ => Err(bad(
             key,
             "a whole number of steps, one or more",
+            &resolved.value,
+        )),
+    }
+}
+
+/// The parallel cap. A cap of one is serial dispatch, which is a thing to
+/// ask for; a cap of none is a pool that can start nothing, which is not.
+fn parallel(settings: &Config, key: &str) -> Result<Option<NonZeroUsize>, ConfigError> {
+    let Some(resolved) = settings.get(key) else {
+        return Ok(None);
+    };
+    match resolved
+        .value
+        .as_u64()
+        .and_then(|calls| usize::try_from(calls).ok())
+        .and_then(NonZeroUsize::new)
+    {
+        Some(calls) => Ok(Some(calls)),
+        None => Err(bad(
+            key,
+            "a whole number of calls, one or more",
             &resolved.value,
         )),
     }
