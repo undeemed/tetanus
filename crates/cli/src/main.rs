@@ -74,6 +74,10 @@ enum Cmd {
         /// that takes it, so the layer a flag settles on can be read
         #[arg(long, value_name = "PATH")]
         dir: Option<PathBuf>,
+        /// Print what this build compiles in, reading no document at all:
+        /// the answer a machine with nothing configured would give
+        #[arg(long, conflicts_with = "dir")]
+        defaults: bool,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -334,9 +338,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { dir, json } => {
-            settings::page(policy, &document, &mut out, dir.as_deref(), json)
-        }
+        Cmd::Config {
+            dir,
+            defaults,
+            json,
+        } => settings::page(policy, &document, &mut out, dir.as_deref(), defaults, json),
         Cmd::Models { json } => {
             let catalog = providers();
             if json {

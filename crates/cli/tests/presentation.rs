@@ -13,8 +13,8 @@
 //! finds those journals and names each by the id its store answers to; that a
 //! journal read full-screen is refused where there is no screen; that a model
 //! named from outside is drawn and not obeyed on the line that says it; which
-//! settings document a command boots from, and what it does when the one it
-//! was told to read is not there; and
+//! settings document a command boots from, what it does when the one it was
+//! told to read is not there, and the page that reads none at all; and
 //! the shape of the machine-readable output the interface contract fixes. NOT tested
 //! here: the resolution rules themselves (owned by
 //! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
@@ -799,6 +799,108 @@ fn a_named_document_that_is_not_there_stops_the_command() {
         std::fs::read_dir(dir.path()).expect("read").count(),
         0,
         "a refused command left something behind"
+    );
+}
+
+/// TC-CLI-CONF-14: `tetanus config --defaults`, against a document that sets
+/// keys and then against one that does not parse.
+/// Expected: one page both times - every row on the `default` layer, nothing
+/// of the document on it, and exit 0 even where the plain page exits 1. The
+/// question `--defaults` answers is about the build rather than the machine,
+/// so a document is not read to answer it, and the moment a reader most needs
+/// the answer is the moment their own document is the thing that is broken.
+///
+/// The page also says what it is not, on stderr, so the bytes a script reads
+/// are the same bytes the other page gives it.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding, in turn,
+/// each of the two documents.
+#[test]
+fn the_defaults_page_reads_no_document_at_all() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    std::fs::write(&document, "sessions:\n  root: documented\n").expect("the document is written");
+    let set = run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &env,
+    );
+    std::fs::write(&document, "sessions: [1, 2\n").expect("the document is written");
+    let broken = run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &env,
+    );
+
+    for (case, out) in [("a document", &set), ("a broken document", &broken)] {
+        assert!(out.status.success(), "{case}: {}", stderr(out));
+        let page = stdout(out);
+        assert!(
+            !page.contains("documented"),
+            "{case} reached the page:\n{page}"
+        );
+        assert!(
+            layers(&page).iter().all(|(_, layer)| layer == "default"),
+            "{case}: a row came off something else:\n{page}"
+        );
+        assert!(
+            stderr(out).contains("not what it will run on"),
+            "{case} did not say what the page is not: {}",
+            stderr(out)
+        );
+    }
+    assert_eq!(stdout(&set), stdout(&broken), "the two pages differ");
+    // The plain page against that same document is the failure this one is
+    // asked instead of.
+    let plain = run(dir.path(), &["config", "--color", "never"], &env);
+    assert_eq!(plain.status.code(), Some(1), "{}", stderr(&plain));
+}
+
+/// TC-CLI-CONF-15: the two other shapes of `--defaults`.
+/// Expected: `--json` carries the keys and layers the page carries, as it does
+/// for the page this one is a variant of; and `--dir` with it is a usage
+/// error, because a flag that overrides a setting and a page that reads no
+/// settings are two questions, and answering one while being asked both would
+/// print a `flag` row on a page whose whole claim is that nothing was set.
+#[test]
+fn the_defaults_page_answers_json_and_refuses_a_flag_layer() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let page = stdout(&run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &[],
+    ));
+    let json = stdout(&run(dir.path(), &["config", "--defaults", "--json"], &[]));
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+    let told: Vec<(String, String)> = parsed["entries"]
+        .as_array()
+        .expect("the entries")
+        .iter()
+        .map(|entry| {
+            (
+                entry["key"].as_str().unwrap_or_default().to_string(),
+                entry["layer"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(told, layers(&page), "{json}\n{page}");
+
+    let both = run(
+        dir.path(),
+        &["config", "--defaults", "--dir", "elsewhere"],
+        &[],
+    );
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+    assert_eq!(stdout(&both), "", "it printed a page anyway");
+    assert!(
+        stderr(&both).contains("cannot be used with"),
+        "{}",
+        stderr(&both)
     );
 }
 
