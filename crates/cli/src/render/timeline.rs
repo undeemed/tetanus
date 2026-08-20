@@ -35,12 +35,19 @@
 //! to the line like any other value. The result is the work of the turn - a
 //! file, a command's output, a search - so it is folded to the width and read
 //! like prose, capped in height the way upstream caps a terminal card.
+//!
+//! Every value in an event came off the wire, the short ones included. A
+//! message and a result are tamed by the width rules that size them
+//! ([`wrap`], [`truncate`]), but a tool's name, an event's type, a model, a
+//! `call_id` and a stop reason are drawn as they arrived, so this module tames
+//! them itself. A journal is a file, and a file is something a reader can be
+//! sent.
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use tetanus_protocol::types::{KnownEvent, SessionEvent, StopReason, Usage};
-use tetanus_ui::{truncate, wrap, Role, Theme, Ui};
+use tetanus_ui::{tame, truncate, visible_width, wrap, Role, Theme, Ui};
 
 /// Where a content line starts: two of indent, a five-column label, two more.
 pub(super) const LABEL: usize = 5;
@@ -98,7 +105,10 @@ impl Reader {
     fn draw(&mut self, theme: &Theme, width: usize, time: u64, event: &KnownEvent) -> Vec<String> {
         match event {
             KnownEvent::SessionStart { model, .. } => {
-                vec![format!("session on {}", theme.paint(Role::Accent, model))]
+                vec![format!(
+                    "session on {}",
+                    theme.paint(Role::Accent, &tame(model))
+                )]
             }
             KnownEvent::TurnStart { turn } => vec![
                 {
@@ -199,7 +209,7 @@ impl Reader {
                 }
                 let mut lines = vec![String::new(), closing];
                 if let Some(veto) = stop_veto {
-                    lines.push(format!("{INDENT}held open by {veto}"));
+                    lines.push(format!("{INDENT}held open by {}", tame(veto)));
                 }
                 lines
             }
@@ -272,7 +282,7 @@ pub(super) fn stopped(reason: &StopReason) -> String {
         StopReason::PreStepRejected => "rejected before the step".into(),
         StopReason::MaxSteps => "step budget spent".into(),
         StopReason::Cancelled => "cancelled".into(),
-        StopReason::Other(reason) => reason.clone(),
+        StopReason::Other(reason) => tame(reason),
     }
 }
 
@@ -338,14 +348,15 @@ pub(super) fn tool(
     value: &str,
     answers: Option<&str>,
 ) -> String {
+    let name = tame(name);
     let head = format!("{INDENT}{glyph} {name}  ");
-    let room = width.saturating_sub(head.chars().count());
+    let room = width.saturating_sub(visible_width(&head));
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let value = truncate(&flat, room, theme.charset());
     let mark = theme.paint(role, glyph);
     let line = format!("{INDENT}{mark} {name}  {value}");
     match answers {
-        Some(call) => format!("{line} (for {call})"),
+        Some(call) => format!("{line} (for {})", tame(call)),
         None => line,
     }
 }
@@ -383,15 +394,18 @@ fn produced(
     content: &str,
     answers: Option<&str>,
 ) -> Vec<String> {
+    let name = tame(name);
     let head = format!("{INDENT}{glyph} {name}  ");
-    let says = answers.map(|call| format!(" (for {call})"));
+    let says = answers.map(|call| format!(" (for {})", tame(call)));
     let says = says.unwrap_or_default();
     // The marker is folded around rather than added afterwards: a row that
     // overran the width by its length would corrupt every row drawn under it.
     let room = width
-        .saturating_sub(head.chars().count() + says.chars().count())
+        .saturating_sub(visible_width(&head) + visible_width(&says))
         .max(1);
-    let pad = " ".repeat(head.chars().count());
+    // Columns to measure the room, columns to fill it: the head is what the
+    // first row was given, so the rows under it start where its text does.
+    let pad = " ".repeat(visible_width(&head));
 
     let mut said: Vec<&str> = content.lines().collect();
     let folded = said
@@ -438,8 +452,9 @@ fn produced(
 /// A type this build does not know. The contract says pass it through, so it
 /// is shown rather than dropped.
 fn raw(theme: &Theme, width: usize, event: &SessionEvent) -> String {
-    let ty = theme.paint(Role::Topic, &event.ty);
-    let room = width.saturating_sub(event.ty.chars().count() + 4);
+    let named = tame(&event.ty);
+    let ty = theme.paint(Role::Topic, &named);
+    let room = width.saturating_sub(visible_width(&named) + 4);
     let data = truncate(&event.data.to_string(), room, theme.charset());
     format!("{INDENT}{ty}  {data}")
 }
@@ -1164,5 +1179,97 @@ mod tests {
             1,
             "said on more than one row: {out}"
         );
+    }
+
+    /// TC-CLI-TL-24: a journal whose short values carry escape sequences.
+    /// Expected: not one of them reaches the page, in any of the six places a
+    /// value arrives as itself rather than as prose - the model, an unknown
+    /// event type, a tool's name, the `call_id` a late result names, the stop
+    /// reason and the veto that held the turn open - and the words around
+    /// each of them are still drawn. A journal is a file, and a file is
+    /// something a reader can be sent.
+    #[test]
+    fn a_short_value_out_of_a_journal_cannot_drive_the_terminal() {
+        let clear = "\u{1b}[2J";
+        let told = rendered(
+            &[
+                event(
+                    "session/start",
+                    json!({ "session_id": "s", "provider": "mock", "max_steps": 4,
+                            "model": format!("deep{clear}seek") }),
+                ),
+                event(&format!("weather/{clear}report"), json!({ "wind": 12 })),
+                event(
+                    "tool/call",
+                    json!({ "id": format!("c{clear}1"), "name": format!("ec{clear}ho"),
+                            "arguments": { "text": "hi" } }),
+                ),
+                event(
+                    "tool/call",
+                    json!({ "id": "c2", "name": "read", "arguments": {} }),
+                ),
+                event(
+                    "tool/result",
+                    json!({ "call_id": format!("c{clear}1"), "name": format!("ec{clear}ho"),
+                            "ok": true, "content": "hi" }),
+                ),
+                event(
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1,
+                            "stop_reason": format!("a {clear} veto"),
+                            "stop_veto": format!("we{clear}ather") }),
+                ),
+            ],
+            Charset::Unicode,
+            80,
+        );
+
+        assert!(
+            !told.contains('\u{1b}'),
+            "an escape reached the page:\n{told}"
+        );
+        for word in [
+            "deepseek",
+            "weather/report",
+            "echo",
+            "(for c1)",
+            "a  veto",
+            "held open by weather",
+        ] {
+            assert!(told.contains(word), "`{word}` is not drawn:\n{told}");
+        }
+    }
+
+    /// TC-CLI-TL-25: a tool whose name a terminal draws twice as wide.
+    /// Expected: no row overruns the width. The room left for the value is
+    /// measured in the columns the name is drawn in, not the characters it is
+    /// made of, so a name in a wide script cannot push the value past the
+    /// frame and every row under it into the wrong column.
+    #[test]
+    fn the_room_beside_a_name_is_measured_in_columns() {
+        let out = rendered(
+            &[
+                event(
+                    "tool/call",
+                    json!({ "call_id": "c1", "name": "\u{65e5}\u{672c}\u{8a9e}",
+                            "arguments": { "text": "alpha bravo charlie delta echo foxtrot" } }),
+                ),
+                event(
+                    "tool/result",
+                    json!({ "call_id": "c1", "name": "\u{65e5}\u{672c}\u{8a9e}", "ok": true,
+                            "content": "alpha bravo charlie delta echo foxtrot golf hotel" }),
+                ),
+            ],
+            Charset::Unicode,
+            40,
+        );
+
+        for line in out.lines() {
+            assert!(
+                tetanus_ui::visible_width(line) <= 40,
+                "`{line}` is {} columns",
+                tetanus_ui::visible_width(line)
+            );
+        }
     }
 }

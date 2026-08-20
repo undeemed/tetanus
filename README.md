@@ -191,9 +191,10 @@ Inside a journal `t` unfolds it too, and folds it back, so a folded row saying h
 What a tool produced is read rather than glimpsed: every view folds it to the width under the tool's own name, keeps the lines the tool wrote as lines, and a result longer than sixteen of them keeps its first eight and its last eight with a count of what is between - the same cap upstream's terminal card uses, so the same result folds the same way in both front ends.
 The arguments of the call above it stay cut to one line, because arguments are checked rather than read.
 
-Nothing a model or a tool wrote can drive the terminal it is drawn on.
-A result or an answer holding an escape sequence - a screen clear, a window title, a bell, a colour of its own - is read as the words it also holds and nothing else, in every view and under every `--color` setting.
-`--raw` is the exception on purpose: it is the machine's copy of the journal, and JSON writes an escape as six characters no terminal acts on.
+Nothing in a journal can drive the terminal it is drawn on.
+An escape sequence - a screen clear, a window title, a bell, a colour of its own - is read as the words around it and nothing else, wherever it arrived: in an answer, in a tool's result, and in the short values a page draws as themselves, such as the model, a tool's name, an event type this build does not know, or the line `--raw` could not read.
+This holds in every view and under every `--color` setting.
+`--raw` prints the payload as the JSON it is, where an escape is six characters no terminal acts on.
 
 `tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
 Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.
