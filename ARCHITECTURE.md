@@ -198,6 +198,14 @@ Both steps can fail and neither failure is stepped over.
 A document that cannot be read is `Io`, exit 1, and names the path once, because the engine's own sentence already names it.
 A value a key does not take is `InvalidParams`, exit 2, and names the field; its next step names the document rather than `--help`, since nothing in a document is a flag.
 
+Every other subcommand that builds an engine boots the same way, through one reader in `crates/cli/src/main.rs`.
+A subcommand that resolved settings of its own would make `tetanus config` describe a harness the next command does not run.
+The flags the user typed go on top as the `Flag` layer, which outranks `File`: `--dir` sets `sessions.root`, so it still wins over a document and `config.dump` reports the key as `flag` rather than as `file`.
+A flag that was not passed sets nothing at all, which is what leaves the document able to win - a clap `default_value` on that layer would be a document that could never win, so the flags that override a setting are optional and their defaults are the engine's.
+Whoever set a refused value is who the report is for: a value off a flag reads as any other bad argument, and a value off the document names the document.
+The page itself is the engine's own `config.dump` rather than a copy of the resolved layers, so a key whose name says it holds a credential keeps its row and its layer and loses its value, as section 4.3 of the interface contract requires.
+`tetanus config --dir <path>` asks the question rather than giving an instruction: it lists nothing and opens nothing, and it is how the `flag` layer can be read at all, since a flag is only on the layer of the process it was typed at.
+
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.
 [crates/turn/src/tokens.rs](crates/turn/src/tokens.rs) prices that surface, and any request, under
@@ -463,7 +471,7 @@ A status the caller reads has to be the same status for the same mistake.
 Every flag that takes a path takes a `PathBuf`, and clap refuses an empty one before this build is
 reached; the three values that stay text (`run --model`, the journal `replay` reads, and the address
 `serve` binds) took the empty string and carried it further on, so one mistake had four answers: a
-run announced on a model with no name, `error: no journal at ` with nothing after it, `error: :
+run announced on a model with no name, `error: no journal at` with nothing after it, `error: :
 invalid socket address`, and clap's own refusal for the other two.
 All five now take clap's rule ([crates/cli/src/main.rs](crates/cli/src/main.rs)) and refuse it in
 clap's words with the status §4.5 gives a wrong command line.
