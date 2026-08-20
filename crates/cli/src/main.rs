@@ -50,6 +50,13 @@ struct Cli {
         value_parser = clap::builder::PossibleValuesParser::new(ColorChoice::NAMES)
     )]
     color: String,
+    /// Settings document to read, instead of the one under the harness home
+    ///
+    /// The harness home is `$TETANUS_HOME` when that is set and `~/.tetanus`
+    /// when it is not, and the document in it is `settings.yaml`. That one is
+    /// allowed to be missing; a document named here is not.
+    #[arg(long, value_name = "PATH", global = true)]
+    settings: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -265,8 +272,8 @@ impl Cli {
 /// carried the empty string somewhere further on: a run announced itself on a
 /// model with no name, `replay` reported a journal missing when none had been
 /// named, and `serve` said `: invalid socket address`. This is clap's own
-/// rule, so all five now refuse the same mistake in the same words, with the
-/// exit Â§4.5 gives a bad argument.
+/// rule, so every one of them now refuses the same mistake in the same words,
+/// with the exit §4.5 gives a bad argument.
 ///
 /// Only the empty string. A name made of spaces is a name this build cannot
 /// judge - a file may be called that - and refusing it would be this module
@@ -299,20 +306,26 @@ fn color_choice(value: &str) -> ColorChoice {
 
 fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
     let mut out = policy.stdout();
+    // Which document every boot below reads, settled once and for all of
+    // them. `--settings` is global, so a path that names nothing is the same
+    // mistake whichever subcommand it was typed at, and one answer here is
+    // what keeps `tetanus config` describing the document the next command
+    // will read.
+    let document = document(policy, cli.settings)?;
     match cli.cmd {
         Cmd::Run(args) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            runtime.block_on(run(policy, &mut out, args))
+            runtime.block_on(run(policy, &document, &mut out, args))
         }
         Cmd::Chat(args) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            let held = runtime.block_on(chat::chat(policy, &mut out, args));
+            let held = runtime.block_on(chat::chat(policy, &document, &mut out, args));
             // The line reader is a blocking read that nothing can cancel, so a
             // chat left with Ctrl-C exits with one still parked on standard
             // input. Dropping the runtime waits for its pool; this does not,
@@ -337,7 +350,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // use for a key it settles, and it drops the value of a key whose
             // name says it holds a credential (contract §4.3). A surface that
             // printed the layers itself would print that credential.
-            let engine = tetanus_engine::HarnessEngine::new(booted(policy, &root(dir.as_deref()))?);
+            let engine = tetanus_engine::HarnessEngine::new(booted(
+                policy,
+                &document,
+                &root(dir.as_deref()),
+            )?);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -392,7 +409,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // that boot rather than from a path and the compiled defaults:
             // a listing under one set of settings and a run under another
             // would be two harnesses wearing one name.
-            let engine = tetanus_engine::HarnessEngine::new(booted(policy, &root(dir.as_deref()))?);
+            let engine = tetanus_engine::HarnessEngine::new(booted(
+                policy,
+                &document,
+                &root(dir.as_deref()),
+            )?);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -451,7 +472,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // an empty session is how a typo becomes a blank page and a zero
             // exit. The lookup is here, before any view is chosen, so every
             // shape of `replay` finds and fails the same way.
-            let path = journal_named(policy, &path, dir.as_deref())?;
+            let path = journal_named(policy, &document, &path, dir.as_deref())?;
             // `--raw` is the view for a journal the reader below refuses,
             // so it opens the file itself. Asking for a log first would make
             // the one command that reads a broken journal fail on exactly the
@@ -540,7 +561,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // cannot read is a fault to report, not a server to start on the
             // defaults: the sessions the caller asked for would land
             // somewhere else, and the banner would say so too late to matter.
-            let settings = booted(policy, &root(dir.as_deref()))?;
+            let settings = booted(policy, &document, &root(dir.as_deref()))?;
             // Multi-threaded, because both carriers' properties are
             // concurrency properties: `agent.interrupt` is answered while the
             // prompt it interrupts still runs, and a push overtakes the answer
@@ -885,13 +906,13 @@ fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) 
 /// the user configured on paper and unconfigured in fact.
 fn booted(
     policy: &Policy,
+    document: &std::path::Path,
     flags: &[(&'static str, serde_json::Value)],
 ) -> Result<tetanus_engine::EngineConfig, Reported> {
-    let document = document();
-    let mut settings = tetanus_engine::boot::document(&document).map_err(|err| {
+    let mut settings = tetanus_engine::boot::document(document).map_err(|err| {
         misconfigured(
             policy,
-            &document,
+            document,
             &tetanus_engine::convert::config_error(&err),
         )
     })?;
@@ -911,7 +932,7 @@ fn booted(
             .and_then(serde_json::Value::as_str);
         match blamed.is_some_and(|key| flags.iter().any(|(set, _)| *set == key)) {
             true => fail(policy, &fault),
-            false => misconfigured(policy, &document, &fault),
+            false => misconfigured(policy, document, &fault),
         }
     })
 }
@@ -929,9 +950,44 @@ fn root(dir: Option<&std::path::Path>) -> Vec<(&'static str, serde_json::Value)>
     .collect()
 }
 
-/// Where this run's settings document lives.
-fn document() -> PathBuf {
-    tetanus_config::file::document_path(&tetanus_config::home::home(None))
+/// Where this run's settings document lives: the path `--settings` named, or
+/// `settings.yaml` under the harness home.
+///
+/// A document nobody named may be absent. A first run has none, the answer is
+/// then the compiled defaults, and every case in the suite would otherwise
+/// need one written before the binary would start.
+///
+/// A document the user named may not. They typed a path because something is
+/// in it, and reading the defaults instead would run a harness they did not
+/// configure and say nothing about it - the same fault the boot already
+/// refuses to fall back on, arriving one step earlier. The reader below
+/// reports every other way a document can be wrong, including a path whose
+/// extension it cannot parse and a directory where the file should be; a
+/// path with nothing at all there is the one it cannot tell from a first run,
+/// so it is checked here.
+fn document(policy: &Policy, named: Option<PathBuf>) -> Result<PathBuf, Reported> {
+    let Some(path) = named else {
+        return Ok(tetanus_config::file::document_path(
+            &tetanus_config::home::home(None),
+        ));
+    };
+    match path.exists() {
+        true => Ok(path),
+        false => Err(fail(policy, &missing_document(&path))),
+    }
+}
+
+/// A settings document the user named that is not there.
+///
+/// `Io` is §4.5's code for a path the filesystem could not answer for, and it
+/// carries the same exit 1 as a document that cannot be parsed: both mean the
+/// harness could not be configured the way it was asked to be.
+fn missing_document(path: &std::path::Path) -> RpcError {
+    RpcError::new(
+        ErrorCode::Io,
+        format!("no settings document at {}", path.display()),
+    )
+    .with_data(serde_json::json!({ "path": path.display().to_string() }))
 }
 
 /// The flags a command that runs turns was given, before the document has
@@ -967,6 +1023,7 @@ struct Turn {
 /// somebody wrote can, and that is what the layer is read for below.
 fn turn_settings(
     policy: &Policy,
+    document: &std::path::Path,
     flags: TurnFlags,
     fallback: AdapterChoice,
     journal: &str,
@@ -983,7 +1040,7 @@ fn turn_settings(
     if let Some(steps) = flags.max_steps {
         overrides.push((key::MAX_STEPS, serde_json::json!(steps)));
     }
-    let settings = booted(policy, &overrides)?;
+    let settings = booted(policy, document, &overrides)?;
 
     // A key still on its compiled layer is a key nobody has an opinion about,
     // and the command's own default stands. Anything above it - a document, an
@@ -998,7 +1055,7 @@ fn turn_settings(
 
     Ok(Turn {
         provider: match written(key::PROVIDER) {
-            true => provider_named(policy, &settings.default_provider)?,
+            true => provider_named(policy, document, &settings.default_provider)?,
             false => fallback,
         },
         // Not the settled value when nobody set it: the engine's compiled
@@ -1019,7 +1076,11 @@ fn turn_settings(
 /// clap refuses an unknown `--adapter`, so a name that gets this far came out
 /// of a document or an environment, and is reported the way any other value
 /// in one is: it names the key, and it names the file that has to be edited.
-fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported> {
+fn provider_named(
+    policy: &Policy,
+    document: &std::path::Path,
+    name: &str,
+) -> Result<AdapterChoice, Reported> {
     [AdapterChoice::Mock, AdapterChoice::Deepseek]
         .into_iter()
         .find(|choice| choice.route() == name)
@@ -1029,7 +1090,7 @@ fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported
                 .join(" or ");
             misconfigured(
                 policy,
-                &document(),
+                document,
                 &RpcError::new(
                     ErrorCode::InvalidParams,
                     format!("must be a provider this build can reach, {known}, not {name:?}"),
@@ -1057,6 +1118,7 @@ fn provider_named(policy: &Policy, name: &str) -> Result<AdapterChoice, Reported
 /// nothing on disk asks where the sessions live.
 fn journal_named(
     policy: &Policy,
+    document: &std::path::Path,
     target: &str,
     dir: Option<&std::path::Path>,
 ) -> Result<String, Reported> {
@@ -1064,7 +1126,7 @@ fn journal_named(
     if named.exists() {
         return Ok(target.to_string());
     }
-    let sessions = booted(policy, &root(dir))?.sessions_root;
+    let sessions = booted(policy, document, &root(dir))?.sessions_root;
     match [
         sessions.join(target),
         sessions.join(format!("{target}.jsonl")),
@@ -1728,6 +1790,7 @@ fn settle<W: std::io::Write>(
 
 async fn run<W: std::io::Write>(
     policy: &Policy,
+    document: &std::path::Path,
     out: &mut Ui<W>,
     args: RunArgs,
 ) -> Result<(), Reported> {
@@ -1748,6 +1811,7 @@ async fn run<W: std::io::Write>(
     // journal goes when `--session` did not.
     let settled = turn_settings(
         policy,
+        document,
         TurnFlags {
             adapter: args.adapter,
             model: args.model,

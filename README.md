@@ -57,7 +57,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity | Compaction, session query |
 | Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports, the usage and context projections |
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
-| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
+| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home - or the one `--settings <path>` names - re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
 | Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | The fire UI |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
@@ -154,6 +154,8 @@ Without the key the command says so and stops before any network call.
 `--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
 `--trace` (the raw sequence) with `--verbose` (each durable payload), `--ui` (a screen of its own),
 and `--json`.
+`--settings <path>` and `--color <when>` are on every subcommand, before it or after it.
+The first names the settings document to read in place of the one under the harness home (`$TETANUS_HOME`, or `~/.tetanus`), and a path with nothing there is an error rather than a quiet fall back to the compiled defaults.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.

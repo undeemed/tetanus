@@ -130,6 +130,7 @@ enum Typed {
 /// Hold a conversation on one session journal.
 pub async fn chat<W: Write>(
     policy: &Policy,
+    document: &std::path::Path,
     out: &mut Ui<W>,
     args: ChatArgs,
 ) -> Result<(), Reported> {
@@ -138,6 +139,7 @@ pub async fn chat<W: Write>(
     // decides where the journal goes when `--session` did not.
     let settled = crate::turn_settings(
         policy,
+        document,
         crate::TurnFlags {
             adapter: args.adapter,
             model: args.model.clone(),
