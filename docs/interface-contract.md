@@ -620,7 +620,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
-| §4.4.2 a step the cap cut off dispatches no tool calls | TC-PORT-CAP-3 |
+| §4.4.2 a turn the output cap cut off ends `max-tokens`, on the call and on the journal | TC-CAP-1 |
+| §4.4.2 a step the cap cut off dispatches no tool calls | TC-PORT-CAP-3, TC-CAP-2 |
 | §4.4.2 the reason is the turn's, and does not carry into the next | TC-PORT-CAP-2 |
 | §4.4.2 the cut-off step's message carries no call | TC-PORT-CAP-4 |
 | §4.4.3 a reserved call's capability is not advertised | TC-SUB-5 |
