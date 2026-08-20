@@ -6,6 +6,8 @@
 //! as `session/event`. Picking the right domain is the first decision in most
 //! changes (upstream `docs/architecture.md`, "Events").
 
+use std::sync::Arc;
+
 use tetanus_core::events::{DispatchMode, Event};
 
 use crate::llm::{ChunkSink, LlmError, ModelRequest, ModelResponse};
@@ -160,6 +162,10 @@ pub struct RequestError {
     /// whether the failure is its business.
     pub provider: String,
     pub failure: RequestFailure,
+    /// The interrupt this turn watches. A listener that waits before it
+    /// answers waits on this, so a caller who asks the turn to stop is not
+    /// held up by a backoff nobody is waiting for any more.
+    pub interrupt: Arc<crate::interrupt::Interrupt>,
 }
 impl Event for RequestError {
     const TOPIC: &'static str = "agent/request-error";
