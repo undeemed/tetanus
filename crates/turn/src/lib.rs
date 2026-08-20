@@ -16,6 +16,7 @@
 pub mod boot;
 pub mod engine;
 pub mod events;
+pub mod interrupt;
 pub mod llm;
 pub mod log;
 pub mod prompt;

@@ -20,11 +20,12 @@ mod harness;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use harness::Harness;
 use tetanus_core::{EffectHandle, EventBus};
 use tetanus_session::SessionEvent;
-use tetanus_turn::events::LlmStream;
+use tetanus_turn::events::{LlmStream, RequestError};
 use tetanus_turn::llm::mock::PROVIDER;
 use tetanus_turn::llm::retry::{
     install, Backoff, Jitter, RetryPolicy, RETRY_EVENT, RETRY_STARTED_EVENT,
@@ -231,6 +232,87 @@ async fn a_failure_from_another_route_is_delegated() {
     assert!(records(&h, RETRY_EVENT).is_empty());
 }
 
+/// TC-PORT-RETRYX-6: an interrupt during the wait wins over the retry.
+///
+/// Upstream: `retry.spec.ts`, "lets turn cancellation win during backoff
+/// without opening another step".
+///
+/// Input: a route whose first call fails with 503, a policy whose wait is
+/// thirty seconds, and a caller that cancels the turn once the `llm/retry`
+/// record exists.
+/// Expected: the turn fails on the provider failure in under five seconds;
+/// the provider was asked exactly once; the journal carries the one scheduled
+/// retry and no `llm/retry-started`, because the attempt it promised never
+/// went out.
+#[tokio::test]
+async fn an_interrupt_during_the_wait_ends_the_turn() {
+    let h = Harness::new("retryx-interrupted").await;
+    let (attempts, _flaky) = flaky(h.bus(), 1, 503);
+    let _executor = install(
+        h.bus(),
+        Arc::clone(h.engine.log()),
+        PROVIDER,
+        patient(),
+        fixed_jitter(),
+    );
+    let started = Instant::now();
+
+    // Ordering, not timing: the cancel waits for the record the executor
+    // writes immediately before the wait, so the case never fires early.
+    let interrupt = async {
+        until_recorded(&h, RETRY_EVENT).await;
+        assert!(h.engine.cancel(), "the turn was running");
+    };
+    let (failed, ()) = tokio::join!(h.engine.run_turn("stop waiting"), interrupt);
+
+    assert!(matches!(failed, Err(TurnError::Llm(_))), "{failed:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it waited it out"
+    );
+    assert_eq!(attempts.load(Ordering::Relaxed), 1, "asked once, not again");
+    assert_eq!(records(&h, RETRY_EVENT).len(), 1, "one retry was scheduled");
+    assert!(
+        records(&h, RETRY_STARTED_EVENT).is_empty(),
+        "the scheduled attempt never went out"
+    );
+}
+
+/// TC-PORT-RETRYX-7: an interrupt that beats the policy leaves no record.
+///
+/// Upstream: `retry.spec.ts`, "lets an earlier recovery listener cancel before
+/// %s retry policy runs".
+///
+/// Input: a listener registered before the executor that cancels the turn and
+/// then delegates, and a 503 the policy would otherwise retry.
+/// Expected: the turn fails, the provider was asked exactly once, and the
+/// journal carries no `llm/retry` at all - a scheduled retry is a promise, and
+/// none was made.
+#[tokio::test]
+async fn an_interrupt_before_the_policy_records_nothing() {
+    let h = Harness::new("retryx-pre-interrupted").await;
+    let (attempts, _flaky) = flaky(h.bus(), 1, 503);
+    // The interrupt travels on the event, so a listener stops the turn it was
+    // handed rather than reaching back for the engine.
+    let _canceller = h.bus().on_waterfall::<RequestError, _>(|ev, next| {
+        ev.interrupt.stop();
+        Box::pin(next.run(ev))
+    });
+    let _executor = install(
+        h.bus(),
+        Arc::clone(h.engine.log()),
+        PROVIDER,
+        patient(),
+        fixed_jitter(),
+    );
+
+    let failed = h.engine.run_turn("stop first").await;
+
+    assert!(matches!(failed, Err(TurnError::Llm(_))), "{failed:?}");
+    assert_eq!(attempts.load(Ordering::Relaxed), 1, "asked once, not again");
+    assert!(records(&h, RETRY_EVENT).is_empty(), "nothing was promised");
+}
+
 /// A provider that fails its first `failures` calls and then works, counting
 /// every call it was asked to make.
 fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectHandle) {
@@ -283,4 +365,30 @@ fn records(h: &Harness, ty: &str) -> Vec<SessionEvent> {
         .into_iter()
         .filter(|event| event.ty == ty)
         .collect()
+}
+
+/// A wait no case may actually spend, so a case that returns has been cut
+/// short rather than merely served quickly.
+fn patient() -> RetryPolicy {
+    RetryPolicy::Normal {
+        max_retries: 2,
+        retryable_codes: vec!["SERVER".to_string()],
+        backoff: Backoff {
+            initial_delay_ms: 30_000.0,
+            max_delay_ms: 30_000.0,
+            jitter_ratio: 0.0,
+        },
+    }
+}
+
+/// Wait until the journal carries a record of type `ty`, so a case can act at
+/// a point in the run rather than at a point on the clock.
+async fn until_recorded(h: &Harness, ty: &str) {
+    for _ in 0..2_000 {
+        if h.engine.log().events().iter().any(|event| event.ty == ty) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!("no {ty} record was written");
 }

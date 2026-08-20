@@ -8,7 +8,8 @@
 //!
 //! [`install`] is the caller that runs it against a live route: a listener on
 //! `agent/request-error` that answers a failed request with another attempt,
-//! and records each scheduled retry on the journal before it waits.
+//! and records each scheduled retry on the journal before it waits. That wait
+//! is cut short when the turn is interrupted, and then the failure stands.
 //!
 //! Parity: upstream `packages/llm/llm/src/retry-policy.ts` for the shape and
 //! the defaults, and `packages/llm/llm-retry/src/index.ts` for the executor.
@@ -34,9 +35,8 @@ pub const DEFAULT_MAX_DELAY_MS: f64 = 10_000.0;
 pub const DEFAULT_JITTER_RATIO: f64 = 0.1;
 
 /// The failure codes `normal` mode retries by default: everything upstream
-/// classes as transient. tetanus has no `EMPTY_RESPONSE` failure yet, and the
-/// code is kept in the set so a provider that grows one is retried without a
-/// policy change.
+/// classes as transient. Each one is a code some [`crate::llm::LlmError`]
+/// answers, including `EMPTY_RESPONSE`.
 pub const DEFAULT_RETRYABLE_CODES: [&str; 5] = [
     "EMPTY_RESPONSE",
     "RATE_LIMIT",
@@ -226,10 +226,22 @@ pub fn install(
             if ev.provider != route {
                 return next.run(ev).await;
             }
+            // A turn that has already been asked to stop gets no retry, and
+            // no record of one: an `llm/retry` entry is a promise to try
+            // again, and this listener is not going to.
+            if ev.interrupt.stopped() {
+                return next.run(ev).await;
+            }
             let Some((retry, delay)) = schedule(log.as_ref(), &policy, ev, jitter()) else {
                 return next.run(ev).await;
             };
-            tokio::time::sleep(delay).await;
+            // The wait is the one part of a turn an interrupt cuts short: a
+            // caller who has just asked the turn to stop does not want to
+            // sit through a backoff before it does. A cut wait answers no
+            // retry, so the failure the driver already has stands.
+            if !ev.interrupt.wait(delay).await {
+                return next.run(ev).await;
+            }
             let started = serde_json::json!({ "turn": ev.turn, "step": ev.step, "retry": retry });
             if let Err(refused) = log.append(RETRY_STARTED_EVENT, started) {
                 // The journal is the count. An attempt it cannot record would
