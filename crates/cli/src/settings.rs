@@ -23,7 +23,7 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_ui::{Policy, Ui};
 
 use crate::render;
-use crate::{fail, misconfigured, report, AdapterChoice, Reported};
+use crate::{fail, misconfigured, place, report, AdapterChoice, Reported};
 
 /// Write the page for the settings the next command would run on.
 ///
@@ -60,9 +60,9 @@ pub fn page<W: Write>(
     // is". It is the page with the document left out, which is also
     // the page a document that cannot be read still has - and that is
     // when the question is asked most.
-    let settings = match defaults {
-        true => compiled(policy)?,
-        false => booted(policy, document, &root(dir))?,
+    let (settings, read) = match defaults {
+        true => (compiled(policy)?, None),
+        false => (booted(policy, document, &root(dir))?, Some(place(document))),
     };
     let engine = tetanus_engine::HarnessEngine::new(settings);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -75,7 +75,7 @@ pub fn page<W: Write>(
     if json {
         render::json::line(out, &dump).map_err(|err| report(policy, &err.to_string(), None))?;
     } else {
-        render::config::render(out, &dump.entries).ok();
+        render::config::render(out, &dump.entries, read.as_deref()).ok();
     }
     if defaults {
         // A page that is not what the harness will run on has to say

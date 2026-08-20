@@ -164,14 +164,17 @@ pub type Open<'a> = dyn Fn(&str) -> Result<Vec<SessionEvent>, String> + 'a;
 /// An empty list never opens a screen: `tetanus sessions`' own line - that
 /// nothing has been written yet, and what writes one - is the whole message,
 /// and a blank page with a cursor on nothing is a worse way to say it.
+/// `root` is carried for that one line's sake, which names the directory the
+/// list came out of; the screen itself heads every session with its own id.
 pub fn pick<W: Write>(
     out: &mut Ui<W>,
     list: &SessionListResult,
+    root: &str,
     think: bool,
     open: &Open<'_>,
 ) -> io::Result<Stop> {
     if list.sessions.is_empty() {
-        sessions::render(out, list)?;
+        sessions::render(out, list, root)?;
         return Ok(Stop::Quit);
     }
     let theme = *out.theme();
