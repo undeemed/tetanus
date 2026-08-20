@@ -3,14 +3,15 @@
 //! Features tested: that a plain theme emits no escape bytes; that a colored
 //! theme wraps a span and resets it; that format width pads the text and not
 //! the escape sequences; that a field pads its label in the columns a
-//! terminal draws it in; the diagnostic tags; the charset-dependent glyphs.
+//! terminal draws it in; what a field says when its value draws nothing; the
+//! diagnostic tags; the charset-dependent glyphs.
 //!
 //! Features NOT tested here: the policy that produced the theme (see
 //! `color_policy.rs`) and the real process streams.
 //!
 //! Environmental needs: none. Every case writes into a `Vec<u8>`.
 
-use tetanus_ui::{buffered, visible_width, Charset, Role, Theme};
+use tetanus_ui::{buffered, tame_line, visible_width, Charset, Role, Theme};
 
 const ESC: char = '\u{1b}';
 
@@ -113,6 +114,30 @@ fn a_field_pads_its_label_in_the_columns_it_draws() {
             visible_width(&line[..at]),
             11,
             "the value does not start where the other one does: {line:?}"
+        );
+    }
+}
+
+/// TC-UI-WRITE-7: a field whose value draws nothing - empty, and every
+/// character taken out of it by a filter.
+/// Expected: both rows say `(empty)` where the value would be, and neither
+/// ends in blank space. A row that stopped after its label would read as a
+/// value the reader failed to see, and it would leave the gap hanging off the
+/// end of the line.
+#[test]
+fn a_value_that_draws_nothing_is_said_and_not_left_blank() {
+    let mut ui = buffered(Theme::plain(), 80);
+    ui.field("journal", 7, "").expect("write");
+    ui.field("model", 7, &tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}"))
+        .expect("write");
+
+    let out = ui.contents();
+    assert_eq!(out, "journal  (empty)\nmodel    (empty)\n");
+    for line in out.lines() {
+        assert_eq!(
+            line.trim_end(),
+            line,
+            "the row ends in blank space: {line:?}"
         );
     }
 }

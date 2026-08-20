@@ -403,6 +403,14 @@ That name is tamed for the line that says it and for the heading of the watched 
 the lookup that chose the adapter: what was given is what selects, and what is drawn is what is
 drawn.
 
+Taming can leave nothing behind: a file whose whole name is an escape sequence is a file a reader
+can make, and after the fold there is no character of it to print.
+A row that stopped where its value should be reads as a value the reader failed to see rather than
+one there was nothing to show, and it ends in the blank space that was meant to carry the value, so
+[`or_empty`](crates/ui/src/text.rs) gives that case a word.
+[`Writer::field`](crates/ui/src/writer.rs) draws it muted, so it reads as this build's word and not
+as the value, and the heading a chat opens with says it the same way.
+
 What the binary exits with is on the page too, under `Exit status:`
 ([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)), because the caller of `tetanus run
 || case $? in ...` reads a number this build has nowhere else told them about. The numbers are not

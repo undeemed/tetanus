@@ -14,7 +14,7 @@ use std::io::{self, IsTerminal, Write};
 use crate::color::{self, ColorChoice, Env};
 use crate::progress::Progress;
 use crate::screen::Screen;
-use crate::text::visible_width;
+use crate::text::{or_empty, visible_width};
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -76,8 +76,18 @@ impl<W: Write> Ui<W> {
     /// format width counts characters: a label in a script a terminal draws
     /// twice as wide is fewer characters than the columns it takes, and every
     /// row under it would start somewhere else.
+    ///
+    /// A value that draws nothing is said in the renderer's own muted word
+    /// rather than left out. A row that stopped after its label reads as a
+    /// value the reader failed to see, and it would end in the blank space of
+    /// the gap. Both cases reach here: a caller that had nothing to say, and
+    /// one whose value was every character `tame_line` had to take out.
     pub fn field(&mut self, label: &str, pad: usize, value: &str) -> io::Result<()> {
         let gap = " ".repeat(pad.saturating_sub(visible_width(label)) + 2);
+        let value = match visible_width(value) {
+            0 => self.theme.paint(Role::Muted, or_empty(value)).to_string(),
+            _ => value.to_string(),
+        };
         writeln!(
             self.out,
             "{}{gap}{value}",

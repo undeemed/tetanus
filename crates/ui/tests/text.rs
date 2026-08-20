@@ -9,7 +9,9 @@
 //!
 //! Environmental needs: none. Every case is a pure function of its input.
 
-use tetanus_ui::{fit, light, plain, tame, tame_line, truncate, visible_width, wrap, Charset};
+use tetanus_ui::{
+    fit, light, or_empty, plain, tame, tame_line, truncate, visible_width, wrap, Charset,
+};
 
 /// TC-UI-TEXT-1: a value that already fits.
 /// Expected: returned unchanged, with no mark added. A renderer must be able
@@ -345,4 +347,21 @@ fn a_row_is_tamed_and_folded_onto_one_line() {
     }
     // What was already one line is untouched.
     assert_eq!(tame_line("deepseek-chat"), "deepseek-chat");
+}
+
+/// TC-UI-TEXT-21: the word for a value that draws nothing.
+/// Expected: text with any visible width is returned as it was, and text with
+/// none - empty, all zero-width, or everything taken out by `tame_line` -
+/// becomes `(empty)`. The width is what is asked, not the length: a value of
+/// combining marks alone is bytes a row cannot show.
+#[test]
+fn a_value_that_draws_nothing_is_given_a_word() {
+    assert_eq!(or_empty("deepseek-chat"), "deepseek-chat");
+    assert_eq!(or_empty(" "), " ");
+    assert_eq!(or_empty(""), "(empty)");
+    assert_eq!(or_empty("\u{301}\u{301}"), "(empty)");
+    assert_eq!(
+        or_empty(&tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}")),
+        "(empty)"
+    );
 }

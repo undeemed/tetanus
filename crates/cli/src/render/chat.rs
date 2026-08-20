@@ -22,7 +22,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_ui::{tame_line, Role, Ui};
+use tetanus_ui::{or_empty, tame_line, Role, Ui};
 
 /// Width of the label column on the opening page. `journal` is the longest
 /// label, and `run` prints its own journal line at this width, so the two land
@@ -43,12 +43,14 @@ pub struct Opened<'a> {
 ///
 /// The two values that came from outside - the model a flag or a config file
 /// named, and the path a `-s` gave - are drawn through `tame_line` on the way
-/// in. A writer draws what it is handed, so making them safe is this page's
+/// in, and through `or_empty` if that left nothing of them: a heading ending
+/// in `chat on ` says less than a heading that says the name was empty. A writer draws what it is handed, so making them safe is this page's
 /// job, and both are drawn as one row each: a sequence in either would clear
 /// the screen it is opening on, or rename the window, before a single question
 /// has been typed.
 pub fn banner<W: Write>(ui: &mut Ui<W>, opened: &Opened) -> io::Result<()> {
-    let model = ui.paint(Role::Accent, &tame_line(opened.model)).to_string();
+    let named = tame_line(opened.model);
+    let model = ui.paint(Role::Accent, or_empty(&named)).to_string();
     ui.heading(&format!("chat on {model}"))?;
     ui.field("journal", LABEL, &tame_line(opened.journal))?;
     // Only when there are some. A chat that starts a journal has no history to
@@ -200,6 +202,35 @@ mod tests {
             page,
             "\nchat on mock\n\
              journal  sessions/chat.jsonl\n\
+             keys     /help for the commands \u{b7} ctrl-d to leave\n"
+        );
+    }
+
+    /// TC-CLI-CHAT-PAGE-6: a path and a name holding nothing that can be
+    /// drawn.
+    /// Expected: each row says `(empty)` rather than stopping after its label.
+    /// A file whose whole name is an escape sequence is a file a reader can
+    /// make, and after `tame_line` there is nothing of it left to print; a row
+    /// that went blank there would read as this build having lost the journal
+    /// it is writing.
+    #[test]
+    fn a_row_with_nothing_left_to_draw_says_so() {
+        let page = rendered(Charset::Unicode, |ui| {
+            banner(
+                ui,
+                &Opened {
+                    model: "\u{1b}[2J",
+                    journal: "\u{1b}]0;pwned\u{7}",
+                    turns: 0,
+                },
+            )
+            .expect("banner");
+        });
+
+        assert_eq!(
+            page,
+            "\nchat on (empty)\n\
+             journal  (empty)\n\
              keys     /help for the commands \u{b7} ctrl-d to leave\n"
         );
     }
