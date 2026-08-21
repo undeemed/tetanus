@@ -76,6 +76,10 @@ class Scenario:
     #: A program other than the `tetanus` binary, by name, under the examples
     #: directory. Used for the parts of the UI a whole turn is too fast to show.
     example: str | None = None
+    #: Keystrokes to send once the view is up, as (bytes, seconds to wait
+    #: after). A full-screen view that reads keys paints nothing worth showing
+    #: until somebody types at it, and it never exits on its own.
+    keys: list[tuple[bytes, float]] = field(default_factory=list)
 
 
 SCENARIOS = [
@@ -93,6 +97,9 @@ SCENARIOS = [
     Scenario("tetanus replay j.jsonl --live", "the same journal played back: the block redraws, then leaves nothing",
              ["replay", "j.jsonl", "--live", "--speed", "6"],
              setup=[["run", "-p", "echo this", "--session", "j.jsonl"]]),
+    Scenario("tetanus chat --ui", "the conversation on a screen of its own: a turn asked, the transcript kept, the prompt pinned",
+             ["chat", "--ui", "-a", "mock", "--session", "c.jsonl"],
+             keys=[(b"what does a turn look like\r", 3.0), (b"/keys\r", 1.0), (b"\x04", 0.6)]),
     Scenario("tetanus config", "every resolved key, and the layer that set it", ["config"]),
     Scenario("tetanus info", "what this build is", ["info"]),
     Scenario("tetanus run --adapter deepseek", "the failure surface: error, then the way out",
@@ -159,6 +166,14 @@ class Screen:
                     self.control(move.group(2), move.group(1))
                     i += move.end()
                     continue
+                # `ESC [ H`, and `ESC [ row ; col H`: a full-screen view homes
+                # the cursor to start a frame, and places it on the row it
+                # wants a caret on before it finishes one.
+                home = re.match(r"\x1b\[([0-9]*)(?:;([0-9]*))?H", text[i:])
+                if home:
+                    self.place(home.group(1), home.group(2))
+                    i += home.end()
+                    continue
                 skip = re.match(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07", text[i:])
                 i += skip.end() if skip else 1
                 continue
@@ -186,6 +201,21 @@ class Screen:
                 line[self.column] = (char, self.style)
                 self.column += 1
             i += 1
+
+    def place(self, row: str, column: str) -> None:
+        """Put the cursor where an absolute move asks for it.
+
+        A full-screen view paints by homing and writing every row, so without
+        this each frame lands under the one before it and the pane shows a
+        conversation repeated once per repaint. A repaints pane is stacking on
+        purpose and is left alone.
+        """
+        if self.repaints:
+            return
+        self.row = max(0, int(row) - 1) if row else 0
+        self.column = max(0, int(column) - 1) if column else 0
+        while len(self.lines) <= self.row:
+            self.lines.append([])
 
     def control(self, final: str, raw: str) -> None:
         """The three escapes the product writes: cursor up, and the two erases.
@@ -263,8 +293,16 @@ def env_for(extra: dict[str, str]) -> dict[str, str]:
 
 
 def capture(argv: list[str], cwd: Path, env: dict[str, str], tty: bool,
-            program: Path = BIN) -> tuple[str, int]:
-    """Run a program and return everything it painted, plus its exit status."""
+            program: Path = BIN,
+            keys: list[tuple[bytes, float]] | None = None) -> tuple[str, int]:
+    """Run a program and return everything it painted, plus its exit status.
+
+    `keys` is for the views that read them: each pair is what to type and how
+    long to let the view answer before the next. A view that reads keys is also
+    a view that never ends on its own, so the last pair is whatever leaves it -
+    ctrl-D for the chat - and the wait after it is the one that catches the
+    page it leaves behind.
+    """
     if not tty:
         done = subprocess.run([str(program), *argv], cwd=cwd, env=env,
                               capture_output=True, timeout=60)
@@ -275,10 +313,39 @@ def capture(argv: list[str], cwd: Path, env: dict[str, str], tty: bool,
         return text, done.returncode
 
     leader, follower = pty.openpty()
+    # A view that reads keys needs the terminal on its standard input as well,
+    # and one that does not is unchanged by being given it: neither the help
+    # page nor a turn reads a keystroke.
+    stdin = follower if keys else subprocess.DEVNULL
     proc = subprocess.Popen([str(program), *argv], cwd=cwd, env=env,
-                            stdin=subprocess.DEVNULL, stdout=follower, stderr=follower)
+                            stdin=stdin, stdout=follower, stderr=follower)
     os.close(follower)
     chunks: list[bytes] = []
+
+    def drain(seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            ready, _, _ = select.select([leader], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                data = os.read(leader, 65536)
+            except OSError:
+                return
+            if data:
+                chunks.append(data)
+
+    if keys:
+        # The view has to be up before it is typed at, or the keys land in the
+        # terminal's buffer and arrive all at once as a paste.
+        drain(1.2)
+        for typed, wait in keys:
+            try:
+                os.write(leader, typed)
+            except OSError:
+                break
+            drain(wait)
+
     while True:
         ready, _, _ = select.select([leader], [], [], 0.2)
         if ready:
@@ -295,6 +362,27 @@ def capture(argv: list[str], cwd: Path, env: dict[str, str], tty: bool,
     return b"".join(chunks).decode(errors="replace"), proc.wait()
 
 
+#: What a terminal writes when a view takes the alternate screen, and gives it
+#: back. Everything between the two is the view; everything outside it is the
+#: shell's own screen, which the view is careful not to disturb.
+ALTERNATE = ("\x1b[?1049h", "\x1b[?1049l")
+
+
+def on_the_alternate_screen(text: str) -> str:
+    """What a full-screen view painted, without the page it was opened from.
+
+    A view on the alternate screen leaves the screen it found when it exits, so
+    a pane rendered from the whole capture ends up showing the shell's page
+    with the view's frames stacked above it. What a reviewer wants to see is
+    the view: the frames between the two switches, of which the last is the
+    one that was on the terminal when they left it.
+    """
+    if ALTERNATE[0] not in text:
+        return text
+    view = text.split(ALTERNATE[0], 1)[1]
+    return view.rsplit(ALTERNATE[1], 1)[0] if ALTERNATE[1] in view else view
+
+
 def render_scenarios() -> list[dict]:
     panes = []
     for scenario in SCENARIOS:
@@ -304,9 +392,12 @@ def render_scenarios() -> list[dict]:
                 capture(argv, cwd, env, tty=False)
             program = EXAMPLES / scenario.example if scenario.example else BIN
             try:
-                text, status = capture(scenario.argv, cwd, env, scenario.tty, program)
+                text, status = capture(
+                    scenario.argv, cwd, env, scenario.tty, program, scenario.keys
+                )
             except subprocess.TimeoutExpired:
                 text, status = "the command did not finish inside 60s", -1
+        text = on_the_alternate_screen(text)
         screen = Screen(scenario.repaints)
         screen.write(text)
         panes.append({
@@ -600,7 +691,19 @@ def check() -> None:
     assert rows("one\r\n\x1b[1A\rtwo\r\n", repaints=True) == ["one", "two", ""]
     # TC-WATCH-6: an escape this does not implement is dropped, not printed.
     assert rows("\x1b[?25lhidden\x1b[?25h") == ["hidden"]
-    print("uiwatch: the cell buffer agrees with all 6 cases")
+    # TC-WATCH-7: a full-screen view homes the cursor to start a frame, so the
+    # second frame overwrites the first rather than landing under it.
+    assert rows("\x1b[Hone\r\ntwo\x1b[Hnew\r\n") == ["new", "two"]
+    # TC-WATCH-8: an absolute move puts the cursor on a row and a column, which
+    # is how a view that is typed into says where its caret goes.
+    assert rows("\x1b[Ha\r\nb\r\nc\x1b[2;2Hx") == ["a", "bx", "c"]
+    # TC-WATCH-9: what a view painted is what it painted on the alternate
+    # screen - the page it was opened from is not part of the view.
+    assert on_the_alternate_screen("before\x1b[?1049hinside\x1b[?1049lafter") == "inside"
+    assert on_the_alternate_screen("no alternate screen here") == "no alternate screen here"
+    # A view killed before it left keeps everything it painted.
+    assert on_the_alternate_screen("shell\x1b[?1049hview") == "view"
+    print("uiwatch: the cell buffer agrees with all 9 cases")
 
 
 def main() -> None:
