@@ -24,13 +24,23 @@
 //! a caller says so: the block on screen belongs to the old width, so it is
 //! erased before the first frame of the new one.
 //!
-//! # Limits
+//! # Why a block never fills the terminal
 //!
-//! The cursor arithmetic assumes the block did not scroll. A block taller than
-//! the terminal scrolls its own top away, and the next frame then redraws from
-//! the wrong row. Callers keep the block short - a live view shows the tail of
-//! a turn, not the whole of it - and the transcript above it is printed, which
-//! is the part that is allowed to scroll.
+//! The cursor arithmetic assumes the block did not scroll. A block as tall as
+//! the terminal scrolls its own top away, and every frame after it is drawn
+//! one row out of place - the failure looks like the view duplicating itself
+//! down the screen, and it does not stop until the run does.
+//!
+//! Callers keep the block short for their own reasons - a live view shows the
+//! tail of a turn, not the whole of it - but "short" is a number they chose
+//! against a terminal they cannot see. This type knows the terminal, so this
+//! type holds the block to it: the last rows of what it was handed, one row
+//! kept clear for the shell prompt the cursor is sitting on. The tail is what
+//! survives, because the footer of a live block is its last row and the rows
+//! above it are the answer scrolling past.
+//!
+//! The transcript above the block is printed rather than drawn, and printing
+//! is what is allowed to scroll.
 
 use std::io::{self, Write};
 
@@ -44,17 +54,30 @@ pub struct Screen<W: Write> {
     /// Rows of the block currently on the terminal, to be replaced or erased
     /// on the next frame.
     drawn: usize,
+    /// Rows the terminal has, as the caller last measured it.
+    rows: usize,
 }
 
 impl<W: Write> Screen<W> {
     /// Wrap a stream. `animated` is "this stream is a terminal", which the
     /// caller resolves once - see [`Policy::stdout_screen`](crate::Policy).
-    pub fn new(ui: Ui<W>, animated: bool) -> Self {
+    pub fn new(ui: Ui<W>, animated: bool, rows: usize) -> Self {
         Self {
             ui,
             animated,
             drawn: 0,
+            rows,
         }
+    }
+
+    /// The terminal is this many rows now.
+    ///
+    /// Told separately from the width, because the two arrive together and
+    /// mean different things: a width that changed invalidates the block on
+    /// screen, and a height that changed only decides how much of the next one
+    /// there is room for.
+    pub fn rows(&mut self, rows: usize) {
+        self.rows = rows;
     }
 
     /// Commit lines above the block. They scroll with the terminal and are
@@ -77,6 +100,11 @@ impl<W: Write> Screen<W> {
         }
         let width = self.ui.width();
         let charset = self.ui.theme().charset();
+        // The tail of what was handed over, and never the whole terminal: one
+        // row is left for the prompt the cursor is on, and a block that filled
+        // the screen would scroll its own top away.
+        let room = self.rows.saturating_sub(1).max(1);
+        let lines = &lines[lines.len().saturating_sub(room)..];
         self.home()?;
         for line in lines {
             // A line that wrapped would occupy two rows, and every frame after

@@ -349,7 +349,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // answer the same flag: a screen the terminal cannot hold is a
             // bad argument, not a failure of the conversation.
             if args.ui && !policy.stdout_is_terminal {
-                return Err(fail(policy, &nowhere_to_draw()));
+                return Err(fail(policy, &nowhere_to_draw(policy)));
             }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -540,6 +540,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             let played = runtime.block_on(render::replay::play(
                 &mut out,
                 policy.stdout_is_terminal,
+                policy.rows,
                 &events,
                 speed.unwrap_or(1.0),
                 think,
@@ -1147,7 +1148,11 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 ) -> Option<F::Output> {
     let (theme, width) = (*out.theme(), out.width());
     let mut view = Live::new(theme, width, phase, think);
-    let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
+    let mut screen = Screen::new(
+        Ui::new(out.out(), theme, width),
+        policy.stdout_is_terminal,
+        policy.rows,
+    );
     let mut status = status_line(policy, phase, policy.stdout_is_terminal);
 
     let started = std::time::Instant::now();
@@ -1168,8 +1173,12 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
                 // the block would keep drawing at a width that stopped being
                 // true, and every frame after the resize would land wrong.
                 if policy.stdout_is_terminal {
-                    let width = tetanus_ui::measure();
+                    let (width, rows) = tetanus_ui::size();
                     screen.resize(width).ok();
+                    // The height decides how much of the next block there is
+                    // room for, and a terminal that was made shorter while a
+                    // turn ran is the case this exists for.
+                    screen.rows(rows);
                     view.resize(width);
                 }
                 view.tick();

@@ -12,13 +12,24 @@
 //!
 //! Environmental needs: none. Every case writes into a `Vec<u8>`, so no case
 //! needs a terminal or a pty.
+//!
+//! Features tested here also include the height: a block taller than the
+//! terminal keeps its tail, and a terminal made shorter under a block holds
+//! the next frame to the new height.
 
 use tetanus_ui::{buffered, visible_width, Charset, Screen, Theme};
 
 fn screen(animated: bool, width: usize) -> Screen<Vec<u8>> {
+    // A terminal tall enough that the cases below say what they mean about
+    // width and about erasing; the height has its own case.
+    tall(animated, width, 24)
+}
+
+fn tall(animated: bool, width: usize, rows: usize) -> Screen<Vec<u8>> {
     Screen::new(
         buffered(Theme::new(false, Charset::Unicode), width),
         animated,
+        rows,
     )
 }
 
@@ -182,4 +193,53 @@ fn a_resize_to_the_same_width_writes_nothing() {
     screen.resize(40).expect("resize");
 
     assert_eq!(written(screen).len(), drawn);
+}
+
+/// TC-UI-SCREEN-8: a block taller than the terminal.
+/// Expected: the last rows of it, one row short of the terminal's height, and
+/// the rows above them dropped. A block as tall as the terminal scrolls its
+/// own top away; the arithmetic that redraws the next frame then counts from
+/// the wrong row, and the view duplicates itself down the screen for as long
+/// as the run lasts. The tail is what survives because a live block's footer
+/// is its last row.
+#[test]
+fn a_block_taller_than_the_terminal_keeps_its_tail() {
+    let mut screen = tall(true, 40, 4);
+    screen
+        .draw(&lines(&["one", "two", "three", "four", "five", "six"]))
+        .expect("draw");
+
+    let drawn = screen.ui().contents();
+    for gone in ["one", "two", "three"] {
+        assert!(!drawn.contains(gone), "`{gone}` was drawn: {drawn:?}");
+    }
+    for kept in ["four", "five", "six"] {
+        assert!(drawn.contains(kept), "`{kept}` was dropped: {drawn:?}");
+    }
+}
+
+/// TC-UI-SCREEN-9: the terminal made shorter under a block already on it.
+/// Expected: the next frame is held to the new height. A reader dragging a
+/// window smaller mid-turn is the case this exists for, and the old height is
+/// no guide to the new one.
+#[test]
+fn a_shorter_terminal_holds_the_next_frame() {
+    let mut screen = tall(true, 40, 10);
+    screen
+        .draw(&lines(&["one", "two", "three", "four"]))
+        .expect("draw");
+    assert!(screen.ui().contents().contains("one"));
+
+    screen.rows(3);
+    screen
+        .draw(&lines(&["five", "six", "seven"]))
+        .expect("draw");
+
+    let drawn = screen.ui().contents();
+    let last = drawn.rsplit('\r').next().unwrap_or_default();
+    assert!(
+        !last.contains("five"),
+        "three rows were drawn in two: {drawn:?}"
+    );
+    assert!(drawn.contains("seven"), "the tail is missing: {drawn:?}");
 }

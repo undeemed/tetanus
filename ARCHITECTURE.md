@@ -298,7 +298,14 @@ identified there by the contract calls it makes rather than by what it prints. S
 `tetanus run` shows one turn three ways, and every settled line in all three comes from the same
 `Reader` in [crates/cli/src/render/timeline.rs](crates/cli/src/render/timeline.rs), so a turn watched
 live reads like the same turn replayed tomorrow.
-The default is a block under the shell prompt, redrawn in place by `Screen`.
+The default is a block under the shell prompt, redrawn in place by `Screen`, which holds it to the
+terminal it is drawn on: the last rows of what it was handed, one row kept for the prompt the
+cursor sits on.
+A block as tall as the terminal scrolls its own top away, and the cursor arithmetic that redraws
+the next frame then counts from the wrong row - the view duplicates itself down the screen and does
+not stop until the run does.
+The caller keeps the block short for its own reasons; "short" is a number chosen against a terminal
+it cannot see, and this type can see it.
 That block says what the turn is waiting on, how long it has been waiting, and what it has spent so
 far ([crates/cli/src/render/live.rs](crates/cli/src/render/live.rs)): a reader watching a turn is
 watching it spend money, and a figure that arrives only once the turn is over tells them
