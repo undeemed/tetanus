@@ -249,7 +249,10 @@ impl Schema {
 
 /// How a value reads in a message: what it is, not what it holds. A user who
 /// wrote a credential in the wrong place should not find it echoed in an error.
-fn describe(value: &Value) -> String {
+///
+/// Shared with the write path, so a conflict reported when a document is read
+/// and the same conflict reported when one is written read the same way.
+pub fn describe(value: &Value) -> String {
     match value {
         Value::Null => "nothing".into(),
         Value::Bool(_) => "a boolean".into(),

@@ -18,6 +18,7 @@ pub mod recompose;
 pub mod schema;
 pub mod secret;
 pub mod watch;
+pub mod write;
 
 /// A fault reading the settings document.
 ///
