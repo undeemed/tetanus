@@ -82,8 +82,8 @@ use std::time::Duration;
 
 use tetanus_protocol::types::{KnownEvent, SessionEvent};
 use tetanus_ui::{
-    light, plain, show, size, tame_line, Flow, Frame, Key, Page, Role, Show, Stop, Theme, Tty, Ui,
-    View,
+    light, plain, show, size, tame_line, when_killed, Flow, Frame, Key, Page, Role, Show, Stop,
+    Theme, Tty, Ui, View,
 };
 
 use super::keys::{self, Row};
@@ -128,6 +128,9 @@ pub fn browse<W: Write>(
         Exit::Quit,
         (cols, rows),
     );
+    // As in the picker: `show` gives the terminal back on every path out that
+    // the process is allowed to take, and a signal is not one of them.
+    let _killed = when_killed(Tty::new(io::stdout())).ok();
     show(
         Tty::new(io::stdout()),
         out,

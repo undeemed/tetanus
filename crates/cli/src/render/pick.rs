@@ -92,7 +92,8 @@ use std::time::Duration;
 use tetanus_protocol::methods::SessionListResult;
 use tetanus_protocol::types::{SessionEvent, SessionInfo};
 use tetanus_ui::{
-    bar, light, show, size, tame_line, Flow, Frame, Key, Role, Show, Stop, Theme, Tty, Ui, View,
+    bar, light, show, size, tame_line, when_killed, Flow, Frame, Key, Role, Show, Stop, Theme, Tty,
+    Ui, View,
 };
 
 use super::browse::{Exit, Journal, NAME};
@@ -176,6 +177,9 @@ pub fn pick<W: Write>(
     let theme = *out.theme();
     let (cols, rows) = size();
     let mut picker = Picker::new(theme, list, think, open, cols);
+    // A signal ends the process before `show` can give the terminal back, so
+    // the watch is hung first. It stands down when this scope does.
+    let _killed = when_killed(Tty::new(io::stdout())).ok();
     show(
         Tty::new(io::stdout()),
         out,

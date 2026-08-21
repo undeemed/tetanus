@@ -44,6 +44,22 @@
 //! install a panic hook, because a hook is global and a library that installs
 //! one takes that decision away from the binary.
 //!
+//! # Signals
+//!
+//! [`Held`] covers every way out of a scope that Rust knows about. A signal is
+//! not one of them: `SIGTERM`, `SIGHUP` and `SIGQUIT` end the process where it
+//! stands, `Drop` never runs, and the person at the terminal keeps raw mode,
+//! the alternate screen and a hidden cursor - a shell that echoes nothing,
+//! drawn over a scrollback they cannot get back to. Their only way out is to
+//! type `reset` blind.
+//!
+//! [`when_killed`] hangs that net, and it is hung by the binary rather than by
+//! `Held`, for the reason the panic hook is not: a signal handler is process
+//! wide, and taking a terminal in a test should not quietly register one. It
+//! restores and then re-raises with the default handler, so what the signal
+//! means does not change - a killed process still reports itself killed, by
+//! that signal, to whatever is waiting on it.
+//!
 //! # Why this crate's own [`Key`]
 //!
 //! For the reason [`Role`](crate::Role) exists rather than an `anstyle::Style`
@@ -201,6 +217,90 @@ impl<C: Console> Drop for Held<C> {
         let _ = self.give_back();
     }
 }
+
+/// Give the terminal back when the process is killed rather than ended.
+///
+/// A watch on the four signals that end a process politely enough to be
+/// caught: `SIGTERM` from a supervisor or a `kill`, `SIGHUP` from a terminal
+/// that closed, `SIGQUIT` and `SIGINT` from a keyboard whose keys this view is
+/// not reading. When one lands, `spare` is restored and the signal is
+/// re-raised with the default handler, so the process still dies of what
+/// killed it.
+///
+/// `spare` is a second console over the same terminal, because the first one
+/// is inside a [`Held`] the running view is using and the watch runs on a
+/// thread of its own. For [`Tty`] that costs a second handle on one stream.
+///
+/// Arm it just before the terminal is taken rather than just after. Undoing a
+/// mode nothing has entered is what a terminal ignores, so the earlier order
+/// costs nothing, and the later one leaves a gap in which the screen has been
+/// entered and no watch will leave it.
+///
+/// The returned guard takes the watch down when it is dropped. Bind it: a
+/// `let _ = when_killed(..)` drops it on the spot and watches nothing.
+///
+/// # Errors
+///
+/// If the handlers cannot be registered. A caller that only wanted the net
+/// should carry on without it rather than refuse to open the view: the failure
+/// leaves the terminal exactly as safe as it was before this function existed.
+#[cfg(unix)]
+pub fn when_killed<C: Console + Send + 'static>(mut spare: C) -> io::Result<Killed> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = Signals::new([SIGTERM, SIGHUP, SIGQUIT, SIGINT])?;
+    let handle = signals.handle();
+    let thread = std::thread::spawn(move || {
+        // `forever` ends when the handle is closed, which is the guard being
+        // dropped and nothing having arrived. Only a signal takes this arm.
+        if let Some(signal) = signals.forever().next() {
+            // Whatever it says goes nowhere: the process is about to end, and
+            // the stream that would carry the complaint is the one in doubt.
+            let _ = spare.restore();
+            // Not `exit`: a caller waiting on this process asked what killed
+            // it, and an exit status would tell them nobody did.
+            let _ = signal_hook::low_level::emulate_default_handler(signal);
+        }
+    });
+    Ok(Killed {
+        handle: Some(handle),
+        thread: Some(thread),
+    })
+}
+
+/// [`when_killed`] where there are no signals to watch.
+#[cfg(not(unix))]
+pub fn when_killed<C: Console + Send + 'static>(_spare: C) -> io::Result<Killed> {
+    Ok(Killed {})
+}
+
+/// The watch [`when_killed`] hung, taken down when this is dropped.
+#[cfg(unix)]
+pub struct Killed {
+    /// `None` once taken down, which is `Drop` and nothing else.
+    handle: Option<signal_hook::iterator::Handle>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Drop for Killed {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.close();
+        }
+        // Joined rather than left running, so that a view which ends and then
+        // reports on the same stream cannot be writing at the same time as a
+        // watch that is on its way out.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The watch [`when_killed`] hung, taken down when this is dropped.
+#[cfg(not(unix))]
+pub struct Killed {}
 
 /// A keystroke, in the vocabulary a view codes against.
 ///
