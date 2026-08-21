@@ -15,9 +15,10 @@
 //! Features NOT tested here: which failures the policy lists
 //! (`upstream_retry_policy.rs`), the executor's own records
 //! (`upstream_retry_executor.rs`), and the decoder read frame by frame
-//! (`upstream_deepseek_wire.rs`). Upstream's stalled-body case is not ported:
-//! tetanus sets no request or idle timeout, so nothing yet turns a stall into
-//! `TIMEOUT`. Section 3 of `docs/parity.md` carries the gap.
+//! (`upstream_deepseek_wire.rs`), and the idle window read frame by frame
+//! (`deepseek_idle_timeout.rs`). Upstream's whole-request deadline is not
+//! ported: the idle window catches a provider that goes silent, not one that
+//! answers slowly for ever. Section 3 of `docs/parity.md` carries that gap.
 //!
 //! Environmental needs: a writable temp directory and a loopback socket. No
 //! case reaches the network or a real API key.
@@ -34,7 +35,9 @@ use tetanus_core::{Context, EffectHandle, EventBus};
 use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::events::FAILED_STOP_REASON;
-use tetanus_turn::llm::deepseek::{DeepSeekAdapter, DeepSeekConfig, PROVIDER, STREAM_CLOSED};
+use tetanus_turn::llm::deepseek::{
+    DeepSeekAdapter, DeepSeekConfig, DEFAULT_STREAM_IDLE_TIMEOUT_MS, PROVIDER, STREAM_CLOSED,
+};
 use tetanus_turn::llm::retry::{
     install, Backoff, RetryPolicy, DEFAULT_MAX_RETRIES, DEFAULT_RETRYABLE_CODES, RETRY_EVENT,
 };
@@ -222,6 +225,43 @@ async fn an_endpoint_that_never_answers_stops_at_the_budget() {
     assert_eq!(closer(&route)["stop_reason"], FAILED_STOP_REASON);
 }
 
+/// TC-PORT-XPORT-6: a body that stalls is turned into `TIMEOUT` by the idle
+/// window, and the turn recovers on the next request.
+///
+/// Upstream: "turns a stalled body into TIMEOUT and succeeds on the next
+/// request".
+///
+/// Input: a provider whose first connection sends the response head and then
+/// goes silent, holding the socket open, and whose second answers completely.
+/// The route runs under a short idle window, so the silence is what ends the
+/// first attempt rather than any byte the server sends.
+/// Expected: the turn answers with the second attempt's text; two requests
+/// carrying the same body, because a retry re-sends the conversation the
+/// stalled attempt was given; one `llm/retry` classed `TIMEOUT`, which is in
+/// the default set for exactly this reason; one committed message; and a turn
+/// that ended naturally in one step. Without the idle window the first attempt
+/// never returns, so this turn never ends.
+#[tokio::test]
+async fn a_stalled_body_times_out_and_recovers_on_retry() {
+    // A window long enough that a loaded runner scheduling a write late is not
+    // a failure, short enough that the case does not spend seconds waiting.
+    const IDLE_MS: u64 = 400;
+    let provider =
+        Provider::start(vec![Answer::Stall, Answer::Text("recovered after timeout")]).await;
+    let route = route_with_idle("xport-stall", &provider.base_url(), 2.0, IDLE_MS).await;
+
+    let outcome = route.engine.run_turn(PROMPT).await.expect("the turn ran");
+
+    assert_eq!(outcome.content, "recovered after timeout");
+    let sent = provider.requests();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], sent[1], "the retry re-sent the same request");
+    assert_eq!(codes(&route), ["TIMEOUT"]);
+    assert_eq!(count(&route, topic::ASSISTANT_MESSAGE), 1);
+    assert_eq!(count(&route, topic::STEP_START), 1);
+    assert_eq!(closer(&route)["stop_reason"], "natural");
+}
+
 /// One booted turn engine talking to a fake provider, with the retry executor
 /// installed on that provider's route.
 struct Route {
@@ -234,9 +274,16 @@ struct Route {
     _dir: TempDir,
 }
 
-/// The fixture: the real HTTP adapter pointed at `base_url`, under a normal
-/// policy over the default retryable set and the default bound.
+/// The fixture at the default idle window: the real HTTP adapter pointed at
+/// `base_url`, under a normal policy over the default retryable set and the
+/// default bound.
 async fn route(name: &str, base_url: &str, delay_ms: f64) -> Route {
+    route_with_idle(name, base_url, delay_ms, DEFAULT_STREAM_IDLE_TIMEOUT_MS).await
+}
+
+/// The same fixture with the idle window named, so the one case that waits a
+/// stall out does not pay the five-minute default to do it.
+async fn route_with_idle(name: &str, base_url: &str, delay_ms: f64, idle_ms: u64) -> Route {
     static KEY: Once = Once::new();
     KEY.call_once(|| std::env::set_var(TEST_API_KEY_ENV, "mock-key"));
 
@@ -249,7 +296,7 @@ async fn route(name: &str, base_url: &str, delay_ms: f64) -> Route {
         api_key_env: TEST_API_KEY_ENV.to_string(),
         base_url: base_url.to_string(),
         models: vec![MODEL.to_string()],
-        max_tokens: None,
+        stream_idle_timeout_ms: idle_ms,
         ..DeepSeekConfig::default()
     });
     let ctx = boot(
@@ -352,6 +399,9 @@ enum Answer {
     CleanEof,
     /// Frames, then the body stops mid-message.
     Cut,
+    /// The head is sent and then the connection is held open and silent: the
+    /// client's idle window is what ends the attempt, not the server.
+    Stall,
     /// The request is read and the connection closed with no answer.
     Reset,
 }
@@ -377,6 +427,9 @@ impl Provider {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let recording = Arc::clone(&sent);
         let serving = tokio::spawn(async move {
+            // Sockets a stall left open, kept alive so each stays silent
+            // rather than being closed when its socket is dropped.
+            let mut parked = Vec::new();
             for answer in answers {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
@@ -385,7 +438,19 @@ impl Provider {
                 // closed without one still counts as a request that arrived.
                 let request = read(&mut socket).await;
                 recording.lock().expect("sent").push(request);
+                if let Answer::Stall = answer {
+                    // Head, then silence: the loop moves on to accept the
+                    // retry while this connection is held open below.
+                    write(&mut socket, OK_HEAD).await;
+                    parked.push(socket);
+                    continue;
+                }
                 write_answer(&mut socket, answer).await;
+            }
+            // Hold any stalled connections open until the Provider is dropped
+            // and the task is aborted.
+            if !parked.is_empty() {
+                std::future::pending::<()>().await;
             }
         });
         Self {
@@ -452,6 +517,8 @@ async fn write_answer(socket: &mut TcpStream, answer: Answer) {
     let (head, frames): (&str, Vec<String>) = match answer {
         // Nothing is written: the close is the answer.
         Answer::Reset => (OK_HEAD, Vec::new()),
+        // A stall is handled before this point, by parking the open socket.
+        Answer::Stall => unreachable!("a stall is parked, not answered"),
         Answer::Text(text) => (OK_HEAD, vec![delta(text), finish(), "[DONE]".to_string()]),
         Answer::Contentless => (OK_HEAD, vec![finish(), "[DONE]".to_string()]),
         Answer::CleanEof => (OK_HEAD, partial()),
