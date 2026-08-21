@@ -24,10 +24,12 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::FutureExt;
 
 use tetanus_core::events::Terminal;
 use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
@@ -61,6 +63,20 @@ pub enum TurnError {
     Llm(#[from] LlmError),
     #[error(transparent)]
     Service(#[from] ServiceError),
+    /// A listener that decides something panicked, and the turn was ended with
+    /// it rather than the panic unwinding into whoever asked for the turn.
+    ///
+    /// The bus keeps `serial` and `waterfall` loud on purpose: a decision
+    /// listener with a bug is not something to paper over, and a caller that
+    /// asked one question should hear about it. What this contains is the
+    /// *blast radius*. Before it, such a panic escaped `run_turn`, so
+    /// `turn/start` was left unbalanced on the journal and the session was
+    /// wedged open - a reader could not tell the turn was over, and the next
+    /// open had to synthesize `interrupted` closers for a turn nothing
+    /// interrupted. The panic is still reported, as this failure; the journal
+    /// is closed the way section 4.4.2 says every failed turn closes.
+    #[error("a plugin listener panicked: {0}")]
+    Plugin(String),
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +239,23 @@ impl TurnEngine {
             .append(topic::TURN_START, serde_json::json!({ "turn": turn }))?;
 
         let mut progress = Progress::default();
-        let ran = self.run_steps(turn, input, &mut progress).await;
+        // `AssertUnwindSafe` is the deliberate part. A panic mid-turn leaves
+        // `progress` describing what the turn had done when it stopped, which
+        // is not a corrupted value but exactly the value the closers need: the
+        // step it left open is the step that must be ended. Nothing else
+        // crosses the boundary, and the engine is not reused for another turn
+        // on the strength of it.
+        let ran = match AssertUnwindSafe(self.run_steps(turn, input, &mut progress))
+            .catch_unwind()
+            .await
+        {
+            Ok(ran) => ran,
+            Err(payload) => {
+                let fault = crate::tools::panicked(payload);
+                tracing::error!(turn, %fault, "a plugin listener panicked; ending the turn");
+                Err(TurnError::Plugin(fault))
+            }
+        };
         let closed = self.close(turn, &progress, &ran);
 
         // The failure that ended the turn is the one the caller hears, even
