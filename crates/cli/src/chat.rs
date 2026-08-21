@@ -661,7 +661,7 @@ impl Session<'_> {
         // Nothing appended, nothing to copy. On a journal of six thousand
         // events, copying them every frame is a sixth of a core spent on a
         // conversation nobody is having.
-        let Some(length) = appended(self.log.path(), self.length) else {
+        let Some(length) = crate::appended(self.log.path(), self.length) else {
             return;
         };
         self.length = length;
@@ -685,19 +685,6 @@ impl Session<'_> {
         frame.paint(out).ok();
         self.painted = Some(frame);
     }
-}
-
-/// How long the journal is now, when that is not how long it was.
-///
-/// A journal is append-only, so a file that has not grown holds nothing a
-/// reader of it has not seen. `None` is "nothing new"; a file the filesystem
-/// will not answer for reads as new every time, which is the behaviour this
-/// replaced and the safe way to be wrong.
-fn appended(journal: &std::path::Path, seen: u64) -> Option<u64> {
-    let length = std::fs::metadata(journal)
-        .map(|file| file.len())
-        .unwrap_or(u64::MAX);
-    (length != seen).then_some(length)
 }
 
 /// How often a frame is composed while the view is up. The same interval every
@@ -903,30 +890,36 @@ mod tests {
         assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
     }
 
-    /// TC-CLI-CHAT-IN-9: whether a journal has anything new in it.
+    /// TC-CLI-POLL-1: whether a journal has anything new in it.
     /// Expected: its length the first time, nothing while it is unchanged, its
     /// new length once something is appended, and - for a file that cannot be
     /// read - something every time, which is the behaviour this replaced and
     /// the safe way to be wrong.
     ///
-    /// The view asks this twelve times a second. Asking the log instead copies
-    /// every event it holds: on a journal of six thousand, that was a sixth of
-    /// a core spent on a conversation nobody was having.
+    /// Every view in the binary asks this twelve times a second - the helper
+    /// is `main.rs`'s for that reason, and the case is here because this is
+    /// the module whose loop found it. Asking the log instead copies every
+    /// event it holds: on a journal of six thousand, that was a sixth of a
+    /// core spent on a conversation nobody was having.
     #[test]
     fn a_journal_that_has_not_grown_is_not_read_again() {
         let dir = tempfile::tempdir().expect("temp dir");
         let journal = dir.path().join("c.jsonl");
         std::fs::write(&journal, "one line\n").expect("write");
 
-        let first = appended(&journal, 0).expect("a length");
+        let first = crate::appended(&journal, 0).expect("a length");
         assert_eq!(first, 9);
-        assert_eq!(appended(&journal, first), None, "read again unchanged");
+        assert_eq!(
+            crate::appended(&journal, first),
+            None,
+            "read again unchanged"
+        );
 
         std::fs::write(&journal, "one line\ntwo lines\n").expect("append");
-        let second = appended(&journal, first).expect("a new length");
+        let second = crate::appended(&journal, first).expect("a new length");
         assert_eq!(second, 19);
 
         // A journal that is not there reads as new, every time.
-        assert!(appended(&dir.path().join("gone.jsonl"), 0).is_some());
+        assert!(crate::appended(&dir.path().join("gone.jsonl"), 0).is_some());
     }
 }
