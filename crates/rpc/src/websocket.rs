@@ -15,10 +15,16 @@ use std::sync::Arc;
 
 use futures_util::stream::{SplitSink, StreamExt};
 use futures_util::SinkExt;
+use std::sync::Mutex;
 use tetanus_protocol::methods::{Engine, EventSink};
 use tetanus_protocol::rpc::ErrorCode;
 use tokio::io::{AsyncRead, AsyncWrite};
+
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
+
+use crate::auth::{Auth, Refusal};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
@@ -34,11 +40,27 @@ use crate::{Codec, Frames};
 /// handshake that is not a WebSocket handshake, a socket that resets - ends
 /// that connection and no other.
 pub async fn serve(engine: Arc<dyn Engine>, listener: TcpListener) -> std::io::Result<()> {
+    serve_as(engine, listener, Auth::default()).await
+}
+
+/// The same, under a stated posture.
+///
+/// Contract section 4.1.2. [`Auth::default`] is the weakest one offered and
+/// still refuses every off-box peer and every browser origin, so `serve` is
+/// safe to call and a deployment bound off-box has to say so with
+/// [`Auth::require_token`] rather than get there by omission.
+pub async fn serve_as(
+    engine: Arc<dyn Engine>,
+    listener: TcpListener,
+    auth: Auth,
+) -> std::io::Result<()> {
+    let auth = Arc::new(auth);
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let engine = Arc::clone(&engine);
+        let auth = Arc::clone(&auth);
         tokio::spawn(async move {
-            let _ = connection(engine, stream).await;
+            let _ = connection_as(engine, stream, &auth, peer.ip()).await;
         });
     }
 }
@@ -52,7 +74,68 @@ pub async fn connection<S>(engine: Arc<dyn Engine>, stream: S) -> Result<(), Err
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let socket = tokio_tungstenite::accept_async(stream).await?;
+    connection_as(
+        engine,
+        stream,
+        &Auth::default(),
+        std::net::IpAddr::from([127, 0, 0, 1]),
+    )
+    .await
+}
+
+/// Serve one connection whose peer has to earn it.
+///
+/// The handshake is refused *before* the upgrade, which is why no
+/// `ErrorCode` covers this: an unauthenticated peer never reaches the
+/// JSON-RPC layer, so the frame that would carry one is never sent. What it
+/// gets is an HTTP status, and a deliberately uninformative one - a prober
+/// that could tell "no token" from "wrong token" would learn whether it had
+/// found a server expecting the token it was guessing.
+pub async fn connection_as<S>(
+    engine: Arc<dyn Engine>,
+    stream: S,
+    auth: &Auth,
+    peer: std::net::IpAddr,
+) -> Result<(), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let refused: Arc<Mutex<Option<Refusal>>> = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&refused);
+    let posture = auth.clone();
+
+    let socket = tokio_tungstenite::accept_hdr_async(
+        stream,
+        // The `Err` type is `ErrorResponse`, which is what tungstenite's
+        // handshake callback requires; it cannot be boxed without changing a
+        // signature this crate does not own.
+        #[allow(clippy::result_large_err)]
+        move |request: &Request, response: Response| {
+            let headers = request.headers();
+            let mut presented = Auth::present(
+                headers
+                    .get("sec-websocket-protocol")
+                    .and_then(|v| v.to_str().ok()),
+                request.uri().query(),
+            );
+            presented.origin = headers
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+
+            match posture.admit(peer, &presented) {
+                Ok(()) => Ok(response),
+                Err(refusal) => {
+                    *seen.lock().expect("refusal") = Some(refusal.clone());
+                    let mut denial = ErrorResponse::new(None);
+                    *denial.status_mut() =
+                        StatusCode::from_u16(refusal.status()).unwrap_or(StatusCode::UNAUTHORIZED);
+                    Err(denial)
+                }
+            }
+        },
+    )
+    .await?;
     let codec = Arc::new(Codec::new(engine));
     // Unbounded for the same reason the stdio carrier is: the session log is
     // the stream (section 7.2), so a dropped event is a hole in it, and

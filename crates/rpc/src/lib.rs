@@ -16,6 +16,7 @@
 // output or not at all, so denying them here is the guard.
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 
+pub mod auth;
 pub mod stdio;
 pub mod websocket;
 

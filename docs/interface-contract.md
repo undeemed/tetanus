@@ -95,7 +95,7 @@ Two things follow, and the second is the one that surprises people.
 
 **So the WebSocket carrier authenticates, and refuses before the upgrade.**
 
-- It requires a secret established out of band by whoever started the server, and a handshake that does not present it is refused with an HTTP failure *before* the connection becomes a WebSocket. Refusing at the upgrade means an unauthenticated peer never reaches the JSON-RPC layer, so there is no code in §4.5 for this and there should not be: the frame that would carry one is never sent.
+- It requires a secret established out of band by whoever started the server for **every peer that is not on the loopback interface**, and a handshake that does not present it is refused with an HTTP failure *before* the connection becomes a WebSocket. A deployment bound off-box - which the standing rule makes the expected one - is therefore token-only. The weakest posture the carrier offers admits a local peer without a token, which is safe on a single-user machine and is not on a shared one; a deployment with other local accounts requires the token from everyone. Refusing at the upgrade means an unauthenticated peer never reaches the JSON-RPC layer, so there is no code in §4.5 for this and there should not be: the frame that would carry one is never sent.
 - It checks `Origin` when the handshake carries one, and refuses a browser origin it was not told to expect. A non-browser client sends none, and that is not a failure; a browser cannot forge one.
 
 **A secret cannot travel in a header here, and that is a constraint rather than an oversight.**
