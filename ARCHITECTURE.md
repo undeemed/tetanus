@@ -558,6 +558,18 @@ one there was nothing to show, and it ends in the blank space that was meant to 
 [`Writer::field`](crates/ui/src/writer.rs) draws it muted, so it reads as this build's word and not
 as the value, and the heading a chat opens with says it the same way.
 
+The two blocks that close the root page - the examples and the environment - are composed by one
+function, not written out with their own spaces
+([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)).
+A block handed to clap already spaced is a block clap folds at column zero when the window is
+narrow, and `--adapter deepseek` arriving under `DEEPSEEK_API_KEY`, in the column where a
+variable's name goes, reads as another variable.
+Composed, each row is two columns while they fit and stacked under itself when they do not, and a
+command too wide for the window folds under itself rather than at column zero.
+The environment list is every variable the binary reads, and the case that asserts it names each
+one: a user whose output came out plain, or in ASCII, or the wrong width, reads this page to find
+out which variable did it.
+
 What the binary exits with is on the page too, under `Exit status:`
 ([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)), because the caller of `tetanus run
 || case $? in ...` reads a number this build has nowhere else told them about. The numbers are not
