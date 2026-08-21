@@ -81,9 +81,11 @@ pub enum Ended {
 /// it decides both whether the block is drawn and whether anything waits.
 /// `stop` is Ctrl-C: when it resolves, the block is erased and whatever was
 /// already committed stays committed.
+#[allow(clippy::too_many_arguments)]
 pub async fn play<W: Write>(
     ui: &mut Ui<W>,
     animated: bool,
+    rows: usize,
     events: &[SessionEvent],
     speed: f64,
     think: bool,
@@ -100,7 +102,7 @@ pub async fn play<W: Write>(
     }
     let (theme, width) = (*ui.theme(), ui.width());
     let mut view = Live::new(theme, width, "replaying", think);
-    let mut screen = Screen::new(Ui::new(ui.out(), theme, width), animated);
+    let mut screen = Screen::new(Ui::new(ui.out(), theme, width), animated, rows);
     let mut stop = std::pin::pin!(stop);
 
     let start = events.first().map(|event| event.time).unwrap_or_default();
@@ -273,7 +275,7 @@ mod tests {
     async fn a_piped_playback_is_the_timeline() {
         let events = turn();
         let mut played = buffered(theme(), 80);
-        let ended = play(&mut played, false, &events, 1.0, false, never())
+        let ended = play(&mut played, false, 24, &events, 1.0, false, never())
             .await
             .expect("play");
         assert_eq!(ended, Ended::Finished);
@@ -294,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_journal_says_it_is_empty() {
         let mut ui = buffered(theme(), 80);
-        let ended = play(&mut ui, false, &[], 1.0, false, never())
+        let ended = play(&mut ui, false, 24, &[], 1.0, false, never())
             .await
             .expect("play");
         assert_eq!(ended, Ended::Finished);
@@ -314,6 +316,7 @@ mod tests {
         let ended = play(
             &mut ui,
             true,
+            24,
             &events,
             1_000.0,
             false,

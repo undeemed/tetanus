@@ -187,6 +187,10 @@ pub struct Policy {
     pub stdout: Theme,
     pub stderr: Theme,
     pub width: usize,
+    /// Rows the terminal has, for the one view that draws a block in place: a
+    /// block as tall as the terminal scrolls its own top away, and every frame
+    /// after it lands a row out.
+    pub rows: usize,
     /// Whether stderr is a terminal. Colour does not answer this: `--color
     /// never` at a terminal is still a terminal, and progress may still
     /// repaint in place.
@@ -214,6 +218,12 @@ impl Policy {
                 charset,
             ),
             width: color::width(env, terminal_width),
+            rows: terminal_size::terminal_size()
+                .map(|(_, rows)| usize::from(rows.0))
+                .filter(|rows| *rows > 0)
+                // A stream that is not a terminal has no height to respect,
+                // and `Screen` writes nothing to one anyway.
+                .unwrap_or(usize::MAX),
             stderr_is_terminal,
             stdout_is_terminal,
         }
@@ -240,7 +250,7 @@ impl Policy {
     /// The live block, on stdout, repainted only at a terminal. A piped run
     /// gets the printed lines and no frames at all.
     pub fn stdout_screen(&self) -> Screen<io::Stdout> {
-        Screen::new(self.stdout(), self.stdout_is_terminal)
+        Screen::new(self.stdout(), self.stdout_is_terminal, self.rows)
     }
 }
 
