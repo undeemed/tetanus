@@ -131,6 +131,21 @@ The crate is authoritative for field-level detail; this section states the invar
 **`SessionEvent`** is one durable fact, byte-identical to one line of the JSONL journal.
 `type` stays a free string because the durable vocabulary grows, and a surface must pass an unknown type through rather than drop it.
 `seq` equals the index of the line, so a replay verifies contiguity.
+
+**`seq` is the order. `time` is not, and must not be used as one.**
+`time` is epoch milliseconds from the clock of the machine that wrote the line, and nothing makes it monotonic within a journal.
+Three ordinary things break it, and the last is not an edge case at all:
+
+- a clock correction - NTP stepping, an operator setting the time, a virtual machine resuming - moves it backwards mid-session;
+- a journal is read on a machine that is not the one that wrote it, whose clock never agreed in the first place;
+- **a forked journal is non-monotonic by construction.** §4.4.6 copies the parent's events as they stand, so seqs 1 upward carry the parent's timestamps while seq 0 is the child's own `session/start`, written later. Every forked journal has a header stamped after the events that follow it.
+
+So a surface sorts, bisects and pages by `seq`, always.
+`time` is for showing a reader when something happened, and for nothing that has to be correct.
+
+**Subtracting two `time` values is not a duration.**
+It is an estimate that is usually close and occasionally negative, and a reader that computes one had better be prepared for both.
+`TurnSummary.duration_ms` is measured on a monotonic clock, which is immune to every case above, so it is the answer to "how long did this take" and the difference of two stamps is not.
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
@@ -215,7 +230,8 @@ The engine already holds the journal open when it lists; a picker paging every j
 **`TurnSummary`** is the closing shape of one turn.
 Most of it is reconstructable from the journal; the summary is the convenience form.
 `duration_ms` and `usage` are the two exceptions worth stating.
-Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once.
+`duration_ms` is **not** a restatement of what the journal already holds, though this document used to say it was.
+It is measured on a monotonic clock while the turn runs, and `SessionEvent.time` is wall clock; the two answer the same question and only one of them is right when a clock moves (§4.3).
 `usage` is **not** derivable from anything else here, so it is named now even where a provider does not report it: both fields are `Option`, and `None` means "this build did not measure it", never zero.
 `Usage` uses the provider's own words, `prompt_tokens` and `completion_tokens`, because the same object is what `assistant/message.usage` carries in the journal.
 
@@ -682,6 +698,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 error object shape and code round trip | TC-PROTO-3 |
 | §5 an unknown code is not remapped | TC-PROTO-4 |
 | §4.3 `SessionEvent` matches a journal line | TC-PROTO-5 |
+| §4.3 `seq` orders a journal and `time` does not | TC-PROTO-85 |
+| §4.3 a duration is measured, not subtracted | TC-PROTO-86 |
 | §5 unknown enum variants survive | TC-PROTO-6 |
 | §4.2 pushes name their session | TC-PROTO-7 |
 | §5 compatibility is decided by major alone | TC-PROTO-8 |
@@ -828,3 +846,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Corrects what this document said about time (§4.3). It claimed "elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once", and both halves were wrong. `time` is wall clock from the writing machine and nothing makes it monotonic within a journal: a clock correction moves it backwards mid-session, a journal read elsewhere was stamped by a clock that never agreed, and - the case that is not hypothetical - **every forked journal is non-monotonic by construction**, because §4.4.6 copies the parent's events as they stand while seq 0 is the child's own header, written later. So a surface orders, bisects and pages by `seq`, and `time` is for telling a reader when something happened and for nothing that has to be correct. `duration_ms` is measured on a monotonic clock rather than derived, which makes it the answer to how long a turn took and the difference of two stamps merely an estimate that is usually close and occasionally negative. No type changes and no behaviour change: this describes what the engine has always done and withdraws a claim the document should not have made. |

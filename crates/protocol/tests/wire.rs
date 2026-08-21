@@ -802,3 +802,122 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-85: contract section 4.3. `seq` orders a journal and `time` does
+/// not.
+///
+/// The case that makes this concrete is not a clock fault: a forked journal is
+/// non-monotonic *by construction*. Section 4.4.6 copies the parent's events
+/// as they stand, so seqs 1 upward carry the parent's timestamps while seq 0
+/// is the child's own header, written later. Every forked journal has a header
+/// stamped after the events that follow it.
+///
+/// A surface that sorted by `time` would put that header in the middle of the
+/// history it opens.
+#[test]
+fn seq_orders_a_journal_and_time_does_not() {
+    // A forked journal: the child's header written now, the inherited prefix
+    // stamped when the parent wrote it.
+    let child_header = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 5_000,
+        data: json!({
+            "session_id": "child", "provider": "mock", "model": "m", "max_steps": 8,
+            "parent_session": "parent", "fork_seq": 2
+        }),
+        source_event_seqs: None,
+    };
+    let inherited = [
+        SessionEvent {
+            ty: "turn/start".into(),
+            seq: 1,
+            time: 1_000,
+            data: json!({ "turn": 1 }),
+            source_event_seqs: None,
+        },
+        SessionEvent {
+            ty: "turn/end".into(),
+            seq: 2,
+            time: 2_000,
+            data: json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            source_event_seqs: None,
+        },
+    ];
+
+    let journal = [
+        child_header.clone(),
+        inherited[0].clone(),
+        inherited[1].clone(),
+    ];
+
+    // In journal order, `seq` only ever increases.
+    let seqs: Vec<u64> = journal.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, [0, 1, 2]);
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "seq is the order");
+
+    // `time` does not, and this journal is a perfectly ordinary one.
+    let times: Vec<u64> = journal.iter().map(|e| e.time).collect();
+    assert_eq!(times, [5_000, 1_000, 2_000]);
+    assert!(
+        !times.windows(2).all(|w| w[0] <= w[1]),
+        "a forked journal's header is stamped after the events it precedes"
+    );
+
+    // Sorting by time reorders the journal, which is the bug this rule exists
+    // to prevent.
+    let mut by_time = journal.clone();
+    by_time.sort_by_key(|e| e.time);
+    assert_ne!(
+        by_time.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        seqs,
+        "ordering by time is not ordering the journal"
+    );
+}
+
+/// TC-PROTO-86: contract section 4.3. A duration is measured, not subtracted.
+///
+/// This document used to say `duration_ms` was "only the engine saying it
+/// once". It is not: it is measured on a monotonic clock while the turn runs,
+/// and `time` is wall clock, so the two answer the same question and only one
+/// of them is right when a clock moves. A reader that subtracts two stamps
+/// gets an estimate that is usually close and occasionally negative.
+#[test]
+fn a_duration_is_measured_not_subtracted() {
+    // A turn during which the clock was corrected backwards: the difference of
+    // the stamps is negative, and the measured duration is not.
+    let opened: u64 = 10_000;
+    let closed: u64 = 8_500;
+    assert!(
+        closed < opened,
+        "a clock correction mid-turn, which is an ordinary event"
+    );
+
+    let measured = TurnSummary {
+        turn: 1,
+        steps: 1,
+        stop_reason: StopReason::Natural,
+        stop_veto: None,
+        content: "done".into(),
+        duration_ms: Some(1_400),
+        usage: None,
+    };
+
+    assert_eq!(
+        measured.duration_ms,
+        Some(1_400),
+        "the monotonic measurement is unaffected by the clock moving"
+    );
+    // The subtraction a reader might reach for cannot even be done in the
+    // journal's own type without underflowing, which is the sharpest form of
+    // "do not do this".
+    assert_eq!(closed.checked_sub(opened), None);
+
+    // Unmeasured stays absent rather than zero, as section 4.3 already
+    // requires of both optional fields.
+    let unmeasured = TurnSummary {
+        duration_ms: None,
+        ..measured
+    };
+    assert_eq!(unmeasured.duration_ms, None);
+}
