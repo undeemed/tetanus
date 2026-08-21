@@ -1,0 +1,13 @@
+# Append-only tables, merged rather than adjudicated.
+#
+# Every slice in flight appends one row to the end of this file, and git merges
+# by line: two branches appending after the same last line conflict on every
+# rebase, whatever they actually changed. `union` is git's built-in driver that
+# keeps both sides in order instead, which is what resolving one of these by
+# hand amounted to.
+#
+# It never reports a conflict, so it cannot warn about a change that is not an
+# append. That is why only this file carries it: `docs/parity.md` and
+# `docs/interface-contract.md` are edited in place, and a conflict in those is
+# information.
+docs/parity-changelog.md merge=union
