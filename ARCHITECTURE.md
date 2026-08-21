@@ -59,6 +59,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/config   tetanus-config    layered config with provenance
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
+  -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells, shell tools
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
                                        full-screen view loop
@@ -301,7 +302,8 @@ Two adapters ship:
 - [crates/turn/src/llm/mock.rs](crates/turn/src/llm/mock.rs) - deterministic and offline. It calls a
   tool on step 1 and answers on step 2, so one offline run covers the tool pipeline and the loop-back.
   Every turn runs that shape, not only the first: it reads this step's own messages, never the whole
-  conversation.
+  conversation. Which tool it calls is the prompt's to choose: a prompt opening with `!` asks for
+  `shell` with the rest as the command, so a build with no key still exercises the process seam.
 - [crates/turn/src/llm/deepseek.rs](crates/turn/src/llm/deepseek.rs) - DeepSeek chat completions
   behind an `SseTransport` seam, so the request body and the stream decoder are tested without
   network. Credentials are referenced by environment variable name; config never carries a literal
@@ -613,6 +615,42 @@ The contract's own status table and changelog are authoritative for what is serv
 A boundary change is its own pull request touching the document and the types together
 ([AGENTS.md](AGENTS.md)).
 
+### 4.9 Interface view - the process seam
+
+Everything that leaves the harness goes through `tetanus-exec`, in three layers.
+
+`proc::Command` ([crates/exec/src/proc.rs](crates/exec/src/proc.rs)) runs one command: an argv nothing
+re-splits, an environment the caller listed rather than one inherited and scrubbed, a bounded
+capture that keeps the tail, and a sink that is handed each piece of output as it arrives.
+Every child leads its own process group, so termination is a SIGTERM to the group, a grace period,
+then a SIGKILL to the group: a command that starts grandchildren and a command that traps SIGTERM
+both end. When the leader exits but something it started still holds the output pipe, the group is
+swept and the caller is told - otherwise an orphan would hold a turn open for ever.
+
+`backend::ShellBackend` ([crates/exec/src/backend.rs](crates/exec/src/backend.rs)) is which shell a
+command goes through. `Bash` and `PowerShell` ship; a backend whose binary is absent refuses,
+naming the program and where it looked, and never substitutes another shell - a bash script run
+under dash fails later, elsewhere, with a message about syntax.
+`shell::ShellExec` resolves a request against the deployment's defaults and caps before running it,
+and renders the result into upstream's markers (`[stderr]`, `[timed out after Nms]`,
+`[killed by signal: X]`, `[exit code: N]`), which `shell::parse_exit` reads back out of a replayed
+result.
+
+`session::ShellSessions` ([crates/exec/src/session.rs](crates/exec/src/session.rs)) is the
+persistent half: a long-lived shell reading commands from a pipe, with a per-command nonce marker
+around each one so its output and its exit status are exactly attributable. The working directory
+and the exported variables survive between tool calls because the process does. A shell that dies
+is reported and stays dead; nothing is restarted underneath the caller, because a fresh shell in a
+state the model did not create is worse than being told.
+
+`tools::ShellTools` ([crates/exec/src/tools.rs](crates/exec/src/tools.rs)) registers what the model
+calls: `shell`, and `shell_open`/`shell_run`/`shell_close`/`shell_list`. They run in the ordinary
+tool pipeline - `shell` and `shell_run` are barriers, `shell_list` is parallel-safe - and they hold
+the turn's own interrupt, so stopping a turn kills the command it started rather than only ending
+the loop. A composition supplies that switch through `boot_with`
+([crates/turn/src/boot.rs](crates/turn/src/boot.rs)); the engine mints one per session, because one
+switch shared across sessions would let an interrupt in one stop another.
+
 ## 5. Verification - the conformance approach
 
 Parity with upstream is asserted, not asserted about.
@@ -662,7 +700,8 @@ not protocol-level.
 ## 7. Not built yet
 
 A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
-kernel sandboxing, the web UI, and the WASM plugin host.
+kernel sandboxing, a PTY and the terminal tools that need one, background jobs, the web UI, and the
+WASM plugin host.
 The file tools exist and are composed by whoever builds a registry
 ([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
 is the presentation lane's wiring, per §4.7's ownership table in

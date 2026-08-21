@@ -568,13 +568,31 @@ async fn an_ordinary_command_is_not_swept() {
 /// would satisfy any content-only check.
 ///
 /// Input: a command that prints, sleeps, prints again, with a sink attached
-/// and the first chunk's arrival timed.
-/// Expected: the first chunk arrives well before the command ends; both
-/// streams reach the sink tagged with which they came from; and the captured
-/// tails still hold everything.
+/// and a watcher reading the sink while the command is still running.
+/// Expected: the watcher sees the first line before the call returns - the
+/// claim stated as an ordering rather than as a stopwatch reading, so a loaded
+/// machine cannot turn "it streamed" into "it was slow"; both streams reach the
+/// sink tagged with which they came from; and the captured tails still hold
+/// everything.
 #[tokio::test]
 async fn a_long_running_command_is_readable_before_it_ends() {
     let sink = Arc::new(Timed::default());
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let sink = Arc::clone(&sink);
+        let finished = Arc::clone(&finished);
+        tokio::spawn(async move {
+            loop {
+                if sink.text().contains("first") {
+                    return !finished.load(std::sync::atomic::Ordering::Acquire);
+                }
+                if finished.load(std::sync::atomic::Ordering::Acquire) {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
     let started = std::time::Instant::now();
 
     let output = sh("echo first; echo to-err 1>&2; sleep 1; echo second")
@@ -582,12 +600,17 @@ async fn a_long_running_command_is_readable_before_it_ends() {
         .run()
         .await
         .expect("ran");
+    finished.store(true, std::sync::atomic::Ordering::Release);
 
     let elapsed = started.elapsed();
+    assert!(
+        watcher.await.expect("the watcher ran"),
+        "nothing reached the sink until the command had ended, which is buffering"
+    );
     let first = sink.first_at().expect("something reached the sink");
     assert!(
-        first < Duration::from_millis(700),
-        "the first chunk waited {first:?} of a {elapsed:?} command, which is buffering"
+        first < elapsed,
+        "the first chunk arrived at {first:?} of a {elapsed:?} command"
     );
     let text = sink.text();
     assert!(
@@ -789,11 +812,13 @@ fn read_pid(path: &std::path::Path) -> i32 {
 
 /// Whether a process still exists, asked the way a shell asks: signal zero.
 ///
-/// Gives the kernel a moment first, because a kill is delivered asynchronously
-/// and the question is whether the process dies, not whether it has died by
-/// the time the next line runs.
+/// Waits for the answer rather than sampling it, because a kill is delivered
+/// asynchronously and the claim under test is that the process dies - not that
+/// it has died by the time the next line runs. The window is long because a
+/// loaded machine schedules the reaper late, and a case that fails only under
+/// load is a case nobody can read.
 fn alive(pid: i32) -> bool {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         // Safety: signal zero delivers nothing; it only asks whether the
         // process exists and could be signalled.
         if unsafe { libc::kill(pid, 0) } != 0 {

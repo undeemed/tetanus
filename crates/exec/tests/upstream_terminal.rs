@@ -591,8 +591,14 @@ fn read_pid(path: &std::path::Path) -> i32 {
 }
 
 /// Whether a process still exists, asked the way a shell asks: signal zero.
+///
+/// Waits for the answer rather than sampling it, because a kill is delivered
+/// asynchronously and the claim under test is that the process dies - not that
+/// it has died by the time the next line runs. The window is long because a
+/// loaded machine schedules the reaper late, and a case that fails only under
+/// load is a case nobody can read.
 fn alive(pid: i32) -> bool {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         // Safety: signal zero delivers nothing; it only asks whether the
         // process exists and could be signalled.
         if unsafe { libc::kill(pid, 0) } != 0 {

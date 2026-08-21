@@ -632,6 +632,65 @@ async fn arguments_the_model_got_wrong_are_refused_with_a_reason() {
     );
 }
 
+/// TC-PORT-SHELL-19: a host with no shell still advertises `shell`, and every
+/// call answers the deployment fault.
+///
+/// Not an upstream case: upstream's composition fails to load when its
+/// executor cannot be mounted, because a host without a shell is a
+/// misconfiguration there. A tetanus binary has other tools that still work,
+/// so it starts - and this is the case that keeps the shell's absence loud
+/// rather than invisible.
+///
+/// A tool that quietly vanished would leave the model unable to tell "this
+/// build has no shell" from "this deployment is broken", and it would report
+/// neither to the person who could fix it.
+///
+/// Input: the tools registered against a bash pinned to a program that is not
+/// there, and a model that calls `shell` anyway.
+/// Expected: `shell` is still registered, its description names the fault, and
+/// the call answers a failure naming the missing program.
+#[tokio::test]
+async fn a_host_with_no_shell_still_advertises_the_tool_and_explains() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut registry = tetanus_turn::tools::ToolRegistry::new();
+    ShellTools::register_or_explain(
+        &mut registry,
+        Arc::new(Bash::at("/nowhere/bin/bash")),
+        ShellConfig {
+            cwd: dir.path().to_path_buf(),
+            ..ShellConfig::default()
+        },
+        SessionConfig::default(),
+        Interrupt::new(),
+    );
+
+    assert_eq!(
+        registry.names().cloned().collect::<Vec<_>>(),
+        vec![SHELL],
+        "the one tool it can honestly offer is the one that explains itself"
+    );
+    let advertised = registry.schemas()[0].description.clone();
+    assert!(
+        advertised.contains("/nowhere/bin/bash"),
+        "the description names what is missing: {advertised}"
+    );
+
+    let refused = registry
+        .execute(&ToolCall {
+            id: "call-1".into(),
+            name: SHELL.into(),
+            arguments: json!({ "command": "true" }),
+        })
+        .await
+        .expect_err("there is no shell to run it");
+    assert!(
+        refused
+            .to_string()
+            .contains("no other shell was substituted"),
+        "the refusal rules out the silent fallback: {refused}"
+    );
+}
+
 // ---------------------------------------------------------------- fixtures
 
 /// A call written from what earlier results said - the session id
@@ -854,8 +913,14 @@ fn read_pid(path: &std::path::Path) -> i32 {
 }
 
 /// Whether a process still exists, asked the way a shell asks: signal zero.
+///
+/// Waits for the answer rather than sampling it, because a kill is delivered
+/// asynchronously and the claim under test is that the process dies - not that
+/// it has died by the time the next line runs. The window is long because a
+/// loaded machine schedules the reaper late, and a case that fails only under
+/// load is a case nobody can read.
 fn alive(pid: i32) -> bool {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         // Safety: signal zero delivers nothing; it only asks whether the
         // process exists and could be signalled.
         if unsafe { libc::kill(pid, 0) } != 0 {
