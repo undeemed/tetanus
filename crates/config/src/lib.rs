@@ -13,6 +13,7 @@ pub mod file;
 pub mod home;
 pub mod recompose;
 pub mod secret;
+pub mod watch;
 
 /// A fault reading the settings document.
 ///
