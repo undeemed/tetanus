@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{Stream, StreamExt};
 
@@ -53,6 +53,21 @@ pub const STREAM_CLOSED: &str = "the stream ended without the [DONE] sentinel";
 /// `DEFAULT_STREAM_IDLE_TIMEOUT_MS`).
 pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 
+/// How long one request may take in total, however busy the connection is.
+///
+/// The idle window catches a provider that goes quiet; this catches one that
+/// never does. A route that answers a byte every four minutes for ever resets
+/// the idle window on each byte and keeps a turn alive indefinitely, which is
+/// the same unbounded turn the idle window was added to prevent, reached the
+/// other way round.
+///
+/// Ten minutes is chosen to be longer than any legitimate single completion,
+/// extended reasoning included, and short enough that a wedged route fails
+/// while someone is still watching. Upstream has no equivalent - the idle
+/// window is the only bound it ships - so this is the `llm/*` gap section 3
+/// names rather than a port.
+pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 600_000;
+
 /// The finish reason a stream that never states one is reported as. The
 /// provider omits the field on some plain completions, and an empty string
 /// downstream reads as a turn that ended for no stated reason.
@@ -75,6 +90,14 @@ pub struct DeepSeekConfig {
     /// [`DeepSeekConfig::idle_window`] reads a zero as the default rather than
     /// as a window of no time, which would fail every request.
     pub stream_idle_timeout_ms: u64,
+    /// The whole-request deadline this route runs with, in milliseconds.
+    ///
+    /// Read the same way as the idle window, and for the same reason: a zero
+    /// is the default rather than a deadline of no time, which would fail
+    /// every request. A deployment that wants no practical bound sets a large
+    /// value rather than zero, so "unset" and "unbounded" stay different
+    /// things.
+    pub request_deadline_ms: u64,
 }
 
 impl DeepSeekConfig {
@@ -83,6 +106,15 @@ impl DeepSeekConfig {
     pub fn idle_window(&self) -> Duration {
         Duration::from_millis(match self.stream_idle_timeout_ms {
             0 => DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+            ms => ms,
+        })
+    }
+
+    /// The whole-request budget, with a zero read as
+    /// [`DEFAULT_REQUEST_DEADLINE_MS`].
+    pub fn deadline(&self) -> Duration {
+        Duration::from_millis(match self.request_deadline_ms {
+            0 => DEFAULT_REQUEST_DEADLINE_MS,
             ms => ms,
         })
     }
@@ -99,6 +131,7 @@ impl Default for DeepSeekConfig {
             models: vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
             max_tokens: None,
             stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+            request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
         }
     }
 }
@@ -131,7 +164,7 @@ impl DeepSeekAdapter {
     /// The production wiring: a real HTTPS call, watched by the configured
     /// idle window.
     pub fn with_http(config: DeepSeekConfig) -> Self {
-        let transport = ReqwestTransport::new(config.idle_window());
+        let transport = ReqwestTransport::new(config.idle_window(), config.deadline());
         Self::new(config, Arc::new(transport))
     }
 
@@ -603,39 +636,71 @@ pub struct ReqwestTransport {
     client: reqwest::Client,
     /// Kept so a failure can name the window it exceeded.
     idle: Duration,
+    /// Kept for the same reason, and to tell the two timeouts apart.
+    deadline: Duration,
 }
 
 impl ReqwestTransport {
-    /// A transport whose connection may stay silent for `idle` and no longer.
-    pub fn new(idle: Duration) -> Self {
+    /// A transport bounded twice: silent for at most `idle`, and running for
+    /// at most `deadline` however talkative it is.
+    ///
+    /// Both bounds are needed and neither implies the other. The idle window
+    /// catches a provider that stops speaking; the deadline catches one that
+    /// never stops. A route that answers a byte every four minutes for ever
+    /// resets the idle window on each byte, so without the deadline it is a
+    /// turn that never ends.
+    pub fn new(idle: Duration, deadline: Duration) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .read_timeout(idle)
+                // `timeout` is the whole request, head and body together,
+                // which is exactly the budget wanted here.
+                .timeout(deadline)
                 // The same failure `reqwest::Client::default()` panics on: a
                 // build whose TLS backend cannot start has no transport to
                 // hand back and no request it could serve.
                 .build()
                 .expect("a reqwest client"),
             idle,
+            deadline,
         }
     }
 
-    /// What a stalled connection is reported as. The failure is
-    /// [`LlmError::Timeout`], whose code `TIMEOUT` is in
+    /// What a timeout is reported as, naming whichever bound was reached.
+    ///
+    /// The transport reports both as [`LlmError::Timeout`], whose code
+    /// `TIMEOUT` is in
     /// [`retry::DEFAULT_RETRYABLE_CODES`](crate::llm::retry::DEFAULT_RETRYABLE_CODES),
-    /// so a provider that goes quiet is asked again rather than ending the
-    /// turn.
-    fn idle_message(&self, url: &str) -> String {
-        format!(
-            "the stream from {url} was idle for {}ms",
-            self.idle.as_millis()
-        )
+    /// so either way the request is asked again rather than ending the turn.
+    /// Only the message differs, and it differs because the two say different
+    /// things about the route: one is quiet, the other is slow, and a reader
+    /// deciding whether to raise the deadline needs to know which.
+    ///
+    /// Which bound was reached is decided by how long the request actually
+    /// ran, because the transport reports both through one error kind. A
+    /// request that has been running for its whole budget reached the
+    /// deadline; anything sooner is the idle window.
+    fn timeout_message(&self, url: &str, started: Instant) -> String {
+        if started.elapsed() >= self.deadline {
+            format!(
+                "the request to {url} exceeded its {}ms deadline",
+                self.deadline.as_millis()
+            )
+        } else {
+            format!(
+                "the stream from {url} was idle for {}ms",
+                self.idle.as_millis()
+            )
+        }
     }
 }
 
 impl Default for ReqwestTransport {
     fn default() -> Self {
-        Self::new(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
+        Self::new(
+            Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+            Duration::from_millis(DEFAULT_REQUEST_DEADLINE_MS),
+        )
     }
 }
 
@@ -657,9 +722,12 @@ impl SseTransport for ReqwestTransport {
         for (name, value) in attribution_headers(&AppIdentity::default()) {
             request = request.header(name, value);
         }
+        // When the request started, so a timeout can say which of the two
+        // bounds it reached.
+        let started = Instant::now();
         let response = request.json(&body).send().await.map_err(|e| {
             if e.is_timeout() {
-                LlmError::Timeout(self.idle_message(url))
+                LlmError::Timeout(self.timeout_message(url, started))
             } else {
                 LlmError::Transport(format!("request to {url} failed: {e}"))
             }
@@ -684,11 +752,27 @@ impl SseTransport for ReqwestTransport {
 
         // Worded here and moved into the stream: the frames outlive this call,
         // so they cannot borrow the transport to ask it later.
-        let stalled = self.idle_message(url);
+        // Worded lazily rather than eagerly: which bound a later failure
+        // reached depends on how long the stream has been running by then,
+        // which is not known yet.
+        let (url_owned, idle, deadline) = (url.to_string(), self.idle, self.deadline);
+        let stalled = move || {
+            if started.elapsed() >= deadline {
+                format!(
+                    "the request to {url_owned} exceeded its {}ms deadline",
+                    deadline.as_millis()
+                )
+            } else {
+                format!(
+                    "the stream from {url_owned} was idle for {}ms",
+                    idle.as_millis()
+                )
+            }
+        };
         let bytes = response.bytes_stream().map(move |chunk| {
             chunk.map(|b| b.to_vec()).map_err(|e| {
                 if e.is_timeout() {
-                    LlmError::Timeout(stalled.clone())
+                    LlmError::Timeout(stalled())
                 } else {
                     LlmError::Transport(e.to_string())
                 }
