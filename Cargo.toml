@@ -13,6 +13,7 @@ members = [
   "crates/sandbox",
   "crates/turn",
   "crates/host",
+  "crates/features",
   "crates/fs",
   "crates/mcp",
   "crates/web",

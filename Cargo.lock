@@ -1541,6 +1541,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-features"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tetanus-core",
+ "tetanus-session",
+ "tetanus-turn",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tetanus-fs"
 version = "0.1.0"
 dependencies = [
