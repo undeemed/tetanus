@@ -104,9 +104,9 @@ pub fn read<K: Keys, W: Write>(
 
 /// What a keystroke did to the line.
 ///
-/// Non-exhaustive because a later slice adds a history to walk with the up and
-/// down keys, and a caller that matched exhaustively today would be the thing
-/// that stopped compiling for it.
+/// Non-exhaustive because the vocabulary grows: a caller that matched
+/// exhaustively today would be the thing that stopped compiling for the next
+/// thing a keystroke can mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Typed {
@@ -156,6 +156,18 @@ impl Line {
     /// An empty line, with the cursor at its start.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Put `text` on the line, with the cursor at the end of it.
+    ///
+    /// For a caller walking a history: what was asked before is not something
+    /// the reader typed, so it arrives whole rather than a keystroke at a
+    /// time, and the cursor goes where it would be if they had just finished
+    /// typing it - which is where they will edit it from.
+    pub fn put(&mut self, text: &str) {
+        self.text = text.chars().collect();
+        self.cursor = self.text.len();
+        self.offset = 0;
     }
 
     /// What has been typed so far.
