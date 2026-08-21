@@ -11,4 +11,5 @@ tetanus-session = { path = "../session" }
 
 [dev-dependencies]
 tetanus-core = { path = "../core" }
+tokio = { workspace = true }
 tempfile.workspace = true

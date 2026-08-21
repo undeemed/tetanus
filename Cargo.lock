@@ -1639,6 +1639,7 @@ dependencies = [
  "tempfile",
  "tetanus-core",
  "tetanus-session",
+ "tokio",
 ]
 
 [[package]]
