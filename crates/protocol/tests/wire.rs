@@ -6,8 +6,8 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
-    SessionEventPush, SessionForkParams,
+    capability, method, push, AgentStatusPush, AgentSteerParams, AgentSteerResult,
+    ApprovalSetParams, ApproveParams, ApproveResult, SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
@@ -801,4 +801,114 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-35: contract section 4.4.10. A steer names the turn it joined and
+/// the step that read it.
+///
+/// The step is what lets a surface show the message landing where it landed
+/// rather than where it was typed - a person who says "actually, use TypeScript"
+/// mid-answer needs to see which step acted on it, because the one before it
+/// did not.
+#[test]
+fn a_steer_names_the_turn_and_the_step_that_read_it() {
+    let params = AgentSteerParams {
+        session_id: "s1".into(),
+        content: "actually, use the other file".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize"),
+        json!({ "session_id": "s1", "content": "actually, use the other file" })
+    );
+
+    let landed = AgentSteerResult {
+        turn: 3,
+        taken_at_step: Some(2),
+    };
+    assert_eq!(
+        serde_json::to_value(&landed).expect("serialize"),
+        json!({ "turn": 3, "taken_at_step": 2 })
+    );
+
+    // Still queued when the call answered: the turn is known, the step is not
+    // yet, and absent says so rather than naming a step that did not read it.
+    let queued = AgentSteerResult {
+        turn: 3,
+        taken_at_step: None,
+    };
+    let wire = serde_json::to_value(&queued).expect("serialize");
+    assert_eq!(wire.get("taken_at_step"), None);
+    assert_eq!(
+        serde_json::from_value::<AgentSteerResult>(wire).expect("parse"),
+        queued
+    );
+
+    assert_eq!(capability::AGENT_STEER, method::AGENT_STEER);
+}
+
+/// TC-PROTO-36: contract section 4.4.10. A steered message is on the journal
+/// whether or not a step ever read it, and is not a `user/message`.
+///
+/// The durability rule exists to prevent the worst outcome available here: a
+/// caller told its message was accepted, which then vanishes from the history
+/// because the turn ended first. The person believes they have said something
+/// and the transcript disagrees.
+///
+/// The separate type exists because both derive to the same role, and a reader
+/// replaying must still tell a message that *opened* a turn from one that
+/// arrived during it - only one of them can be refused for arriving too late.
+#[test]
+fn a_steer_that_was_never_read_is_still_on_the_journal() {
+    let read = SessionEvent {
+        ty: "user/steer".into(),
+        seq: 7,
+        time: 0,
+        data: json!({ "content": "use the other file", "turn": 3, "taken": true }),
+        source_event_seqs: None,
+    };
+    let missed = SessionEvent {
+        data: json!({ "content": "too late", "turn": 3, "taken": false }),
+        ..read.clone()
+    };
+
+    for event in [&read, &missed] {
+        assert!(event.parse().is_none(), "staged, like the other new types");
+        assert!(event.data["content"].is_string());
+        assert!(event.data["taken"].is_boolean(), "it says which happened");
+    }
+    assert_ne!(read.data["taken"], missed.data["taken"]);
+
+    assert_ne!(
+        read.ty, "user/message",
+        "a steer is not a prompt, though both derive to the same role"
+    );
+}
+
+/// TC-PROTO-37: contract section 4.4.10. An idle session refuses with a null
+/// turn.
+///
+/// Worth a case because the wording reads backwards at first: a session that
+/// is *not* busy is exactly what makes steering impossible. The code names the
+/// condition the caller has to fix - there is no turn to join - and the null
+/// turn says which way round it is, so a surface can tell "nothing is running"
+/// from "the turn is finishing and will read nothing more".
+#[test]
+fn an_idle_session_refuses_with_a_null_turn() {
+    let idle = RpcError::new(ErrorCode::SessionBusy, "no turn is running")
+        .with_data(json!({ "session_id": "s1", "turn": null }));
+    let too_late = RpcError::new(ErrorCode::SessionBusy, "the turn takes no further step")
+        .with_data(json!({ "session_id": "s1", "turn": 3 }));
+
+    for refusal in [&idle, &too_late] {
+        assert_eq!(refusal.kind(), Some(ErrorCode::SessionBusy), "no new code");
+        assert_eq!(ErrorCode::SessionBusy.exit_status(), 4);
+    }
+
+    let idle_data = idle.data.clone().expect("data");
+    assert_eq!(idle_data["turn"], json!(null), "nothing is running");
+    assert_eq!(
+        too_late.data.clone().expect("data")["turn"],
+        json!(3),
+        "and a turn that is finishing names itself"
+    );
 }

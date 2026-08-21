@@ -25,6 +25,7 @@ pub mod method {
     pub const AGENT_PROMPT: &str = "agent.prompt";
     pub const AGENT_STATUS: &str = "agent.status";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
+    pub const AGENT_STEER: &str = "agent.steer";
     pub const CATALOG_TOOLS: &str = "catalog.tools";
     pub const CATALOG_MODELS: &str = "catalog.models";
     pub const CONFIG_DUMP: &str = "config.dump";
@@ -46,6 +47,7 @@ pub mod capability {
     pub const SESSION_FORK: &str = "session.fork";
     pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
+    pub const AGENT_STEER: &str = "agent.steer";
     pub const UI_ASK: &str = "ui.ask";
     pub const UI_APPROVE: &str = "ui.approve";
     pub const APPROVAL_SET: &str = "approval.set";
@@ -199,6 +201,28 @@ pub struct AgentPromptParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptResult {
     pub summary: TurnSummary,
+}
+
+/// Params of `agent.steer`: a message for the turn already running.
+///
+/// Contract section 4.4.10. Not `agent.prompt`: this joins a turn rather than
+/// starting one, and is refused when there is none to join.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSteerParams {
+    pub session_id: String,
+    pub content: String,
+}
+
+/// Where a steered message landed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSteerResult {
+    /// The turn that took it.
+    pub turn: u64,
+    /// The step that read it, so a surface can show the message landing where
+    /// it landed rather than where it was typed. Absent while it is still
+    /// queued at the moment the call answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_at_step: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,6 +381,19 @@ pub trait Engine: Send + Sync {
     async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError>;
     async fn agent_status(&self, params: SessionRef) -> Result<AgentStatusResult, RpcError>;
     async fn agent_interrupt(&self, params: SessionRef) -> Result<Ack, RpcError>;
+    /// Contract section 4.2: reserved. See [`Engine::session_fork`] for what a
+    /// default body means here.
+    async fn agent_steer(&self, params: AgentSteerParams) -> Result<AgentSteerResult, RpcError> {
+        let _ = params;
+        Err(RpcError::new(
+            ErrorCode::NotImplemented,
+            format!(
+                "`{}` is reserved, and this build does not serve it",
+                method::AGENT_STEER
+            ),
+        )
+        .with_data(serde_json::json!({ "method": method::AGENT_STEER })))
+    }
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError>;
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError>;
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError>;
