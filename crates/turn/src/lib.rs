@@ -9,6 +9,7 @@
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
+//! - [`schema`] checks a call's arguments against the schema its tool published.
 //! - [`tools`] is the model-facing capability registry.
 //! - [`boot`] composes them through the typed service registry.
 //! - [`trace`] reads back the ordered event sequence of a run.
@@ -21,6 +22,7 @@ pub mod llm;
 pub mod log;
 pub mod prompt;
 pub mod repair;
+pub mod schema;
 pub mod tokens;
 pub mod tools;
 pub mod trace;
