@@ -78,6 +78,9 @@ pub struct Request {
     /// What came after the head, for the routes that take one. Empty for the
     /// requests that carry nothing, which is most of them.
     pub body: Vec<u8>,
+    /// Who is asking. A route that authenticates needs it, and it is the
+    /// carrier's to report because it is the only party that saw the socket.
+    pub peer: std::net::IpAddr,
 }
 
 impl Request {
@@ -111,6 +114,21 @@ impl Request {
             headers,
             upgrade,
             body: Vec::new(),
+            // Filled in by the carrier, which is the only party that has it.
+            peer: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        })
+    }
+
+    /// One value out of the query string, or `None`.
+    ///
+    /// A token travels here because a browser cannot set a header on the
+    /// requests that matter, which is the same reason §4.1.2 gives for the
+    /// socket's own token living in the URL.
+    pub fn query(&self, name: &str) -> Option<&str> {
+        self.query.as_deref()?.split('&').find_map(|pair| {
+            pair.split_once('=')
+                .filter(|(key, _)| *key == name)
+                .map(|(_, value)| value)
         })
     }
 

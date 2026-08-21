@@ -2145,10 +2145,25 @@ fn the_web_panel_binds_loopback_or_the_wildcard() {
 
 /// The bridge, asked one question over plain HTTP.
 fn over_http(port: u16, method: &str, kind: &str, body: &str) -> (u16, String) {
+    over_http_at(port, method, kind, body, None)
+}
+
+/// The same, with an `authorization` header when one is given.
+fn over_http_at(
+    port: u16,
+    method: &str,
+    kind: &str,
+    body: &str,
+    authorization: Option<&str>,
+) -> (u16, String) {
     use std::io::{Read, Write};
     let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).expect("it connects");
+    let authorization = match authorization {
+        Some(value) => format!("authorization: {value}\r\n"),
+        None => String::new(),
+    };
     let request = format!(
-        "POST /api/{method} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: {kind}\r\ncontent-length: {}\r\n\r\n{body}",
+        "POST /api/{method} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: {kind}\r\n{authorization}content-length: {}\r\n\r\n{body}",
         body.len()
     );
     socket.write_all(request.as_bytes()).expect("written");
@@ -2290,4 +2305,67 @@ fn the_bridge_answers_the_host_methods_too() {
     assert_eq!(relative, 200, "{unqualified}");
     assert!(unqualified.contains("-32009"), "{unqualified}");
     assert!(unqualified.contains("not/absolute"), "{unqualified}");
+}
+
+/// TC-CLI-WEB-7: the bridge under a stated token.
+/// Expected: a POST with no token is 401 and never reaches the JSON-RPC layer,
+/// one with the token in the query is answered, and so is one presenting it as
+/// a bearer header. A door with a lock beside a door without one is a room
+/// with no lock: this carrier reaches the whole engine exactly as the socket
+/// does, so the posture has to be the same on both.
+#[test]
+fn the_bridge_is_locked_the_way_the_socket_is() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args([
+            "web",
+            "--frontend",
+            "app",
+            "--listen",
+            "127.0.0.1:5397",
+            "--token",
+            "a-stated-secret",
+        ])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let hello = r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#;
+    let (bare, _) = over_http(5397, "rpc.hello", "application/json", hello);
+    let (with_query, greeted) = over_http_at(
+        5397,
+        "rpc.hello?token=a-stated-secret",
+        "application/json",
+        hello,
+        None,
+    );
+    let (with_header, _) = over_http_at(
+        5397,
+        "session.list",
+        "application/json",
+        "{}",
+        Some("Bearer a-stated-secret"),
+    );
+    // The page is not the protocol: it stays readable, which is what makes the
+    // token deliverable to a reader who was given the URL.
+    let page = std::net::TcpStream::connect(("127.0.0.1", 5397)).is_ok();
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(bare, 401, "an unauthenticated POST reached the engine");
+    assert_eq!(with_query, 200, "{greeted}");
+    assert!(greeted.contains("protocol_version"), "{greeted}");
+    assert_eq!(with_header, 200, "a bearer token was not accepted");
+    assert!(page, "the page stopped being served");
 }

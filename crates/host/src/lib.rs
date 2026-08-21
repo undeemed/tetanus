@@ -368,6 +368,9 @@ impl WebServer {
         // is taken off the socket, and then the body a route may want.
         take(&mut stream, head).await?;
         let mut request = request;
+        if let Ok(peer) = stream.peer_addr() {
+            request.peer = peer.ip();
+        }
         match body(&mut stream, &request).await? {
             Body::Read(body) => request.body = body,
             // A body bigger than this carrier will hold is refused before it

@@ -45,6 +45,20 @@ const carrier = query.get("ws") || manifest.carrier || window.TETANUS_WS || "";
 // publish. The manifest's is the demonstration posture, where the deployment
 // has said out loud that every reader of this page may dial.
 const token = query.get("token") || manifest.token || "";
+// The same secret on the other door. The bridge admits a caller exactly as the
+// socket does, so a page that dialled with a token and posted without one
+// would be refused halfway through its own work.
+window.TETANUS_CALL = async (method, params) => {
+  const url = "/api/" + method + (token ? "?token=" + encodeURIComponent(token) : "");
+  const said = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params || {}),
+  });
+  const body = await said.json();
+  if (body.error) throw new Error(body.error.message || "the call failed");
+  return body.result;
+};
 const address = carrier && token
   ? carrier + (carrier.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
   : carrier;

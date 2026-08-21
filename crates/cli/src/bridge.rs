@@ -51,6 +51,7 @@ use tetanus_host::{
 };
 use tetanus_protocol::methods::{AgentStatusPush, Engine, EventSink, SessionEventPush};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
+use tetanus_rpc::auth::{Auth, Presented};
 use tetanus_rpc::Codec;
 
 /// Where the bridge lives. A prefix, because the method is the rest of it.
@@ -71,19 +72,30 @@ mod host {
     pub const CREATE: &str = "host.createDirectory";
 }
 
-/// Mount the bridge on a carrier.
-pub fn mount(server: &WebServer, engine: Arc<dyn Engine>) -> Result<Registered, Taken> {
+/// Mount the bridge on a carrier, under the same posture as the socket.
+///
+/// The same `Auth`, deliberately. A door with a lock beside a door without one
+/// is a room with no lock: this carrier reaches the whole `Engine` exactly as
+/// the socket does - start turns, read every journal, read the resolved
+/// configuration - so a deployment that stated a token and left the POSTs open
+/// would have stated nothing at all.
+pub fn mount(
+    server: &WebServer,
+    engine: Arc<dyn Engine>,
+    auth: Arc<Auth>,
+) -> Result<Registered, Taken> {
     let codec = Arc::new(Codec::new(engine));
     let picker = Browse::default();
     let handler: Handler = Arc::new(move |request| {
         let codec = Arc::clone(&codec);
-        Box::pin(async move { answer(codec, picker, request).await })
+        let auth = Arc::clone(&auth);
+        Box::pin(async move { answer(codec, picker, auth, request).await })
     });
     server.register(Pattern::Prefix, PREFIX, handler)
 }
 
 /// One call, from the request that carried it to the answer that goes back.
-async fn answer(codec: Arc<Codec>, picker: Browse, request: Request) -> Response {
+async fn answer(codec: Arc<Codec>, picker: Browse, auth: Arc<Auth>, request: Request) -> Response {
     if request.method != "POST" {
         return refused(
             Status::MethodNotAllowed,
@@ -92,6 +104,25 @@ async fn answer(codec: Arc<Codec>, picker: Browse, request: Request) -> Response
         )
         .with("allow", "POST");
     }
+    // Who is asking, before what they are asking for. A refusal here never
+    // reaches the JSON-RPC layer, which is §4.1.2's own arrangement for the
+    // socket and is why an unauthenticated peer gets a status rather than an
+    // error frame.
+    let presented = Presented {
+        token: request
+            .query("token")
+            .map(str::to_string)
+            .or_else(|| bearer(&request)),
+        origin: request.header("origin").map(str::to_string),
+    };
+    if auth.admit(request.peer, &presented).is_err() {
+        return refused(
+            Status::Unauthorized,
+            ErrorCode::InvalidRequest,
+            "this carrier is not open to you",
+        );
+    }
+
     // Before dispatch, and before the body is even looked at.
     let declared = request
         .header("content-type")
@@ -164,6 +195,18 @@ async fn answer(codec: Arc<Codec>, picker: Browse, request: Request) -> Response
             "that call has no answer over this carrier",
         ),
     }
+}
+
+/// A token from the one header a non-browser client would think to use.
+///
+/// A browser cannot set headers on a WebSocket handshake, which is why the
+/// socket reads the URL; a `fetch` can, and a caller with a shell can too, so
+/// both spellings are accepted here and neither is required.
+fn bearer(request: &Request) -> Option<String> {
+    request
+        .header("authorization")?
+        .strip_prefix("Bearer ")
+        .map(str::to_string)
 }
 
 /// The two host methods, or `None` for a call that is not one of them.
