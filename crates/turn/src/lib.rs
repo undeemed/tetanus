@@ -5,6 +5,7 @@
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
+//! - [`process`] runs one external command, bounded in output and in time.
 //! - [`prompt`] is the named section registry the assembly starts from.
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
@@ -19,6 +20,7 @@ pub mod events;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
+pub mod process;
 pub mod prompt;
 pub mod repair;
 pub mod tokens;
