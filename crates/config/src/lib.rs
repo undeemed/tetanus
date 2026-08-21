@@ -15,6 +15,7 @@ pub mod file;
 pub mod home;
 pub mod preset;
 pub mod recompose;
+pub mod reload;
 pub mod schema;
 pub mod secret;
 pub mod watch;
