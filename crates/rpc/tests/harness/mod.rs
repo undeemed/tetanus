@@ -8,6 +8,7 @@
 //! one carrier works over the others, and two suites asserting it against two
 //! different doubles would not be asserting the same thing.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -32,6 +33,10 @@ pub struct Fake {
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     /// `agent.prompt` waits on this; `agent.interrupt` releases it.
     turn: Notify,
+    /// Mints a distinct id per subscription. A double that answered the same
+    /// id every time would make any case about *several* subscriptions agree
+    /// with itself no matter what the carrier did.
+    subscriptions: AtomicUsize,
 }
 
 impl Fake {
@@ -88,8 +93,9 @@ impl Engine for Fake {
     ) -> Result<SessionSubscribeResult, RpcError> {
         self.record(method::SESSION_SUBSCRIBE);
         *self.sink.lock().expect("sink") = Some(sink);
+        let n = self.subscriptions.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(SessionSubscribeResult {
-            subscription_id: "sub-1".into(),
+            subscription_id: format!("sub-{n}"),
             last_seq: 0,
         })
     }
