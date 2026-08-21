@@ -243,7 +243,7 @@ That server has no end of file to stop it, so Ctrl-C is the shutdown and it exit
 
 ## Workspace layout
 
-A Cargo workspace of nine crates.
+A Cargo workspace of ten crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
@@ -254,6 +254,7 @@ A Cargo workspace of nine crates.
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
+| `tetanus-host` | [crates/host](crates/host) | The HTTP route carrier the web GUI rides on: named routes, one fallback seat, upgrade seats, and the directory picker behind them |
 | `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, the whole-screen frame and the scrollable page on it, held terminal and loop a full-screen view runs in |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |
 
