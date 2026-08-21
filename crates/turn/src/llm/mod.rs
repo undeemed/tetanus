@@ -145,6 +145,159 @@ impl ModelResponse {
     }
 }
 
+/// A failure the account cannot spend its way out of: the quota, balance or
+/// credit is gone.
+///
+/// Deliberately outside
+/// [`DEFAULT_RETRYABLE_CODES`](crate::llm::retry::DEFAULT_RETRYABLE_CODES). It
+/// arrives as a 429, which is the same status a provider uses for "slow down",
+/// and the two need opposite answers: asking again after a backoff is right
+/// for a rate limit and pointless for an empty account. Before this
+/// distinction existed a dead key spent the whole retry budget - every attempt,
+/// every wait - and then reported `RATE_LIMIT`, which sends the reader looking
+/// for a throughput problem instead of a billing one.
+pub const QUOTA: &str = "QUOTA";
+
+/// A request the model cannot accept because it is too big for its context.
+///
+/// Also terminal, and for a plainer reason: the same request will not fit the
+/// next time either. What fixes it is sending less - compaction, or a shorter
+/// history - and that is a decision above this seam, so the failure says what
+/// happened rather than being retried until the budget runs out.
+pub const CONTEXT_WINDOW_EXCEEDED: &str = "CONTEXT_WINDOW_EXCEEDED";
+
+/// Whether a provider's own words say the account is out of quota.
+///
+/// Upstream matches this with regular expressions
+/// (`packages/llm/llm/src/error.ts`, `isQuotaExceededError`); this normalizes
+/// first and then looks for the same phrases, which needs no dependency and
+/// accepts the same wordings. Normalizing is what makes `insufficient_quota`,
+/// `insufficient-quota` and `Insufficient Quota` one case rather than three.
+///
+/// The list is wording a provider chose, so it is matched generously in shape
+/// and narrowly in meaning: every phrase here says the balance is gone, and
+/// none of them could be said by a provider that merely wants a slower caller.
+pub fn names_exhausted_quota(detail: &str) -> bool {
+    let text = normalized(detail);
+
+    // "insufficient quota", "insufficient balance", "insufficient credits".
+    for what in RESOURCES {
+        if near(&text, "insufficient", what, 1) {
+            return true;
+        }
+    }
+
+    // The same fact as a sentence: "quota exceeded", "your balance is
+    // exhausted", "you exceeded your current quota". A short window, because
+    // a message that mentions the two far apart is probably discussing two
+    // things, and the cost of guessing wrong here is a turn that fails when a
+    // backoff would have fixed it.
+    for what in RESOURCES.iter().chain(ALLOWANCES) {
+        for spent in ["exceeded", "exhausted", "reached", "depleted"] {
+            if near(&text, what, spent, 3) || near(&text, spent, what, 4) {
+                return true;
+            }
+        }
+    }
+
+    ["credit", "credits", "budget", "money"]
+        .iter()
+        .any(|what| near(&text, "out of", what, 1))
+}
+
+/// What a provider says has run out. Deliberately not "limit": a rate limit is
+/// a limit, and reading one as an empty account would fail a turn that a
+/// backoff would have fixed.
+const RESOURCES: &[&str] = &["quota", "balance", "credit", "credits"];
+
+/// The named allowances that mean the account rather than the request rate.
+const ALLOWANCES: &[&str] = &["usage limit", "monthly limit", "spending limit"];
+
+/// Whether a provider's own words say the request was too big for the model's
+/// context.
+///
+/// Ported from upstream's `isContextWindowExceededError`, by the same
+/// normalize-then-match route.
+pub fn names_context_overflow(detail: &str) -> bool {
+    let text = normalized(detail);
+    const OVERFLOW: [&str; 4] = [
+        "context length exceeded",
+        "context window exceeded",
+        "context length overflow",
+        "context limit exceeded",
+    ];
+    if OVERFLOW.iter().any(|phrase| text.contains(phrase)) {
+        return true;
+    }
+    if near(&text, "maximum context", "length", 2) || near(&text, "max context", "length", 2) {
+        return true;
+    }
+    // "prompt is too long for this model", "request too large for the context
+    // window". The subject has to be the thing that was sent, so a provider
+    // saying its own queue is too long is not read as this.
+    for subject in ["request", "prompt", "input", "message", "messages"] {
+        for size in ["too long", "too large"] {
+            if near(&text, subject, size, 3)
+                && (text.contains("context") || text.contains("for this model"))
+            {
+                return true;
+            }
+        }
+        if near(&text, subject, "exceeds", 3) && text.contains("context") {
+            return true;
+        }
+        if near(&text, subject, "exceeded", 3) && text.contains("context") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Lowercase words, with everything that is not a letter or a digit read as a
+/// separator.
+///
+/// Providers spell the same fact as `insufficient_quota`, `Insufficient
+/// Quota` and `insufficient-quota`, and a classifier that treated those as
+/// three different messages would work for whichever one it was written
+/// against. Punctuation is a separator for the same reason and one more: a
+/// message ends in a full stop, so `exceeded.` and `exceeded` are the same
+/// word to a reader and have to be the same word here.
+fn normalized(detail: &str) -> String {
+    let spaced: String = detail
+        .chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c.to_ascii_lowercase(),
+            _ => ' ',
+        })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `first` is followed by `second` within `gap` words.
+///
+/// Both may be phrases. The window is what lets "exceeded your current quota"
+/// match while keeping a sentence that mentions the two words far apart from
+/// counting.
+fn near(text: &str, first: &str, second: &str, gap: usize) -> bool {
+    let words: Vec<&str> = text.split(' ').collect();
+    let first: Vec<&str> = first.split(' ').collect();
+    let second: Vec<&str> = second.split(' ').collect();
+
+    for start in 0..words.len() {
+        if !words[start..].starts_with(&first[..]) {
+            continue;
+        }
+        let after = start + first.len();
+        let limit = (after + gap + second.len()).min(words.len());
+        for at in after..limit {
+            if words[at..].starts_with(&second[..]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("MISSING_CREDENTIAL: no API key at {0}")]
@@ -204,10 +357,18 @@ impl LlmError {
             LlmError::Transport(_) => "TRANSPORT",
             LlmError::EmptyResponse(_) => "EMPTY_RESPONSE",
             LlmError::Timeout(_) => "TIMEOUT",
-            LlmError::Provider { status, .. } => match status {
-                408 => "TIMEOUT",
-                429 => "RATE_LIMIT",
-                500..=599 => "SERVER",
+            // What the provider said is read before the status it said it
+            // under, because the status is the coarser fact. A 429 is the
+            // same number whether the account is out of money or merely
+            // going too fast, and those need opposite answers.
+            LlmError::Provider {
+                status, message, ..
+            } => match (status, message) {
+                (_, detail) if names_exhausted_quota(detail) => QUOTA,
+                (_, detail) if names_context_overflow(detail) => CONTEXT_WINDOW_EXCEEDED,
+                (408, _) => "TIMEOUT",
+                (429, _) => "RATE_LIMIT",
+                (500..=599, _) => "SERVER",
                 _ => "PROVIDER",
             },
             LlmError::Protocol(_) => "PROTOCOL",
