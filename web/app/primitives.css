@@ -1,0 +1,100 @@
+/* How the atoms in `primitives.js` are drawn.
+ *
+ * Every value here is a token from `tokens.css`. A literal colour in this file
+ * would be a colour that survives the next palette change, which is the whole
+ * failure the token layer exists to prevent.
+ */
+
+/* --- the state dot --------------------------------------------------- */
+
+.dot { display:inline-flex; align-items:center; gap:var(--gap-tight);
+  font:var(--size-small)/1.2 var(--font-code); color:var(--text-muted); }
+.dot-mark { width:8px; height:8px; border-radius:50%; background:var(--state-idle); }
+.dot-ok   .dot-mark { background:var(--state-ok); }
+.dot-busy .dot-mark { background:var(--state-busy); }
+.dot-bad  .dot-mark { background:var(--state-bad); }
+
+/* --- the pill -------------------------------------------------------- */
+
+.pill { display:inline-block; padding:1px 7px; border-radius:999px;
+  border:1px solid var(--line); background:var(--surface-raised);
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text-muted); }
+.pill-ok  { border-color:var(--state-ok);  color:var(--state-ok); }
+.pill-bad { border-color:var(--state-bad); color:var(--state-bad); }
+.pill-busy{ border-color:var(--state-busy);color:var(--state-busy); }
+
+/* --- the button ------------------------------------------------------ */
+
+.btn { padding:8px 14px; border-radius:var(--radius-tight);
+  border:1px solid var(--line-bright); background:var(--surface-raised);
+  color:var(--text); font:var(--size-body)/1.2 var(--font-prose); cursor:pointer; }
+.btn:hover:not(:disabled) { background:var(--surface-panel); }
+/* The press is the one place this page moves: a control that does not answer
+   a click reads as one that did not receive it. */
+.btn:active:not(:disabled) { transform:scale(.97); }
+.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.btn:disabled { color:var(--text-muted); border-color:var(--line); cursor:default; }
+.btn-primary { border-color:var(--accent); color:var(--text-bright); }
+
+/* --- the field ------------------------------------------------------- */
+
+.field { padding:8px 10px; border-radius:var(--radius-tight);
+  border:1px solid var(--line); background:var(--surface-sunken);
+  color:var(--text); font:var(--size-body)/1.4 var(--font-prose); }
+.field:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+
+/* --- the disclosure -------------------------------------------------- */
+
+.disclose { border-left:2px solid var(--line); padding-left:var(--gap); }
+.disclose-head { cursor:pointer; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-code); list-style:none; }
+.disclose-head::-webkit-details-marker { display:none; }
+.disclose-head:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.disclose-mark { display:inline-block; width:1em; transition:transform .12s ease; }
+.disclose[open] > .disclose-head .disclose-mark { transform:rotate(90deg); }
+.disclose-body { padding:var(--gap-tight) 0 var(--gap) 0; }
+.disclose-bad { border-left-color:var(--state-bad); }
+.disclose-bad > .disclose-head { color:var(--state-bad); }
+@media (prefers-reduced-motion: reduce) { .disclose-mark { transition:none; } }
+
+/* --- the toast ------------------------------------------------------- */
+
+.toast { position:fixed; top:120px; left:50%; transform:translateX(-50%);
+  padding:10px 16px; border-radius:var(--radius);
+  border:1px solid var(--line-bright); background:var(--surface-raised);
+  color:var(--text); font:var(--size-body)/1.4 var(--font-prose);
+  pointer-events:none; z-index:40; animation:toast-in .18s ease-out; }
+.toast-bad { border-color:var(--state-bad); color:var(--state-bad); }
+.toast-going { opacity:0; transition:opacity 1s ease; }
+.toast-still { animation:none; }
+@keyframes toast-in { from { transform:translate(-50%,-8px); opacity:0; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation:none; } }
+
+/* --- the modal ------------------------------------------------------- */
+
+.modal { border:1px solid var(--line); border-radius:12px; padding:0;
+  width:min(760px,92vw); background:var(--surface-panel); color:var(--text); }
+.modal::backdrop { background:rgba(0,0,0,.55); }
+.modal-head { padding:var(--gap-wide); border-bottom:1px solid var(--line); }
+.modal-title { margin:0; font:var(--size-head)/1.3 var(--font-prose); color:var(--text-bright); }
+.modal-body { padding:0; }
+.modal-foot { display:flex; gap:var(--gap); align-items:center;
+  padding:11px var(--gap-wide); border-top:1px solid var(--line); }
+
+/* --- the json tree --------------------------------------------------- */
+
+.json-node { display:block; }
+.json-row { display:flex; gap:var(--gap); align-items:baseline;
+  font:var(--size-small)/1.7 var(--font-code); }
+.json-key { color:var(--text-muted); }
+.json-key::after { content:":"; }
+.json-string { color:var(--text); }
+.json-number, .json-boolean { color:var(--accent); }
+.json-null, .json-empty, .json-deep { color:var(--text-muted); }
+/* A nested row steps in, so the shape is readable without drawing brackets. */
+.json-row > .json-node { border-left:1px solid var(--line); padding-left:var(--gap); }
+
+/* --- text a person wrote --------------------------------------------- */
+
+.said { white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-body)/1.55 var(--font-prose); color:var(--text); }

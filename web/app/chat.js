@@ -1,3 +1,5 @@
+import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
+
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
 //
@@ -260,10 +262,19 @@ function drawn(event) {
       here.live = null;
       break;
     }
-    case "tool/call":
-      (card || turnCard(undefined)).calls.push(data.id);
-      row("call", null, `${data.name}  ${JSON.stringify(data.arguments)}`, "▸");
+    case "tool/call": {
+      const here = card || turnCard(undefined);
+      here.calls.push(data.id);
+      // The arguments are a value a model wrote, so they are drawn as a tree
+      // of elements rather than stringified into a line: it folds, it is
+      // readable at depth, and nothing in it is ever treated as markup.
+      const line = row("call", null, `${data.name}`, "▸");
+      // The fold goes on the row rather than inside the text span: a
+      // disclosure is a block, and a block inside an inline element is a
+      // shape the browser has to guess at.
+      line.parentElement.append(jsonBlock(data.arguments, "arguments"));
       break;
+    }
     case "tool/result": {
       const here = card || turnCard(undefined);
       // Pairing is by `call_id`, never by arrival order (contract §4.3.1). A
@@ -280,11 +291,22 @@ function drawn(event) {
     case "turn/end": {
       const here = card || turnCard(data.turn);
       const steps = data.steps === 1 ? "1 step" : `${data.steps} steps`;
-      const parts = [`turn ${data.turn}`, data.stop_reason, steps];
-      if (here.tokens > 0) parts.push(`${here.tokens} tokens`);
       const end = document.createElement("div");
       end.className = "end";
-      end.textContent = parts.join(" · ");
+      // Facts as pills, and the reason coloured by whether the turn ended the
+      // way it meant to - the same rule the terminal's closing line follows:
+      // only `natural` is a turn that finished, and every other reason means
+      // the answer is missing something the reader cannot see is missing.
+      end.append(pill(`turn ${data.turn}`));
+      end.append(pill(data.stop_reason, data.stop_reason === "natural" ? "ok" : "bad"));
+      end.append(pill(steps));
+      if (here.tokens > 0) end.append(pill(`${here.tokens} tokens`));
+      if (data.stop_reason === "max-tokens") {
+        const cut = document.createElement("div");
+        cut.className = "hint";
+        cut.textContent = "the answer stops where the cap did; ask again to go on";
+        end.append(cut);
+      }
       here.el.append(end);
       card = null;
       break;
@@ -337,8 +359,10 @@ function strong(text) {
 }
 
 function settle(state, said, bad = false) {
+  const tone = { live: "ok", busy: "busy", gone: "bad" }[state] || "idle";
+  const word = { live: "connected", busy: "working", gone: "offline" }[state] || "connecting";
   view.state.className = `state ${state}`;
-  view.state.textContent = { live: "connected", busy: "working", gone: "offline" }[state] || "connecting";
+  view.state.replaceChildren(stateDot(tone, word));
   view.hint.textContent = said;
   view.hint.className = bad ? "fault" : "";
 }
