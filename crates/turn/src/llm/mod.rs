@@ -3,6 +3,7 @@
 //! [`LlmAdapter`] and providing it as the `llm` service at boot; nothing in the
 //! turn engine names a provider.
 
+pub mod attribution;
 pub mod deepseek;
 pub mod mock;
 pub mod retry;
