@@ -197,66 +197,89 @@ impl Roster {
 pub fn discover(roots: &[Root]) -> Roster {
     let mut roster = Roster::default();
     for root in roots {
-        let entries = match std::fs::read_dir(&root.path) {
-            Ok(entries) => entries,
-            // Not being there is the ordinary case: most deployments have two
-            // of the five roots. Being refused is a fault, because answering
-            // "no skills here" for a directory this process could not read
-            // would serve a roster nobody chose.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                roster.faults.push(Fault {
-                    path: root.path.clone(),
-                    reason: format!("the skill root could not be read: {error}"),
-                });
-                continue;
-            }
-        };
-
-        let mut found: Vec<(PathBuf, String)> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // A directory bundle is `<name>/SKILL.md`; a flat skill is
-            // `<name>.md`. Both spellings exist upstream and both exist in the
-            // wild, so reading only one would silently ignore half of what a
-            // user has written.
-            if path.is_dir() {
-                let manifest = path.join("SKILL.md");
-                if manifest.is_file() {
-                    found.push((manifest, file_stem(&path)));
+        match candidates(&root.path) {
+            Ok(found) => {
+                for (path, fallback) in found {
+                    take(&mut roster, &path, &fallback, root.source);
                 }
-            } else if path.extension().is_some_and(|ext| ext == "md")
-                && !path
-                    .file_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
-            {
-                found.push((path.clone(), file_stem(&path)));
             }
-        }
-        // Sorted so one root contributes in a stable order whatever the
-        // filesystem's own order is.
-        found.sort();
-
-        for (path, fallback) in found {
-            match read_skill(&path, &fallback, root.source) {
-                Ok(skill) => match roster.skills.get(&skill.name) {
-                    // First root wins, and the loser is recorded rather than
-                    // dropped.
-                    Some(kept) => roster.shadowed.push(Shadowed {
-                        name: skill.name,
-                        path: skill.path,
-                        source: skill.source,
-                        by: kept.path.clone(),
-                    }),
-                    None => {
-                        roster.skills.insert(skill.name.clone(), skill);
-                    }
-                },
-                Err(reason) => roster.faults.push(Fault { path, reason }),
-            }
+            // Not being there is the ordinary case: most deployments have two
+            // of the five roots.
+            Err(None) => continue,
+            Err(Some(reason)) => roster.faults.push(Fault {
+                path: root.path.clone(),
+                reason,
+            }),
         }
     }
     roster
+}
+
+/// The skill files one root holds, in a stable order.
+///
+/// `Err(None)` is "there is no such root", which is ordinary; `Err(Some)` is a
+/// root that exists and could not be read, which is a fault - answering "no
+/// skills here" for a directory this process was denied would serve a roster
+/// nobody chose.
+fn candidates(root: &Path) -> Result<Vec<(PathBuf, String)>, Option<String>> {
+    let entries = std::fs::read_dir(root).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => None,
+        _ => Some(format!("the skill root could not be read: {error}")),
+    })?;
+
+    let mut found: Vec<(PathBuf, String)> = Vec::new();
+    for entry in entries.flatten() {
+        // A directory bundle is `<name>/SKILL.md`; a flat skill is `<name>.md`.
+        // Both spellings exist in the wild, so reading only one would silently
+        // ignore half of what a user has written.
+        let path = entry.path();
+        if path.is_dir() {
+            let manifest = path.join("SKILL.md");
+            if manifest.is_file() {
+                found.push((manifest, file_stem(&path)));
+            }
+        } else if flat_skill(&path) {
+            found.push((path.clone(), file_stem(&path)));
+        }
+    }
+    // Sorted so one root contributes in a stable order whatever the
+    // filesystem's own order is.
+    found.sort();
+    Ok(found)
+}
+
+/// Whether a file at the top of a root is a flat skill.
+///
+/// A bare `SKILL.md` is not: it is a bundle's manifest that has lost its
+/// directory, and taking it would name the skill after the root.
+fn flat_skill(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "md")
+        && !path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+}
+
+/// Read one candidate into the roster: as a skill, as a shadowed loser, or as
+/// a fault.
+fn take(roster: &mut Roster, path: &Path, fallback: &str, source: Source) {
+    match read_skill(path, fallback, source) {
+        Ok(skill) => match roster.skills.get(&skill.name) {
+            // First root wins, and the loser is recorded rather than dropped.
+            Some(kept) => roster.shadowed.push(Shadowed {
+                name: skill.name,
+                path: skill.path,
+                source: skill.source,
+                by: kept.path.clone(),
+            }),
+            None => {
+                roster.skills.insert(skill.name.clone(), skill);
+            }
+        },
+        Err(reason) => roster.faults.push(Fault {
+            path: path.to_path_buf(),
+            reason,
+        }),
+    }
 }
 
 fn file_stem(path: &Path) -> String {

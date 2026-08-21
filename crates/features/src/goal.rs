@@ -315,87 +315,84 @@ pub fn decide(existing: Option<Goal>, operation: &Operation) -> Result<Goal, Goa
 /// Stated as a match on the pair rather than as a table of booleans, so the
 /// compiler is the thing that notices a phase nobody handled.
 fn transition(goal: Goal, operation: &Operation) -> Result<Goal, GoalError> {
-    let bumped = goal.revision + 1;
-    let from = goal.phase.as_str();
     match operation {
         Operation::Create { .. } => unreachable!("create is settled before the transition table"),
-        Operation::Edit { objective, .. } => match goal.phase {
-            // A finished goal is not edited back to life: that is a new goal,
-            // and saying so keeps the journal's history of what was attempted
-            // honest.
-            Phase::Complete => Err(GoalError::BadTransition { from, to: "edited" }),
-            _ => Ok(Goal {
-                revision: bumped,
-                objective: checked(objective)?,
-                ..goal
-            }),
-        },
-        Operation::Pause { .. } => match goal.phase {
-            Phase::Active | Phase::Blocked => Ok(Goal {
-                revision: bumped,
-                phase: Phase::Paused,
-                blocker: None,
-                ..goal
-            }),
-            other => Err(GoalError::BadTransition {
-                from: other.as_str(),
-                to: "paused",
-            }),
-        },
-        Operation::Resume { .. } => match goal.phase {
-            Phase::Paused | Phase::Blocked => Ok(Goal {
-                revision: bumped,
-                phase: Phase::Active,
-                blocker: None,
-                ..goal
-            }),
-            other => Err(GoalError::BadTransition {
-                from: other.as_str(),
-                to: "active",
-            }),
-        },
-        Operation::Block { blocker, .. } => {
-            if blocker.code.trim().is_empty() || blocker.message.trim().is_empty() {
-                return Err(GoalError::NoBlocker);
-            }
-            match goal.phase {
-                Phase::Active | Phase::Paused => Ok(Goal {
-                    revision: bumped,
-                    phase: Phase::Blocked,
-                    blocker: Some(Blocker {
-                        code: blocker.code.trim().to_string(),
-                        message: blocker.message.trim().to_string(),
-                    }),
-                    ..goal
-                }),
-                other => Err(GoalError::BadTransition {
-                    from: other.as_str(),
-                    to: "blocked",
-                }),
-            }
-        }
+        Operation::Edit { objective, .. } => edited(goal, objective),
+        Operation::Pause { .. } => moved(goal, Phase::Paused, &[Phase::Active, Phase::Blocked]),
+        Operation::Resume { .. } => moved(goal, Phase::Active, &[Phase::Paused, Phase::Blocked]),
+        Operation::Block { blocker, .. } => blocked(goal, blocker),
         // Completion is allowed from every unfinished phase: a goal that turned
         // out to be done while it was paused or blocked is done, and forcing a
         // resume first would put a lie on the journal.
-        Operation::Complete { .. } => match goal.phase {
-            Phase::Complete => Err(GoalError::BadTransition {
-                from,
-                to: "complete",
-            }),
-            _ => Ok(Goal {
-                revision: bumped,
-                phase: Phase::Complete,
-                blocker: None,
-                ..goal
-            }),
-        },
+        Operation::Complete { .. } => moved(
+            goal,
+            Phase::Complete,
+            &[Phase::Active, Phase::Paused, Phase::Blocked],
+        ),
         // Clearing is always legal: it is how a session gets out of any state,
         // and the tombstone records that it happened.
         Operation::Clear { .. } => Ok(Goal {
-            revision: bumped,
+            revision: goal.revision + 1,
             ..goal
         }),
     }
+}
+
+/// Move a goal to `to`, when it is resting in a phase that permits the move.
+///
+/// The permitted set is passed in rather than matched here, so each transition
+/// reads as one line at the call site and adding a phase means revisiting one
+/// list instead of re-reading five nested matches. A move always clears the
+/// blocker: every phase this reaches is one where the old reason no longer
+/// describes the goal.
+fn moved(goal: Goal, to: Phase, from: &[Phase]) -> Result<Goal, GoalError> {
+    if !from.contains(&goal.phase) {
+        return Err(GoalError::BadTransition {
+            from: goal.phase.as_str(),
+            to: to.as_str(),
+        });
+    }
+    Ok(Goal {
+        revision: goal.revision + 1,
+        phase: to,
+        blocker: None,
+        ..goal
+    })
+}
+
+/// A finished goal is not edited back to life: that is a new goal, and saying
+/// so keeps the journal's record of what was attempted honest.
+fn edited(goal: Goal, objective: &str) -> Result<Goal, GoalError> {
+    if goal.phase == Phase::Complete {
+        return Err(GoalError::BadTransition {
+            from: goal.phase.as_str(),
+            to: "edited",
+        });
+    }
+    Ok(Goal {
+        revision: goal.revision + 1,
+        objective: checked(objective)?,
+        ..goal
+    })
+}
+
+/// Block a goal, on the reason it is blocked by.
+///
+/// The reason is checked before the phase, because a blocked goal with no
+/// explanation is worth refusing whatever phase it was resting in.
+fn blocked(goal: Goal, blocker: &Blocker) -> Result<Goal, GoalError> {
+    if blocker.code.trim().is_empty() || blocker.message.trim().is_empty() {
+        return Err(GoalError::NoBlocker);
+    }
+    let reason = Blocker {
+        code: blocker.code.trim().to_string(),
+        message: blocker.message.trim().to_string(),
+    };
+    let moved = moved(goal, Phase::Blocked, &[Phase::Active, Phase::Paused])?;
+    Ok(Goal {
+        blocker: Some(reason),
+        ..moved
+    })
 }
 
 fn checked(objective: &str) -> Result<String, GoalError> {
