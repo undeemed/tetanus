@@ -13,6 +13,7 @@
 use serde_json::json;
 use tetanus_session::{SessionError, SessionEvent, SessionLog};
 
+use crate::approval::ApprovalOutcome;
 use crate::events::StopReason;
 use crate::log::topic;
 
@@ -63,6 +64,19 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<Closer> {
         .filter(|i| !open_turn[*i..].iter().any(|e| e.ty == topic::STEP_END));
 
     let mut closers = Vec::new();
+    // An approval question the crash caught mid-flight is closed first, before
+    // the result of the call it was about, because that is the order a live
+    // turn writes them in: a decision precedes the call it decides. The scope
+    // is the whole open turn and not the open step, because the pair is
+    // turn-enclosed rather than step-enclosed - it carries no step to belong
+    // to, for the same reason `tool/call` and `tool/result` carry none.
+    for id in undecided_asks(open_turn) {
+        closers.push(Closer {
+            ty: topic::APPROVAL_DECIDED,
+            data: json!({ "id": id, "outcome": ApprovalOutcome::Cancelled.as_str() }),
+            sources: None,
+        });
+    }
     if let Some(step_start) = open_step {
         let step = &open_turn[step_start..];
         for call in unanswered_calls(step) {
@@ -99,6 +113,28 @@ pub fn repair(log: &dyn SessionLog) -> Result<Vec<SessionEvent>, SessionError> {
         written.push(event);
     }
     Ok(written)
+}
+
+/// The approval questions of the open turn that never got a decision, in the
+/// order they were asked.
+///
+/// `cancelled` and not `unavailable` is what these are closed with: nobody was
+/// found to be missing, the process holding the question died, and those are
+/// different facts to a reader of the transcript. Both deny, so telling them
+/// apart costs nothing and keeps the audit honest.
+fn undecided_asks(open_turn: &[SessionEvent]) -> Vec<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for event in open_turn {
+        match event.ty.as_str() {
+            topic::APPROVAL_ASKED => pending.push(string(&event.data, "id")),
+            topic::APPROVAL_DECIDED => {
+                let id = string(&event.data, "id");
+                pending.retain(|open| *open != id);
+            }
+            _ => {}
+        }
+    }
+    pending
 }
 
 /// A call the model asked for inside the open step, in the order it was asked.

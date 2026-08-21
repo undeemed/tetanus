@@ -20,6 +20,17 @@ pub mod topic {
     pub const TOOL_RESULT: &str = "tool/result";
     pub const STEP_END: &str = "step/end";
     pub const TURN_END: &str = "turn/end";
+
+    /// The decision audit of contract section 4.4.7. `approval/asked` and
+    /// `approval/decided` are one pair per question, sharing an `id`;
+    /// `approval/policy` is a switch, and the last one is the session's.
+    ///
+    /// None of the three derives to a message: what the model learns about a
+    /// denial is the `tool/result` it gets, not the audit of how that was
+    /// decided.
+    pub const APPROVAL_ASKED: &str = "approval/asked";
+    pub const APPROVAL_DECIDED: &str = "approval/decided";
+    pub const APPROVAL_POLICY: &str = "approval/policy";
 }
 
 /// Derive the model history from the log. Replay is re-derivation from the

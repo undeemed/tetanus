@@ -2,6 +2,7 @@
 //! four-mode event bus, and a durable session log.
 //!
 //! - [`engine`] drives the turn flow and owns the documented event order.
+//! - [`approval`] decides whether one tool call may run, and audits it.
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
@@ -13,6 +14,7 @@
 //! - [`boot`] composes them through the typed service registry.
 //! - [`trace`] reads back the ordered event sequence of a run.
 
+pub mod approval;
 pub mod boot;
 pub mod engine;
 pub mod events;

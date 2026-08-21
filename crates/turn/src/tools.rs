@@ -310,7 +310,7 @@ async fn contained(
 }
 
 /// What a caught panic was about, as far as the payload says.
-fn panicked(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panicked(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_string();
     }

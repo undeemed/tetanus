@@ -75,6 +75,7 @@ cargo test -p tetanus-protocol --test wire       # the engine/presentation contr
 cargo test -p tetanus-hardness --test run_offline
 cargo test -p tetanus-turn --test properties         # what holds for every journal
 cargo test -p tetanus-turn --test properties_tools   # what holds for every tool schedule
+cargo test -p tetanus-turn --test upstream_approval  # whether a tool call may run
 ```
 
 Three rules keep it a gate rather than a formality.
