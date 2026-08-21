@@ -82,6 +82,15 @@ fn stderr(out: &Output) -> String {
     String::from_utf8(out.stderr.clone()).expect("utf-8")
 }
 
+/// The same, as one line per diagnostic rather than per row.
+///
+/// A note longer than the terminal folds under its own tag, so a sentence a
+/// case is looking for can arrive across two rows. What the case means is the
+/// sentence, not the rows it was drawn on.
+fn said(out: &Output) -> String {
+    stderr(out).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// TC-CLI-UI-1: `tetanus --help` into a pipe.
 /// Expected: exit 0, a page that names its usage and its `--color` values, and
 /// not one escape byte, because a pipe is not a terminal.
@@ -1641,7 +1650,7 @@ fn a_target_that_is_nothing_names_the_root_it_was_looked_for_under() {
 
     assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     assert_eq!(stdout(&out), "", "a missing journal printed a page");
-    let told = stderr(&out);
+    let told = said(&out);
     assert!(told.contains("no journal at nope"), "{told}");
     assert!(told.contains("journals"), "{told}");
     assert!(told.contains("tetanus sessions"), "{told}");
@@ -1823,7 +1832,7 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
             "",
             "`{args:?}` wrote a page for a missing file"
         );
-        let err = stderr(&out);
+        let err = said(&out);
         assert!(
             err.contains("no journal at nope.jsonl"),
             "`{args:?}`: {err}"

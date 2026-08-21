@@ -573,7 +573,14 @@ message, or a value out of the error's `data`: a path, a session id, a tool, a m
 the protocol version a server speaks - so `wording` tames what the match returned, where a code
 added to the contract cannot get past it.
 The way out beside it is this module's own words and is left alone.
-The same seam folds the sentence onto one line, because it is drawn after the `error:` tag on a stream and
+A diagnostic longer than the terminal is folded under its own tag by the writer that draws it
+([`Ui::note`](crates/ui/src/writer.rs)), with the rest of the sentence indented past `note: ` rather
+than starting at column zero, where a terminal's own fold would put it: in the column a tag goes
+in, reading as a second diagnostic this build wrote without one.
+These are the sentences a reader meets when something has already gone wrong, and the values inside
+them are cut to the width by whoever composed them, which is where the width of a value is known.
+
+The taming seam folds the sentence onto one line, because it is drawn after the `error:` tag on a stream and
 as a single row of a frame: a newline puts a second line on stderr that reads like a report of its
 own - a message ending in `note: run this` would be read as this build's advice - and inside a
 frame it is a line feed with no carriage return, which is the one thing
