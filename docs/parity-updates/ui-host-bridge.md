@@ -4,7 +4,7 @@ Upstream: [`host/apiproxy`] - "the API gateway shared by every client", whose
 wire rule is `ClientRequest` as the body of `POST /api/<method>` and
 `ServerResponse` as that POST's response body.
 
-tetanus: `crates/cli/src/bridge.rs`, mounted by `tetanus web` on the prefix
+tetanus: `crates/cli/src/bridge.rs`, mounted by `tetanus serve --frontend` on the prefix
 `/api/`.
 
 ## What is here
@@ -16,7 +16,7 @@ tetanus: `crates/cli/src/bridge.rs`, mounted by `tetanus web` on the prefix
 | every POST must declare `application/json`, else **415 before dispatch** | same | yes |
 | business errors ride the result; "HTTP status expresses only the carrier" | same: an unknown method is 200 with `-32601` in the envelope | yes |
 | responses echo the request's id, never mint one | one POST is one call; the id is the carrier's | in effect |
-| the package registers no routes; carriers wrap the gateway | the bridge is mounted by `tetanus web`, not by the host | yes |
+| the package registers no routes; carriers wrap the gateway | the bridge is mounted by the serve composition, not by the host | yes |
 
 ## One dispatch table
 

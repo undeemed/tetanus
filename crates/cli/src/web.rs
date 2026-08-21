@@ -1,4 +1,4 @@
-//! `tetanus web`: the browser panel, with a carrier behind it.
+//! `tetanus serve --frontend`: the browser panel, with a carrier behind it.
 //!
 //! This is the composition upstream calls the web shell: an HTTP server for
 //! the page, a WebSocket carrier for the protocol, and a boot manifest that
@@ -6,6 +6,12 @@
 //! `crates/host` is the carrier of routes, `crates/rpc` is the protocol's own
 //! WebSocket, `web/app` is the page - and what this file adds is the wiring
 //! and the sentence a person reads when it comes up.
+//!
+//! It is a mode of `tetanus serve` rather than a subcommand of its own,
+//! because what it starts is the HTTP host and `serve` is the word this
+//! binary already uses for starting a server. The carriers differ - stdio, a
+//! WebSocket, and now the page with both of those behind it - and the
+//! subcommand does not have to.
 //!
 //! # Why the page is not patched on its way out
 //!

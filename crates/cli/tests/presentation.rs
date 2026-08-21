@@ -2096,7 +2096,8 @@ fn the_build_page_counts_agree_with_the_catalogues() {
     assert!(page.starts_with("\ntetanus "), "{page}");
 }
 
-/// TC-CLI-WEB-1: `tetanus web` pointed at a directory with no page in it.
+/// TC-CLI-WEB-1: `tetanus serve --frontend` pointed at a directory with no
+/// page in it.
 /// Expected: exit 1, the directory named, and nothing bound. A server that
 /// came up on the address a person was about to open and then answered every
 /// request with "no index.html" is a worse failure than not coming up.
@@ -2106,7 +2107,7 @@ fn the_web_panel_refuses_a_frontend_that_is_not_there() {
 
     let refused = run(
         dir.path(),
-        &["web", "--frontend", "nowhere", "--listen", "127.0.0.1:0"],
+        &["serve", "--listen", "127.0.0.1:0", "--frontend", "nowhere"],
         &[],
     );
 
@@ -2131,7 +2132,13 @@ fn the_web_panel_binds_loopback_or_the_wildcard() {
 
     let refused = run(
         dir.path(),
-        &["web", "--frontend", "app", "--listen", "192.168.1.10:5300"],
+        &[
+            "serve",
+            "--listen",
+            "192.168.1.10:5300",
+            "--frontend",
+            "app",
+        ],
         &[],
     );
 
@@ -2196,7 +2203,7 @@ fn the_api_bridge_answers_the_published_contract_over_http() {
 
     let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
         .current_dir(dir.path())
-        .args(["web", "--frontend", "app", "--listen", "127.0.0.1:5399"])
+        .args(["serve", "--listen", "127.0.0.1:5399", "--frontend", "app"])
         .env("TETANUS_HOME", dir.path())
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2246,7 +2253,7 @@ fn the_bridge_answers_the_host_methods_too() {
 
     let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
         .current_dir(dir.path())
-        .args(["web", "--frontend", "app", "--listen", "127.0.0.1:5398"])
+        .args(["serve", "--listen", "127.0.0.1:5398", "--frontend", "app"])
         .env("TETANUS_HOME", dir.path())
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2326,11 +2333,11 @@ fn the_bridge_is_locked_the_way_the_socket_is() {
     let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
         .current_dir(dir.path())
         .args([
-            "web",
-            "--frontend",
-            "app",
+            "serve",
             "--listen",
             "127.0.0.1:5397",
+            "--frontend",
+            "app",
             "--token",
             "a-stated-secret",
         ])

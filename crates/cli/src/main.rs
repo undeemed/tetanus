@@ -143,7 +143,8 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["raw", "live"])]
         json: bool,
     },
-    /// Host the JSON-RPC protocol on stdin and stdout
+    /// Host the JSON-RPC protocol: on stdin and stdout, on a WebSocket, or
+    /// behind the browser panel
     Serve {
         /// Directory the journals this server writes land in. Defaults to
         /// `sessions.root` in the settings document, or `sessions` when
@@ -153,29 +154,19 @@ enum Cmd {
         /// Serve the WebSocket carrier on this address instead of on stdio
         #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
-    },
-    /// Serve the browser panel, with a carrier behind it
-    Web {
-        /// Directory the journals this server writes land in. Defaults to
-        /// `sessions.root` in the settings document.
-        #[arg(long, value_name = "PATH")]
-        dir: Option<PathBuf>,
-        /// Address for the page. Only `127.0.0.1` and `0.0.0.0` are bound.
-        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:5300", value_parser = named())]
-        listen: String,
-        /// The built frontend to serve. An assembly fact, never hardcoded:
-        /// this is the directory holding the page's `index.html`.
-        #[arg(long, value_name = "PATH", default_value = "web/app")]
-        frontend: PathBuf,
+        /// Also serve the browser panel from this directory, with the
+        /// protocol on the same address. Needs `--listen`.
+        #[arg(long, value_name = "PATH", requires = "listen")]
+        frontend: Option<PathBuf>,
         /// Secret a reader's URL must carry to reach the protocol. Required
         /// for a bind that is not loopback, per contract §4.1.2, unless
         /// `--open-to-anyone` says the opposite out loud.
-        #[arg(long, value_name = "TOKEN")]
+        #[arg(long, value_name = "TOKEN", requires = "listen")]
         token: Option<String>,
         /// Serve the protocol to anybody who can reach this machine, with no
         /// token. Only meaningful with a non-loopback `--listen`, and only
         /// ever right for a demonstration on a network you trust.
-        #[arg(long, conflicts_with = "token")]
+        #[arg(long, conflicts_with = "token", requires = "listen")]
         open_to_anyone: bool,
     },
     /// Print version/build info
@@ -577,7 +568,24 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 _ => Ok(()),
             }
         }
-        Cmd::Serve { dir, listen } => {
+        Cmd::Serve {
+            dir,
+            listen,
+            frontend: Some(frontend),
+            token,
+            open_to_anyone,
+        } => web::web(
+            policy,
+            &document,
+            dir,
+            listen.as_deref().unwrap_or("127.0.0.1:5300"),
+            &frontend,
+            web::Posture {
+                token,
+                open_to_anyone,
+            },
+        ),
+        Cmd::Serve { dir, listen, .. } => {
             // The one subcommand that writes no page: on stdio, stdout belongs
             // to the carrier from here on (contract §4.1), so everything a
             // person reads goes to stderr and `out` is left untouched. The
@@ -669,23 +677,6 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             render::serve::stopped(&mut err, carrier).ok();
             Ok(())
         }
-        Cmd::Web {
-            dir,
-            listen,
-            frontend,
-            token,
-            open_to_anyone,
-        } => web::web(
-            policy,
-            &document,
-            dir,
-            &listen,
-            &frontend,
-            web::Posture {
-                token,
-                open_to_anyone,
-            },
-        ),
         Cmd::Info => {
             // Counted from the same two functions the catalogue pages print,
             // so the number here and the list there cannot disagree.

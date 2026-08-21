@@ -8,7 +8,7 @@ the socket uses.
 
 ## The defect this closes
 
-The bridge landed with no authentication at all. `tetanus web --token <T>`
+The bridge landed with no authentication at all. `tetanus serve --frontend --token <T>`
 therefore locked the socket and left every POST open: a caller who could reach
 the port could start turns, read every journal in the sessions directory and
 read the resolved configuration, which is exactly the reach §4.1.2 says a

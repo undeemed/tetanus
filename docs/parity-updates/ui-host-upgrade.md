@@ -6,7 +6,7 @@ socket and request" - with the `/api` bridge and downlink WebSockets owned by
 the connection plugin.
 
 tetanus: `WebServer::register_upgrade` now hands over the socket, and
-`tetanus web` seats `crates/rpc`'s carrier at `/api/ws`.
+`tetanus serve --frontend` seats `crates/rpc`'s carrier at `/api/ws`.
 
 ## What changed
 
@@ -42,7 +42,7 @@ A page served from one origin and dialling another is a cross-origin
 WebSocket - exactly the case §4.1.2's origin check exists to refuse. Same
 origin, and the check protects the deployment instead of fighting the page.
 
-`tetanus web` therefore names its own origins to the carrier: the addresses the
+`tetanus serve --frontend` therefore names its own origins to the carrier: the addresses the
 server can be opened on, in both schemes, and nothing else. `localhost` and
 `127.0.0.1` are two origins to a browser and one machine to everybody else, so
 both are named; `https` is named because a proxy terminating TLS sends it while

@@ -9,11 +9,11 @@ dependency, so the thing a reviewer opens is the file in this directory.
 ## Running it
 
 ```sh
-tetanus web                                  # then open the address it prints
-tetanus web --listen 0.0.0.0:5300 --dir sessions
+tetanus serve --listen 127.0.0.1:5300 --frontend web/app   # open the address it prints
+tetanus serve --listen 0.0.0.0:5300 --frontend web/app --open-to-anyone
 ```
 
-`tetanus web` binds the page's address, takes a port from the operating system for the carrier, and
+`tetanus serve --frontend` binds the page's address, takes a port from the operating system for the carrier, and
 tells the page which one through the host's index tap - the boot manifest, `window.TETANUS_BOOT`.
 The page is served by `crates/host`, which is the same route carrier every other host route will
 ride on; nothing patches the HTML on its way past.

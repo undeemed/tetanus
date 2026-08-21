@@ -849,7 +849,7 @@ and no page of history can race the first live push.
 The transcript is the terminal's transcript - the same rows, the same order, the same closing line -
 because a turn that read differently in a browser would be a second description of the same events
 for a reader to reconcile.
-`tetanus web` is what serves it, and it is the harness's own host rather than a script beside it
+`tetanus serve --frontend` is what serves it, and it is the harness's own host rather than a script beside it
 ([crates/host](crates/host), [crates/cli/src/web.rs](crates/cli/src/web.rs)).
 The page goes out on the host's single fallback seat with the shell's locked semantics - a miss is
 the page with 200, so a deep link belongs to the router in the browser and not to the server - and

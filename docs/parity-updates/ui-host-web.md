@@ -3,14 +3,20 @@
 Upstream: the composed web shell - [`apps/web`] served by [`host/frontend-static`]
 on [`host/webserver`], with the boot manifest arriving through `applyIndexTaps`.
 
-tetanus: `tetanus web` (`crates/cli/src/web.rs`), serving `web/app` through
-`crates/host`.
+tetanus: `tetanus serve --frontend` (`crates/cli/src/web.rs`), serving
+`web/app` through `crates/host`.
+
+The mode is on `serve` rather than on a subcommand of its own: it starts the
+HTTP host, and `serve` is the word this binary already uses for starting a
+server. `tetanus web` would also have sat beside the mcp lane's `tetanus-web`
+crate, which is the fetch and search tools - one word for two unrelated
+things.
 
 ## What changed
 
 | Before | Now |
 | --- | --- |
-| `web/chat/serve.py`, a Python dev server | `tetanus web`, the product binary |
+| `web/chat/serve.py`, a Python dev server | `tetanus serve --frontend`, the product binary |
 | the carrier's address string-replaced into the HTML as it was served | a boot manifest written by an index tap, read by the page as data |
 | files served by `http.server` | the host's fallback seat, with the shell's locked semantics |
 | `window.TETANUS_WS`, patched in | `window.TETANUS_BOOT`, a manifest with `carrier` and `protocol` |
@@ -51,5 +57,5 @@ the manifest into markup. TC-HOST-STATIC-7 asks for exactly that.
 | Id | Case | Expected result |
 | --- | --- | --- |
 | TC-HOST-STATIC-7 | a manifest whose value would close the script tag | inside the head, before the page's script, `<` escaped |
-| TC-CLI-WEB-1 | `tetanus web --frontend nowhere` | exit 1, the directory named, nothing bound |
+| TC-CLI-WEB-1 | `tetanus serve --frontend nowhere` | exit 1, the directory named, nothing bound |
 | TC-CLI-WEB-2 | `--listen 192.168.1.10:5300` | refused, naming the two addresses it binds |

@@ -112,7 +112,7 @@ class RpcFailure extends Error {
 
 function connect() {
   if (!address) {
-    settle("gone", "No server address. Open this page from `tetanus web`, or add `?ws=ws://host:port`.");
+    settle("gone", "No server address. Open this page from `tetanus serve --frontend`, or add `?ws=ws://host:port`.");
     return;
   }
   view.where.innerHTML = "";
