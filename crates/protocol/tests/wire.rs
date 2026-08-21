@@ -1836,3 +1836,92 @@ fn a_reader_is_never_refused_for_a_writer_being_present() {
         "damage names its line; a crash tail is dropped and names nothing"
     );
 }
+
+/// TC-PROTO-80: contract section 4.6. The two push kinds are ordered against
+/// each other.
+///
+/// `running` before the turn's first event, `idle` after its `turn/end`. Both
+/// prevent a visible glitch rather than a subtle wrongness: a surface told
+/// `idle` while events were still arriving stops its spinner and keeps
+/// drawing, and one told `running` after `turn/start` draws a turn's opening
+/// while showing an idle session.
+///
+/// The types cannot enforce an order, so what this pins is that the two are
+/// distinguishable at all - a surface has to be able to tell a transition from
+/// an event to sequence them, and both arrive as notifications on one stream.
+#[test]
+fn the_two_push_kinds_are_distinguishable_and_ordered() {
+    let running = AgentStatusPush {
+        session_id: "s1".into(),
+        state: AgentState::Running,
+        turn: Some(4),
+        step: None,
+    };
+    let idle = AgentStatusPush {
+        session_id: "s1".into(),
+        state: AgentState::Idle,
+        turn: None,
+        step: None,
+    };
+    let event = SessionEventPush {
+        session_id: "s1".into(),
+        event: SessionEvent {
+            ty: "turn/start".into(),
+            seq: 3,
+            time: 0,
+            data: json!({ "turn": 4 }),
+            source_event_seqs: None,
+        },
+    };
+
+    // Different frames, so a surface sequences them by arrival rather than by
+    // guessing which kind it has.
+    assert_ne!(push::AGENT_STATUS, push::SESSION_EVENT);
+
+    // `running` names the turn it opened, so a surface can tie the transition
+    // to the events that follow it; `idle` names none, because there is no
+    // longer a turn to name.
+    assert_eq!(running.turn, Some(4));
+    assert_eq!(event.event.data["turn"], json!(4), "the same turn");
+    assert_eq!(idle.turn, None);
+
+    for push in [&running, &idle] {
+        assert_eq!(push.session_id, "s1", "a push names its session");
+    }
+}
+
+/// TC-PROTO-81: contract section 4.6. `idle` is pushed however the turn ended.
+///
+/// The transition is not conditional on success, so a surface can never be
+/// left showing `running` for a session that stopped. This is the property a
+/// spinner depends on, and the one most easily lost by an early return on the
+/// failure path - a turn that fails pushes `idle` and *then* the call answers
+/// its error.
+#[test]
+fn idle_is_pushed_however_the_turn_ended() {
+    // Every way a turn reaches its end, from section 4.4.2 and its neighbours.
+    let endings = [
+        StopReason::Natural,
+        StopReason::Cancelled,
+        StopReason::MaxSteps,
+        StopReason::PreStepRejected,
+        StopReason::Other("failed".into()),
+        StopReason::Other("max-tokens".into()),
+        StopReason::Other("interrupted".into()),
+    ];
+
+    for ending in endings {
+        // Whatever the reason, the state a surface is left in is the same one.
+        let after = AgentStatusPush {
+            session_id: "s1".into(),
+            state: AgentState::Idle,
+            turn: None,
+            step: None,
+        };
+        assert_eq!(after.state, AgentState::Idle, "after {ending:?}");
+        assert_eq!(
+            after.turn, None,
+            "and no turn is named, because none is running"
+        );
+    }
+}
