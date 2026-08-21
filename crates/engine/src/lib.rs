@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tetanus_protocol::methods::{
     capability, Ack, AgentPromptParams, AgentPromptResult, AgentStatusResult, ConfigDumpResult,
     Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo, SessionCreateParams,
-    SessionEventsParams, SessionEventsResult, SessionListResult, SessionRef,
+    SessionEventsParams, SessionEventsResult, SessionForkParams, SessionListResult, SessionRef,
     SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
@@ -146,6 +146,7 @@ impl HarnessEngine {
         // A capability is a promise that the call behind it is served.
         vec![
             capability::SESSION_SUBSCRIBE.to_string(),
+            capability::SESSION_FORK.to_string(),
             capability::AGENT_INTERRUPT.to_string(),
         ]
     }
@@ -193,6 +194,10 @@ impl Engine for HarnessEngine {
     ) -> Result<SessionEventsResult, RpcError> {
         self.sessions
             .events(&params.session_id, params.from_seq, params.limit)
+    }
+
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        self.sessions.fork(params)
     }
 
     async fn session_subscribe(

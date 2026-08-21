@@ -191,6 +191,44 @@ impl SessionLog for JsonlSessionLog {
     }
 }
 
+/// Write a whole journal at once, from events that already carry their `seq`
+/// and `time`.
+///
+/// This is how a fork's seed is laid down (contract section 4.4.6): the copied
+/// events keep the seqs and the times they were written under, which `append`
+/// cannot do because it assigns both. The file must not exist. A seed written
+/// onto a journal that already holds a history would splice two histories into
+/// one file, and every seq after the join would name the wrong line.
+///
+/// The same rule the reader enforces is enforced here, so a seed cannot create
+/// a journal `replay` would refuse: `seq` must equal the index of its line.
+pub fn seed(path: impl AsRef<Path>, events: &[SessionEvent]) -> Result<(), SessionError> {
+    let path = path.as_ref();
+    for (i, event) in events.iter().enumerate() {
+        if event.seq != i as u64 {
+            return Err(SessionError::Corrupt(i + 1));
+        }
+    }
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    for event in events {
+        let line = serde_json::to_string(event)
+            .map_err(|_| SessionError::NotSerializable(event.ty.clone()))?;
+        writeln!(file, "{line}")?;
+    }
+    // One barrier for the whole seed: unlike an append, no caller has been
+    // told any part of this is durable until all of it is.
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Read a journal back from disk. `seq` contiguity is verified: a gap means the
 /// file is not a faithful copy of the log that produced it.
 ///

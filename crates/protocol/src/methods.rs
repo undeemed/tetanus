@@ -327,25 +327,7 @@ pub trait Engine: Send + Sync {
         &self,
         params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError>;
-    /// Contract section 4.2: reserved.
-    ///
-    /// The default body is what `Reserved` states in Rust. A build that does
-    /// not serve the call answers `NotImplemented` instead of failing to
-    /// compile, which is exactly the promise the status makes to a surface
-    /// building against a frozen shape. The slice that serves the call deletes
-    /// this body, and section 7.4's compile error for every implementor comes
-    /// back with it.
-    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
-        let _ = params;
-        Err(RpcError::new(
-            ErrorCode::NotImplemented,
-            format!(
-                "`{}` is reserved, and this build does not serve it",
-                method::SESSION_FORK
-            ),
-        )
-        .with_data(serde_json::json!({ "method": method::SESSION_FORK })))
-    }
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError>;
     /// The one call whose trait form takes an argument the wire does not
     /// carry: where the carrier wants its pushes delivered.
     async fn session_subscribe(

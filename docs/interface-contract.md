@@ -87,7 +87,7 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `session.create` | `SessionCreateParams` | `SessionInfo` | always | Served |
 | `session.list` | none | `SessionListResult` | always | Served |
 | `session.events` | `SessionEventsParams` | `SessionEventsResult` | always | Served |
-| `session.fork` | `SessionForkParams` | `SessionInfo` | `session.fork` | Reserved |
+| `session.fork` | `SessionForkParams` | `SessionInfo` | `session.fork` | Served |
 | `session.subscribe` | `SessionSubscribeParams` | `SessionSubscribeResult` | `session.subscribe` | Served |
 | `session.unsubscribe` | `SessionUnsubscribeParams` | `Ack` | `session.subscribe` | Served |
 | `agent.prompt` | `AgentPromptParams` | `AgentPromptResult` | always | Served |
@@ -669,7 +669,7 @@ The conformance cases in §6 hold these rules to their word.
 ## 6. Verification
 
 The cases run offline.
-Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`.
+Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`, and those over §4.4.6 in `crates/engine/tests/fork.rs`.
 Those that hold a carrier to §4.1 live in `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs`, which drive the same engine double, so a claim proved for one carrier and not the other is a failing case rather than an omission.
 Those that hold the published failure mapping to §4.5 live in `crates/engine/tests/faults.rs`.
 Those over the interaction and state views (§4.4, §4.6) live in `crates/engine/tests/facade.rs`, `agent.rs`, `subscribe.rs`, `sessions.rs` and `resume.rs`, with the closer synthesis §4.4.4 applies pinned on its own in `crates/turn/tests/upstream_repair.rs`.
@@ -716,7 +716,7 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
-| §4.2 every call the method table serves is served | TC-ENG-3 |
+| §4.2 every call in the method table is served | TC-ENG-3 |
 | §4.2 a reserved call answers `NotImplemented`, and is not advertised | TC-ENG-4 |
 | §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
 | §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
@@ -726,6 +726,13 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.7 an outcome the engine does not know denies rather than failing to parse | TC-PROTO-22 |
 | §4.4.7 the two policies, and a third word that stays readable | TC-PROTO-23 |
 | §4.3.2 the three `approval/*` types stage like the other two | TC-PROTO-24 |
+| §4.4.6 lineage is on the child's header, and an empty parent forks | TC-PORT-FORK-1 |
+| §4.4.6 the child inherits the prefix, and the two journals are detached | TC-PORT-FORK-2, TC-PORT-FORK-3 |
+| §4.4.6 an earlier boundary stands while the parent's tail is open | TC-PORT-FORK-4 |
+| §4.4.6 a boundary must be a closed one | TC-PORT-FORK-5, TC-PORT-FORK-10 |
+| §4.4.6 the child's own work begins after the seed | TC-PORT-FORK-6 |
+| §4.4.6 what a fork refuses, and with which code | TC-PORT-FORK-7 .. TC-PORT-FORK-12 |
+| §4.4.6 a forked session is an ordinary session | TC-FORK-1, TC-FORK-2 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
@@ -828,3 +835,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Serves `session.fork` (§4.2, §4.4.6), and advertises the capability that promises it. The engine copies the prefix, writes the child's header over the parent's line 0 and opens the child through the ordinary create path, so a forked session is listed, paged, titled and prompted like any other and its first turn is numbered after the turns it inherited - a fork is a resume of a prefix. `session/start` now carries `parent_session` and `fork_seq` where one applies. TC-ENG-3 grows the row this change serves. TC-ENG-4 and TC-RPC-12 asserted the not-yet answer of that row and now assert it of `approval.set` instead: the two cases belong to whichever calls are reserved at the time, not to the first one that ever was, so serving a call moves them rather than retiring them. `Reserved` and its default trait body stay documented in §4.2 for the call that still needs them. |

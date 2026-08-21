@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tetanus_core::EventBus;
-use tetanus_protocol::methods::{SessionCreateParams, SessionEventsResult};
+use tetanus_protocol::methods::{SessionCreateParams, SessionEventsResult, SessionForkParams};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, SessionInfo};
 use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
@@ -33,12 +33,24 @@ pub const MAX_TITLE: usize = 80;
 pub const MAX_PAGE: u32 = 500;
 
 /// The `session/start` payload: what a surface needs to list a cold session.
+///
+/// Lineage is part of it, so a forked journal says where it came from without
+/// a sidecar. Both fields are absent on a session that was opened rather than
+/// forked, which is what keeps every journal written before forking existed
+/// readable by this reader.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionHeader {
     pub session_id: String,
     pub provider: String,
     pub model: String,
     pub max_steps: u32,
+    /// The session this journal was forked from (contract section 4.4.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
+    /// Last parent seq this journal inherited, inclusive. Present exactly when
+    /// `parent_session` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_seq: Option<u64>,
 }
 
 /// One session held open in memory. Slice-scoped: the turn runtime attaches
@@ -129,6 +141,8 @@ impl SessionStore {
                         .unwrap_or_else(|| self.defaults.provider.clone()),
                     model: params.model.unwrap_or_else(|| self.defaults.model.clone()),
                     max_steps: params.max_steps.unwrap_or(self.defaults.max_steps),
+                    parent_session: None,
+                    fork_seq: None,
                 };
                 let value = serde_json::to_value(&header).map_err(crate::convert::internal)?;
                 log.append(SESSION_START, value)
@@ -146,6 +160,88 @@ impl SessionStore {
         let info = self.info(&live);
         self.live.lock().expect("live").insert(id, live);
         Ok(info)
+    }
+
+    /// Open a child session seeded with a prefix of another one's journal
+    /// (contract section 4.4.6).
+    ///
+    /// The child is a copy: the parent is read and never written. Its journal
+    /// is the inherited prefix with the parent's `session/start` replaced, one
+    /// line for one line, by the child's own - which is why the copied events
+    /// keep their seqs and their `sourceEventSeqs` need no rewriting. Nothing
+    /// ever cites seq 0.
+    pub fn fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        // The child id is settled first, as upstream settles it: a caller that
+        // named an id it already holds is told that, whatever else is also
+        // wrong with the request. Refused rather than reopened, because a seed
+        // written onto a journal that already holds a history would splice the
+        // two together.
+        let child_id = match params.child_session_id {
+            Some(id) => {
+                validate_id_named(&id, "child_session_id")?;
+                if self.resolve(&id).is_some() {
+                    return Err(RpcError::new(
+                        ErrorCode::InvalidParams,
+                        format!("session `{id}` already exists"),
+                    )
+                    .with_data(serde_json::json!({ "field": "child_session_id" })));
+                }
+                id
+            }
+            None => self.fresh_id(),
+        };
+
+        // A journal with no header is not a session this server can open: it
+        // is the one `session.list` already declines to report, and there is
+        // no route for the child to inherit.
+        let events = self.read_all(&params.session_id)?;
+        let Some(parent) = header_of(&events) else {
+            return Err(session_not_found(&params.session_id));
+        };
+        let last = events.len() as u64 - 1;
+        let boundary = params.through_seq.unwrap_or(last);
+        if boundary > last {
+            return Err(bad_boundary(format!(
+                "fork boundary {boundary} does not exist in session `{}` (last seq: {last})",
+                params.session_id
+            )));
+        }
+        if let Some(turn) = open_turn_at(&events, boundary) {
+            return Err(bad_boundary(format!(
+                "fork boundary {boundary} in session `{}` ends inside open turn {turn}",
+                params.session_id
+            )));
+        }
+
+        let header = SessionHeader {
+            session_id: child_id.clone(),
+            // The route comes with the history: what the child inherits was
+            // produced under the parent's provider and model.
+            provider: parent.provider,
+            model: parent.model,
+            max_steps: parent.max_steps,
+            parent_session: Some(parent.session_id),
+            fork_seq: Some(boundary),
+        };
+        let mut seed = Vec::with_capacity(boundary as usize + 1);
+        seed.push(SessionEvent {
+            ty: SESSION_START.to_string(),
+            seq: 0,
+            time: now_ms(),
+            data: serde_json::to_value(&header).map_err(crate::convert::internal)?,
+            source_event_seqs: None,
+        });
+        seed.extend(events[1..=boundary as usize].iter().cloned());
+
+        let path = self.path_of(&child_id);
+        tetanus_session::seed(&path, &seed).map_err(|e| session_error(&child_id, e))?;
+
+        // Opened through the ordinary path, so a forked session is live and
+        // listed on exactly the terms every other session is.
+        self.create(SessionCreateParams {
+            session_id: Some(child_id),
+            ..SessionCreateParams::default()
+        })
     }
 
     /// Every session this store knows: the live ones, plus every journal on
@@ -392,8 +488,44 @@ fn header_at(path: &Path) -> Option<SessionHeader> {
     header_of(&[event])
 }
 
+/// The turn a boundary falls inside, or `None` when the prefix ending there is
+/// closed.
+///
+/// Stated over the log and not over live state: the last `turn/start` or
+/// `turn/end` at or before the boundary decides. A `turn/start` means the turn
+/// it opened is still open there, so a child seeded with that prefix would
+/// begin owing a result to a turn that never ran on it.
+fn open_turn_at(events: &[SessionEvent], boundary: u64) -> Option<u64> {
+    let last = events[..=boundary as usize]
+        .iter()
+        .rev()
+        .find(|e| e.ty == "turn/start" || e.ty == "turn/end")?;
+    if last.ty != "turn/start" {
+        return None;
+    }
+    Some(last.data.get("turn").and_then(|t| t.as_u64()).unwrap_or(0))
+}
+
+fn bad_boundary(message: String) -> RpcError {
+    RpcError::new(ErrorCode::InvalidParams, message)
+        .with_data(serde_json::json!({ "field": "through_seq" }))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// A session id names a file, so it may not reach outside the store's root.
 fn validate_id(id: &str) -> Result<(), RpcError> {
+    validate_id_named(id, "session_id")
+}
+
+/// The same rule, reported against the parameter that carried the id, so a
+/// caller that named a child id is told which of two ids was refused.
+fn validate_id_named(id: &str, field: &str) -> Result<(), RpcError> {
     let ok = !id.is_empty()
         && id.len() <= 128
         && id
@@ -406,8 +538,8 @@ fn validate_id(id: &str) -> Result<(), RpcError> {
     } else {
         Err(RpcError::new(
             ErrorCode::InvalidParams,
-            "session_id must be 1 to 128 characters of [A-Za-z0-9._-]",
+            format!("{field} must be 1 to 128 characters of [A-Za-z0-9._-]"),
         )
-        .with_data(serde_json::json!({ "field": "session_id" })))
+        .with_data(serde_json::json!({ "field": field })))
     }
 }

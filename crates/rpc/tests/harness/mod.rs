@@ -15,8 +15,8 @@ use tetanus_protocol::methods::{
     method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
     ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
     SessionCreateParams, SessionEventPush, SessionEventsParams, SessionEventsResult,
-    SessionListResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
-    SessionUnsubscribeParams, ToolCatalogResult,
+    SessionForkParams, SessionListResult, SessionRef, SessionSubscribeParams,
+    SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::{AgentState, SessionEvent, SessionInfo, StopReason, TurnSummary};
@@ -123,6 +123,9 @@ impl Engine for Fake {
         Ok(Ack { ok: true })
     }
     async fn session_create(&self, _: SessionCreateParams) -> Result<SessionInfo, RpcError> {
+        unused()
+    }
+    async fn session_fork(&self, _: SessionForkParams) -> Result<SessionInfo, RpcError> {
         unused()
     }
     async fn session_events(
