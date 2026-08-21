@@ -179,6 +179,8 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | `approval/policy` | `policy` |
 | `context/snapshot` | `turn`, `parts` (each `name` and `text`) |
 | `user/steer` | `content`, `turn`, `taken` |
+| `question/asked` | `id`, `questions` |
+| `question/answered` | `id`, `answers`, `answered` |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
@@ -368,7 +370,31 @@ So a guarded turn is a whole turn with its journal balanced, not a truncated one
 
 Both are values of the growable `StopReason` (§7.5), not new variants, so no wire type changes and an older surface renders them through its fallback.
 Neither is an error and neither adds a code: a bound the deployment chose being reached is the bound working.
+The rest of this section is what an implementation has to decide, settled here rather than found out.
+The call is reserved, so nothing has been built against it yet and this costs nothing now; it would cost two lanes a rewrite later.
 
+**An answer covers every question, or it is not an answer.**
+A tool that asked three things needs three; given two it is in a state its author never wrote code for.
+An `AskResult` that leaves a question unanswered is treated as no answer at all - the same outcome as a client that errored - so a tool meets one of exactly two cases rather than a partial third.
+An answer naming a question that was not asked is ignored: the questions are the contract, and a client that answered more has not answered less.
+
+**An answer outside a closed list is not an answer.**
+`QuestionOption.label` is both the text and the value (§4.3), so a question that offers options accepts those labels and nothing else.
+A question with no options is free text and accepts anything.
+A single-select question given several labels is unanswered, not first-wins: a tool acting on a guess about which one the user meant is worse than a tool told it has no answer.
+
+**The pair is durable, and turn-enclosed.**
+`question/asked` and `question/answered` go on the journal (§4.3.2), one pair per ask, sharing an `id`.
+A tool acted on what the user said, and a transcript that shows the action without the question cannot explain it - the same reason §4.4.7 gives for the approval pair, and the same enclosure rule, because the turn is what §4.4.4's repair closes and a question outside one could never be closed.
+An ask a crash caught mid-question is closed on reopen the way an approval is.
+
+**An interrupt withdraws the question.**
+`agent.interrupt` settles an outstanding ask as unanswered at once, rather than waiting for an answer a stopped turn would not use, and a late answer is discarded.
+This is §4.4.7's rule and it is the same rule for the same reason.
+
+**Nothing else bounds the wait.**
+There is no timeout: a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault.
+The interrupt is the way out, which is why the previous rule is not optional.
 #### 4.4.4 Reopening a journal a crash left open
 
 A process that dies mid-turn leaves a journal whose last turn never ended, and possibly a tool call no `tool/result` answers.
@@ -929,6 +955,9 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.2 a guarded turn names which guard stopped it | TC-PROTO-40 |
 | §4.4.2 a guard reason is a value, not a variant | TC-PROTO-41 |
 | §4.4.3 a reserved call's capability is not advertised | TC-SUB-5 |
+| §4.4.3 a partial answer is no answer | TC-PROTO-55 |
+| §4.4.3 an answer outside a closed list is no answer | TC-PROTO-56 |
+| §4.4.3 the pair is durable in both outcomes | TC-PROTO-57 |
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
@@ -1033,3 +1062,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States what a turn a guard stopped looks like (§4.4.2): `turn/end` carries `stop_reason: "timed-out"` or `"repeated"`, and `agent.prompt` still answers a summary rather than an error, because a bound the deployment chose being reached is the bound working. A guard is a bound on the turn rather than on a request - how long the whole turn may take, and how many times the model may do the same thing - which is what distinguishes these from the request deadline the provider seam already has. The two reasons are separate because they need opposite answers: `"timed-out"` usually means a bigger budget or a smaller task, while `"repeated"` means the model was looping and a bigger budget makes it strictly worse, so collapsing them would leave a reader unable to tell "this needs longer" from "longer will not help". A guard stops at a step boundary like `agent.interrupt`, so the journal is balanced and §4.6 holds unchanged. No type changes and no error code: both are values of the growable `StopReason` by §7.5, carried across by §7.6's mapping exactly as `"interrupted"` and `"max-tokens"` already are. The engine slice that runs the guards lands separately, and it will add reasons to `tetanus_turn::StopReason`, which by §3 no surface may match - the arm belongs to the presentation lane. |
 | 1.0 | Settles how `config.dump` decides a value is a secret (§4.3): the schema where the engine has one, the name rule for everything else, and the two compose by **union, never by override**. That direction is the whole change. A schema that could un-mark a key would make adding a key to the schema a way to start publishing it, and the mistake would be silent and permanent. Each rule alone fails one way - a schema misses what it does not describe, a name rule misses a credential called `authorization` - and the union fails safe, at the cost of occasionally withholding a `monkey_token` the user can still read in their own file. The schema half is what catches a credential whose name says nothing, which no rule reading the name could find. One ambiguity in the previous wording is now stated rather than left implicit: nothing distinguishes a withheld value from a document that literally contains `<redacted>`, so a surface must not read the sentinel as proof of secrecy. The honest signal is a flag on the entry, and it is deliberately deferred - `ConfigEntry` is a type the presentation lane constructs, so by §5 that field is a change both lanes land together. No type changes here, and the engine slice that consults a schema lands separately; until it does, the name rule is what runs and its behaviour is unchanged. |
 | 1.0 | Corrects two things this document had wrong about itself. §4.3.1's payload table omitted `tool/result.code`, which §4.4.4 has promised since crash repair landed and the engine has written ever since - so the table was not a description of what the engine writes. The row now lists it, and §4.3 says when it is present: only on a result nobody ran, because a call that was dispatched reports its outcome in `ok` and `content` and needs no reason for not having one. And §5's rule about added fields was stated too narrowly. It said a field breaks the lane that *constructs* a type; an exhaustive destructuring pattern breaks the same way in a lane that only *receives* one, and `crates/cli/src/render/timeline.rs` is the live example - it never builds a `KnownEvent` and still could not survive a field on `ToolResult`. A fourth compatibility rule follows: a consumer matches a struct variant with a rest pattern. It cannot be verified from this side, because it is a property of the other lane's source rather than of anything crossing the boundary, so it is a promise whose cost is paid by whoever adds the next field. `KnownEvent::ToolResult` is therefore *not* given the field here: the gap is named instead, with what unblocks it. Today a surface on the typed path cannot tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, since one is safe to retry and the other is not - though the value is on `SessionEvent.data` for a reader willing to look. No type changes. |
+| 1.0 | Settles §4.4.3, which reserved `ui/ask` and then said almost nothing about it. The call is still reserved, so nothing has been built against it and this costs nothing now; the same decisions found out later cost two lanes a rewrite. An answer covers every question or it is no answer, so a tool meets one of exactly two cases rather than a partial third its author never wrote code for; an answer naming a question nobody asked is ignored, because the questions are the contract. A question offering options accepts those labels and nothing else, and a single-select question given several is unanswered rather than first-wins - a tool acting on a guess about which the user meant is worse than a tool told it has none. `question/asked` and `question/answered` join §4.3.2 as a durable pair sharing an `id`, turn-enclosed and closed by repair, for §4.4.7's reasons: a transcript that shows what a tool did but not what the user was asked cannot explain it. An interrupt withdraws an outstanding ask and a late answer is discarded, as it does for an approval. Nothing else bounds the wait, deliberately - a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault - which is why the interrupt rule is not optional. No type changes and no new code. |
