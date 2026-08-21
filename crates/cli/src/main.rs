@@ -345,6 +345,12 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.block_on(run(policy, &document, &mut out, args))
         }
         Cmd::Chat(args) => {
+            // Answered before a journal is opened, the way `run` and `replay`
+            // answer the same flag: a screen the terminal cannot hold is a
+            // bad argument, not a failure of the conversation.
+            if args.ui && !policy.stdout_is_terminal {
+                return Err(fail(policy, &nowhere_to_draw()));
+            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()

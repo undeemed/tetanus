@@ -22,7 +22,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_ui::{or_empty, tame_line, Role, Ui};
+use tetanus_ui::{or_empty, tame_line, truncate, Role, Theme, Ui};
 
 /// Width of the label column on the opening page. `journal` is the longest
 /// label, and `run` prints its own journal line at this width, so the two land
@@ -94,15 +94,46 @@ pub fn space<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
 }
 
 /// Every command the chat answers, in the order a reader meets them.
+/// Every command the chat answers, and what each one does.
+///
+/// One list, read by the page a chat prints and by the card the full-screen
+/// view settles onto its transcript. Two lists would be two answers to
+/// `/help`, and the one a reader met would depend on which chat they were in.
+pub const COMMANDS: [(&str, &str); 3] = [
+    ("/help", "this card; `/?` does the same"),
+    (
+        "/exit",
+        "leave the chat; `/quit`, `/q` and ctrl-d do the same",
+    ),
+    ("//text", "ask `/text`, rather than run it as a command"),
+];
+
+/// The same card, as lines to settle onto a transcript.
+///
+/// The full-screen view has no writer to hand: its rows are composed and then
+/// painted as one frame, so the card is composed the same way. The heading is
+/// drawn as a heading rather than written as one, for the same reason.
+pub fn card(theme: &Theme, cols: usize) -> Vec<String> {
+    let label = COMMANDS
+        .iter()
+        .map(|(command, _)| command.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![theme.paint(Role::Heading, "commands").to_string()];
+    lines.extend(COMMANDS.iter().map(|(command, said)| {
+        let pad = " ".repeat(label - command.chars().count() + 2);
+        let said = truncate(said, cols.saturating_sub(label + 4), theme.charset());
+        format!(
+            "  {}{pad}{}",
+            theme.paint(Role::Accent, command),
+            theme.paint(Role::Muted, &said)
+        )
+    }));
+    lines
+}
+
 pub fn help<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
-    let rows = [
-        ("/help", "this card; `/?` does the same"),
-        (
-            "/exit",
-            "leave the chat; `/quit`, `/q` and ctrl-d do the same",
-        ),
-        ("//text", "ask `/text`, rather than run it as a command"),
-    ];
+    let rows = COMMANDS;
     let label = rows
         .iter()
         .map(|(command, _)| command.chars().count())

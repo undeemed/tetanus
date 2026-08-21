@@ -38,13 +38,14 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::log::topic;
 use tetanus_turn::{TurnConfig, TurnEngine};
-use tetanus_ui::{tame_line, Policy, Ui};
+use tetanus_ui::{tame_line, when_killed, Held, Key, Keys, Policy, Role, Tty, Ui};
 
 use crate::render;
 use crate::{AdapterChoice, Reported};
@@ -70,6 +71,10 @@ pub struct ChatArgs {
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
     pub think: bool,
+    /// Hold the conversation on a screen of its own: the transcript above,
+    /// scrollable, and the line you type on pinned to the foot of it
+    #[arg(long)]
+    pub ui: bool,
 }
 
 /// What a typed line asks for.
@@ -183,6 +188,25 @@ pub async fn chat<W: Write>(
     )
     .map_err(|err| crate::report(policy, &err.to_string(), None))?;
 
+    // The same name as the banner draws, tamed for the line that says it -
+    // `tetanus run` words its phase line from a tamed name for the same
+    // reason. What was given still selects the adapter; what is drawn is
+    // drawn.
+    let phase = format!("running the turn on {}", tame_line(&model));
+
+    if args.ui {
+        return fire(
+            policy,
+            out,
+            &engine,
+            log.as_ref(),
+            &model,
+            &phase,
+            args.think,
+        )
+        .await;
+    }
+
     render::chat::banner(
         out,
         &render::chat::Opened {
@@ -201,12 +225,6 @@ pub async fn chat<W: Write>(
     // row. It is a string and not a call because the thread that draws it is
     // not the one holding the writer.
     let marker = render::chat::marker(out);
-    // The same name as the banner drew, tamed for the line that says it -
-    // `tetanus run` words its phase line from a tamed name for the same
-    // reason. What was given still selects the adapter; what is drawn is
-    // drawn.
-    let phase = format!("running the turn on {}", tame_line(&model));
-
     loop {
         // The blank line that separates the prompt from the turn above it goes
         // through the writer, before the terminal is taken: it is an ordinary
@@ -287,6 +305,274 @@ pub async fn chat<W: Write>(
     crate::journal(out, &log);
     Ok(())
 }
+
+/// Hold the conversation on a screen of its own.
+///
+/// The same engine, the same journal and the same wording as the ordinary
+/// chat: what changes is where the rows go. The transcript is kept by the view
+/// rather than by the reader's scrollback, because the alternate screen has
+/// none, and the row a person types on is the second-to-last row of the
+/// terminal whatever else is happening above it.
+async fn fire<W: Write>(
+    policy: &Policy,
+    out: &mut Ui<W>,
+    engine: &TurnEngine,
+    log: &JsonlSessionLog,
+    model: &str,
+    phase: &str,
+    think: bool,
+) -> Result<(), Reported> {
+    // Hung before the terminal is taken, for the reason `with_page` gives: the
+    // gap between the two is real, and a signal landing in it would find the
+    // alternate screen entered and no watch yet to leave it.
+    let killed = when_killed(Tty::new(std::io::stdout())).ok();
+    let mut held = match Held::take(Tty::new(std::io::stdout())) {
+        Ok(held) => held,
+        // It said it was a terminal and then would not be taken. Reported
+        // rather than fallen back from: the journal is open and the engine is
+        // booted, so a silent return would end a conversation the reader asked
+        // for without a word about why.
+        Err((_, err)) => {
+            drop(killed);
+            return Err(crate::fail(
+                policy,
+                &tetanus_protocol::rpc::RpcError::new(
+                    tetanus_protocol::rpc::ErrorCode::Io,
+                    format!("the terminal could not be taken: {err}"),
+                ),
+            ));
+        }
+    };
+
+    let theme = *out.theme();
+    let (cols, rows) = tetanus_ui::size();
+    let mut view = render::fire::Fire::new(theme, cols, model, think);
+    let events = log.events();
+    view.history(&events.iter().map(crate::crossing).collect::<Vec<_>>());
+    let mut session = Session {
+        log,
+        view,
+        painted: None,
+        seen: events.len(),
+        size: (cols, rows),
+        frames: tokio::time::interval(FRAME),
+    };
+
+    let leaving = session.hold(out, engine, held.console(), phase).await;
+
+    held.release().ok();
+    drop(killed);
+    crate::journal(out, log);
+    match leaving {
+        Leaving::Stopped => Err(crate::stopped(policy)),
+        Leaving::Ended => Ok(()),
+        Leaving::Failed(fault) => Err(crate::fail(policy, &fault)),
+    }
+}
+
+/// How the reader left, which is what the process exits with.
+enum Leaving {
+    /// `/exit`, or Ctrl-D on an empty line.
+    Ended,
+    /// Ctrl-C, which §4.5 gives 130.
+    Stopped,
+    /// A turn failed, and the conversation ends on its status the way the
+    /// ordinary chat's does.
+    Failed(tetanus_protocol::rpc::RpcError),
+}
+
+/// The state one full-screen conversation keeps between frames.
+///
+/// A struct rather than a stack of locals because the loop has two halves -
+/// waiting for a line, and answering one - and both halves settle the journal,
+/// answer the keys and paint. Written as one function they were one function
+/// doing four things.
+struct Session<'a> {
+    log: &'a JsonlSessionLog,
+    view: render::fire::Fire,
+    /// The frame already on the terminal, so a screen that has not changed is
+    /// not painted again.
+    painted: Option<tetanus_ui::Frame>,
+    /// How much of the journal is on the page.
+    seen: usize,
+    size: (usize, usize),
+    frames: tokio::time::Interval,
+}
+
+impl Session<'_> {
+    /// Read lines and answer them until the reader leaves.
+    async fn hold<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+    ) -> Leaving {
+        loop {
+            let asked = match self.line(out, tty).await {
+                render::fire::Act::Asked(line) => line,
+                render::fire::Act::Leave => return Leaving::Ended,
+                render::fire::Act::Stopped => return Leaving::Stopped,
+                render::fire::Act::Go => continue,
+            };
+            match parse(&asked) {
+                Input::Blank => continue,
+                Input::Leave => return Leaving::Ended,
+                Input::Help => self
+                    .view
+                    .settle(render::chat::card(self.view.theme(), self.size.0)),
+                Input::Unknown(command) => self.said(&format!(
+                    "{} is not a command; /help lists them",
+                    tame_line(command)
+                )),
+                Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
+                    Some(Ok(())) => {}
+                    Some(Err(fault)) => return Leaving::Failed(fault),
+                    None => return Leaving::Stopped,
+                },
+            }
+        }
+    }
+
+    /// Wait for the reader to finish a line, painting while they type.
+    ///
+    /// The clock still turns with nothing running, because a journal can grow
+    /// under a conversation resumed beside another one.
+    async fn line<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        tty: &mut Tty<std::io::Stdout>,
+    ) -> render::fire::Act {
+        loop {
+            self.frames.tick().await;
+            let typed = self.keys(tty);
+            self.settle();
+            self.paint(out, Duration::ZERO);
+            if typed != render::fire::Act::Go {
+                return typed;
+            }
+        }
+    }
+
+    /// Run one turn, painting it as it arrives.
+    ///
+    /// `None` is Ctrl-C: the turn is dropped where it stands, which is what
+    /// the ordinary chat does with the same key.
+    async fn turn<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+        said: &str,
+    ) -> Option<Result<(), tetanus_protocol::rpc::RpcError>> {
+        self.view.started(phase);
+        let started = std::time::Instant::now();
+        let mut running = std::pin::pin!(engine.run_turn(said));
+        let outcome = loop {
+            tokio::select! {
+                done = &mut running => break Some(done),
+                _ = self.frames.tick() => {
+                    let typed = self.keys(tty);
+                    self.settle();
+                    self.view.tick();
+                    self.paint(out, started.elapsed());
+                    if typed != render::fire::Act::Go {
+                        break None;
+                    }
+                }
+            }
+        };
+        // Whatever the turn wrote after the last frame, and then the block
+        // goes: nothing more is coming.
+        self.settle();
+        self.view.finished();
+        let outcome = outcome?;
+        let answered = match outcome {
+            Ok(_) => Ok(()),
+            Err(err) => Err(crate::turn_fault(
+                &err,
+                self.log.id(),
+                self.model(),
+                self.log.path(),
+            )),
+        };
+        if let Err(fault) = &answered {
+            let lines = render::fault::lines(self.view.theme(), self.size.0, fault);
+            self.view.settle(lines);
+        }
+        self.paint(out, Duration::ZERO);
+        Some(answered)
+    }
+
+    /// The model this conversation is on, as the heading says it.
+    fn model(&self) -> &str {
+        self.view.model()
+    }
+
+    /// One line of this build's own words, on the transcript.
+    fn said(&mut self, text: &str) {
+        let said = self.view.theme().paint(Role::Warn, text).to_string();
+        self.view.settle(vec![said]);
+    }
+
+    /// Answer every keystroke waiting, and take the size the terminal reports.
+    ///
+    /// A resize arrives on the same queue as the keys and is answered here
+    /// rather than passed on, because a frame built for the old size is wrong
+    /// the instant it is read.
+    fn keys(&mut self, tty: &mut Tty<std::io::Stdout>) -> render::fire::Act {
+        for _ in 0..KEYS {
+            let Ok(Some(key)) = tty.key(Duration::ZERO) else {
+                break;
+            };
+            if let Key::Resize(cols, rows) = key {
+                self.size = (cols as usize, rows as usize);
+                continue;
+            }
+            match self.view.key(key) {
+                render::fire::Act::Go => {}
+                // The first line finished, or the first way out, ends the
+                // reading: what is left in the buffer belongs to the next line.
+                act => return act,
+            }
+        }
+        render::fire::Act::Go
+    }
+
+    /// Commit whatever the journal has grown by.
+    fn settle(&mut self) {
+        let events = self.log.events();
+        for event in events.iter().skip(self.seen) {
+            self.view.push(&crate::crossing(event));
+        }
+        self.seen = events.len();
+    }
+
+    /// Paint, unless the frame is the frame already on the terminal.
+    ///
+    /// The clock runs at twelve frames a second and a conversation waiting for
+    /// somebody to type changes on none of them, so most frames are the one
+    /// before them. `Frame` is comparable for exactly this.
+    fn paint<W: Write>(&mut self, out: &mut Ui<W>, spent: Duration) {
+        let frame = self.view.frame(self.size.0, self.size.1, spent);
+        if self.painted.as_ref() == Some(&frame) {
+            return;
+        }
+        frame.paint(out).ok();
+        self.painted = Some(frame);
+    }
+}
+
+/// How often a frame is composed while the view is up. The same interval every
+/// other full-screen view in this binary uses.
+const FRAME: Duration = Duration::from_millis(80);
+
+/// Keystrokes one frame will answer before it draws. The same bound
+/// `Watch::beat` sets, and for the same reason: a held key repeats faster than
+/// the frames come round, and a pasted wall of text must not hold up the turn
+/// running beside it.
+const KEYS: usize = 32;
 
 /// Turns already on a journal, which is what a resumed chat remembers.
 fn turns_on(log: &JsonlSessionLog) -> usize {
