@@ -77,6 +77,19 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<Closer> {
             sources: None,
         });
     }
+    // A user question the crash caught mid-flight is closed the same way and
+    // for the same reason (contract section 4.4.3, which points at 4.4.7 for
+    // the rule). It reads `answered: false` rather than carrying an outcome
+    // word, because a question has no vocabulary of denials: either the user
+    // said something or they did not, and a process that died means they did
+    // not.
+    for id in unanswered_questions(open_turn) {
+        closers.push(Closer {
+            ty: topic::QUESTION_ANSWERED,
+            data: json!({ "id": id, "answers": [], "answered": false }),
+            sources: None,
+        });
+    }
     if let Some(step_start) = open_step {
         let step = &open_turn[step_start..];
         for call in unanswered_calls(step) {
@@ -128,6 +141,28 @@ fn undecided_asks(open_turn: &[SessionEvent]) -> Vec<String> {
         match event.ty.as_str() {
             topic::APPROVAL_ASKED => pending.push(string(&event.data, "id")),
             topic::APPROVAL_DECIDED => {
+                let id = string(&event.data, "id");
+                pending.retain(|open| *open != id);
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
+/// The user questions of the open turn that never got an answer, in the order
+/// they were asked.
+///
+/// The same fold as [`undecided_asks`], over the other pair. Two folds rather
+/// than one generic one, because the closers they produce carry different
+/// payloads and a reader following a single abstraction here would have to hold
+/// both shapes in their head to check either.
+fn unanswered_questions(open_turn: &[SessionEvent]) -> Vec<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for event in open_turn {
+        match event.ty.as_str() {
+            topic::QUESTION_ASKED => pending.push(string(&event.data, "id")),
+            topic::QUESTION_ANSWERED => {
                 let id = string(&event.data, "id");
                 pending.retain(|open| *open != id);
             }

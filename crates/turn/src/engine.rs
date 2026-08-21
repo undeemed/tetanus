@@ -220,6 +220,23 @@ impl TurnEngine {
         })
     }
 
+    /// Run this engine's turns on an interrupt somebody else also holds.
+    ///
+    /// One flag, two holders. A tool that waits on something unbounded - a
+    /// question put to a person ([`crate::questions`]) - has to learn that the
+    /// turn was interrupted, and a tool body is handed nothing but its
+    /// arguments, so the seam it waits on must have been given the flag when it
+    /// was composed. Passing it here rather than reaching into a built engine
+    /// keeps the composition explicit: whoever wires the tool and the engine
+    /// together is the one place that knows they are the same turn.
+    ///
+    /// The engine still clears the flag as each turn starts, so an interrupt
+    /// that stopped nothing does not stop the turn that follows it.
+    pub fn sharing_interrupt(mut self, interrupt: Arc<Interrupt>) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+
     /// Ask the running turn to stop at its next step boundary. Answering
     /// `false` means there was nothing to ask: no turn is running.
     pub fn cancel(&self) -> bool {

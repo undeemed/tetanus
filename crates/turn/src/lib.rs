@@ -10,6 +10,7 @@
 //! - [`process`] runs one external command, bounded in output and in time.
 //! - [`prompt`] is the named section registry the assembly starts from.
 //! - [`prune`] shrinks a tool result that is too long to keep whole.
+//! - [`questions`] asks the user something a tool cannot decide alone.
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`instructions`] reads the conventions a project keeps in its repository.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
@@ -31,6 +32,7 @@ pub mod log;
 pub mod process;
 pub mod prompt;
 pub mod prune;
+pub mod questions;
 pub mod repair;
 pub mod schema;
 pub mod tokens;

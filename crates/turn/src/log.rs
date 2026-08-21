@@ -31,6 +31,16 @@ pub mod topic {
     pub const APPROVAL_ASKED: &str = "approval/asked";
     pub const APPROVAL_DECIDED: &str = "approval/decided";
     pub const APPROVAL_POLICY: &str = "approval/policy";
+
+    /// The user-question audit of contract section 4.4.3, and the same pair
+    /// rule: one `question/asked` and exactly one `question/answered` sharing
+    /// an `id`, inside the turn that needed the answer.
+    ///
+    /// Neither derives to a message. What the model learns is the `tool/result`
+    /// the asking tool produced, and a transcript that showed it the audit
+    /// would be feeding it the harness's own bookkeeping as conversation.
+    pub const QUESTION_ASKED: &str = "question/asked";
+    pub const QUESTION_ANSWERED: &str = "question/answered";
 }
 
 /// Derive the model history from the log. Replay is re-derivation from the
