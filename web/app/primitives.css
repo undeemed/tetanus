@@ -186,3 +186,7 @@
 .code pre { margin:0; padding:var(--gap) var(--gap-wide); overflow-x:auto; }
 .code code { border:0; background:none; padding:0;
   font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+
+/* A value the engine withheld. Struck through rather than coloured: it is not
+   a fault, it is a value nobody is allowed to read. */
+.set-withheld { font-style:italic; color:var(--text-muted); }

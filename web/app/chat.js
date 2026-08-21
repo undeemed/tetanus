@@ -6,6 +6,7 @@ import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
 import { models, tools } from "./catalogue.js";
+import { settings } from "./settings.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -753,6 +754,12 @@ document.getElementById("catalogue-open").onclick = async () => {
       },
     });
     tools(listed, toolset.tools || []);
+    // The same dialog: what this build can run, and what it is configured to
+    // do with it. Two calls, one question - "what is this deployment".
+    const dumped = await window.TETANUS_CALL("config.dump", {});
+    settings(document.getElementById("catalogue-settings"), dumped.entries || [], {
+      document: dumped.document,
+    });
   } catch (err) {
     shown.replaceChildren();
     const said = document.createElement("p");
