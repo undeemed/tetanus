@@ -1636,6 +1636,9 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "serde_json",
+ "tempfile",
+ "tetanus-core",
+ "tetanus-session",
 ]
 
 [[package]]

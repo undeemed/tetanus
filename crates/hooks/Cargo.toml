@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 regex.workspace = true
 serde_json.workspace = true
+tetanus-session = { path = "../session" }
+
+[dev-dependencies]
+tetanus-core = { path = "../core" }
+tempfile.workspace = true
