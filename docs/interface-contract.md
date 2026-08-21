@@ -158,7 +158,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `assistant/chunk` | `chunk` (`text` \| `reasoning` \| `tool_call`), plus `delta` for the first two and `call` for the third, plus `turn` and `step` |
 | `assistant/message` | `content`, `reasoning`, `tool_calls`, `finish_reason`, `usage` |
 | `tool/call` | `id`, `name`, `arguments` |
-| `tool/result` | `call_id`, `name`, `ok`, `content` |
+| `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
 
@@ -190,6 +190,16 @@ They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: the
 This step is not a version bump.
 `SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
 The second step is the minor bump, because a `KnownEvent` variant is an addition under §5.
+
+**`tool/result.code` is present only on a result nobody ran.**
+A call the engine dispatched has an outcome, and the outcome is `ok` and `content`.
+A result the engine *synthesized* - crash repair closing a call that was interrupted (§4.4.4), or a call refused before it ran (§4.4.7) - has no outcome to report, so it carries a code saying why there is none.
+The vocabulary grows with the reasons, so a surface reads an unknown code as "not run, for a reason this build does not know" rather than failing.
+
+`KnownEvent::ToolResult` does **not** carry it yet, and that is a gap rather than a decision.
+`parse()` drops the field, so a surface on the typed path cannot today tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, because the first is safe to retry and the second is not.
+The field is on the journal and on `SessionEvent.data`, so nothing is lost to a surface willing to read it there; what is missing is the compiler-checked path.
+It is deferred for the reason below rather than added here, and it lands in the version the presentation lane takes.
 
 **`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
 A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
@@ -650,21 +660,30 @@ The constant is in `tetanus-protocol`, and a literal `"1.0"` in a consuming lane
 The version is the one string in this contract that no peer should hard-code.
 
 **An added field is minor on the wire and not always minor in Rust.**
-A JSON reader ignores a field it was not sent; a Rust struct literal does not, so adding even an optional field to a type the *other* lane constructs - rather than only receives - stops that lane compiling.
+A JSON reader ignores a field it was not sent; Rust does not, so adding even an optional field can stop the other lane compiling.
 Wire-optional is not source-optional.
-So an addition to a constructed type is a change both lanes land together, and until they do, an addition goes on the types a surface only ever reads.
-That is why §4.4.6 puts a forked session's lineage on its `session/start` line and not on `SessionInfo`, which the presentation lane builds in its own cases.
+
+Two shapes break, not one, and the second was missed when this rule was first written.
+A **struct literal** must name every field, so a lane that *constructs* the type stops compiling.
+An **exhaustive destructuring pattern** must also name every field, so a lane that only ever *receives* the type stops compiling too.
+`crates/cli/src/render/timeline.rs` is the live example: it never builds a `KnownEvent`, and it still cannot survive a field being added to `KnownEvent::ToolResult`, because it matches that variant by naming all four.
+
+So the rule is about both, and a fourth rule joins the three below to make it avoidable: a consumer matches a struct variant with a rest pattern.
+Until a type's consumers do, an addition to it is a change both lanes land together, and an addition goes on the types nobody names field by field.
+That is why §4.4.6 puts a forked session's lineage on its `session/start` line rather than on `SessionInfo`, and why §4.3's `tool/result.code` is documented but not yet a `KnownEvent` field.
 
 **A major bump covers everything else.**
 Removing or renaming a method or field, changing a field's type, making an optional field required, narrowing an accepted value, or changing what an existing error code means is a major bump.
 
-Three rules make additions safe, and a surface must follow all three.
+Four rules make additions safe, and a surface must follow all four.
 
 1. Ignore unknown object fields.
 2. Ignore unknown notification methods, and answer unknown request methods `MethodNotFound`.
 3. Render unknown enum variants through the `Other(String)` fallback, and unknown error codes through their raw code.
+4. Match a struct variant with a rest pattern, so a field added to it is not a build break.
 
-The conformance cases in §6 hold these rules to their word.
+The conformance cases in §6 hold the first three to their word.
+The fourth cannot be checked from this side - it is a property of the consuming lane's source, not of any value that crosses the boundary - so it is a promise, and the cost of breaking it is paid by whoever adds the next field.
 
 ## 6. Verification
 
@@ -689,6 +708,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.3.1 every durable payload parses from the journal shape | TC-PROTO-10 |
 | §4.3.1 an unknown type parses to `None` and keeps its data | TC-PROTO-11 |
 | §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
+| §4.3 a synthesized result carries a code, and an unknown one is readable | TC-PROTO-50 |
+| §4.3 the typed path cannot see the code yet, and says so | TC-PROTO-51 |
 | §4.3.1 every event the engine writes parses, and all ten types appear | TC-CONTRACT-1 |
 | §4.3.1 the engine's own `tool/result` names and cites its call | TC-CONTRACT-2 |
 | §4.3.1 `TurnSummary.content` restates the last `assistant/message` | TC-CONTRACT-3 |
@@ -828,3 +849,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Corrects two things this document had wrong about itself. §4.3.1's payload table omitted `tool/result.code`, which §4.4.4 has promised since crash repair landed and the engine has written ever since - so the table was not a description of what the engine writes. The row now lists it, and §4.3 says when it is present: only on a result nobody ran, because a call that was dispatched reports its outcome in `ok` and `content` and needs no reason for not having one. And §5's rule about added fields was stated too narrowly. It said a field breaks the lane that *constructs* a type; an exhaustive destructuring pattern breaks the same way in a lane that only *receives* one, and `crates/cli/src/render/timeline.rs` is the live example - it never builds a `KnownEvent` and still could not survive a field on `ToolResult`. A fourth compatibility rule follows: a consumer matches a struct variant with a rest pattern. It cannot be verified from this side, because it is a property of the other lane's source rather than of anything crossing the boundary, so it is a promise whose cost is paid by whoever adds the next field. `KnownEvent::ToolResult` is therefore *not* given the field here: the gap is named instead, with what unblocks it. Today a surface on the typed path cannot tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, since one is safe to retry and the other is not - though the value is on `SessionEvent.data` for a reader willing to look. No type changes. |
