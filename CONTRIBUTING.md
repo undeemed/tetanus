@@ -96,6 +96,10 @@ cargo test -p tetanus-turn --test upstream_compaction      # a conversation that
 cargo test -p tetanus-turn --test upstream_projections     # the folds a reader asks a session for
 cargo test -p tetanus-session --test upstream_sqlite       # the second persistence backend
 cargo test -p tetanus-engine --test credential_containment # a secret in none of the artifacts
+cargo test -p tetanus-core --test jobs                     # work the harness owes, across a restart
+cargo test -p tetanus-core --test schedule                 # time-triggered work, by moving the clock
+cargo test -p tetanus-turn --test upstream_workflow        # multi-step work outside a turn
+cargo test -p tetanus-turn --test upstream_lsp             # a language server, and one that dies
 ```
 
 Three rules keep it a gate rather than a formality.
