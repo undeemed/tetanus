@@ -345,20 +345,28 @@ pub async fn chat<W: Write>(
                     crate::journal(out, &log);
                     return Err(crate::stopped(policy));
                 };
-                // A turn that failed ends the chat with the status §4.5 gives
-                // its code, the same as `tetanus run`: the conversation is on
-                // the journal, and `tetanus chat -s <path>` picks it up again.
-                outcome.map_err(|err| {
-                    crate::fail(
-                        policy,
-                        &crate::turn_fault(
-                            &err,
-                            &opened.session_id,
-                            settled.provider.route(),
-                            &settled.journal,
-                        ),
-                    )
-                })?;
+                // A turn that failed is a turn that failed, not a chat that
+                // is over: the engine is still booted and the journal is
+                // still open, so the fault is said and the next line is
+                // asked for. A provider that could not be reached is the
+                // ordinary case here, and dropping a reader back to a shell
+                // to retype `tetanus chat -s <path>` answers a network blip
+                // by ending the conversation.
+                //
+                // Piped input keeps the old behaviour, because there is
+                // nobody there to ask again: the status §4.5 gives the code
+                // is what a script reads, and a run whose turns all failed
+                // must not exit 0.
+                if let Err(err) = outcome {
+                    let fault = crate::turn_fault(
+                        &err,
+                        &opened.session_id,
+                        settled.provider.route(),
+                        &settled.journal,
+                    );
+                    kept_going(policy, typing, &fault)?;
+                    continue;
+                }
                 engine
                     .flush()
                     .await
@@ -368,6 +376,24 @@ pub async fn chat<W: Write>(
     }
 
     crate::journal(out, &log);
+    Ok(())
+}
+
+/// What a failed turn does to the chat around it.
+///
+/// A reader at a terminal is told and asked for another line. A pipe has
+/// nobody to ask, so the run ends on the status §4.5 gives the fault's code -
+/// the same number `tetanus run` would have exited with, which is what a
+/// script branching on `$?` reads.
+fn kept_going(
+    policy: &Policy,
+    typing: bool,
+    fault: &tetanus_protocol::rpc::RpcError,
+) -> Result<(), Reported> {
+    if !typing {
+        return Err(crate::fail(policy, fault));
+    }
+    crate::said_fault(policy, fault);
     Ok(())
 }
 
@@ -433,7 +459,6 @@ async fn fire<W: Write>(
     match leaving {
         Leaving::Stopped => Err(crate::stopped(policy)),
         Leaving::Ended => Ok(()),
-        Leaving::Failed(fault) => Err(crate::fail(policy, &fault)),
     }
 }
 
@@ -443,9 +468,6 @@ enum Leaving {
     Ended,
     /// Ctrl-C, which §4.5 gives 130.
     Stopped,
-    /// A turn failed, and the conversation ends on its status the way the
-    /// ordinary chat's does.
-    Failed(tetanus_protocol::rpc::RpcError),
 }
 
 /// The state one full-screen conversation keeps between frames.
@@ -511,9 +533,13 @@ impl Session<'_> {
     ) -> Option<Leaving> {
         match parse(asked) {
             Input::Leave => Some(Leaving::Ended),
+            // A failed turn is already on the page, said in the wording
+            // §4.5's code carries: the reader sees what went wrong under
+            // their question and asks again, or leaves. Tearing the screen
+            // down to print the same sentence to a shell would answer a
+            // provider blip by throwing away the conversation on it.
             Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
-                Some(Ok(())) => None,
-                Some(Err(fault)) => Some(Leaving::Failed(fault)),
+                Some(_) => None,
                 None => Some(Leaving::Stopped),
             },
             // Everything else changes the page and nothing else.
