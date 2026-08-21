@@ -301,32 +301,46 @@ pub fn fit(text: &str, width: usize, charset: Charset) -> String {
 /// Newlines in `text` are kept, blank lines included. A word too long for any
 /// line - a path, a URL, a base64 blob - is broken rather than allowed to
 /// overrun.
+///
+/// A line's own indentation is kept, and what folds out of that line is laid
+/// under it rather than back at column zero. Not every line a model writes is
+/// prose: a fenced block, a diff, a stack trace and a table all carry meaning
+/// in their leading spaces, and a fold that dropped them changed the text
+/// rather than laying it out - `    println!()` inside a function came back
+/// flush with the `fn` above it, which is a different program to read.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let text = tame(text);
     let mut lines = Vec::new();
 
     for paragraph in text.split('\n') {
+        let indent: String = paragraph.chars().take_while(|char| *char == ' ').collect();
+        // A line indented past the whole width has nowhere to fold to. It
+        // keeps one column to fold in, which is the same bargain `width` above
+        // makes with a caller who asked for none.
+        let room = width.saturating_sub(indent.len()).max(1);
+        let body = &paragraph[indent.len()..];
+        let mut lines_here: Vec<String> = Vec::new();
         let mut line = String::new();
         let mut filled = 0;
 
-        for word in paragraph.split_whitespace() {
+        for word in body.split_whitespace() {
             let mut rest: Vec<char> = word.chars().collect();
-            while span(&rest) > width {
+            while span(&rest) > room {
                 if filled > 0 {
-                    lines.push(std::mem::take(&mut line));
+                    lines_here.push(std::mem::take(&mut line));
                     filled = 0;
                 }
                 // One character in any case: a character wider than the whole
                 // width overruns it by a column, and a fold that took none
                 // would fold this word for the rest of the run.
-                let cut = take(&rest, width).max(1);
-                lines.push(rest.drain(..cut).collect::<String>());
+                let cut = take(&rest, room).max(1);
+                lines_here.push(rest.drain(..cut).collect::<String>());
             }
 
             let drawn = span(&rest);
-            if filled > 0 && filled + 1 + drawn > width {
-                lines.push(std::mem::take(&mut line));
+            if filled > 0 && filled + 1 + drawn > room {
+                lines_here.push(std::mem::take(&mut line));
                 filled = 0;
             }
             if filled > 0 {
@@ -336,7 +350,20 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
             filled += drawn;
             line.extend(rest);
         }
-        lines.push(line);
+        lines_here.push(line);
+        // The indent is put back on every row the line folded into, so the
+        // block stays a block: a continuation at column zero would read as a
+        // new line of the code rather than the rest of the one above it.
+        lines.extend(
+            lines_here
+                .into_iter()
+                .map(|folded| match folded.is_empty() {
+                    // An indent with nothing after it is trailing space, and nothing
+                    // is drawn by it. A blank line stays blank.
+                    true => folded,
+                    false => format!("{indent}{folded}"),
+                }),
+        );
     }
     lines
 }

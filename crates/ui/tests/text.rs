@@ -1,9 +1,10 @@
 //! Test Design Specification: the text rules every renderer shares.
 //!
 //! Features tested: cutting a value to a width and saying so, folding a
-//! paragraph to a width without losing a word, measuring and cutting a line
-//! that a theme has already painted, and making text the harness did not write
-//! safe to draw, as a paragraph and as one row. Features NOT tested here: what any particular renderer does
+//! paragraph to a width without losing a word and without losing the column a
+//! line was written in, measuring and cutting a line that a theme has already
+//! painted, and making text the harness did not write safe to draw, as a
+//! paragraph and as one row. Features NOT tested here: what any particular renderer does
 //! with the result - the status line owns its own cases in `progress.rs`, the
 //! timeline owns its own in `render/timeline.rs`.
 //!
@@ -363,5 +364,87 @@ fn a_value_that_draws_nothing_is_given_a_word() {
     assert_eq!(
         or_empty(&tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}")),
         "(empty)"
+    );
+}
+
+/// TC-UI-TEXT-22: a line that was written indented.
+/// Expected: the indent is still there, and what folded out of the line is
+/// laid under it rather than back at column zero. A continuation at column
+/// zero reads as the next line of a block rather than the rest of this one,
+/// which is a different text from the one the model wrote.
+#[test]
+fn a_folded_line_keeps_the_column_it_started_in() {
+    let lines = wrap(
+        "    a long indented sentence that has to fold somewhere",
+        24,
+    );
+
+    assert!(lines.len() > 1, "nothing folded: {lines:?}");
+    for line in &lines {
+        assert!(visible_width(line) <= 24, "`{line}` overruns 24");
+        assert!(line.starts_with("    "), "lost its column: {lines:?}");
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.trim_start())
+            .collect::<Vec<_>>()
+            .join(" "),
+        "a long indented sentence that has to fold somewhere"
+    );
+}
+
+/// TC-UI-TEXT-23: a fenced block inside prose a model wrote.
+/// Expected: every line comes back at the depth it was written at. This is the
+/// case the rule exists for: a body indented four columns inside a function is
+/// a different program from one flush with the `fn` above it, and a renderer
+/// that folds an answer must not be the thing that changes it.
+#[test]
+fn a_block_keeps_the_shape_it_was_written_in() {
+    let said = "Here is the fix.\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+    let lines = wrap(said, 40);
+
+    assert_eq!(
+        lines,
+        vec![
+            "Here is the fix.",
+            "",
+            "```rust",
+            "fn main() {",
+            "    println!(\"hi\");",
+            "}",
+            "```",
+        ]
+    );
+}
+
+/// TC-UI-TEXT-24: a blank line, and a line of nothing but spaces.
+/// Expected: both come back empty. An indent is only put back on a row that
+/// has something after it, because an indent alone is trailing space: nothing
+/// is drawn by it, and a frame would still spend the columns.
+#[test]
+fn a_line_with_nothing_on_it_is_not_indented() {
+    assert_eq!(wrap("a\n\nb", 20), vec!["a", "", "b"]);
+    assert_eq!(wrap("a\n    \nb", 20), vec!["a", "", "b"]);
+}
+
+/// TC-UI-TEXT-25: a line indented as wide as the window, or wider.
+/// Expected: it still folds, one column at a time, and no row is empty for
+/// want of room. A deep indent in a narrow terminal is a real journal - a
+/// nested diff read on a phone - and the fold has to terminate on it.
+#[test]
+fn an_indent_wider_than_the_window_still_folds() {
+    let lines = wrap("          deep", 8);
+
+    assert!(!lines.is_empty(), "nothing came back");
+    for line in &lines {
+        assert!(!line.trim().is_empty(), "an empty row: {lines:?}");
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.trim_start())
+            .collect::<String>(),
+        "deep"
     );
 }
