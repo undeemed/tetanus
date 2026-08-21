@@ -55,6 +55,15 @@ export const PANELS = {
     reads: "the plan the agent put up for review",
     view: null,
   },
+  // Published by the features lane while this file was being written, and
+  // still not on this branch: `Attachment { id, name, media_type, ... }` with
+  // a `Limits` beside it. Registered now so the entry is waiting rather than
+  // being discovered later.
+  "attachment/added": {
+    title: "Attached",
+    reads: "each attachment's name and media type, against the limits the deployment set",
+    view: null,
+  },
 };
 
 /**

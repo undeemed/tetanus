@@ -36,6 +36,20 @@ import { disclosure, jsonTree, pill } from "./primitives.js";
  */
 export const views = {
   /**
+   * Where the session is working: the project root, how it was identified,
+   * the instruction files the project keeps, and what is at the top level.
+   *
+   * Registered and inert. The tool is on `fm/tetanus-p2-features` and answers
+   * **rendered text** rather than a structure - `Workspace::render()` - so the
+   * view that claims it will be a reader of that text, and writing it against
+   * a format on an unlanded branch would be writing against a format still
+   * free to change. Until then the generic frame shows exactly what the tool
+   * said, which for a text-answering tool is most of what a view would do
+   * anyway.
+   */
+  workspace_info: null,
+
+  /**
    * `echo` returns what it was given. Its result is the text, so it is drawn
    * as text rather than as a one-key tree that a reader has to open to find a
    * sentence in.
@@ -50,7 +64,7 @@ export const views = {
 export function toolCall(name, args) {
   const root = frame("call", name);
   const view = views[name];
-  root.body.append(view ? view.call(args) : jsonTree(args ?? {}));
+  root.body.append(view?.call ? view.call(args) : jsonTree(args ?? {}));
   return root;
 }
 
@@ -64,7 +78,7 @@ export function toolCall(name, args) {
 export function toolResult(name, content, ok) {
   const root = frame(ok ? "result" : "failed", name);
   const view = views[name];
-  root.body.append(view && ok ? view.result(content) : text(content));
+  root.body.append(view?.result && ok ? view.result(content) : text(content));
   if (!ok) root.head.append(pill("failed", "bad"));
   return root;
 }
