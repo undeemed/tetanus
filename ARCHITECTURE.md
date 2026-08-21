@@ -309,6 +309,16 @@ recorded both halves of it.
 Both are derived from event times the journal already holds, so a surface cannot disagree with the
 journal it read, and both sit behind the threshold the duration sits behind: under a second they
 are noise, and two runs of one turn must print the same bytes.
+
+`/stats` on the full-screen chat is the same arithmetic over the whole journal rather than one turn:
+how much was asked, how long the model and the tools each took, the average wait for a first token,
+the rate, and what was billed
+([`stats`](crates/cli/src/render/timeline.rs)).
+Upstream keeps those figures on a strip beside its composer; a terminal has no room for a strip that
+keeps itself up to date, so this is a snapshot that stays where it was asked for - and a reader who
+wants the figure again asks again, which is cheaper to read than a number moving in a corner.
+A group with nothing in it is left out whole: `0 tokens` reads as a conversation that was free,
+where a conversation whose every request failed is one that never got an answer.
 `--ui` takes the whole terminal instead and composes each frame with `Page`
 ([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
 still running.

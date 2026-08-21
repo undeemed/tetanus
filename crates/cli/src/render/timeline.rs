@@ -392,6 +392,197 @@ pub(super) fn tokens(count: u64) -> String {
     }
 }
 
+/// What a whole conversation has cost and how fast it has been.
+///
+/// Upstream keeps the same figures on a strip beside its composer, folded over
+/// the same events: how much was asked, how long the model and the tools each
+/// took, how long the first token took on average, the rate the answers
+/// decoded at, and what was billed. This is that fold, over a journal.
+///
+/// Every figure is derived rather than carried: the journal holds event times
+/// and the usage a message reported, and a surface that computed them from
+/// anything else would be a second answer about one conversation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub turns: u64,
+    pub steps: u64,
+    /// Milliseconds between a step starting and its message settling, summed.
+    pub thinking: u64,
+    /// Milliseconds between a tool being called and answering, summed.
+    pub tooling: u64,
+    /// Summed first-token waits, and how many steps recorded one.
+    pub waited: u64,
+    pub waits: u64,
+    /// Decode time and the tokens decoded in it, over the steps recording both.
+    pub decoding: u64,
+    pub decoded: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl Stats {
+    /// The average wait for a first token, when any step recorded one.
+    pub fn wait(&self) -> Option<u64> {
+        (self.waits > 0).then(|| self.waited / self.waits)
+    }
+
+    /// Tokens a second while decoding, on the same terms the closing line
+    /// reports it: nothing when too little time passed to divide by.
+    pub fn rate(&self) -> Option<u64> {
+        (self.decoding >= FLOOR && self.decoded > 0)
+            .then(|| self.decoded * 1_000 / self.decoding)
+            .filter(|rate| *rate > 0)
+    }
+}
+
+/// Fold a journal into what it says about the conversation on it.
+pub fn stats(events: &[SessionEvent]) -> Stats {
+    let mut stats = Stats::default();
+    let mut step: Option<u64> = None;
+    let mut first: Option<u64> = None;
+    // Calls waiting on a result, by the id a result pairs to (contract §4.3.1);
+    // never by arrival order, because two calls in flight arrive in whichever
+    // order the tools finish.
+    let mut calls: Vec<(String, u64)> = Vec::new();
+    for event in events {
+        let time = event.time;
+        match event.parse() {
+            Some(KnownEvent::TurnStart { .. }) => stats.turns += 1,
+            Some(KnownEvent::StepStart { .. }) => {
+                stats.steps += 1;
+                step = Some(time);
+                first = None;
+            }
+            Some(KnownEvent::AssistantChunk { .. }) => {
+                if first.is_none() {
+                    first = Some(time);
+                    if let Some(started) = step {
+                        stats.waited += time.saturating_sub(started);
+                        stats.waits += 1;
+                    }
+                }
+            }
+            Some(KnownEvent::AssistantMessage { usage, .. }) => {
+                if let Some(started) = step.take() {
+                    stats.thinking += time.saturating_sub(started);
+                }
+                if let (Some(first), Some(usage)) = (first.take(), usage.as_ref()) {
+                    stats.decoding += time.saturating_sub(first);
+                    stats.decoded += usage.completion_tokens;
+                }
+                if let Some(usage) = usage {
+                    stats.prompt_tokens += usage.prompt_tokens;
+                    stats.completion_tokens += usage.completion_tokens;
+                }
+            }
+            Some(KnownEvent::ToolCall { id, .. }) => calls.push((id, time)),
+            Some(KnownEvent::ToolResult { call_id, .. }) => {
+                if let Some(at) = calls.iter().position(|(id, _)| *id == call_id) {
+                    let (_, called) = calls.remove(at);
+                    stats.tooling += time.saturating_sub(called);
+                }
+            }
+            _ => {}
+        }
+    }
+    stats
+}
+
+/// The strip a reader asks for: what was asked, what it took, how fast it was,
+/// and what it cost.
+///
+/// Grouped the way upstream groups it, and a group with nothing in it is left
+/// out whole rather than printed as zeroes - a conversation whose every
+/// request failed has counts and no billing, and saying `0 tokens` would read
+/// as a conversation that was free rather than one that never got an answer.
+pub fn told(theme: &Theme, stats: &Stats) -> Vec<String> {
+    if stats.turns == 0 && stats.steps == 0 {
+        return vec![theme
+            .paint(Role::Muted, "nothing has been asked yet")
+            .to_string()];
+    }
+    let dot = theme.glyph("·", "-");
+    let groups: Vec<String> = [
+        Some(counted(stats, dot)),
+        took(stats, dot),
+        fast(stats, dot),
+        billed(stats, dot),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    vec![
+        theme.paint(Role::Heading, "stats").to_string(),
+        format!("  {}", theme.paint(Role::Muted, &groups.join("   "))),
+    ]
+}
+
+/// How much was asked.
+///
+/// A turn that failed before its first step is still a turn, and each half is
+/// counted where it is there rather than the pair being counted together.
+fn counted(stats: &Stats, dot: &str) -> String {
+    let mut counts = Vec::new();
+    if stats.turns > 0 {
+        counts.push(match stats.turns {
+            1 => "1 turn".to_string(),
+            turns => format!("{turns} turns"),
+        });
+    }
+    if stats.steps > 0 {
+        counts.push(match stats.steps {
+            1 => "1 step".to_string(),
+            steps => format!("{steps} steps"),
+        });
+    }
+    counts.join(&format!(" {dot} "))
+}
+
+/// How long the model and the tools each took.
+fn took(stats: &Stats, dot: &str) -> Option<String> {
+    let mut took = Vec::new();
+    if stats.thinking > 0 {
+        took.push(format!(
+            "model {}",
+            duration(Duration::from_millis(stats.thinking))
+        ));
+    }
+    if stats.tooling > 0 {
+        took.push(format!(
+            "tools {}",
+            duration(Duration::from_millis(stats.tooling))
+        ));
+    }
+    (!took.is_empty()).then(|| took.join(&format!(" {dot} ")))
+}
+
+/// How fast the answers came, on the readings worth reporting.
+fn fast(stats: &Stats, dot: &str) -> Option<String> {
+    let mut fast = Vec::new();
+    if let Some(wait) = stats.wait().filter(|wait| *wait >= FLOOR) {
+        fast.push(format!(
+            "first token in {} on average",
+            duration(Duration::from_millis(wait))
+        ));
+    }
+    if let Some(rate) = stats.rate() {
+        fast.push(format!("{rate} tok/s"));
+    }
+    (!fast.is_empty()).then(|| fast.join(&format!(" {dot} ")))
+}
+
+/// What was billed, when anything was.
+fn billed(stats: &Stats, dot: &str) -> Option<String> {
+    let spent = stats.prompt_tokens + stats.completion_tokens;
+    (spent > 0).then(|| {
+        format!(
+            "{} in {dot} {} out",
+            tokens(stats.prompt_tokens),
+            tokens(stats.completion_tokens)
+        )
+    })
+}
+
 /// Render a whole event stream, as a reader of a finished turn sees it.
 pub fn render<W: Write>(ui: &mut Ui<W>, events: &[SessionEvent], think: bool) -> io::Result<()> {
     if events.is_empty() {
@@ -1499,6 +1690,115 @@ mod tests {
         // The wait is a fact the journal holds even when nothing was billed.
         assert!(unmeasured.contains("first token in 0.9s"), "{unmeasured}");
         assert!(!unmeasured.contains("tok/s"), "{unmeasured}");
+    }
+
+    /// TC-CLI-TL-28: the fold over a conversation of two turns, one of them
+    /// with two tools in flight at once.
+    /// Expected: every figure the strip reports, and a tool's time taken from
+    /// the call its result names rather than from the call before it - two
+    /// calls in flight arrive in whichever order the tools finish, which is
+    /// the reason the contract pairs them by id (§4.3.1).
+    #[test]
+    fn the_fold_reads_a_conversation_off_its_journal() {
+        let told = stats(&[
+            timed(0, "turn/start", json!({ "turn": 1 })),
+            timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+            timed(
+                500,
+                "assistant/chunk",
+                json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+            ),
+            timed(
+                1_500,
+                "assistant/message",
+                json!({ "content": "on it", "usage": { "prompt_tokens": 100, "completion_tokens": 50 } }),
+            ),
+            timed(
+                1_500,
+                "tool/call",
+                json!({ "id": "slow", "name": "echo", "arguments": {} }),
+            ),
+            timed(
+                1_600,
+                "tool/call",
+                json!({ "id": "quick", "name": "echo", "arguments": {} }),
+            ),
+            // The second call answers first: paired by id, the slow one is a
+            // second and the quick one is a tenth.
+            timed(
+                1_700,
+                "tool/result",
+                json!({ "call_id": "quick", "name": "echo", "ok": true, "content": "" }),
+            ),
+            timed(
+                2_500,
+                "tool/result",
+                json!({ "call_id": "slow", "name": "echo", "ok": true, "content": "" }),
+            ),
+            timed(
+                2_500,
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            ),
+            timed(3_000, "turn/start", json!({ "turn": 2 })),
+            timed(3_000, "step/start", json!({ "turn": 2, "step": 1 })),
+            timed(
+                3_200,
+                "assistant/chunk",
+                json!({ "chunk": "text", "delta": "again", "turn": 2, "step": 1 }),
+            ),
+            timed(
+                3_700,
+                "assistant/message",
+                json!({ "content": "again", "usage": { "prompt_tokens": 40, "completion_tokens": 10 } }),
+            ),
+            timed(
+                3_700,
+                "turn/end",
+                json!({ "turn": 2, "steps": 1, "stop_reason": "natural" }),
+            ),
+        ]);
+
+        assert_eq!(told.turns, 2);
+        assert_eq!(told.steps, 2);
+        // 1.5s of the first step and 0.7s of the second.
+        assert_eq!(told.thinking, 2_200);
+        // A second for the slow call, a tenth for the quick one.
+        assert_eq!(told.tooling, 1_100);
+        assert_eq!(told.waits, 2);
+        assert_eq!(told.wait(), Some(350));
+        // Sixty tokens decoded over a second and a half.
+        assert_eq!(told.decoded, 60);
+        assert_eq!(told.decoding, 1_500);
+        assert_eq!(told.rate(), Some(40));
+        assert_eq!(told.prompt_tokens, 140);
+        assert_eq!(told.completion_tokens, 60);
+    }
+
+    /// TC-CLI-TL-29: the strip, on a conversation with nothing to say about
+    /// speed or money, and on one with nothing at all.
+    /// Expected: a group with no data is left out whole rather than printed as
+    /// zeroes. `0 tokens` reads as a conversation that was free; a
+    /// conversation whose every request failed is one that never got an
+    /// answer, and the counts say so on their own.
+    #[test]
+    fn a_group_with_nothing_in_it_is_left_out() {
+        let theme = Theme::new(false, Charset::Unicode);
+        let counted = told(
+            &theme,
+            &Stats {
+                turns: 1,
+                steps: 1,
+                ..Stats::default()
+            },
+        );
+        let strip = counted.join(" ");
+        assert!(strip.contains("1 turn · 1 step"), "{strip}");
+        assert!(!strip.contains("tok/s"), "{strip}");
+        assert!(!strip.contains(" in "), "{strip}");
+
+        let nothing = told(&theme, &Stats::default()).join(" ");
+        assert!(nothing.contains("nothing has been asked yet"), "{nothing}");
     }
 
     /// TC-CLI-TL-25: a tool whose name a terminal draws twice as wide.
