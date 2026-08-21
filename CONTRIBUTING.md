@@ -53,6 +53,21 @@ The file is committed for a second reason. Every lane works in a disposable work
 untracked baseline exists only wherever it was first written; without it in the repository the gate
 fails to load rather than answering, and each worktree is tempted to regenerate its own.
 
+**Do not read the gate during an unresolved merge or cherry-pick.** It scans what `git ls-files`
+lists, and a conflicted path is listed once per stage, so the tree is measured with that file
+counted three times. Measured here: one conflicted file read ~140 points low, which is a whole
+slice's worth of imaginary regression. Resolve, `git add`, then measure.
+
+Two things move the score more than their diff size suggests, and both are worth knowing before
+writing the code rather than after:
+
+- **Growing a hub file.** Adding a command's body to [`crates/cli/src/main.rs`](crates/cli/src/main.rs)
+  cost 128 points for 44 lines; the same code in a module of its own cost none. A file that every
+  other file already reaches through is the expensive place to put anything.
+- **One function that answers several questions.** A `match` over every key of a line editor put one
+  function over the complexity bound and failed the no-regression check outright. Splitting it by
+  the question each arm answers cleared it.
+
 ## Running it
 
 ```bash
