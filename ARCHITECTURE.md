@@ -300,6 +300,16 @@ same running total - and the same wording - the closing line reports; a build wh
 no usage says nothing rather than saying nothing was spent.
 The browser panel draws the same figure on its turn card, from the same events.
 
+Only one way of ending is painted as a turn that ended well.
+A model that stopped because it had finished is `natural`; every other reason means the answer on
+the page is missing something a reader cannot see is missing - the provider's cap cut it off, a
+step budget ran out, a listener refused the step, somebody interrupted - so the reason is drawn in
+the warning colour rather than the colour of a job done.
+The cap is worded rather than echoed (`cut off at the output cap`, not the wire's `max-tokens`) and
+carries a sentence of its own, because the contract asks for exactly that in §4.4.2: a surface that
+renders it as an ordinary end tells the reader that a sentence the model never finished is the
+whole reply.
+
 A turn's closing line adds how fast the model was, on the turns slow enough for that to be a fact:
 the wait for the first token, and the rate the answer decoded at
 ([timeline.rs](crates/cli/src/render/timeline.rs)).
