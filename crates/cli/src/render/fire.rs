@@ -58,6 +58,15 @@
 //! already has - and the keys that walk the matches are two the editor does
 //! not answer: ctrl-n for the next, ctrl-p for the one before.
 //!
+//! # Why Tab walks the turns
+//!
+//! The web panel upstream puts every message in a list you can click. A
+//! terminal has no list to put beside the conversation and no pointer to click
+//! it with, and the thing a reader is actually reaching for is the same: the
+//! start of a turn, three or thirty turns back. Tab and Shift-Tab are that
+//! reach. They are the two keys left that mean "onwards" and "back" to
+//! everybody, and the editor answers neither.
+//!
 //! # Why the editor answers first
 //!
 //! Every printable key belongs to the line being typed - including `?` and
@@ -86,6 +95,18 @@ const CHROME: usize = 5;
 
 /// The marker the prompt row opens with, and what it costs in columns.
 const MARKER: &str = "> ";
+
+/// Whether this is the event a turn opens on.
+///
+/// Read off the type rather than off the composed line, because what the line
+/// says is a rendering and the type is the journal's own word (contract
+/// §4.3.1).
+fn opens_a_turn(said: &Said) -> bool {
+    match said {
+        Said::Event(event) => event.ty == "turn/start",
+        _ => false,
+    }
+}
 
 /// What the reader asked for with the key they just pressed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +181,10 @@ pub struct Fire {
     /// every line again and the numbers are what a rewrap can be redone from.
     hits: Vec<usize>,
     at: usize,
+    /// The line each turn opens on, oldest first. Kept the same way and for
+    /// the same reason as the matches: a rewrap moves them, and they are what
+    /// Tab walks.
+    turns: Vec<usize>,
 }
 
 impl Fire {
@@ -186,6 +211,7 @@ impl Fire {
             wanted: None,
             hits: Vec::new(),
             at: 0,
+            turns: Vec::new(),
         }
     }
 
@@ -202,9 +228,45 @@ impl Fire {
             self.back += lines.len();
         }
         let from = self.lines.len();
+        if opens_a_turn(&said) && !lines.is_empty() {
+            self.turns.push(from);
+        }
         self.lines.extend(lines);
         self.said.push(said);
         self.mark(from);
+    }
+
+    /// Put the window on the turn before the one it is on, or the one after.
+    ///
+    /// The turn's own first line goes to the top of the body, because what
+    /// follows a turn's opening is the turn, and a reader who asked for it
+    /// wants to read forwards from there.
+    fn turn(&mut self, forward: bool) {
+        if self.turns.is_empty() {
+            return;
+        }
+        let room = self.body.max(1);
+        // Where the top of the body is now, as a line number.
+        let top = self.lines.len().saturating_sub(self.back + room);
+        let next = match forward {
+            true => self.turns.iter().find(|line| **line > top).copied(),
+            false => self.turns.iter().rev().find(|line| **line < top).copied(),
+        };
+        let Some(line) = next else {
+            // Past the last turn is the foot of the conversation, which is
+            // where a reader walking forwards is heading; before the first is
+            // the top of it. Neither is a refusal to move.
+            match forward {
+                true => self.follow(),
+                false => self.back = self.lines.len().saturating_sub(room.min(self.lines.len())),
+            }
+            return;
+        };
+        self.back = self
+            .lines
+            .len()
+            .saturating_sub(line + room)
+            .min(self.lines.len().saturating_sub(room.min(self.lines.len())));
     }
 
     /// Look for `word` in what has been said, or - given nothing - stop
@@ -323,6 +385,7 @@ impl Fire {
         let said = std::mem::take(&mut self.said);
         self.lines.clear();
         self.hits.clear();
+        self.turns.clear();
         self.back = 0;
         self.live = Live::new(self.theme, cols, &self.phase, self.think);
         for one in &said {
@@ -425,6 +488,8 @@ impl Fire {
             Key::PageDown => self.scroll(-(screenful as isize)),
             Key::Ctrl('n') => self.walk(true),
             Key::Ctrl('p') => self.walk(false),
+            Key::Tab => self.turn(true),
+            Key::BackTab => self.turn(false),
             // Back to the foot, and out of a search: both are the reader
             // saying they are done looking at what they were looking at.
             Key::Esc => {
@@ -502,7 +567,7 @@ impl Fire {
             // it, and they are not on the footer the rest of the time.
             true => format!("ctrl-n next {dot} ctrl-p back {dot} esc done {dot} ctrl-c leave"),
             false => format!(
-                "enter ask {dot} {} scroll {dot} /help {dot} /find {dot} ctrl-c leave",
+                "enter ask {dot} {} scroll {dot} tab turn {dot} /help {dot} ctrl-c leave",
                 self.theme.glyph("↑↓", "up/dn")
             ),
         };
@@ -536,7 +601,8 @@ impl Fire {
 ///
 /// Features tested: the arrangement of a frame and where the cursor lands on
 /// it; that `/find` counts its matches, lands on the newest and says when
-/// there are none, and that ctrl-n and ctrl-p walk them and go round; that every printable key belongs to the line being typed and the keys
+/// there are none, and that ctrl-n and ctrl-p walk them and go round; that Tab
+/// and Shift-Tab walk the turns and land on either end of the conversation; that every printable key belongs to the line being typed and the keys
 /// the editor does not answer move the window; that Enter asks and an empty
 /// line does not; that a line typed while a turn is running is held rather
 /// than sent; that Ctrl-C and Ctrl-D are told apart; that arriving lines do
@@ -622,6 +688,17 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    /// The event a turn opens on.
+    fn turn_start(turn: u32) -> SessionEvent {
+        SessionEvent {
+            ty: "turn/start".into(),
+            seq: u64::from(turn),
+            time: 0,
+            data: serde_json::json!({ "turn": turn }),
+            source_event_seqs: None,
+        }
     }
 
     /// A journal event carrying one message.
@@ -900,6 +977,71 @@ mod tests {
         for row in &narrow {
             assert!(visible_width(row) <= 40, "`{row}` overruns 40");
         }
+    }
+
+    /// TC-CLI-FIRE-12: Tab and Shift-Tab over a conversation of three turns.
+    /// Expected: the window lands with a turn's own opening line at the top of
+    /// the body, one turn at a time, in the direction asked for. This is the
+    /// terminal's answer to the message list the web panel puts beside a
+    /// conversation: what a reader reaches for is the start of a turn, and
+    /// there is no list to click.
+    #[test]
+    fn tab_walks_the_turns_and_shift_tab_walks_them_back() {
+        let mut view = fire();
+        for turn in 1..=3 {
+            view.push(&turn_start(turn));
+            for line in 1..=6 {
+                view.note(&format!("turn {turn} line {line}"));
+            }
+        }
+        rows(&mut view, ROWS);
+
+        // The body opens at row two, and a turn opens on the blank row that
+        // separates it from the turn before, so the header is one of the two
+        // rows the jump puts at the top.
+        let opens_on =
+            |rows: &[String], turn: &str| rows[2..4].iter().any(|row| row.contains(turn));
+
+        // From the foot, back one turn at a time.
+        assert_eq!(view.key(Key::BackTab), Act::Go);
+        let third = rows(&mut view, ROWS);
+        assert!(opens_on(&third, "turn 3"), "not the third turn: {third:?}");
+
+        assert_eq!(view.key(Key::BackTab), Act::Go);
+        let second = rows(&mut view, ROWS);
+        assert!(opens_on(&second, "turn 2"), "not the second: {second:?}");
+
+        assert_eq!(view.key(Key::Tab), Act::Go);
+        let forward = rows(&mut view, ROWS);
+        assert!(opens_on(&forward, "turn 3"), "not forwards: {forward:?}");
+    }
+
+    /// TC-CLI-FIRE-13: Tab past the last turn, and Shift-Tab before the first.
+    /// Expected: the foot of the conversation, and the top of it. A reader
+    /// walking forwards is heading for the end, and one walking back is
+    /// heading for the beginning; neither end is a refusal to move.
+    #[test]
+    fn walking_past_either_end_lands_on_it() {
+        let mut view = fire();
+        view.push(&turn_start(1));
+        for line in 1..=20 {
+            view.note(&format!("line {line}"));
+        }
+        rows(&mut view, ROWS);
+
+        view.key(Key::Tab);
+        assert!(
+            rows(&mut view, ROWS)[ROWS - 1].contains("end"),
+            "forwards did not reach the foot"
+        );
+
+        view.key(Key::BackTab);
+        view.key(Key::BackTab);
+        let top = rows(&mut view, ROWS);
+        assert!(
+            top.iter().any(|row| row.contains("turn 1")),
+            "back did not reach the first turn: {top:?}"
+        );
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
