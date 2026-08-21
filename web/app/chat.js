@@ -1,5 +1,6 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
+import { sessionList } from "./sidebar.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -51,7 +52,8 @@ const token = query.get("token") || manifest.token || "";
 // The same secret on the other door. The bridge admits a caller exactly as the
 // socket does, so a page that dialled with a token and posted without one
 // would be refused halfway through its own work.
-window.TETANUS_CALL = async (method, params) => {
+let greeted = null;
+const post = async (method, params) => {
   const url = "/api/" + method + (token ? "?token=" + encodeURIComponent(token) : "");
   const said = await fetch(url, {
     method: "POST",
@@ -61,6 +63,19 @@ window.TETANUS_CALL = async (method, params) => {
   const body = await said.json();
   if (body.error) throw new Error(body.error.message || "the call failed");
   return body.result;
+};
+window.TETANUS_CALL = async (method, params) => {
+  // The bridge is its own connection, so it wants its own handshake: greeting
+  // the socket says nothing about the POSTs. Done once and remembered, because
+  // the contract's rule is one hello per connection and not one per call.
+  if (method !== "rpc.hello") {
+    greeted ||= post("rpc.hello", {
+      protocol_version: manifest.protocol || "1.0",
+      client: { name: "tetanus-web", version: "0.1.0" },
+    });
+    await greeted;
+  }
+  return post(method, params);
 };
 const address = carrier && token
   ? carrier + (carrier.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
@@ -567,3 +582,42 @@ document.getElementById("newdir").onclick = async () => {
     say(err.message, true);
   }
 };
+
+// ---------------------------------------------------------------------------
+// The session list.
+//
+// Read when it is opened and after a turn settles, which is when it can have
+// changed: there is no push for "a session was created", because
+// `session/event` is per-session and a list is not a session, and polling on a
+// timer would be a request every few seconds for an answer that changes twice
+// an hour.
+// ---------------------------------------------------------------------------
+
+const sessionsDialog = document.getElementById("sessions");
+const sessionsList = document.getElementById("session-list");
+
+async function showSessions() {
+  sessionsDialog.showModal();
+  try {
+    const answered = await window.TETANUS_CALL("session.list", {});
+    sessionList(sessionsList, answered.sessions || [], {
+      current: session,
+      onPick: (id) => {
+        // A conversation is named in the query, so a reload continues it -
+        // the same rule the page already follows for the one it is in.
+        const url = new URL(location.href);
+        url.searchParams.set("session", id);
+        location.href = url.toString();
+      },
+    });
+  } catch (err) {
+    sessionsList.replaceChildren();
+    const said = document.createElement("p");
+    said.className = "list-empty";
+    said.textContent = err.message;
+    sessionsList.append(said);
+  }
+}
+
+document.getElementById("sessions-open").onclick = showSessions;
+document.getElementById("sessions-close").onclick = () => sessionsDialog.close();
