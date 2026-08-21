@@ -38,12 +38,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 
 use tetanus_turn::interrupt::Interrupt;
 
 use crate::backend::{BackendError, Markers, ShellBackend};
 use crate::proc::{terminate_group, Chunk, OutputSink, Stream};
+use crate::transcript::{Snapshot, Transcript};
 
 /// How long to wait between transcript checks when nothing woke the waiter.
 /// Upstream polls its PTY on the same interval.
@@ -498,89 +499,6 @@ fn trim_edges(body: &str) -> String {
         .unwrap_or(body)
         .trim_end_matches('\n')
         .to_string()
-}
-
-/// Everything a shell has printed, bounded, with a way to wait for more.
-struct Transcript {
-    bound: usize,
-    state: Mutex<TranscriptState>,
-    changed: Notify,
-}
-
-#[derive(Default)]
-struct TranscriptState {
-    kept: String,
-    /// How many bytes the bound has dropped off the front, so a position in
-    /// the transcript stays meaningful after a drop.
-    dropped: usize,
-}
-
-/// The transcript as it stood at one moment.
-struct Snapshot {
-    kept: String,
-    dropped: usize,
-}
-
-impl Snapshot {
-    /// Everything from absolute position `from` onwards, as far as it is still
-    /// retained.
-    fn since(&self, from: usize) -> String {
-        let start = from.saturating_sub(self.dropped).min(self.kept.len());
-        // A position can land inside a character after a drop; the next
-        // boundary is close enough and is always valid.
-        let start = (start..=self.kept.len())
-            .find(|at| self.kept.is_char_boundary(*at))
-            .unwrap_or(self.kept.len());
-        self.kept[start..].to_string()
-    }
-
-    fn len(&self) -> usize {
-        self.dropped + self.kept.len()
-    }
-
-    /// The whole retained transcript.
-    fn text(self) -> String {
-        self.kept
-    }
-}
-
-impl Transcript {
-    fn new(bound: usize) -> Self {
-        Self {
-            bound,
-            state: Mutex::new(TranscriptState::default()),
-            changed: Notify::new(),
-        }
-    }
-
-    fn push(&self, text: &str) {
-        {
-            let mut state = self.state.lock().expect("no panic holds this lock");
-            state.kept.push_str(text);
-            if state.kept.len() > self.bound {
-                let excess = state.kept.len() - self.bound;
-                let at = (excess..=state.kept.len())
-                    .find(|at| state.kept.is_char_boundary(*at))
-                    .unwrap_or(state.kept.len());
-                state.kept.drain(..at);
-                state.dropped += at;
-            }
-        }
-        self.changed.notify_waiters();
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        let state = self.state.lock().expect("no panic holds this lock");
-        Snapshot {
-            kept: state.kept.clone(),
-            dropped: state.dropped,
-        }
-    }
-
-    fn len(&self) -> usize {
-        let state = self.state.lock().expect("no panic holds this lock");
-        state.dropped + state.kept.len()
-    }
 }
 
 /// The sessions one owner has open.

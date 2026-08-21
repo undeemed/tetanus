@@ -21,9 +21,12 @@
 
 pub mod backend;
 pub mod proc;
+#[cfg(target_os = "linux")]
+pub mod pty;
 pub mod session;
 pub mod shell;
 pub mod tools;
+pub mod transcript;
 
 pub use backend::{BackendError, Bash, PowerShell, Resolved, ShellBackend};
 pub use proc::{
