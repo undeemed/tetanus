@@ -837,7 +837,7 @@ live participation.
 carrier. `tetanus serve` hosts the stdio one, and `tetanus serve --listen` the WebSocket one. §4.8
 covers the contract all three speak.
 
-[web/chat](web/chat/README.md) is the second surface, and it is a page rather than a program:
+[web/app](web/app/README.md) is the second surface, and it is a page rather than a program:
 `index.html` and `chat.js` speak that WebSocket carrier directly, with no build step, no framework
 and no dependency, so what a reviewer opens is the file in the repository.
 It makes the four calls `tetanus chat` makes - `rpc.hello`, `session.create`, `session.subscribe`
@@ -849,8 +849,22 @@ and no page of history can race the first live push.
 The transcript is the terminal's transcript - the same rows, the same order, the same closing line -
 because a turn that read differently in a browser would be a second description of the same events
 for a reader to reconcile.
-`web/chat/serve.py` is the development server that opens it: it starts `tetanus serve --listen`,
-reads the bound address out of the banner, and hands it to the page.
+`tetanus web` is what serves it, and it is the harness's own host rather than a script beside it
+([crates/host](crates/host), [crates/cli/src/web.rs](crates/cli/src/web.rs)).
+The page goes out on the host's single fallback seat with the shell's locked semantics - a miss is
+the page with 200, so a deep link belongs to the router in the browser and not to the server - and
+the address of the carrier reaches it through the boot manifest an index tap writes.
+That indirection is the point: the development server this replaced string-replaced a global into
+the HTML as it served it, which works exactly once, because the page then only runs when served by
+that one program. A manifest is a published seam any assembly can write to and the page reads as
+data.
+
+The host itself ([crates/host](crates/host)) is upstream's `host/webserver` and `host/frontend-static`:
+a route carrier that knows no harness concepts, serves no files and prints nothing.
+What it owns is the table and the order - exact, then longest prefix, then the one fallback - because
+a carrier whose answer depends on which plugin started first is one nobody can compose against, and
+a duplicate path is refused at registration rather than shadowed at the first request that goes to
+the wrong owner.
 
 ### 4.8 Interface view - the engine/presentation contract
 

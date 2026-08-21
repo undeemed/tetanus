@@ -31,7 +31,12 @@ const query = new URLSearchParams(location.search);
 // A page opened through `serve.py` is told its server. A page opened straight
 // from disk is told by hand, which is what makes this file testable against
 // any running `tetanus serve`.
-const address = query.get("ws") || window.TETANUS_WS || "";
+// The boot manifest the host's index tap wrote, then the query, then
+// nothing. The manifest is how a page that knows nothing about the assembly
+// is told what the assembly bound; `?ws=` stays because a page opened
+// against a server somebody else started is a real thing to do.
+const manifest = window.TETANUS_BOOT || {};
+const address = query.get("ws") || manifest.carrier || window.TETANUS_WS || "";
 let session = query.get("session") || null;
 
 let journal = "";
@@ -82,7 +87,7 @@ class RpcFailure extends Error {
 
 function connect() {
   if (!address) {
-    settle("gone", "No server address. Open this page through `web/chat/serve.py`, or add `?ws=ws://host:port`.");
+    settle("gone", "No server address. Open this page from `tetanus web`, or add `?ws=ws://host:port`.");
     return;
   }
   view.where.innerHTML = "";

@@ -22,3 +22,4 @@ pub mod replay;
 pub mod serve;
 pub mod sessions;
 pub mod timeline;
+pub mod web;

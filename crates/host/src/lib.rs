@@ -76,6 +76,61 @@ struct Table {
     next_tap: usize,
 }
 
+/// The facts a page is handed before it runs.
+///
+/// Upstream calls this the boot manifest and sends it through an index tap,
+/// which is the arrangement worth keeping: the assembly knows what was bound,
+/// the frontend knows nothing about the assembly, and the index is the one
+/// document both of them touch. A page that had to be patched by whoever
+/// served it - a string replaced in a file on the way past - is a page that
+/// only works when served by that one program.
+pub struct Manifest {
+    pub carrier: String,
+    pub protocol: String,
+}
+
+impl Manifest {
+    /// The tap that writes this manifest into a page.
+    ///
+    /// Written as JSON into a script the page reads before its own, and
+    /// `</` is escaped inside it: a value containing `</script>` would
+    /// otherwise close the tag and the rest of the manifest would be markup.
+    pub fn tap(self) -> Tap {
+        let said = format!(
+            "{{\"carrier\":{},\"protocol\":{}}}",
+            quoted(&self.carrier),
+            quoted(&self.protocol)
+        );
+        let script = format!("<script>window.TETANUS_BOOT = {said};</script>");
+        Arc::new(move |html| match html.find("</head>") {
+            Some(at) => {
+                let mut out = String::with_capacity(html.len() + script.len());
+                out.push_str(&html[..at]);
+                out.push_str(&script);
+                out.push_str(&html[at..]);
+                out
+            }
+            // A page with no head is not this tap's to repair, and a manifest
+            // appended anywhere else would run after the script that reads it.
+            None => html,
+        })
+    }
+}
+
+/// A JSON string, with the one escape that matters inside a script tag.
+fn quoted(value: &str) -> String {
+    let escaped: String = value
+        .chars()
+        .flat_map(|char| match char {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect(),
+            '<' => "\\u003c".chars().collect(),
+            char => vec![char],
+        })
+        .collect();
+    format!("\"{escaped}\"")
+}
+
 /// A transform every index response passes through.
 ///
 /// This is how the boot manifest reaches the page: the assembly knows what the

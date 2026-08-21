@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home - or the one `--settings <path>` names - re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal, and `tetanus chat --ui` for that conversation held on a screen of its own - transcript above, the line you type on pinned to the foot of it; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | A history to walk with the up and down keys; a turn stopped without leaving the chat |
+| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal, and `tetanus chat --ui` for that conversation held on a screen of its own - transcript above, the line you type on pinned to the foot of it; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `tetanus web`, the browser panel served by the harness's own HTTP host over that WebSocket carrier | A history to walk with the up and down keys; a turn stopped without leaving the chat |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -238,8 +238,8 @@ It takes `--dir <path>`, the directory the journals it writes land in.
 The banner then names the address that was bound rather than the one asked for, so `--listen 127.0.0.1:0` tells you which port the operating system chose.
 That server has no end of file to stop it, so Ctrl-C is the shutdown and it exits 0.
 
-[web/chat](web/chat/README.md) is a browser panel over that carrier: a page and a script, no build step, that holds the same conversation `tetanus chat` holds and draws each reply as it streams.
-`python3 web/chat/serve.py` starts a `tetanus serve` behind it and prints the address to open.
+[web/app](web/app/README.md) is a browser panel over that carrier: a page and a script, no build step, that holds the same conversation `tetanus chat` holds and draws each reply as it streams.
+`tetanus web` serves it from the harness's own HTTP host, starts a carrier behind it, and hands the page the address through the boot manifest.
 
 ## Workspace layout
 

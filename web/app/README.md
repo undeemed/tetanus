@@ -1,4 +1,4 @@
-# web/chat - the browser panel
+# web/app - the browser panel
 
 A conversation with the harness, in a browser, over the WebSocket carrier `tetanus serve` already
 hosts.
@@ -9,12 +9,14 @@ dependency, so the thing a reviewer opens is the file in this directory.
 ## Running it
 
 ```sh
-python3 web/chat/serve.py            # then open the address it prints
-python3 web/chat/serve.py --port 5300 --dir /tmp/tetanus-web-chat
+tetanus web                                  # then open the address it prints
+tetanus web --listen 0.0.0.0:5300 --dir sessions
 ```
 
-`serve.py` starts `tetanus serve --listen 0.0.0.0:0`, reads the address out of its banner, hands it
-to the page and serves the two files. It builds the binary first if there is not one already.
+`tetanus web` binds the page's address, takes a port from the operating system for the carrier, and
+tells the page which one through the host's index tap - the boot manifest, `window.TETANUS_BOOT`.
+The page is served by `crates/host`, which is the same route carrier every other host route will
+ride on; nothing patches the HTML on its way past.
 
 To point the page at a server you started yourself, open it with the address in the query:
 `index.html?ws=ws://host:port`. A conversation is named in the query too - `?session=<id>` - and the

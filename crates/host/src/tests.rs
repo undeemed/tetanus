@@ -367,3 +367,36 @@ async fn the_frontend_holds_one_seat_and_gives_it_back() {
     let said = ask(address, "GET /whatever HTTP/1.1\r\nhost: x\r\n\r\n").await;
     assert!(said.starts_with("HTTP/1.1 404"), "{said}");
 }
+
+/// TC-HOST-STATIC-7: the boot manifest, in a page, with a value that would
+/// close the script tag.
+/// Expected: the manifest lands inside the head, before the page's own script,
+/// and `<` is escaped so a carrier address containing `</script>` arrives as
+/// data rather than as markup.
+#[tokio::test]
+async fn the_manifest_reaches_the_page_as_data() {
+    let dir = dist();
+    std::fs::write(
+        dir.path().join("index.html"),
+        "<html><head><title>x</title></head><body></body></html>",
+    )
+    .expect("index");
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    let _manifest = server.tap_index(
+        Manifest {
+            carrier: "ws://127.0.0.1:9/</script><b>".into(),
+            protocol: "1.0".into(),
+        }
+        .tap(),
+    );
+    tokio::spawn(server.serve(listener));
+
+    let said = ask(address, "GET / HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let head = said.find("</head>").expect("a head");
+    let boot = said.find("TETANUS_BOOT").expect("the manifest");
+    assert!(boot < head, "the manifest is outside the head: {said}");
+    assert!(!said.contains("/</script><b>"), "unescaped: {said}");
+    assert!(said.contains("\\u003c/script>"), "{said}");
+}

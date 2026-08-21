@@ -1441,6 +1441,7 @@ dependencies = [
  "tetanus-config",
  "tetanus-core",
  "tetanus-engine",
+ "tetanus-host",
  "tetanus-protocol",
  "tetanus-rpc",
  "tetanus-session",

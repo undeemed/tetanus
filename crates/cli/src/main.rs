@@ -4,6 +4,7 @@ mod chat;
 mod prompt;
 mod render;
 mod settings;
+mod web;
 
 use tetanus_protocol::methods::{
     AgentPromptResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
@@ -151,6 +152,20 @@ enum Cmd {
         /// Serve the WebSocket carrier on this address instead of on stdio
         #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
+    },
+    /// Serve the browser panel, with a carrier behind it
+    Web {
+        /// Directory the journals this server writes land in. Defaults to
+        /// `sessions.root` in the settings document.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+        /// Address for the page. Only `127.0.0.1` and `0.0.0.0` are bound.
+        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:5300", value_parser = named())]
+        listen: String,
+        /// The built frontend to serve. An assembly fact, never hardcoded:
+        /// this is the directory holding the page's `index.html`.
+        #[arg(long, value_name = "PATH", default_value = "web/app")]
+        frontend: PathBuf,
     },
     /// Print version/build info
     Info,
@@ -643,6 +658,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             render::serve::stopped(&mut err, carrier).ok();
             Ok(())
         }
+        Cmd::Web {
+            dir,
+            listen,
+            frontend,
+        } => web::web(policy, &document, dir, &listen, &frontend),
         Cmd::Info => {
             // Counted from the same two functions the catalogue pages print,
             // so the number here and the list there cannot disagree.

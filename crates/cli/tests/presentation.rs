@@ -2095,3 +2095,50 @@ fn the_build_page_counts_agree_with_the_catalogues() {
     );
     assert!(page.starts_with("\ntetanus "), "{page}");
 }
+
+/// TC-CLI-WEB-1: `tetanus web` pointed at a directory with no page in it.
+/// Expected: exit 1, the directory named, and nothing bound. A server that
+/// came up on the address a person was about to open and then answered every
+/// request with "no index.html" is a worse failure than not coming up.
+#[test]
+fn the_web_panel_refuses_a_frontend_that_is_not_there() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let refused = run(
+        dir.path(),
+        &["web", "--frontend", "nowhere", "--listen", "127.0.0.1:0"],
+        &[],
+    );
+
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("nowhere"), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("index.html"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// TC-CLI-WEB-2: an address this server will not bind.
+/// Expected: refused, with the two it will bind named. There is no TLS here,
+/// no authentication and no origin policy, so a third address would read as an
+/// option this server had thought about.
+#[test]
+fn the_web_panel_binds_loopback_or_the_wildcard() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(dir.path().join("app/index.html"), "<html></html>").expect("the page");
+
+    let refused = run(
+        dir.path(),
+        &["web", "--frontend", "app", "--listen", "192.168.1.10:5300"],
+        &[],
+    );
+
+    assert_ne!(refused.status.code(), Some(0), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("127.0.0.1 or 0.0.0.0"),
+        "{}",
+        stderr(&refused)
+    );
+}
