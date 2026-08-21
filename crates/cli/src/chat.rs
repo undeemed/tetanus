@@ -921,5 +921,12 @@ mod tests {
 
         // A journal that is not there reads as new, every time.
         assert!(crate::appended(&dir.path().join("gone.jsonl"), 0).is_some());
+
+        // And one that shrank - truncated, or replaced by a shorter file - is
+        // read again rather than trusted. The rule is "the length changed",
+        // not "the length grew": a view that only believed growth would be
+        // reading a file it had already been told to stop believing.
+        std::fs::write(&journal, "one line\n").expect("truncate");
+        assert_eq!(crate::appended(&journal, second), Some(9));
     }
 }

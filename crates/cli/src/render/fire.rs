@@ -770,8 +770,10 @@ impl Fire {
         // The row of the prompt the caret is on, counted from where the
         // prompt began - and only when that row was drawn at all. A terminal
         // with no room for a prompt has nowhere to put a caret, and one placed
-        // anyway would sit on whatever the frame did have room for.
-        if first + at.0 < rows {
+        // anyway would sit on whatever the frame did have room for. A terminal
+        // no columns wide draws nothing, so there is nothing to point at
+        // either; terminals report that width while they are being resized.
+        if first + at.0 < rows && cols > 0 {
             frame.cursor(first + at.0, label + at.1);
         }
         frame
@@ -1675,14 +1677,16 @@ mod tests {
     /// TC-CLI-FIRE-23: every size a terminal can be, including the ones it
     /// should not be.
     /// Expected: the frame is exactly the height asked for, no row overruns
-    /// the width, and the caret is inside the frame - at four columns by one
-    /// row as much as at two hundred by sixty. Six slices have moved rows
+    /// the width, and the caret is inside the frame - at no columns by no rows
+    /// as much as at two hundred by sixty. A terminal reports zero while it is
+    /// being resized, and a view that panicked there would take the
+    /// conversation with it. Six slices have moved rows
     /// between the transcript, the block, the opening page and a prompt that
     /// grows, and each of them is arithmetic that has to hold at both ends.
     #[test]
     fn the_arrangement_holds_at_every_size() {
-        for rows in 1..=10 {
-            for cols in 4..=24 {
+        for rows in 0..=10 {
+            for cols in 0..=24 {
                 for working in [false, true] {
                     let mut view = Fire::new(theme(), cols, "mock-echo-1", "j.jsonl", false);
                     view.note("something said before");
@@ -1713,10 +1717,12 @@ mod tests {
                         .split("\r\n")
                         .map(|row| row.split('\x1b').next().unwrap_or_default())
                         .collect();
+                    // A caret exactly when there is a prompt to point at: the
+                    // arrangement spends its first rows on the heading, the
+                    // blank and the rule, so the prompt is the fourth - and a
+                    // terminal no columns wide draws nothing to point at.
                     let shown = painted.ends_with("\x1b[?25h");
-                    // A terminal with no room for a prompt has nowhere to put
-                    // a caret and does not claim one.
-                    let prompted = drawn.iter().any(|row| row.starts_with("> "));
+                    let prompted = cols > 0 && rows >= CHROME - 1;
                     assert_eq!(
                         shown, prompted,
                         "caret and prompt disagree at {cols}x{rows}"
@@ -1736,11 +1742,17 @@ mod tests {
                     // And on the prompt, not on whatever the frame had room
                     // for above it: a terminal too short for the arrangement
                     // drops the footer, and a caret placed as though the
-                    // footer were always there lands on the rule.
+                    // footer were always there lands on the rule. The rule is
+                    // the row before the prompt, so a caret on or above it is
+                    // the bug this case was written for.
+                    assert!(
+                        row >= CHROME - 1,
+                        "the caret is above the prompt at {cols}x{rows}: row {row}"
+                    );
                     let on = drawn.get(row - 1).copied().unwrap_or_default();
                     assert!(
-                        on.starts_with("> ") || on.starts_with("  "),
-                        "the caret is not on the prompt at {cols}x{rows}: `{on}`"
+                        !on.starts_with('─') && !on.starts_with('-'),
+                        "the caret is on the rule at {cols}x{rows}: `{on}`"
                     );
                 }
             }
