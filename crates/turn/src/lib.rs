@@ -6,6 +6,7 @@
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
 //! - [`prompt`] is the named section registry the assembly starts from.
+//! - [`prune`] shrinks a tool result that is too long to keep whole.
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
@@ -20,6 +21,7 @@ pub mod interrupt;
 pub mod llm;
 pub mod log;
 pub mod prompt;
+pub mod prune;
 pub mod repair;
 pub mod tokens;
 pub mod tools;
