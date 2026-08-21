@@ -77,54 +77,153 @@ pub fn command_style(color: bool) -> clap::ColorChoice {
     }
 }
 
+/// What to type, and what each one is for. The two columns are composed
+/// rather than written out, so the gap between them is measured from the
+/// widest command instead of counted by hand ([`examples`]).
+const ROOT_EXAMPLES: &[(&str, &str)] = &[
+    ("tetanus run", "one offline turn, mock adapter"),
+    (
+        "tetanus run \"list the files\"",
+        "ask for something specific",
+    ),
+    (
+        "tetanus run -a deepseek -m deepseek-v4-pro",
+        "needs DEEPSEEK_API_KEY",
+    ),
+    ("tetanus chat", "talk to the model, turn by turn"),
+    (
+        "tetanus chat -a mock -s /tmp/c.jsonl",
+        "the same offline, in that journal",
+    ),
+    ("tetanus sessions", "every journal, newest first"),
+    ("tetanus sessions --ui", "pick one of them and read it"),
+    (
+        "tetanus replay sessions/turn.jsonl",
+        "re-read a journal from before",
+    ),
+    (
+        "tetanus replay sessions/turn.jsonl --live",
+        "watch that turn arrive again",
+    ),
+    (
+        "tetanus replay sessions/turn.jsonl --ui",
+        "read it on a screen of its own",
+    ),
+    ("tetanus config", "every key, and what set it"),
+    ("tetanus models", "which providers are reachable"),
+    ("tetanus tools", "what the agent is able to call"),
+    ("tetanus serve", "hand stdout to the protocol"),
+    (
+        "tetanus serve --listen 127.0.0.1:8787",
+        "serve the protocol on a socket",
+    ),
+];
+
+/// The same, for the one subcommand with enough flags to need its own.
+const RUN_EXAMPLES: &[(&str, &str)] = &[
+    ("tetanus run", "the default: \"run one full turn\""),
+    ("tetanus run \"list the files\"", "ask for something else"),
+    ("tetanus run - < task.md", "a prompt too long to quote"),
+    ("tetanus run --trace", "the raw event sequence instead"),
+    ("tetanus run --ui", "watch it on a screen of its own"),
+    (
+        "tetanus run --session /tmp/t.jsonl",
+        "choose where the journal lands",
+    ),
+    ("tetanus run --max-steps 1", "stop after one step"),
+    ("tetanus run --think", "unfold what the model thought"),
+    ("tetanus run --json", "JSONL for a script, not for a person"),
+];
+
+/// And for the other one, which is a conversation rather than a command.
+const CHAT_EXAMPLES: &[(&str, &str)] = &[
+    ("tetanus chat", "DeepSeek; needs DEEPSEEK_API_KEY"),
+    ("tetanus chat -a mock", "the same conversation, offline"),
+    (
+        "tetanus chat -s sessions/plan.jsonl",
+        "start or resume that conversation",
+    ),
+    ("tetanus chat --think", "unfold what the model thought"),
+    (
+        "tetanus chat --max-steps 1",
+        "stop each turn after one step",
+    ),
+];
+
+/// An examples block, in two columns where they fit and stacked where they do
+/// not.
+///
+/// Two columns are what makes the block scannable: the eye runs down the
+/// commands, or down what each is for, and never reads a line to find out
+/// which it is looking at. That needs the description column to start past the
+/// widest command, which a narrow window has no room for.
+///
+/// Folded by clap instead, a row too wide is continued at column zero, where
+/// the rest of a description is read as the start of another command. So a
+/// window with no room for the second column gets the description under its
+/// command, indented, and folded to what is left: two lines that say which is
+/// which, rather than one wrapped into nonsense.
+fn examples(theme: &Theme, width: usize, rows: &[(&str, &str)]) -> String {
+    let heading = theme.paint(Role::Heading, "Examples:");
+    // Two spaces in, and two clear of the widest command, which is where a
+    // description starts when there is room for one beside it.
+    let column = 2 + rows.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0) + 2;
+    let widest = rows.iter().map(|(_, what)| what.len()).max().unwrap_or(0);
+
+    let mut lines = vec![heading.to_string()];
+    if column + widest <= width {
+        for (command, what) in rows {
+            lines.push(format!("  {command:<0$}{what}", column - 2));
+        }
+    } else {
+        for (command, what) in rows {
+            lines.push(format!("  {command}"));
+            lines.extend(
+                wrap(what, width.saturating_sub(STACKED).max(1))
+                    .into_iter()
+                    .map(|line| format!("{}{line}", " ".repeat(STACKED))),
+            );
+        }
+    }
+    lines.join("\n")
+}
+
+/// How far a description is indented when it is under its command rather than
+/// beside it. Deeper than the command, so the two are told apart at a glance,
+/// and shallower than any column a wide window would have used.
+const STACKED: usize = 6;
+
 /// The block under the root help: what to type, and what the environment
 /// changes. Upstream `dsh` closes its help with examples too, and it is the
 /// fastest part of a help page to read.
-pub fn root_epilogue(theme: &Theme) -> String {
-    let examples = theme.paint(Role::Heading, "Examples:");
+pub fn root_epilogue(theme: &Theme, width: usize) -> String {
     let environment = theme.paint(Role::Heading, "Environment:");
     format!(
         "\
-{examples}
-  tetanus run                                 one offline turn, mock adapter
-  tetanus run \"list the files\"                ask for something specific
-  tetanus run -a deepseek -m deepseek-v4-pro  needs DEEPSEEK_API_KEY
-  tetanus chat                                talk to the model, turn by turn
-  tetanus chat -a mock -s /tmp/c.jsonl        the same offline, in that journal
-  tetanus sessions                            every journal, newest first
-  tetanus sessions --ui                       pick one of them and read it
-  tetanus replay sessions/turn.jsonl          re-read a journal from before
-  tetanus replay sessions/turn.jsonl --live   watch that turn arrive again
-  tetanus replay sessions/turn.jsonl --ui     read it on a screen of its own
-  tetanus config                              every key, and what set it
-  tetanus models                              which providers are reachable
-  tetanus tools                               what the agent is able to call
-  tetanus serve                               hand stdout to the protocol
-  tetanus serve --listen 127.0.0.1:8787       serve the protocol on a socket
+{}
 
 {environment}
   DEEPSEEK_API_KEY  credential for `--adapter deepseek`
   NO_COLOR          set to anything non-empty for plain output
   CLICOLOR_FORCE    set to keep colour through a pipe
-  COLUMNS           override the detected line width"
+  COLUMNS           override the detected line width",
+        examples(theme, width, ROOT_EXAMPLES)
     )
 }
 
-/// The block under `tetanus chat --help`.
-pub fn chat_epilogue(theme: &Theme) -> String {
-    let examples = theme.paint(Role::Heading, "Examples:");
+/// The block under `tetanus chat --help`, and what a conversation is.
+pub fn chat_epilogue(theme: &Theme, width: usize) -> String {
     format!(
-        "\
-{examples}
-  tetanus chat                          DeepSeek; needs DEEPSEEK_API_KEY
-  tetanus chat -a mock                  the same conversation, offline
-  tetanus chat -s sessions/plan.jsonl   start or resume that conversation
-  tetanus chat --think                  unfold what the model thought
-  tetanus chat --max-steps 1            stop each turn after one step
-
-Type a message and press Enter. `/help` lists the commands, `/exit` or ctrl-d
-leaves, and every turn is appended to the journal, which is what the next chat
-on the same path reads back as memory."
+        "{}\n\n{}",
+        examples(theme, width, CHAT_EXAMPLES),
+        wrap(
+            "Type a message and press Enter. `/help` lists the commands, \
+             `/exit` or ctrl-d leaves, and every turn is appended to the \
+             journal, which is what the next chat on the same path reads back \
+             as memory.",
+            width,
+        )
+        .join("\n"),
     )
 }
 
@@ -177,23 +276,14 @@ pub fn root_long_epilogue(theme: &Theme, width: usize) -> String {
         rows.push(format!("  {status:<4} {first}"));
         rows.extend(folded.map(|line| format!("{indent}{line}")));
     }
-    format!("{}\n\n{heading}\n{}", root_epilogue(theme), rows.join("\n"))
+    format!(
+        "{}\n\n{heading}\n{}",
+        root_epilogue(theme, width),
+        rows.join("\n")
+    )
 }
 
 /// The block under `tetanus run --help`.
-pub fn run_epilogue(theme: &Theme) -> String {
-    let examples = theme.paint(Role::Heading, "Examples:");
-    format!(
-        "\
-{examples}
-  tetanus run                         the default: \"run one full turn\"
-  tetanus run \"list the files\"        ask for something else
-  tetanus run - < task.md             a prompt too long to quote
-  tetanus run --trace                 the raw event sequence instead
-  tetanus run --ui                    watch it on a screen of its own
-  tetanus run --session /tmp/t.jsonl  choose where the journal lands
-  tetanus run --max-steps 1           stop after one step
-  tetanus run --think                 unfold what the model thought
-  tetanus run --json                  JSONL for a script, not for a person"
-    )
+pub fn run_epilogue(theme: &Theme, width: usize) -> String {
+    examples(theme, width, RUN_EXAMPLES)
 }

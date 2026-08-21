@@ -233,10 +233,14 @@ impl Cli {
             // where a block folded here would be folded again.
             .term_width(policy.width)
             .styles(help::styles())
-            .after_help(help::root_epilogue(&theme))
+            .after_help(help::root_epilogue(&theme, policy.width))
             .after_long_help(help::root_long_epilogue(&theme, policy.width))
-            .mut_subcommand("run", |run| run.after_help(help::run_epilogue(&theme)))
-            .mut_subcommand("chat", |chat| chat.after_help(help::chat_epilogue(&theme)));
+            .mut_subcommand("run", |run| {
+                run.after_help(help::run_epilogue(&theme, policy.width))
+            })
+            .mut_subcommand("chat", |chat| {
+                chat.after_help(help::chat_epilogue(&theme, policy.width))
+            });
         <Self as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
             .unwrap_or_else(|err| err.exit())
     }
