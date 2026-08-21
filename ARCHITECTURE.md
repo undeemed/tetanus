@@ -57,6 +57,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
        -> crates/session  tetanus-session   durable event vocabulary + JSONL journal
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
+  -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
@@ -70,6 +71,12 @@ crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 It holds one document per layer rather than one folded map, because a layer that is re-read can
 *drop* a key and the value under it has to come back; a folded map has nothing to come back to
 ([crates/config/src/lib.rs](crates/config/src/lib.rs)).
+`tetanus-fs` depends on `tetanus-turn` and nothing depends on it: it is a *consumer* of the tool seam,
+not a layer under it, which is what keeps a harness composed without file tools a harness that still
+builds and runs.
+It reuses the containment walk `tetanus-turn` already carries rather than growing a second one
+([crates/fs/src/local.rs](crates/fs/src/local.rs)), so the fenced and unfenced backends differ only in
+which root a path is judged against.
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
@@ -185,6 +192,17 @@ listener, because a listener registered later could be ordered ahead of a gate l
 first.
 It is also the one place `waterfall` is contained rather than loud: a question that cannot be
 answered has a defined answer, so a panicking answerer denies its call instead of failing the turn.
+
+The turn engine applies that seam between `tools/pre-execute` and the dispatch: a tool says whether
+one pending call needs deciding, and a call nobody granted is never dispatched at all - the step gets
+a `tool/result` with `ok: false` and a `code`, which is what §4.4.7 of the contract means by a denial
+being a result rather than a failure.
+After `tools/pre-execute`, deliberately, so that what is decided is what would actually run.
+Asking the user something ([crates/turn/src/questions.rs](crates/turn/src/questions.rs)) is the same
+shape for a different question, down to the durable pair and the enclosure rule, and differs in what
+counts as an answer: every question covered, every selection a label that was offered.
+Both are unbounded waits with exactly one way out, which is why an interrupt withdraws an outstanding
+question rather than only stopping the turn at its next step boundary.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
 
@@ -588,7 +606,11 @@ not protocol-level.
 
 ## 7. Not built yet
 
-A settings-file watcher, live subtree remount, the rest of the tool pipeline
-(permissions, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
+A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
+kernel sandboxing, the web UI, and the WASM plugin host.
+The file tools exist and are composed by whoever builds a registry
+([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
+is the presentation lane's wiring, per §4.7's ownership table in
+[docs/interface-contract.md](docs/interface-contract.md).
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.
