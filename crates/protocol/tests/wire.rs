@@ -6,12 +6,13 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    capability, method, AgentStatusPush, SessionEventPush, SessionForkParams,
+    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
+    SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
-    AgentState, Chunk, ConfigEntry, ConfigLayer, KnownEvent, SessionEvent, StopReason, TurnSummary,
-    Usage, REDACTED,
+    AgentState, ApprovalOutcome, ApprovalPolicy, Chunk, ConfigEntry, ConfigLayer, KnownEvent,
+    SessionEvent, StopReason, TurnSummary, Usage, REDACTED,
 };
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
@@ -571,4 +572,233 @@ fn session_start_lineage_is_optional_and_absent_means_no_parent() {
     .expect("serialize");
     assert_eq!(round_tripped.get("parent_session"), None);
     assert_eq!(round_tripped.get("fork_seq"), None);
+}
+
+/// TC-PROTO-20: contract section 4.4.7. An approval question names the audit
+/// line it was written as, the tool it is about, and the call it decides.
+///
+/// `request_id` is the `approval/asked.id` and `call_id` the `tool/call.id`, so
+/// a surface can attach one prompt to both the journal and the call it already
+/// streamed. Both optional fields are absent rather than `null` when the asker
+/// had none, which is what lets a surface tell "no call" from "a call named
+/// null".
+#[test]
+fn an_approve_request_names_its_audit_line_its_tool_and_its_call() {
+    let params = ApproveParams {
+        session_id: "s1".into(),
+        request_id: "ask-1".into(),
+        tool_name: "shell".into(),
+        call_id: Some("call-7".into()),
+        reason: Some("writes outside the workspace".into()),
+    };
+
+    let wire = serde_json::to_value(&params).expect("serialize");
+    assert_eq!(
+        wire,
+        json!({
+            "session_id": "s1",
+            "request_id": "ask-1",
+            "tool_name": "shell",
+            "call_id": "call-7",
+            "reason": "writes outside the workspace",
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ApproveParams>(wire).expect("parse"),
+        params
+    );
+
+    let bare = ApproveParams {
+        call_id: None,
+        reason: None,
+        ..params
+    };
+    let wire = serde_json::to_value(&bare).expect("serialize");
+    assert_eq!(wire.get("call_id"), None);
+    assert_eq!(wire.get("reason"), None);
+
+    // The capability a surface checks is the frame's own name with the
+    // separator every other capability uses.
+    assert_eq!(capability::UI_APPROVE, "ui.approve");
+    assert_eq!(push::UI_APPROVE, "ui/approve");
+}
+
+/// TC-PROTO-21: contract section 4.4.7. Four outcomes, spelled as the section
+/// spells them, and exactly one of them grants.
+///
+/// `grants()` is the fail-closed rule as one function: a caller that matched
+/// the enum itself could forget an arm, and forgetting the wrong one opens a
+/// gate.
+#[test]
+fn one_outcome_grants_and_the_rest_deny() {
+    for (outcome, word, grants) in [
+        (ApprovalOutcome::AllowedOnce, "allowed-once", true),
+        (ApprovalOutcome::Rejected, "rejected", false),
+        (ApprovalOutcome::Cancelled, "cancelled", false),
+        (ApprovalOutcome::Unavailable, "unavailable", false),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&outcome).expect("serialize"),
+            json!(word)
+        );
+        assert_eq!(
+            serde_json::from_value::<ApprovalOutcome>(json!(word)).expect("parse"),
+            outcome
+        );
+        assert_eq!(outcome.grants(), grants, "`{word}` grants: {grants}");
+    }
+
+    let result = ApproveResult {
+        outcome: ApprovalOutcome::AllowedOnce,
+    };
+    assert_eq!(
+        serde_json::to_value(&result).expect("serialize"),
+        json!({ "outcome": "allowed-once" })
+    );
+}
+
+/// TC-PROTO-22: contract section 4.4.7, and section 4.3's rule for a fallback
+/// the engine reads rather than renders.
+///
+/// A client that answers with a word this build does not know is not a parse
+/// failure - section 7.5's fallback is what keeps an added variant minor - and
+/// it is not a grant either. Both halves matter: dropping the fallback would
+/// break an older engine against a newer surface, and letting it grant would
+/// turn any typo into permission.
+#[test]
+fn an_unknown_outcome_parses_and_denies() {
+    let answered = serde_json::from_value::<ApproveResult>(json!({ "outcome": "allowed-always" }))
+        .expect("an unknown outcome parses rather than failing the frame");
+    assert_eq!(
+        answered.outcome,
+        ApprovalOutcome::Other("allowed-always".into())
+    );
+    assert!(
+        !answered.outcome.grants(),
+        "a word the engine cannot interpret is not a grant"
+    );
+
+    // It travels back out as the word it arrived as, so a transcript records
+    // what the client actually said.
+    assert_eq!(
+        serde_json::to_value(&answered).expect("serialize"),
+        json!({ "outcome": "allowed-always" })
+    );
+}
+
+/// TC-PROTO-23: contract section 4.4.7. Two policies, and a third word that
+/// stays readable.
+///
+/// The fallback exists here for the same compatibility reason as everywhere
+/// else, but it is never acted on: the engine answers `InvalidParams` naming
+/// `policy`, because a caller setting a policy could have named one of the two.
+#[test]
+fn the_two_policies_round_trip_and_a_third_word_survives() {
+    for (policy, word) in [
+        (ApprovalPolicy::Ask, "ask"),
+        (ApprovalPolicy::Never, "never"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&policy).expect("serialize"),
+            json!(word)
+        );
+        assert_eq!(
+            serde_json::from_value::<ApprovalPolicy>(json!(word)).expect("parse"),
+            policy
+        );
+    }
+
+    let params = ApprovalSetParams {
+        session_id: "s1".into(),
+        policy: ApprovalPolicy::Never,
+    };
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize"),
+        json!({ "session_id": "s1", "policy": "never" })
+    );
+
+    let unknown = serde_json::from_value::<ApprovalSetParams>(
+        json!({ "session_id": "s1", "policy": "yolo" }),
+    )
+    .expect("an unknown policy reaches the engine as a value, not as a parse failure");
+    assert_eq!(unknown.policy, ApprovalPolicy::Other("yolo".into()));
+
+    assert_eq!(capability::APPROVAL_SET, method::APPROVAL_SET);
+}
+
+/// TC-PROTO-24: contract section 4.3.2. The three `approval/*` types stage
+/// exactly as `llm/retry` does: every documented key is carried, and `parse()`
+/// still answers `None`, so a surface renders them raw until the version that
+/// gives them a `KnownEvent` variant.
+#[test]
+fn the_approval_audit_types_stage_like_the_others() {
+    let asked = SessionEvent {
+        ty: "approval/asked".into(),
+        seq: 5,
+        time: 0,
+        data: json!({
+            "id": "ask-1",
+            "tool_name": "shell",
+            "call_id": "call-7",
+            "reason": "writes outside the workspace",
+        }),
+        source_event_seqs: None,
+    };
+    let decided = SessionEvent {
+        ty: "approval/decided".into(),
+        seq: 6,
+        time: 0,
+        data: json!({ "id": "ask-1", "outcome": "rejected" }),
+        source_event_seqs: None,
+    };
+    let policy = SessionEvent {
+        ty: "approval/policy".into(),
+        seq: 7,
+        time: 0,
+        data: json!({ "policy": "never" }),
+        source_event_seqs: None,
+    };
+
+    for (event, keys) in [
+        (&asked, vec!["id", "tool_name"]),
+        (&decided, vec!["id", "outcome"]),
+        (&policy, vec!["policy"]),
+    ] {
+        assert!(
+            event.parse().is_none(),
+            "`{}` is staged, not a KnownEvent variant",
+            event.ty
+        );
+        for key in keys {
+            assert!(
+                event.data.get(key).is_some(),
+                "`{}` must carry `{key}`",
+                event.ty
+            );
+        }
+    }
+
+    // The pair is one to one and shares an id, which is what makes the audit
+    // readable at all: the decision is found by the id, never by adjacency.
+    assert_eq!(asked.data["id"], decided.data["id"]);
+
+    // The two vocabularies on the journal are the wire enums' own words, so a
+    // surface that folds the log and one that reads a frame agree.
+    assert_eq!(
+        serde_json::from_value::<ApprovalOutcome>(decided.data["outcome"].clone()).expect("parse"),
+        ApprovalOutcome::Rejected
+    );
+    assert_eq!(
+        serde_json::from_value::<ApprovalPolicy>(policy.data["policy"].clone()).expect("parse"),
+        ApprovalPolicy::Never
+    );
+
+    // A question the asker had no call for omits the optional keys rather than
+    // carrying them as null.
+    let bare = SessionEvent {
+        data: json!({ "id": "ask-2", "tool_name": "shell" }),
+        ..asked
+    };
+    assert_eq!(bare.data.get("call_id"), None);
+    assert_eq!(bare.data.get("reason"), None);
 }

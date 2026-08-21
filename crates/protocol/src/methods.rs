@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::rpc::{ErrorCode, RpcError};
 use crate::types::{
-    Answer, ConfigEntry, ProviderDescriptor, Question, SessionEvent, SessionInfo, ToolDescriptor,
-    TurnSummary,
+    Answer, ApprovalOutcome, ApprovalPolicy, ConfigEntry, ProviderDescriptor, Question,
+    SessionEvent, SessionInfo, ToolDescriptor, TurnSummary,
 };
 
 /// Client-to-server method names. String constants, not an enum: an unknown
@@ -28,14 +28,16 @@ pub mod method {
     pub const CATALOG_TOOLS: &str = "catalog.tools";
     pub const CATALOG_MODELS: &str = "catalog.models";
     pub const CONFIG_DUMP: &str = "config.dump";
+    pub const APPROVAL_SET: &str = "approval.set";
 }
 
-/// Server-to-client frames. The two notifications are one-way; `UI_ASK` is a
-/// request the client answers.
+/// Server-to-client frames. The two notifications are one-way; `UI_ASK` and
+/// `UI_APPROVE` are requests the client answers.
 pub mod push {
     pub const SESSION_EVENT: &str = "session/event";
     pub const AGENT_STATUS: &str = "agent/status";
     pub const UI_ASK: &str = "ui/ask";
+    pub const UI_APPROVE: &str = "ui/approve";
 }
 
 /// Capability strings a server advertises in [`HelloResult`]. A surface checks
@@ -45,6 +47,8 @@ pub mod capability {
     pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
     pub const UI_ASK: &str = "ui.ask";
+    pub const UI_APPROVE: &str = "ui.approve";
+    pub const APPROVAL_SET: &str = "approval.set";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,6 +255,52 @@ pub struct AskResult {
     pub answers: Vec<Answer>,
 }
 
+/// Params of the server-to-client `ui/approve` request.
+///
+/// Contract section 4.4.7. One question about one tool call, put to the client
+/// before the call runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApproveParams {
+    /// The session the question belongs to, so a multi-session surface can
+    /// route it.
+    pub session_id: String,
+    /// The `id` of the `approval/asked` this question was audited as, so a
+    /// surface can pair the prompt it is showing with the journal line.
+    pub request_id: String,
+    /// The tool the question is about.
+    pub tool_name: String,
+    /// The `tool/call.id` being decided, when the asker had one. A surface
+    /// that already streamed the call attaches the prompt to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// The asker's own words for why it is asking. Text for a human, not a
+    /// code to match on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The client's answer to `ui/approve`.
+///
+/// Every way of not producing one denies: no `ui.approve` capability, a
+/// JSON-RPC error, an `outcome` outside the four words, or a connection that
+/// dropped. See [`ApprovalOutcome`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApproveResult {
+    pub outcome: ApprovalOutcome,
+}
+
+/// Params of `approval.set`: write one session's approval policy.
+///
+/// Contract section 4.4.7. This is the only thing that appends
+/// `approval/policy`, and there is no matching getter: a caller folds the
+/// events it already receives. Setting the policy a session is already under
+/// writes nothing, so a surface may send it idempotently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalSetParams {
+    pub session_id: String,
+    pub policy: ApprovalPolicy,
+}
+
 /// The whole client-to-server surface, as Rust. The JSON-RPC server is a thin
 /// codec over this trait, and the CLI calls it in process, so the two cannot
 /// serve different contracts.
@@ -310,4 +360,17 @@ pub trait Engine: Send + Sync {
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError>;
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError>;
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError>;
+    /// Contract section 4.2: reserved. See [`Engine::session_fork`] for what a
+    /// default body means here.
+    async fn approval_set(&self, params: ApprovalSetParams) -> Result<Ack, RpcError> {
+        let _ = params;
+        Err(RpcError::new(
+            ErrorCode::NotImplemented,
+            format!(
+                "`{}` is reserved, and this build does not serve it",
+                method::APPROVAL_SET
+            ),
+        )
+        .with_data(serde_json::json!({ "method": method::APPROVAL_SET })))
+    }
 }

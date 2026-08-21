@@ -96,6 +96,7 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `catalog.tools` | none | `ToolCatalogResult` | always | Served |
 | `catalog.models` | none | `ModelCatalogResult` | always | Served |
 | `config.dump` | none | `ConfigDumpResult` | always | Served |
+| `approval.set` | `ApprovalSetParams` | `Ack` | `approval.set` | Reserved |
 
 A call with no params accepts an absent `params`, or `{}`, and treats them alike.
 
@@ -116,6 +117,7 @@ A carrier that drops a connection unsubscribes its sinks; a sink that is gone is
 | `session/event` | notification | `SessionEventPush` | none | Served |
 | `agent/status` | notification | `AgentStatusPush` | none | Served |
 | `ui/ask` | request | `AskParams` | `AskResult` | Reserved, capability `ui.ask` |
+| `ui/approve` | request | `ApproveParams` | `ApproveResult` | Reserved, capability `ui.approve` |
 
 A client that receives an unknown notification method ignores it.
 A client that receives an unknown *request* method answers `MethodNotFound` (`-32601`).
@@ -132,7 +134,7 @@ The crate is authoritative for field-level detail; this section states the invar
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
-Two more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again (§4.3.2).
+Five more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, and `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run (§4.3.2).
 A surface renders them raw until it takes them, which is what "the vocabulary grows" means in practice.
 `session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
 `assistant/chunk` is the streaming surface.
@@ -171,11 +173,19 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | --- | --- |
 | `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
 | `llm/retry-started` | `turn`, `step`, `retry` |
+| `approval/asked` | `id`, `tool_name`, plus `call_id` and `reason` when the asker had them |
+| `approval/decided` | `id`, `outcome` |
+| `approval/policy` | `policy` |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
 `retry` counts from one and is the attempt about to be made, not the one that failed.
 `code` is the stable failure classification of §4.5, and `message` is the provider's own words.
+
+The three `approval/*` types are §4.4.7's audit.
+`approval/asked` and `approval/decided` are one pair sharing an `id`, and `approval/policy` is the durable form of a policy switch: the last one on the journal is the session's override.
+`outcome` is one of §4.4.7's four words and `policy` one of its two, both spelled exactly as the wire enums spell them.
+They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: their place is their position between the boundaries of the step that asked.
 
 This step is not a version bump.
 `SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
@@ -191,8 +201,12 @@ A surface reads one or the other, never both, or it renders the answer twice.
 
 Adding a field to one of these payloads is a minor change; removing or renaming one is major.
 
-**`AgentState`**, **`StopReason`** and **`ConfigLayer`** each carry an `Other(String)` fallback.
+**`AgentState`**, **`StopReason`**, **`ConfigLayer`**, **`ApprovalOutcome`** and **`ApprovalPolicy`** each carry an `Other(String)` fallback.
 A surface renders the fallback rather than failing, and that is exactly what lets the engine add a variant in a minor version.
+
+The two approval enums are the first whose fallback is read rather than rendered, so §4.4.7 fixes what reading one means.
+An `ApprovalOutcome` the engine does not know denies, because a word it cannot interpret is not a grant.
+An `ApprovalPolicy` it does not know is `InvalidParams`, because a policy is set by a caller that could have named one of the two.
 
 **`SessionInfo`** answers a list view without reading a journal: id, journal path, provider, model, creation time, `last_seq` (`-1` for an empty log), live state, and `title`.
 `title` is the session's first user message, truncated by the engine, or `None` when there is none yet.
@@ -314,9 +328,10 @@ A process that dies mid-turn leaves a journal whose last turn never ended, and p
 The closers are ordinary durable events, written once, at the end of the journal:
 
 ```text
-session/event tool/result   (one per unanswered call, ok: false)
-session/event step/end      (only when a step was open)
-session/event turn/end      (stop_reason: "interrupted")
+session/event approval/decided  (one per unanswered ask, outcome: "cancelled")
+session/event tool/result       (one per unanswered call, ok: false)
+session/event step/end          (only when a step was open)
+session/event turn/end          (stop_reason: "interrupted")
 ```
 
 A surface reads them exactly as it reads a live turn's, and `SessionInfo.last_seq` counts them.
@@ -324,6 +339,14 @@ So a reopened session may report a `last_seq` above the one the surface last saw
 
 Each synthesized `tool/result` carries a `code`: `TOOL_NOT_STARTED` when no `tool/call` was ever written for it, and `TOOL_OUTCOME_UNKNOWN` when one was, in which case the result cites that `tool/call` in `sourceEventSeqs`.
 The two are worth telling apart in a transcript, because the first is safe to retry and the second is not.
+
+A synthesized `approval/decided` closes an `approval/asked` the crash caught mid-question, and it reads `cancelled` rather than `unavailable`: nobody was found to be missing, the process holding the question died.
+It comes first, before the `tool/result` of the call it was about, because that is the order a live turn writes them in: a decision precedes the call it decides.
+An ask that was already decided is untouched, exactly as an answered `tool/call` is.
+
+This closer is why §4.4.7 requires an open turn to ask at all.
+The turn is the unit repair closes: `session.create` finds the last `turn/start` with no `turn/end` and balances what it opened.
+An `approval/asked` written between turns is inside nothing, so no repair would ever reach it, and a journal would carry a question with no answer for the rest of its life.
 
 `stop_reason: "interrupted"` is a new value of the growable `StopReason`, and §7.5 already fixes what an old surface does with one.
 A balanced journal is untouched, so this is invisible to every session that closed normally.
@@ -406,6 +429,83 @@ The result is the child's `SessionInfo`, and the child is open when it is answer
 Lineage is read from the child's `session/start` line and is deliberately not repeated on `SessionInfo`; §5 says why an added field on a type the other lane constructs is not the free addition it looks like.
 No subcommand calls `session.fork`: §4.7's table is the closed list of what a subcommand may call, and a row joins it when the presentation lane takes the affordance.
 
+#### 4.4.7 Deciding whether a tool may run
+
+Some tools do something a session cannot take back.
+Before one of those runs, the engine asks, and the answer decides.
+
+```text
+session/event approval/asked     { id, tool_name, call_id, reason }
+server -> ui/approve { session_id, request_id, tool_name, call_id, reason }   (a request)
+client -> ApproveResult { outcome }
+session/event approval/decided   { id, outcome }
+```
+
+`request_id` on the wire is the `id` on the journal, so a surface can pair the prompt it is showing with the audit line, and `call_id` is the `tool/call.id` it already streamed.
+`reason` is the asker's own words for why it is asking, and it is text for a human, not a code to match on.
+
+**Four outcomes, and one of them is a grant.**
+
+| `outcome` | Means |
+| --- | --- |
+| `allowed-once` | run this call |
+| `rejected` | a decision not to run it |
+| `cancelled` | the question was withdrawn before it was answered |
+| `unavailable` | nobody could answer it |
+
+A grant is for the one call it was asked about.
+It is not a rule, not a session setting and not a grant for the same tool later; the next call of the same tool asks again.
+Anything a caller wants to be remembered is a policy, which is the other half of this section.
+
+**The seam fails closed.**
+Every way of not getting an answer denies:
+
+- a client that advertises no `ui.approve` capability is never asked, and the ask settles `unavailable` without a frame going out;
+- a client that is asked and answers with a JSON-RPC error settles `unavailable`;
+- a client that answers with an `outcome` outside the four words settles `unavailable`, because §4.3's fallback is read here and a word the engine cannot interpret is not a grant;
+- a connection that drops with the question outstanding settles `unavailable`.
+
+The difference between `rejected` and `unavailable` is who is speaking: the first is a decision, the second is its absence.
+They deny alike, and they are told apart on the journal so a transcript can say whether a human refused or nobody was there.
+
+**An interrupt withdraws the question.**
+`agent.interrupt` while an ask is outstanding settles it `cancelled` at once, rather than waiting for an answer that a stopped turn would not use.
+An answer that arrives after that is discarded, and never reopens a decision the journal has already recorded.
+This is the one place an interrupt takes effect inside a step rather than at its boundary (§4.4.2), and it is not a change to that rule: the step is not cut short, the question is, and the step then proceeds with the denial.
+
+**The policy decides before anyone is asked.**
+
+| `policy` | Means |
+| --- | --- |
+| `ask` | put the question to the client, under the rules above |
+| `never` | do not put it to anyone: every ask settles `rejected` |
+
+`never` is the unattended stance, and its point is that the answer is knowable without a human: a run in CI neither hangs nor waits for a client that will not answer.
+It settles `rejected` and not `unavailable`, because a deployment that chose it did decide.
+
+A session's policy is the last `approval/policy` on its journal, and the deployment's `approval.policy` setting when the journal holds none.
+The fold is the whole state, so a resumed session is under the policy it was under, with nothing to replay but the log itself.
+`approval.set` writes that event; it is the only thing that does, and a caller reads the policy back by folding the events it already receives rather than by a call of its own.
+
+Setting the policy a session is already under writes nothing, so a surface may send it idempotently.
+A policy outside the two words is `InvalidParams` naming `policy`, and the journal is not written.
+
+**The audit pair is exactly one to one.**
+Every ask appends `approval/asked` before the question goes out, and exactly one `approval/decided` with the same `id` once the outcome is known - including the outcomes nobody was asked for, so a `never` policy still leaves the pair on the journal.
+An `id` is fresh per ask and is never reused, so two calls of the same tool in one step are two pairs.
+The pair is inside the open turn, for the reason §4.4.4 gives: the turn is what repair closes, and a question outside one could never be closed.
+Asking with no turn open is `Internal`, and nothing is appended.
+
+**A denied call is a `tool/result`, not an error.**
+The call is not dispatched, and the step gets a `tool/result` with `ok: false` whose `content` says the call was not permitted.
+§4.5 already fixes this shape: a binding rejection the model reads is not a failure of the call the surface made, so `agent.prompt` still answers a summary and the turn ends normally.
+The model is told, so it can do something else rather than wait on a result that is not coming.
+
+**Which tools ask is not on `ToolDescriptor` in this version.**
+A surface learns it from the ask.
+`ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
+The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -453,6 +553,10 @@ Neither adds a code.
 A surface's match on `ErrorCode` is exhaustive on purpose, so a new code is a change both lanes land together, and these two failures need none: the rows above already carry the path, the key and the exit status each case wants.
 
 `session.fork` adds none either, for the same reason: §4.4.6 lists each of its refusals against a row above, and a refused fork is either a source that is not there or a parameter that is wrong.
+
+§4.4.7 adds none, and it is the case worth stating twice.
+A denial is not a failure of anything: it is the seam working, so it takes no code at all and travels as a `tool/result` the model reads.
+What the section does refuse takes rows above - a policy outside the two words is `InvalidParams` naming `policy`, a session that is not there is `SessionNotFound`, and asking with no turn open is `Internal`, because a caller cannot have caused it from the wire.
 
 A failed tool call is not an error.
 It is a `tool/result` with `ok: false`, because it is a binding rejection the model sees, not a failure of the call the surface made.
@@ -617,6 +721,11 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
 | §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
 | §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
+| §4.4.7 an ask names its audit line, its tool and its call | TC-PROTO-20 |
+| §4.4.7 the four outcomes, and only one of them grants | TC-PROTO-21 |
+| §4.4.7 an outcome the engine does not know denies rather than failing to parse | TC-PROTO-22 |
+| §4.4.7 the two policies, and a third word that stays readable | TC-PROTO-23 |
+| §4.3.2 the three `approval/*` types stage like the other two | TC-PROTO-24 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
@@ -718,3 +827,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States what the `assistant/message` of a cut-off step carries (§4.4.2): the §4.3.1 fields as always, with `tool_calls` empty and the provider's own finish reason kept. No type changes. The clause above says such a step dispatches nothing; it did not say what the durable message holds, and a call left on it is a call no `tool/result` answers, so the history a client derives asks the provider for a result that will never come and the next request on that session is refused. The raw calls stay on the cited `assistant/chunk` events. The engine change that does this lands with the rest of the cut-off behaviour. |
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
+| 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.

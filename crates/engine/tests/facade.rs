@@ -8,11 +8,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
-    capability, method, AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams,
-    PeerInfo, SessionCreateParams, SessionEventPush, SessionEventsParams, SessionForkParams,
-    SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
+    capability, method, AgentPromptParams, AgentStatusPush, ApprovalSetParams, Engine, EventSink,
+    HelloParams, PeerInfo, SessionCreateParams, SessionEventPush, SessionEventsParams,
+    SessionForkParams, SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
+use tetanus_protocol::types::ApprovalPolicy;
 use tetanus_protocol::PROTOCOL_VERSION;
 
 /// A sink for a case that is asserting a call answers, not what it pushes.
@@ -136,12 +137,12 @@ async fn every_call_in_the_table_is_served() {
 /// affordance is hidden until the capability appears, and a surface that calls
 /// it anyway is told so in the one code section 4.5 gives that answer.
 ///
-/// Input: `session.fork`, on a session that exists, with params the frozen
-/// shape accepts.
-/// Expected: `NotImplemented` naming the method in `data`, and no
-/// `session.fork` in the handshake's capabilities. TC-SUB-5 asserts the
-/// complement - that every capability which *is* advertised is served - so the
-/// two together leave no room for a call to be half-promised.
+/// Input: every reserved call, on a session that exists, with params the
+/// frozen shape accepts.
+/// Expected: `NotImplemented` naming the method in `data`, and neither
+/// capability in the handshake's. TC-SUB-5 asserts the complement - that every
+/// capability which *is* advertised is served - so the two together leave no
+/// room for a call to be half-promised.
 #[tokio::test]
 async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
     let (engine, _dir) = engine();
@@ -155,14 +156,16 @@ async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
         .await
         .expect("session.create");
 
-    assert!(
-        !capabilities.contains(&capability::SESSION_FORK.to_string()),
-        "a reserved call must not be advertised: {capabilities:?}"
-    );
+    for reserved in [capability::SESSION_FORK, capability::APPROVAL_SET] {
+        assert!(
+            !capabilities.contains(&reserved.to_string()),
+            "a reserved call must not be advertised: {capabilities:?}"
+        );
+    }
 
     let error = engine
         .session_fork(SessionForkParams {
-            session_id: info.session_id,
+            session_id: info.session_id.clone(),
             through_seq: None,
             child_session_id: None,
         })
@@ -172,5 +175,18 @@ async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
     assert_eq!(
         error.data.expect("data")["method"],
         serde_json::json!(method::SESSION_FORK)
+    );
+
+    let error = engine
+        .approval_set(ApprovalSetParams {
+            session_id: info.session_id,
+            policy: ApprovalPolicy::Never,
+        })
+        .await
+        .expect_err("approval.set is reserved");
+    assert_eq!(error.kind(), Some(ErrorCode::NotImplemented));
+    assert_eq!(
+        error.data.expect("data")["method"],
+        serde_json::json!(method::APPROVAL_SET)
     );
 }
