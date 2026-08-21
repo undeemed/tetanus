@@ -65,8 +65,18 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
                                        full-screen view loop
 
+crates/mcp        tetanus-mcp        an MCP server on stdio: client, tool bridge, reconnect supervisor
+crates/web        tetanus-web        web_fetch and web_search over one transport seam
+
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```
+
+`tetanus-mcp` and `tetanus-web` are the two crates that leave the machine, and both are composed
+into a harness rather than depended on by one: each contributes `tetanus_turn::tools::Tool`
+implementations and reads its own section of the settings document. Everything either of them
+decides sits above a seam - a `Link` for a server on a pipe, an `HttpTransport` for a request - so
+the whole policy is asserted with no socket in the suite, and a failure out there is a failed tool
+call carrying a class rather than a turn that ended.
 
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.
