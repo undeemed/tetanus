@@ -6,13 +6,17 @@
 //! that nothing overruns the width cap; and that every example on the page is
 //! an invocation the binary really accepts.
 //!
-//! Features NOT tested here: the colour policy (owned by `presentation.rs`)
-//! and the turn flow (owned by the conformance suite in `tetanus-turn`).
+//! Features NOT tested here: the colour policy (owned by `presentation.rs`),
+//! which failure gets which code (owned by the contract's own suite and by
+//! `presentation.rs`, which asserts the status of a reported failure), and the
+//! turn flow (owned by the conformance suite in `tetanus-turn`).
 //!
 //! Environmental needs: none. `COLUMNS` is stated, never inherited, so the
 //! wrapping case measures the same page everywhere.
 
 use std::process::Command;
+
+use tetanus_protocol::rpc::ErrorCode;
 
 /// Ask the binary for a help page, at the widest width it uses, into a pipe.
 fn help(args: &[&str]) -> String {
@@ -32,6 +36,36 @@ fn help_at(columns: &str, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).expect("utf-8")
+}
+
+/// Run the binary and report only what it exited with, for the cases whose
+/// whole point is a failing status.
+fn status_of(args: &[&str]) -> i32 {
+    Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .args(args)
+        .env("COLUMNS", "100")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("the binary runs")
+        .status
+        .code()
+        .expect("it exited rather than being signalled")
+}
+
+/// The rows of the exit-status block, as the number and the words beside it.
+///
+/// A folded meaning continues in the number column's own width, so its first
+/// word is never a number and the line drops out here - which is what makes
+/// this readable at any width the page is asked for.
+fn statuses(page: &str) -> Vec<(u8, String)> {
+    block(page, "Exit status:")
+        .iter()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let status = words.next()?.parse::<u8>().ok()?;
+            Some((status, words.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
 }
 
 /// The indented lines under a named block, up to the next blank line.
@@ -227,5 +261,78 @@ fn the_examples_survive_an_eighty_column_terminal() {
                 "`{line}` in `{args:?}` does not fit 80 columns"
             );
         }
+    }
+}
+
+/// TC-CLI-HELP-8: the exit statuses on the long page.
+/// Expected: every status `ErrorCode::exit_status` can return is worded, `0`
+/// is worded beside them, each is worded once, and the block is on `--help`
+/// only. A code added to the contract with a status nobody worded leaves a
+/// caller reading a number the page does not explain, and this is the case
+/// that finds it.
+#[test]
+fn every_exit_status_the_contract_defines_is_worded() {
+    let page = help(&["--help"]);
+    let rows = statuses(&page);
+    assert!(!rows.is_empty(), "the block went missing:\n{page}");
+
+    // The codes are walked rather than listed: JSON-RPC keeps its own errors
+    // in -32768..-32000 and leaves -32099..-32000 to the server, so a code the
+    // contract adds is found here without this test being edited.
+    let mut found = 0;
+    for raw in -32800..=-31900 {
+        let Some(code) = ErrorCode::from_code(raw) else {
+            continue;
+        };
+        found += 1;
+        let status = code.exit_status();
+        assert!(
+            rows.iter().any(|(worded, _)| *worded == status),
+            "{code:?} exits {status}, which the page does not word:\n{page}"
+        );
+    }
+    assert!(found >= 15, "only {found} codes were reachable by number");
+
+    assert!(
+        rows.iter().any(|(status, _)| *status == 0),
+        "nothing says what a run that worked exits with:\n{page}"
+    );
+    for (status, _) in &rows {
+        assert_eq!(
+            rows.iter().filter(|(other, _)| other == status).count(),
+            1,
+            "{status} is worded twice:\n{page}"
+        );
+    }
+
+    // A status is read by the script around a person; `-h` is the summary
+    // that person skims for a flag.
+    assert!(
+        !help(&["-h"]).contains("Exit status:"),
+        "the block is on the short page"
+    );
+}
+
+/// TC-CLI-HELP-9: the page against the binary.
+/// Expected: each of a run that worked, a flag that does not exist and a
+/// journal that is not there exits with a status the block words. The wording
+/// is judged by a reader; that the number is one the page admits to is not,
+/// and a status the page never mentions is the failure this catches.
+#[test]
+fn the_statuses_the_page_words_are_the_ones_it_exits_with() {
+    let page = help(&["--help"]);
+    let rows = statuses(&page);
+
+    for (args, expected) in [
+        (vec!["info"], 0),
+        (vec!["--color", "bogus"], 2),
+        (vec!["replay", "no-such-journal.jsonl"], 4),
+    ] {
+        let status = status_of(&args);
+        assert_eq!(status, expected, "`{args:?}` exited {status}");
+        assert!(
+            rows.iter().any(|(worded, _)| i32::from(*worded) == status),
+            "`{args:?}` exits {status}, which the page does not word:\n{page}"
+        );
     }
 }

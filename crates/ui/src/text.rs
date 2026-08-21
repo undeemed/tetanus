@@ -102,6 +102,23 @@ pub fn tame_line(text: &str) -> String {
     tame(text).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The word a renderer draws in place of a value that draws nothing.
+///
+/// Parenthesised, so it reads as this build's word for what is not there
+/// rather than as the value itself. Two ways a value arrives with nothing in
+/// it, and a reader cannot tell them apart anyway: a caller that had nothing
+/// to say, and a value [`tame_line`] had to take every character out of.
+///
+/// A line that simply stopped where its value should be reads as one the
+/// reader failed to see, and it ends in whatever blank space put the value
+/// there.
+pub fn or_empty(text: &str) -> &str {
+    match visible_width(text) {
+        0 => "(empty)",
+        _ => text,
+    }
+}
+
 /// Step over the rest of one escape sequence, having read its `ESC`.
 ///
 /// Three shapes reach a terminal. `CSI` - `ESC [` - runs to a byte in `@` to
