@@ -629,6 +629,26 @@ The presentation lane owns the binary and wires each subcommand to the calls §4
 Neither lane edits the other's files.
 A change that seems to need one is a gap in this document, and the fix is a contract pull request.
 
+#### 4.7.1 Which rules this document can enforce, and which it cannot
+
+Most of this contract is held by a case. Three rules are not, and cannot be, because they are properties of a consuming lane's *source* rather than of any value that crosses the boundary.
+
+| Rule | Where it is stated |
+| --- | --- |
+| Match a struct variant with a rest pattern | §5, rule 4 |
+| Never match an engine enum - `tetanus_turn::StopReason`, `tetanus_turn::TurnError`, `tetanus_session::SessionError` - to derive a code or a rendering | §3, §4.5 |
+| Derive a failure's code from `tetanus_engine::convert`, not from a match of your own | §4.5 |
+
+Nothing in `crates/protocol`, `crates/engine` or `crates/rpc` can observe any of these, so no conformance case can hold them.
+They are promises, and a promise that is described as a check is worse than one described as a promise - the second gets audited.
+
+**They are not currently kept, and that is recorded here rather than rediscovered.**
+`crates/cli` matches `tetanus_turn::StopReason` variants and `tetanus_session::SessionError` variants today.
+§4.5 already noted the second when the failure mapping was published, and it is still true; the first arrived with the growable-enum rule and outlived it.
+
+Neither is a defect this lane can fix - §4.7 forbids the engine lane editing that file - and neither is urgent: the engine enums have no fallback variant, so the failure mode is a build break in that lane on the day an engine names a new failure, which is loud and immediate rather than silent and wrong.
+What would be a defect is letting them sit unnamed, so that the next reader of §3 believes the rule is being kept because nothing says otherwise.
+
 ## 5. Versioning and compatibility
 
 `PROTOCOL_VERSION` is `major.minor`.
@@ -748,6 +768,7 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.7 naming a path opens that journal, under the id the journal carries | TC-PATH-1, TC-ID-1 |
 | §4.7 a path whose file is not a journal is `LogCorrupt` | TC-PATH-3 |
 | §4.7 every id `session.list` reports is one `session.events` opens | TC-ID-2 |
+| §4.7.1 the rules no case can hold, and their live exceptions | none - see §4.7.1 |
 
 ## 7. Design rationale
 
@@ -763,7 +784,12 @@ The cost is that it says nothing about streams; §4.4.2 answers that by streamin
 ### 7.1.1 One sink, three carriers
 
 The first draft left `session.subscribe` off the `Engine` trait, on the reasoning that a subscription binds to a connection and an in-process caller has none.
-The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by importing `tetanus-core` and `tetanus-turn`, which is the lane boundary §3 draws.
+The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by reaching into `tetanus-core` and `tetanus-turn` for the bus, which is the lane boundary §3 draws.
+
+That is narrower than it first reads, and the narrowing matters.
+`EventSink` removed the need to reach past the contract *to watch a session*.
+It did not remove those crates from the presentation lane's dependency list, and was never going to: §4.7's ownership table gives that lane "the whole binary ... and the wiring to the crates above", so composing an engine out of them is its job.
+The boundary is about **what a surface does with a type, not which crate it imports** - and §3 and §4.5 say the part that actually binds.
 
 `EventSink` is the fix. The subscription binds to a sink rather than to a connection, the carrier supplies the sink, and the wire never carries it.
 The alternative was a second in-process-only call, which would have meant two code paths to keep in step and a renderer that behaves differently depending on how it was launched.
@@ -828,3 +854,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Corrects §7.1.1 and adds §4.7.1. §7.1.1 justified `EventSink` by saying the alternative left the renderer importing `tetanus-core` and `tetanus-turn`, which reads as a claim that it no longer does - and `crates/cli` imports both. The claim was narrower than its wording: `EventSink` removed the need to reach past the contract *to watch a session*, and it never removed those crates from that lane's dependency list, because §4.7's ownership table gives it the wiring. The boundary is about what a surface does with a type, not which crate it imports, and the wording now says so. §4.7.1 then names the three rules no conformance case can hold - the rest-pattern rule, the ban on matching engine enums, and using `convert` rather than a private mapping - because each is a property of the consuming lane's source rather than of any value crossing the boundary. A promise described as a check is worse than one described as a promise, since only the second gets audited. It records that two of the three are not kept today: `crates/cli` matches `tetanus_turn::StopReason` and `tetanus_session::SessionError` variants. Neither is this lane's to fix, and neither is urgent - an engine enum has no fallback, so the failure is a loud build break rather than a silent wrong answer - but leaving them unnamed would let the next reader assume the rules are kept because nothing says otherwise. No type changes. |
