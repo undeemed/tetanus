@@ -33,6 +33,12 @@ same shape. An event type this page does not know is drawn from its raw JSON rat
 the durable vocabulary grows, and the newest half of a turn is the half a reader most wants to see
 ([docs/interface-contract.md](../../docs/interface-contract.md) section 4.3.1).
 
+A dropped connection loses nothing a reader typed. The question goes back into the box it was typed
+in - a prompt that never reached the engine is a question they still have - and the line at the
+foot counts down to the next dial rather than saying only that something failed: the wait doubles
+from a second to a cap of fifteen, and starts from a second again once a server answers. What
+failed is on the transcript, where the rest of the conversation is.
+
 The transcript is deliberately the terminal's transcript: the same `you`, `ai`, `▸ call`, `✓ result`
 rows, the same closing line, the same palette as
 [tools/uiwatch](../../tools/uiwatch/README.md). A turn that read differently here would be a second
@@ -49,6 +55,11 @@ description of the same events.
 
 ## Ownership
 
-This directory belongs to the chat lane. It consumes
+This directory belongs to the chat lane.
+One change was made from the presentation lane, deliberately and on record: the two defects above -
+a question lost when the socket dropped, and a reconnect that said nothing about when it would try
+again - were found while sweeping the surfaces that had never been measured, and were fixed on
+instruction rather than left waiting for a lane that is not currently running. Nothing else in this
+directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
