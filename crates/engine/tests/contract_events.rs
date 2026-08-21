@@ -37,22 +37,32 @@ const DOCUMENTED: &[&str] = &[
     "turn/end",
 ];
 
-/// TC-CONTRACT-1: every event a real turn writes is one the contract
-/// describes, and the turn writes all ten.
+/// TC-CONTRACT-1: every documented event a real turn writes parses, and the
+/// turn writes all ten.
 ///
 /// Section 4.3.1: `SessionEvent::parse()` returns `KnownEvent` for the
-/// documented types. A `None` here means the engine wrote a payload the
-/// published boundary type cannot read - a renamed or dropped field - which is
-/// a major change made by accident.
+/// documented types. A `None` on one of those means the engine wrote a payload
+/// the published boundary type cannot read - a renamed or dropped field -
+/// which is a major change made by accident.
 ///
-/// Expected: no event parses to `None`, and every one of the ten types is
-/// present, so the case cannot pass by writing nothing.
+/// The claim is stated over the documented types rather than over every event
+/// the turn wrote, because section 4.3.2 says the durable vocabulary grows: a
+/// new type is a free string that a surface passes through, and its
+/// `KnownEvent` variant follows later. Asserting that *nothing* is unparsed
+/// would make adding a durable type impossible without a boundary change in
+/// the same commit, which is the opposite of what that section promises.
+/// TC-CONTRACT-1b holds the other half - that an undocumented type is passed
+/// through and not dropped.
+///
+/// Expected: no documented event parses to `None`, and every one of the ten
+/// types is present, so the case cannot pass by writing nothing.
 #[tokio::test]
 async fn every_event_a_turn_writes_is_one_the_contract_describes() {
     let (_engine, events) = one_turn("contract-parses").await;
 
     let unparsed: Vec<&str> = events
         .iter()
+        .filter(|event| DOCUMENTED.contains(&event.ty.as_str()))
         .filter(|event| event.parse().is_none())
         .map(|event| event.ty.as_str())
         .collect();
@@ -67,6 +77,45 @@ async fn every_event_a_turn_writes_is_one_the_contract_describes() {
             "a documented type never appeared, so the case proves nothing: {ty}"
         );
     }
+}
+
+/// TC-CONTRACT-1b: a durable type the boundary has not learned still reaches a
+/// surface whole.
+///
+/// Section 4.3.2: the vocabulary grows, `type` stays a free string, and a
+/// surface passes an unknown type through rather than dropping it. The engine
+/// writes one such type today - `request/context`, the request envelope the
+/// token projections anchor on - so the promise is checkable against a real
+/// turn rather than against a fixture.
+///
+/// Expected: the event is on the journal `session.events` serves, it parses to
+/// no `KnownEvent`, and its payload arrives intact.
+#[tokio::test]
+async fn an_undocumented_type_reaches_a_surface_whole() {
+    let (_engine, events) = one_turn("contract-grows").await;
+
+    let envelope = events
+        .iter()
+        .find(|event| event.ty == "request/context")
+        .expect("the turn wrote a request envelope");
+
+    assert!(
+        envelope.parse().is_none(),
+        "a type the boundary has not learned has no KnownEvent variant yet"
+    );
+    assert!(
+        envelope.data.get("provider").is_some_and(|p| p.is_string()),
+        "the payload arrived whole: {}",
+        envelope.data
+    );
+    assert!(
+        envelope
+            .data
+            .get("system_tokens")
+            .is_some_and(|t| t.is_u64()),
+        "the payload arrived whole: {}",
+        envelope.data
+    );
 }
 
 /// TC-CONTRACT-2: a result is paired to its call by id, and the pairing

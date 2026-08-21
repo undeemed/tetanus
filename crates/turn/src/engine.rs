@@ -37,6 +37,7 @@ use tetanus_session::{SessionError, SessionLog};
 
 use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalService};
 use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
+use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
     RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute, ToolsPostExecute,
@@ -48,6 +49,7 @@ use crate::llm::{
 };
 use crate::log::{derive_messages, topic, with_system};
 use crate::prompt::{AssembleAt, PromptError, PromptRegistry};
+use crate::prune::PruneBudget;
 use crate::tools::{
     Permission, ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema,
 };
@@ -114,6 +116,33 @@ pub struct TurnConfig {
     /// `approval/policy`. Contract section 4.4.7: the journal's own switch wins
     /// over this, and this wins over nothing else.
     pub approval_policy: ApprovalPolicy,
+    /// The routed model's context window, when the deployment knows it.
+    ///
+    /// Recorded on every `request/context`, so a reader of the journal can
+    /// tell how close a request came to the limit without knowing the model's
+    /// catalog. It is also what a compaction budget is scaled against.
+    pub context_window: Option<u64>,
+    /// What to do when the next request would not fit. `None` never compacts,
+    /// which is what a deployment that has not set a window gets: a budget
+    /// with no window to scale against is a guess, and a guess that silently
+    /// rewrote a user's history would be the wrong kind of helpful.
+    pub compaction: Option<AutoCompaction>,
+}
+
+/// The compaction a turn performs for itself, before a request it can already
+/// see will not fit.
+///
+/// Doing it here rather than after a provider refusal is the whole point: a
+/// refused request costs a round trip, and a `CONTEXT_WINDOW_EXCEEDED` is
+/// terminal, so a turn that waited to be told would simply fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoCompaction {
+    /// When to act, and how much recent conversation to keep verbatim.
+    pub budget: CompactionBudget,
+    /// Shrink over-long tool results first, when set. It is model-free and
+    /// costs nothing, so it is worth trying before a summary that costs a
+    /// provider call - and it often makes the summary unnecessary.
+    pub prune: Option<PruneBudget>,
 }
 
 impl Default for TurnConfig {
@@ -128,6 +157,8 @@ impl Default for TurnConfig {
             max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             tool_order: None,
             approval_policy: ApprovalPolicy::Ask,
+            context_window: None,
+            compaction: None,
         }
     }
 }
@@ -235,6 +266,76 @@ impl TurnEngine {
     pub fn sharing_interrupt(mut self, interrupt: Arc<Interrupt>) -> Self {
         self.interrupt = interrupt;
         self
+    }
+
+    /// Bring the next request inside its budget, if a budget was configured
+    /// and the request is over it.
+    ///
+    /// The cheap remedy first: shrinking over-long tool results needs no
+    /// provider, costs nothing and is often enough. A summary is asked for
+    /// only when the request is still over budget after that, because it costs
+    /// a provider call and it loses detail that pruning keeps.
+    ///
+    /// A compaction that cannot help - because the whole surface is the recent
+    /// tail, or because the summary came back no smaller - leaves the request
+    /// as it is rather than failing the turn. The provider may still accept it,
+    /// and a turn that refused to try would be strictly worse than one that
+    /// asked and was told no.
+    async fn fit_context(&self, envelope: u64) -> Result<(), TurnError> {
+        let Some(policy) = self.config.compaction else {
+            return Ok(());
+        };
+        if self.cost(envelope) < policy.budget.threshold_tokens {
+            return Ok(());
+        }
+
+        if let Some(budget) = policy.prune {
+            // A prune only ever appends, so the one failure it can meet is the
+            // journal refusing a write, and that is a failed turn either way.
+            if let Err(compaction::CompactionError::Log(error)) =
+                compaction::prune_results(self.log.as_ref(), budget)
+            {
+                return Err(error.into());
+            }
+            if self.cost(envelope) < policy.budget.threshold_tokens {
+                return Ok(());
+            }
+        }
+
+        let summarizer = self.summarizer();
+        match compaction::compact(
+            self.log.as_ref(),
+            summarizer.as_ref(),
+            &self.config.base_prompt,
+            policy.budget,
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            // A compaction that could not run is not a turn that must fail.
+            // The reason is on the journal, on the `compaction/end` the
+            // transaction wrote before it gave up.
+            Err(compaction::CompactionError::Log(error)) => Err(error.into()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// What the next request would cost: the envelope plus the surface.
+    fn cost(&self, envelope: u64) -> u64 {
+        envelope + crate::tokens::TokenSurface::of(&self.log.events()).total_tokens()
+    }
+
+    /// Who writes a checkpoint for this engine.
+    ///
+    /// The routed model, through the adapter the turn already holds, so the
+    /// summary is written by something that has seen this kind of work. There
+    /// is no second route to configure and no second credential to hold.
+    fn summarizer(&self) -> Arc<dyn Summarizer> {
+        Arc::new(compaction::LlmSummarizer::new(
+            Arc::clone(&self.llm),
+            self.config.model.clone(),
+            self.config.max_tokens,
+        ))
     }
 
     /// Ask the running turn to stop at its next step boundary. Answering
@@ -408,9 +509,6 @@ impl TurnEngine {
                 )?;
             }
 
-            // Model history is derived from the log, never stored beside it.
-            let history = derive_messages(&self.log.events());
-
             let at = AssembleAt { turn, step };
             let sections = self.prompt.assemble(&at);
             // A section registered as the whole prompt is kept aside here and
@@ -433,6 +531,35 @@ impl TurnEngine {
             if let Some(section) = complete {
                 prompt.sections = vec![section];
             }
+            let system = prompt.render()?;
+
+            // The envelope is priced once, here, because compaction is a
+            // decision about the whole request and not about the conversation
+            // alone: a large tool catalog leaves less room for history.
+            let envelope = crate::tokens::estimate_text_tokens(&system)
+                + crate::tokens::estimate_tools(&prompt.tools);
+            self.fit_context(envelope).await?;
+
+            // Model history is derived from the log, never stored beside it -
+            // and after a compaction that means the compacted history, from
+            // the same records a replay would read.
+            let history = derive_messages(&self.log.events());
+
+            // The request envelope, on the journal, before the request is
+            // sent. It is what `context.breakdown` anchors on, and a turn that
+            // then failed still says what it tried to send.
+            self.log.append(
+                compaction::topic::REQUEST_CONTEXT,
+                serde_json::json!({
+                    "turn": turn,
+                    "step": step,
+                    "provider": self.llm.provider(),
+                    "model": self.config.model,
+                    "context_window": self.config.context_window,
+                    "system_tokens": crate::tokens::estimate_text_tokens(&system),
+                    "tools_tokens": crate::tokens::estimate_tools(&prompt.tools),
+                }),
+            )?;
 
             let mut request = AgentRequest {
                 turn,
@@ -440,7 +567,7 @@ impl TurnEngine {
                 request: ModelRequest {
                     provider: self.llm.provider().to_string(),
                     model: self.config.model.clone(),
-                    messages: with_system(&prompt.render()?, history),
+                    messages: with_system(&system, history),
                     tools: prompt.tools.clone(),
                     max_tokens: self.config.max_tokens,
                 },

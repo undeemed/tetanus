@@ -50,9 +50,18 @@ pub mod topic {
 /// fidelity but are not part of history - the `assistant/message` that cites
 /// them is. An `assistant/message` with empty content and no tool calls stays
 /// out of derived history while its durable event keeps usage and sources.
+///
+/// A compaction on the log is honoured here rather than anywhere else, which
+/// is what makes a replayed journal derive the compacted history: the events a
+/// `compaction/summary` or `compaction/prune` shadows are not part of the
+/// derivation, and the replacement stands in their place
+/// ([`crate::compaction::surface`]). A log with no compaction on it derives
+/// exactly as it always did, because its surface is every surface event in log
+/// order.
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
     let mut out = Vec::new();
-    for event in events {
+    for index in crate::compaction::surface(events) {
+        let event = &events[index];
         match event.ty.as_str() {
             topic::USER_MESSAGE => {
                 out.push(Message::user(string_field(event, "content")));

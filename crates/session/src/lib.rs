@@ -14,6 +14,7 @@
 
 pub mod projection;
 pub mod sqlite;
+pub mod units;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

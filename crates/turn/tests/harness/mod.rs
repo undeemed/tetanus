@@ -16,6 +16,17 @@ use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 
 /// The complete documented sequence one mock turn emits: a first step that
 /// calls a tool, a second step that answers, then the terminal checkpoint.
+///
+/// `request/context` joined the sequence with the context lane: it is the
+/// request envelope - the route, its window, and what the system prompt and
+/// tool catalog cost - written before the request rather than after the
+/// answer, so a turn a provider failure ended still says what it tried to
+/// send. It sits after `system-prompt/assemble`, because it prices what that
+/// assembly produced, and before `agent/request`, because a listener that
+/// rewrites the request must not be able to change what the journal already
+/// said the request was. It is the anchor `context.breakdown` folds
+/// (`crates/turn/src/projections.rs`) and the record that gave the three token
+/// projections the envelope `docs/parity.md` named as their blocker.
 // The turn-flow suite asserts against the whole sequence; the other suites
 // sharing this fixture do not, and a test binary lints what it does not use.
 #[allow(dead_code)]
@@ -26,6 +37,7 @@ pub const MOCK_TURN_FLOW: &[&str] = &[
     "step/start",
     "user/message",
     "system-prompt/assemble",
+    "request/context",
     "agent/request",
     "llm/stream",
     "assistant/chunk",
@@ -43,6 +55,7 @@ pub const MOCK_TURN_FLOW: &[&str] = &[
     "agent/pre-step",
     "step/start",
     "system-prompt/assemble",
+    "request/context",
     "agent/request",
     "llm/stream",
     "assistant/chunk",

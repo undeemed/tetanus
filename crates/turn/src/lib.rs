@@ -3,6 +3,10 @@
 //!
 //! - [`engine`] drives the turn flow and owns the documented event order.
 //! - [`approval`] decides whether one tool call may run, and audits it.
+//! - [`compaction`] folds an older span of the conversation into one summary
+//!   when the next request would not fit, durably enough to replay.
+//! - [`projections`] are the priced folds over a journal: what was charged,
+//!   how full the context is, and what it is made of.
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`fs`] decides whether a path the model chose is inside its workspace.
 //! - [`log`] declares the durable session-event vocabulary and derives model
@@ -22,6 +26,7 @@
 
 pub mod approval;
 pub mod boot;
+pub mod compaction;
 pub mod engine;
 pub mod events;
 pub mod fs;
@@ -30,6 +35,7 @@ pub mod interrupt;
 pub mod llm;
 pub mod log;
 pub mod process;
+pub mod projections;
 pub mod prompt;
 pub mod prune;
 pub mod questions;
