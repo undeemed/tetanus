@@ -34,6 +34,25 @@ cargo test --workspace
 
 CI sets no `DEEPSEEK_API_KEY`, so every case in the merge gate runs offline.
 
+## The structural gate
+
+```bash
+sentrux gate
+```
+
+It compares the tree against [`.sentrux/baseline.json`](.sentrux/baseline.json) and prints an
+absolute quality score. A change is expected to hold **7000+**, and **6200** is the floor.
+Quote the score in the pull request body.
+
+**Never run `sentrux gate --save`.** The baseline is a checked-in fact about `master`, not a
+rolling high-water mark: a branch that saves its own numbers overwrites the thing it was being
+measured against, and the next branch is measured against a tree nobody reviewed. Refreshing it is
+deliberate, and lands as its own pull request that says which commit was measured.
+
+The file is committed for a second reason. Every lane works in a disposable worktree, so an
+untracked baseline exists only wherever it was first written; without it in the repository the gate
+fails to load rather than answering, and each worktree is tempted to regenerate its own.
+
 ## Running it
 
 ```bash
