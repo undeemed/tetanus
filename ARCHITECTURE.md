@@ -397,6 +397,15 @@ It is one of the things that were said rather than a case in the frame, so it re
 everything else - and the first turn takes it away rather than leaving it further up the transcript,
 because what it says stops being true the moment one exists.
 
+The prompt grows for a question longer than a row, up to five of them, and the transcript gives up
+those rows: what is being written is what the reader is looking at, and a one-row prompt that
+scrolls sideways is one they cannot check the sentence in.
+It is broken at the column rather than between words, because these rows are a text box and not a
+paragraph - a word break moves every character after it, so the caret a reader is steering would
+jump a row as they typed a space.
+Past five rows it scrolls inside them, keeping the rows the caret is on, the way the single row
+scrolled sideways.
+
 `/think` and `/more` open what is already on the page: the model's thinking, folded to its first
 line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
 to off the screen.
