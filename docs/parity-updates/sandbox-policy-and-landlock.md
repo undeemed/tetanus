@@ -13,7 +13,7 @@ Replace the `sandbox/*` row with:
 
 | Upstream area | Specs | Today | Gap | Closes in |
 | --- | ---: | --- | --- | --- |
-| `sandbox/*` (policy, local, Windows ACL) | 21 | The policy vocabulary as a value resolved once at a boundary and handed down whole - upstream's three modes (`read-only`, `workspace-write`, `danger-full-access`), the workspace root, the writable roots the mode means including the temp areas a build needs, plus two things upstream leaves to its backends: a network decision, and whether partial enforcement is acceptable. A Linux backend on Landlock, built by hand around the fork/exec split so the child's half between `fork` and `exec` is three allocation-free system calls; deny-by-default is the ABI's own shape, so `mkdir`, `unlink` and `rename` are governed and not only `write`. Enforcement through `crates/exec`: one command, and a persistent shell confined once and inherited by every command it runs. A denial rendered as upstream's denial marker naming the mode, so a model reads policy rather than a bug in its own command; a refused tool call contained as `ok: false` with the reason on the journal and carried into the next request. A host that cannot enforce what was asked refuses at composition - `SandboxError::Unavailable` for a kernel without Landlock, `Degraded` for an ABI that cannot govern the policy, and a compile-time refusal naming the missing backend on a platform that has none | Applying the same policy inside the filesystem service (the crate is another lane's, and the seam is `Policy` + `landlock::confine_current_thread`, both already here); the escalation flow - a denied command retried once under a wider mode with user approval - which needs the policy wired to `tetanus_turn::approval`; a Windows ACL backend; a Seatbelt backend for macOS; read confinement, which needs a container rather than an allow-list; a settings key and a CLI flag, so a deployment can choose a mode without composing in Rust | ② for the fs half and the escalation flow, ③ for the other platforms |
+| `sandbox/*` (policy, local, Windows ACL) | 21 | The policy vocabulary as a value resolved once at a boundary and handed down whole - upstream's three modes (`read-only`, `workspace-write`, `danger-full-access`), the workspace root, the writable roots the mode means including the temp areas a build needs, plus two things upstream leaves to its backends: a network decision, and whether partial enforcement is acceptable. A Linux backend on Landlock, built by hand around the fork/exec split so the child's half between `fork` and `exec` is three allocation-free system calls; deny-by-default is the ABI's own shape, so `mkdir`, `unlink` and `rename` are governed and not only `write`. Enforcement through `crates/exec`: one command, and a persistent shell confined once and inherited by every command it runs. A denial rendered as upstream's denial marker naming the mode, so a model reads policy rather than a bug in its own command; a refused tool call contained as `ok: false` with the reason on the journal and carried into the next request. A host that cannot enforce what was asked refuses at composition - `SandboxError::Unavailable` for a kernel without Landlock, `Degraded` for an ABI that cannot govern the policy, and a compile-time refusal naming the missing backend on a platform that has none. The same policy inside the filesystem service, enforced by a worker thread that confines itself, so a path the fence allows and the policy does not is refused by the kernel; one call composes the mode and the policy together | The escalation flow - a denied command retried once under a wider mode with user approval - which needs the policy wired to `tetanus_turn::approval`; a Windows ACL backend; a Seatbelt backend for macOS; read confinement, which needs a container rather than an allow-list; a settings key and a CLI flag, so a deployment can choose a mode without composing in Rust | ② for the fs half and the escalation flow, ③ for the other platforms |
 
 ## 2. Section 4 rows
 
@@ -50,10 +50,27 @@ Add:
   `Enforcement::Partial` and refused unless the policy accepted partial enforcement, rather than
   rounded up to "sandboxed".
 
-## 4. The named follow-up: the filesystem half
+## 4. The filesystem half - landed
 
-The brief for this lane assumed a landed `crates/fs`. This branch does not carry one, so nothing
-here guesses at its API. What the follow-up needs is already in place:
+Written first as a named follow-up, and served in the same branch once `crates/fs` was in history.
+`tetanus_fs::kernel::KernelConfined` wraps any backend in the boundary this crate prepares, and
+`confined_backend` composes the mode and the policy in one call. TC-PORT-SANDBOX-20..27 port it,
+and the arrangement is worth stating because it is not the obvious one:
+
+- **One worker thread, confined once.** Landlock restricts a thread irreversibly, and the harness
+  has to keep writing its journal and answering its socket, so the process's own threads cannot be
+  restricted. The worker restricts itself before it accepts work, and every file operation runs
+  there (TC-PORT-SANDBOX-22 pins that the harness stays usable).
+- **The proof is built so it cannot pass by accident.** TC-PORT-SANDBOX-20 sets the fence *wider*
+  than the policy, so this build's own check permits the write and only the kernel refuses it, and
+  the same write without the layer succeeds to attribute the refusal.
+- **The two seams share one value.** TC-PORT-SANDBOX-23 clones one `Policy` into the file service
+  and the process executor and asserts both refuse the same path - the asymmetry upstream's
+  `roots.ts` note exists to prevent.
+- **Still serial.** One worker means one file operation at a time; a pool needs one restriction per
+  thread, and widening it is its own slice.
+
+What made it a short slice rather than a long one:
 
 - `Policy` is the shared vocabulary, and it is deliberately free of any process- or file-specific
   type, so a filesystem service takes the same value the executor takes.
@@ -64,5 +81,11 @@ here guesses at its API. What the follow-up needs is already in place:
   separately, they will disagree, and the disagreement will read as a bug in whichever one the user
   noticed second.
 
-Until that lands, a deployment that confines the shell still has unconfined file tools, and the
-row in section 3 says so.
+The remaining follow-up is the approved-escalation retry, which belongs with `tetanus_turn::approval`
+rather than inside either enforcement layer.
+
+## 5. Section 4 row for the filesystem half
+
+| Upstream spec | Ports to | Asserts | State |
+| --- | --- | --- | --- |
+| `fs/fs-sandbox/tests/*` (its confinement half), read against `sandbox/sandbox-local` | `crates/fs/tests/upstream_fs_kernel_sandbox.rs` | That the policy governs the file tools, and that it is the kernel doing it | ported: TC-PORT-SANDBOX-20..27. Upstream fences paths in the filesystem package and confines processes in the sandbox package, and never applies one policy to both; this does, which is what its own `roots.ts` note asks for. Its observation policy and read-before-write guard are the fs lane's and are already ported there; nothing here changes them, because a kernel boundary is a second answer to a different question and not a replacement for the first |

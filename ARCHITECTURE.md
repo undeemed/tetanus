@@ -672,9 +672,16 @@ child that allocates can deadlock on a lock another thread held. Deny-by-default
 shape: the handled set is every right the running kernel knows, so anything no rule grants is
 denied, which is why creating, removing and renaming are governed and not only writing.
 
-Enforcement runs through `crates/exec`: `Command::confined` for one command, and one boundary per
-persistent shell, inherited by every command that shell later runs. A denial is rendered with
-upstream's marker naming the mode, so a model reads policy rather than a bug in its own command.
+Enforcement runs through both consumers of the policy. `crates/exec` applies it to processes:
+`Command::confined` for one command, and one boundary per persistent shell, inherited by every
+command that shell later runs. `crates/fs` applies it to the file service
+([crates/fs/src/kernel.rs](crates/fs/src/kernel.rs)): Landlock restricts a thread irreversibly and
+the harness must keep writing its own journal, so the boundary belongs to one worker thread that
+restricts itself before accepting work, and every file operation runs there. One `Policy` value
+feeds both, which is what stops "the write tool cannot write /tmp but bash can". A denial is
+rendered with upstream's marker naming the mode, so a model reads policy rather than a bug in its
+own command; on the file side it arrives as `FS_PERMISSION_DENIED`, the class that already meant
+"the operating system refused" rather than "this build decided".
 
 A host that cannot honour a policy refuses: `Unavailable` for a kernel without Landlock, `Degraded`
 for an ABI that cannot govern what was asked, and a compile-time refusal naming the missing backend
@@ -732,8 +739,8 @@ not protocol-level.
 
 A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
 a PTY and the terminal tools that need one, background jobs, the web UI, and the WASM plugin host.
-Kernel sandboxing exists for processes (§4.10); applying the same policy inside the file tools, and
-the approved-escalation retry, are the two named follow-ups in
+Kernel sandboxing exists for processes and for the file service (§4.10); the approved-escalation
+retry is the remaining named follow-up in
 [docs/parity-updates/sandbox-policy-and-landlock.md](docs/parity-updates/sandbox-policy-and-landlock.md).
 The file tools exist and are composed by whoever builds a registry
 ([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
