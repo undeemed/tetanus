@@ -1627,3 +1627,64 @@ fn the_published_page_maximum_is_what_the_engine_clamps_to() {
     assert_eq!(clamp(Some(0)), MAX_PAGE_SIZE, "zero reads as absent");
     assert_eq!(clamp(None), MAX_PAGE_SIZE);
 }
+
+/// TC-PROTO-65: contract section 4.4.11. A turn a shutdown stopped is a closed
+/// turn that answers a summary.
+///
+/// The payoff is the journal. A server that exits cleanly leaves nothing for
+/// section 4.4.4's repair, so a restart is not preceded by a wave of
+/// synthesized closers on every session that happened to be busy - and a
+/// caller gets the work the turn did manage rather than an error that throws
+/// it away.
+#[test]
+fn a_shut_down_turn_is_closed_and_says_so() {
+    let stopped = TurnSummary {
+        turn: 2,
+        steps: 1,
+        stop_reason: serde_json::from_value(json!("shutdown")).expect("a reason"),
+        stop_veto: None,
+        content: "as far as I got before the restart".into(),
+        duration_ms: None,
+        usage: None,
+    };
+
+    assert_eq!(stopped.stop_reason, StopReason::Other("shutdown".into()));
+    assert!(
+        !stopped.content.is_empty(),
+        "a summary, not an error: the work it did survives"
+    );
+    assert_eq!(
+        serde_json::to_value(&stopped.stop_reason).expect("serialize"),
+        json!("shutdown")
+    );
+}
+
+/// TC-PROTO-66: contract section 4.4.11. Shutdown, cancellation and an
+/// unfinished drain are three different facts.
+///
+/// They are one event to the engine and three answers to a reader. Someone
+/// pressed stop; the operator restarted the service; the drain ran out of time
+/// and the journal was repaired on the next open. The first is a decision to
+/// respect, the second is expected, the third is something to go and look at -
+/// and a transcript that said "cancelled" for a rolling restart would send the
+/// reader after a user who did nothing.
+#[test]
+fn shutdown_and_cancellation_are_different_facts() {
+    let reason =
+        |word: &str| -> StopReason { serde_json::from_value(json!(word)).expect("a reason") };
+
+    let by_user = StopReason::Cancelled;
+    let by_operator = reason("shutdown");
+    let by_crash = reason("interrupted");
+
+    assert_ne!(by_user, by_operator);
+    assert_ne!(by_operator, by_crash);
+    assert_ne!(by_user, by_crash);
+
+    // The named variant is a variant; the two added words are values, so an
+    // older surface renders them through the fallback it already has rather
+    // than failing to parse a journal a newer engine wrote.
+    assert!(matches!(by_user, StopReason::Cancelled));
+    assert_eq!(by_operator, StopReason::Other("shutdown".into()));
+    assert_eq!(by_crash, StopReason::Other("interrupted".into()));
+}

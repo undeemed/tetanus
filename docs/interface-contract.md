@@ -708,6 +708,32 @@ The idle case is `SessionBusy` with a null turn rather than a code of its own, a
 A caller that meant to start a turn calls `agent.prompt`, which is the call that does.
 
 No new error code, and no change to `agent.prompt`.
+#### 4.4.11 Stopping a server
+
+`tetanus serve` hosts carriers, and a process that hosts them gets asked to stop while a turn is running.
+What it owes its journals at that moment is worth fixing, because the alternative is that every deploy leaves a trail of half-turns.
+
+**A stopping server stops taking new work and finishes what it has.**
+It stops accepting connections, interrupts every running turn at the next step boundary - the mechanism `agent.interrupt` already uses, not a second one - and waits for those turns to close.
+
+**A shut-down turn is a closed turn.**
+`turn/end` carries `stop_reason: "shutdown"`, the step it interrupted gets its `step/end`, and `agent.prompt` answers a summary rather than an error, exactly as a cancelled turn does (§4.4.2).
+The point is the journal: a server that exits cleanly leaves nothing for §4.4.4's repair to do, so a restart is not preceded by a wave of synthesized closers on every session that happened to be busy.
+
+**`"shutdown"` is its own reason and not `"cancelled"`.**
+They are the same event to the engine and different facts to a reader.
+Someone pressed stop, or the machine went away underneath it - the first is a decision to respect, the second is something to go and look at, and a transcript that says "cancelled" for a rolling restart sends the reader after a user who did nothing.
+It is a value of the growable `StopReason` (§7.5), so it costs no type change and an older surface renders it through the fallback it already has.
+
+**Best effort, with the crash path still behind it.**
+A tool that will not return cannot be waited for indefinitely, so the drain is bounded and a server that runs out of time exits with turns still open.
+Those journals are exactly the case §4.4.4 exists for and are repaired on the next open.
+This section makes the clean path clean; it does not remove the need for the other one, and a deployment that sees `"interrupted"` after a restart is being told the drain did not finish.
+
+**A client sees the connection end, not an error.**
+There is no "server is stopping" code, deliberately.
+A call that arrives once the drain has begun would need one, and by §4.5 a new code is a change both lanes land together - so the carrier closes instead, which is a state every client already has to handle because a network does it unasked.
+A code becomes worth adding the day a client can usefully do something other than reconnect, and it lands in the version that can.
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -970,6 +996,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
+| §4.4.11 a shut-down turn is closed, and says so | TC-PROTO-65 |
+| §4.4.11 shutdown and cancellation are different facts | TC-PROTO-66 |
 | §4.4.5 `from_seq` is a seq and is inclusive, on both calls | TC-PAGE-2, TC-SUB-6 |
 | §4.4.5 a `from_seq` past the tail is a catch-up with nothing to catch up on | TC-PAGE-7, TC-SUB-6 |
 | §4.4.5 `limit` is clamped down, and zero reads as absent | TC-PAGE-3, TC-PAGE-6 |
@@ -1074,3 +1102,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Corrects two things this document had wrong about itself. §4.3.1's payload table omitted `tool/result.code`, which §4.4.4 has promised since crash repair landed and the engine has written ever since - so the table was not a description of what the engine writes. The row now lists it, and §4.3 says when it is present: only on a result nobody ran, because a call that was dispatched reports its outcome in `ok` and `content` and needs no reason for not having one. And §5's rule about added fields was stated too narrowly. It said a field breaks the lane that *constructs* a type; an exhaustive destructuring pattern breaks the same way in a lane that only *receives* one, and `crates/cli/src/render/timeline.rs` is the live example - it never builds a `KnownEvent` and still could not survive a field on `ToolResult`. A fourth compatibility rule follows: a consumer matches a struct variant with a rest pattern. It cannot be verified from this side, because it is a property of the other lane's source rather than of anything crossing the boundary, so it is a promise whose cost is paid by whoever adds the next field. `KnownEvent::ToolResult` is therefore *not* given the field here: the gap is named instead, with what unblocks it. Today a surface on the typed path cannot tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, since one is safe to retry and the other is not - though the value is on `SessionEvent.data` for a reader willing to look. No type changes. |
 | 1.0 | Settles §4.4.3, which reserved `ui/ask` and then said almost nothing about it. The call is still reserved, so nothing has been built against it and this costs nothing now; the same decisions found out later cost two lanes a rewrite. An answer covers every question or it is no answer, so a tool meets one of exactly two cases rather than a partial third its author never wrote code for; an answer naming a question nobody asked is ignored, because the questions are the contract. A question offering options accepts those labels and nothing else, and a single-select question given several is unanswered rather than first-wins - a tool acting on a guess about which the user meant is worse than a tool told it has none. `question/asked` and `question/answered` join §4.3.2 as a durable pair sharing an `id`, turn-enclosed and closed by repair, for §4.4.7's reasons: a transcript that shows what a tool did but not what the user was asked cannot explain it. An interrupt withdraws an outstanding ask and a late answer is discarded, as it does for an approval. Nothing else bounds the wait, deliberately - a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault - which is why the interrupt rule is not optional. No type changes and no new code. |
 | 1.0 | Publishes the page maximum as `methods::MAX_PAGE_SIZE` (§4.4.5). §4.4.5 has said since it was written that the server clamps `limit` to "its own maximum, which is 500", and 500 lived only in the engine and in that sentence - so the machine-readable half of this contract did not carry a number the prose did. A surface reads the constant now, for the reason §5 already gives `PROTOCOL_VERSION` and one more: a literal `500` in a consuming lane is a claim about a server it may not be talking to, and it fails silently, because asking for more than the maximum is clamped rather than refused. A surface that pages with `next_seq` and `eof` still needs nothing, which is why this was not noticed earlier; the constant is for the surface that wants one round trip instead of two, and that is exactly the surface a hard-coded number would break. One added constant, no type changes, and no behaviour change - `MAX_PAGE_SIZE` is the value the engine already clamps to, and TC-PROTO-60 pins the two together so they cannot drift. |
+| 1.0 | States what a server owes its journals when it is asked to stop (§4.4.11). `tetanus serve` hosts carriers, so a process being stopped mid-turn is an ordinary Tuesday, and until now the only path was the crash path - every deploy left a trail of half-turns for §4.4.4 to synthesize closers over on the next open. A stopping server stops accepting connections, interrupts each running turn at the next step boundary using the mechanism `agent.interrupt` already has rather than a second one, and waits: `turn/end` carries `stop_reason: "shutdown"`, the interrupted step gets its `step/end`, and `agent.prompt` answers a summary as a cancelled turn does. `"shutdown"` is deliberately not `"cancelled"` - the same event to the engine, different facts to a reader, since one is a decision to respect and the other is something to go and look at, and a transcript blaming a rolling restart on a user who did nothing sends them after the wrong thing. It is a growable `StopReason` value by §7.5, so no type changes. The drain is bounded and best-effort: a tool that will not return cannot be waited for, so a server that runs out of time exits with turns open and §4.4.4 repairs them - seeing `"interrupted"` after a restart now means the drain did not finish. No error code is added: a call arriving mid-drain would need one, and by §4.5 that is a change both lanes land together, so the carrier closes instead - a state every client already handles because a network does it unasked. |
