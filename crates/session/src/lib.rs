@@ -8,6 +8,12 @@
 //! `data` payload, and - on the three surface event types - the
 //! `sourceEventSeqs` an event cites.
 
+//! [`projection`] is the derived-view seam over that log: a named fold per
+//! domain, driven forward as events commit, so a reader that wants token usage
+//! or a title does not recompute the whole journal to get it.
+
+pub mod projection;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
