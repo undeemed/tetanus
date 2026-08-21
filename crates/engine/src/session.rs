@@ -56,6 +56,12 @@ pub struct SessionHeader {
     /// `parent_session` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_seq: Option<u64>,
+    /// The agent preset this session was composed from, if any. Written once,
+    /// at creation: a session that changed agent half way through would make
+    /// its journal a record of two of them. Absent on every journal written
+    /// before presets existed, which is why it is optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// The artifact a deployment keeps its journals in.
@@ -142,6 +148,9 @@ pub struct SessionDefaults {
     pub provider: String,
     pub model: String,
     pub max_steps: u32,
+    /// The presets a `session.create` may name, and the one it gets when it
+    /// names none.
+    pub presets: crate::preset::Roster,
 }
 
 pub struct SessionStore {
@@ -256,15 +265,36 @@ impl SessionStore {
         let header = match header_of(&existing) {
             Some(header) => header,
             None => {
+                // What the caller wrote wins over the preset, and the preset
+                // wins over the harness default: a caller that named both a
+                // preset and a model asked for that model on that agent.
+                let composed = self
+                    .defaults
+                    .presets
+                    .resolve(params.preset.as_deref())
+                    .map_err(crate::convert::unknown_preset)?;
+                let (preset_id, agent) = match composed {
+                    Some((id, agent)) => (Some(id), Some(agent.clone())),
+                    None => (None, None),
+                };
+                let from_preset = agent.unwrap_or_default();
                 let header = SessionHeader {
                     session_id: id.clone(),
                     provider: params
                         .provider
+                        .or(from_preset.provider)
                         .unwrap_or_else(|| self.defaults.provider.clone()),
-                    model: params.model.unwrap_or_else(|| self.defaults.model.clone()),
-                    max_steps: params.max_steps.unwrap_or(self.defaults.max_steps),
+                    model: params
+                        .model
+                        .or(from_preset.model)
+                        .unwrap_or_else(|| self.defaults.model.clone()),
+                    max_steps: params
+                        .max_steps
+                        .or(from_preset.max_steps)
+                        .unwrap_or(self.defaults.max_steps),
                     parent_session: None,
                     fork_seq: None,
+                    preset: preset_id,
                 };
                 let value = serde_json::to_value(&header).map_err(crate::convert::internal)?;
                 log.append(SESSION_START, value)
@@ -344,6 +374,9 @@ impl SessionStore {
             max_steps: parent.max_steps,
             parent_session: Some(parent.session_id),
             fork_seq: Some(boundary),
+            // A fork continues one conversation, so it continues it as the
+            // same agent: the preset is inherited rather than re-resolved.
+            preset: parent.preset,
         };
         let mut seed = Vec::with_capacity(boundary as usize + 1);
         seed.push(SessionEvent {

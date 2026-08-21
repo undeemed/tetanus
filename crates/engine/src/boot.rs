@@ -96,6 +96,7 @@ impl EngineConfig {
             max_parallel_tool_calls: parallel(&settings, key::MAX_PARALLEL_TOOL_CALLS)?
                 .unwrap_or(base.max_parallel_tool_calls),
             tool_order: crate::tools::order(&settings, &base.tools)?,
+            presets: crate::preset::roster(&settings)?,
             retry: crate::retry::policy(&settings)?,
             provider_retry: crate::retry::provider_policies(&settings)?,
             providers: base.providers,

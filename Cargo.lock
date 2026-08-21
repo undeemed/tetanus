@@ -1518,6 +1518,7 @@ dependencies = [
  "tetanus-protocol",
  "tetanus-session",
  "tetanus-turn",
+ "thiserror",
  "tokio",
 ]
 

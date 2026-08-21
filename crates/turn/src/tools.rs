@@ -431,3 +431,47 @@ impl Tool for EchoTool {
         }
     }
 }
+
+impl ToolRegistry {
+    /// One registered tool by name, for a caller composing a smaller registry
+    /// out of a larger one.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
+    /// A registry holding only the named tools, sharing the tools themselves.
+    ///
+    /// This is how a preset narrows what one session may call. A name this
+    /// registry does not hold is reported rather than skipped: a preset that
+    /// silently offered fewer tools than it lists would be a preset whose
+    /// typo nobody ever sees.
+    pub fn subset<'a, I>(&self, names: I) -> Result<Self, ToolSubsetError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut kept = Self::new();
+        let mut missing: Vec<String> = Vec::new();
+        for name in names {
+            match self.get(name) {
+                Some(tool) => kept.register(tool),
+                None => missing.push(name.to_string()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ToolSubsetError::Unregistered {
+                missing,
+                registered: self.names().cloned().collect(),
+            });
+        }
+        Ok(kept)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolSubsetError {
+    #[error("no such {}: {}; registered: {}", plural(.missing), quoted(.missing), listed(.registered))]
+    Unregistered {
+        missing: Vec<String>,
+        registered: Vec<String>,
+    },
+}

@@ -12,6 +12,7 @@ pub mod agent;
 pub mod boot;
 pub mod catalog;
 pub mod convert;
+pub mod preset;
 pub mod retry;
 pub mod session;
 pub mod subscribe;
@@ -77,7 +78,8 @@ pub struct EngineConfig {
     /// The adapter behind each provider a session may name.
     pub providers: Arc<dyn Providers>,
     /// The tools every turn on this engine can call, and the list
-    /// `catalog.tools` advertises.
+    /// `catalog.tools` advertises. A session composed from a preset that
+    /// names a subset sees only that subset.
     pub tools: Arc<ToolRegistry>,
     /// Builds one session's own tools against that session's interrupt, for a
     /// composition whose tools hold work outside the process - a shell command
@@ -85,6 +87,10 @@ pub struct EngineConfig {
     /// every session, which is right for tools that touch nothing an interrupt
     /// would have to reach.
     pub session_tools: Option<crate::agent::SessionTools>,
+    /// The named agents a `session.create` may ask for, and the one it gets
+    /// when it asks for none. Resolved from the settings document by
+    /// [`preset::roster`].
+    pub presets: preset::Roster,
     /// The layered config the caller resolved. The engine does not read it to
     /// configure itself - the fields above are already resolved - it reports
     /// its provenance, so `config.dump` can say where a value came from.
@@ -110,6 +116,7 @@ impl Default for EngineConfig {
             // The library composes no tool that leaves the process; the
             // binary does, and sets this when it does.
             session_tools: None,
+            presets: preset::Roster::new(),
             resolved: Arc::new(tetanus_config::Config::default()),
         }
     }
@@ -131,19 +138,12 @@ impl HarnessEngine {
                     provider: config.default_provider.clone(),
                     model: config.default_model.clone(),
                     max_steps: config.max_steps,
+                    presets: config.presets.clone(),
                 },
                 config.sessions_backend.clone(),
             )),
             hub: Arc::new(Hub::new()),
-            runtime: Arc::new(Runtime::new(
-                Arc::clone(&config.providers),
-                Arc::clone(&config.tools),
-                config.retry.clone(),
-                config.provider_retry.clone(),
-                config.tool_order.clone(),
-                config.max_parallel_tool_calls,
-                config.session_tools.clone(),
-            )),
+            runtime: Arc::new(Runtime::new(&config)),
             catalogs: Catalogs::new(&config),
         }
     }
@@ -154,6 +154,15 @@ impl HarnessEngine {
 
     pub fn hub(&self) -> &Arc<Hub> {
         &self.hub
+    }
+
+    /// The tools one session may call, after the preset it was composed from
+    /// has narrowed them. `tool.catalog` answers what the engine holds; this
+    /// answers what this session is offered, and the two differ exactly when a
+    /// preset says so.
+    pub fn session_tools(&self, session_id: &str) -> Result<Vec<String>, RpcError> {
+        let session = self.sessions.open(session_id)?;
+        self.runtime.tools_for(&session)
     }
 
     /// The optional calls this build actually serves. A surface hides an

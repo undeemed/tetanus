@@ -18,15 +18,17 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
 use tetanus_session::{SessionEvent, SessionLog};
-use tetanus_turn::boot::boot_with;
+use tetanus_turn::boot::{boot_with, PromptService};
 use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::llm::retry::{self, RetryPolicy};
 use tetanus_turn::llm::{mock, LlmAdapter};
 use tetanus_turn::log::topic;
+use tetanus_turn::prompt::{PromptRegistry, Section};
 use tetanus_turn::tools::{ToolOrder, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnError};
 
 use crate::convert::{internal, stop_reason};
+use crate::preset::Roster;
 use crate::session::{LiveSession, SessionStore};
 use crate::subscribe::Hub;
 
@@ -82,6 +84,9 @@ struct SessionAgent {
     /// context so it is removed first: it listens on the same bus the context
     /// unwinds.
     _retry: tetanus_core::EffectHandle,
+    /// The persona this session's preset contributed, held for as long as the
+    /// agent: dropping the handle takes the section back out of the registry.
+    _persona: Option<tetanus_core::EffectHandle>,
     /// The boot context owns the plugin registrations. Dropping it would
     /// unwind them, so it lives exactly as long as the engine it built.
     _ctx: tetanus_core::Context,
@@ -116,29 +121,79 @@ pub struct Runtime {
     /// Builds this session's own tools when the composition has tools that
     /// need the session's interrupt; `None` shares `tools` with every session.
     session_tools: Option<SessionTools>,
+    /// The named agents this engine composes. A session's header says which
+    /// one it was composed from, and that is read once, when its turn engine
+    /// is booted.
+    presets: Roster,
     agents: Mutex<BTreeMap<String, Arc<SessionAgent>>>,
 }
 
 impl Runtime {
-    pub fn new(
-        providers: Arc<dyn Providers>,
-        tools: Arc<ToolRegistry>,
-        retry: RetryPolicy,
-        provider_retry: BTreeMap<String, RetryPolicy>,
-        tool_order: Option<ToolOrder>,
-        max_parallel_tool_calls: NonZeroUsize,
-        session_tools: Option<SessionTools>,
-    ) -> Self {
+    /// Reads the runtime's share of a resolved engine configuration.
+    ///
+    /// It takes the whole document rather than a field per setting: every one
+    /// of these is `EngineConfig`'s to decide, the list only grows, and a
+    /// caller assembling eight positional arguments is a caller that can swap
+    /// two of the same type without the compiler noticing.
+    pub fn new(config: &crate::EngineConfig) -> Self {
         Self {
-            providers,
-            tools,
-            retry,
-            provider_retry,
-            tool_order,
-            max_parallel_tool_calls,
-            session_tools,
+            providers: Arc::clone(&config.providers),
+            tools: Arc::clone(&config.tools),
+            retry: config.retry.clone(),
+            provider_retry: config.provider_retry.clone(),
+            tool_order: config.tool_order.clone(),
+            max_parallel_tool_calls: config.max_parallel_tool_calls,
+            session_tools: config.session_tools.clone(),
+            presets: config.presets.clone(),
             agents: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The tools one session may call, and the prompt shape it opens with.
+    ///
+    /// A session composed from a preset that names a tool subset gets a
+    /// registry holding those tools and no others - the model is never offered
+    /// a tool it may not call, because being offered one and refused is a step
+    /// spent on a refusal.
+    ///
+    /// The subset is taken against `base`, which is this session's own
+    /// registry when the composition builds one per session: a preset names
+    /// tools, and the tools it names are that session's, holding that
+    /// session's stop switch.
+    fn composed(
+        &self,
+        session: &LiveSession,
+        base: &Arc<ToolRegistry>,
+    ) -> Result<Composed, RpcError> {
+        let Some(id) = session.header.preset.as_deref() else {
+            return Ok(Composed::default());
+        };
+        // The header is the authority here, not the roster's default: this
+        // session was composed from that id, whatever the document says now.
+        let preset = self.presets.get(id).ok_or_else(|| {
+            crate::convert::unknown_preset(crate::preset::PresetError::Unknown {
+                id: id.to_string(),
+                known: self.presets.ids(),
+            })
+        })?;
+        let tools = match &preset.tools {
+            None => None,
+            Some(names) => Some(Arc::new(
+                base.subset(names.iter().map(String::as_str))
+                    .map_err(|refused| {
+                        RpcError::new(
+                            ErrorCode::InvalidParams,
+                            format!("the preset {id:?} names {refused}"),
+                        )
+                        .with_data(serde_json::json!({ "field": "preset", "preset": id }))
+                    })?,
+            )),
+        };
+        Ok(Composed {
+            tools,
+            prompt: preset.prompt.clone(),
+            persona: preset.persona.clone(),
+        })
     }
 
     /// Run one turn and answer with its summary.
@@ -264,6 +319,20 @@ impl Runtime {
             .unwrap_or_else(|| self.retry.clone())
     }
 
+    /// The tools a session may call, by name, after its preset has been
+    /// applied. A surface that shows "this session's tools" reads this rather
+    /// than the engine-wide catalogue, which is a superset for any session
+    /// composed from a preset that narrows it.
+    pub fn tools_for(&self, session: &LiveSession) -> Result<Vec<String>, RpcError> {
+        // The engine-wide registry is the base here, not a session-built one:
+        // a [`SessionTools`] builder must hold the same names as
+        // [`EngineConfig::tools`], so the answer is the same and this costs no
+        // child process for a question about names.
+        let composed = self.composed(session, &self.tools)?;
+        let registry = composed.tools.unwrap_or_else(|| Arc::clone(&self.tools));
+        Ok(registry.names().cloned().collect())
+    }
+
     /// The turn engine for one session, booted on first use against the
     /// provider and model its header names.
     fn agent_for(&self, session: &LiveSession) -> Result<Arc<SessionAgent>, RpcError> {
@@ -280,10 +349,12 @@ impl Runtime {
         // work outside the process, so `agent.interrupt` on one session stops
         // that session's commands and nobody else's.
         let interrupt = Interrupt::new();
-        let tools = match &self.session_tools {
+        let base = match &self.session_tools {
             Some(build) => build(&interrupt),
             None => Arc::clone(&self.tools),
         };
+        let composed = self.composed(session, &base)?;
+        let tools = composed.tools.clone().unwrap_or(base);
         let ctx = boot_with(
             session.bus.clone(),
             adapter,
@@ -292,6 +363,23 @@ impl Runtime {
             interrupt,
         )
         .map_err(internal)?;
+
+        // The persona is a prompt section rather than a rewritten base, so a
+        // deployment's own words sit beside what plugins contribute instead of
+        // replacing them. Order zero is where upstream puts it: after the
+        // harness identity, before everything else.
+        let persona = match &composed.persona {
+            None => None,
+            Some(text) => {
+                let sections: Arc<PromptRegistry> =
+                    ctx.services.require::<PromptService>().map_err(internal)?;
+                Some(
+                    sections
+                        .section(Section::new(PERSONA_SECTION, PERSONA_ORDER, text.clone()))
+                        .map_err(|refused| internal(refused.to_string()))?,
+                )
+            }
+        };
         // The executor is scoped to the route the session named, which is
         // the route every request of this turn goes out on. A policy is a
         // provider's, not an engine's, so installing it per session is what
@@ -310,6 +398,10 @@ impl Runtime {
                 max_steps: session.header.max_steps,
                 tool_order: self.tool_order.clone(),
                 max_parallel_tool_calls: self.max_parallel_tool_calls,
+                base_prompt: composed
+                    .prompt
+                    .clone()
+                    .unwrap_or_else(|| TurnConfig::default().base_prompt),
                 ..TurnConfig::default()
             },
         )
@@ -319,6 +411,7 @@ impl Runtime {
             engine,
             busy: AtomicBool::new(false),
             _retry: retry,
+            _persona: persona,
             _ctx: ctx,
         });
         // Another caller may have booted the same session meanwhile; the one
@@ -420,4 +513,26 @@ fn turn_error(session: &LiveSession, error: &TurnError) -> RpcError {
         Some(&session.path),
         error,
     )
+}
+
+/// The name the persona section is registered under. Named, because a surface
+/// that renders an assembled prompt shows section ids.
+pub const PERSONA_SECTION: &str = "persona";
+
+/// Where the persona sits: after the harness's own identity, before every
+/// plugin contribution. Upstream puts its deployment persona at the same
+/// order, and for the same reason - who the agent is comes before what it can
+/// do.
+pub const PERSONA_ORDER: i32 = 0;
+
+/// What a preset contributes to one session's agent.
+#[derive(Default)]
+struct Composed {
+    /// The tools the session may call, or `None` for every tool the engine
+    /// has.
+    tools: Option<Arc<ToolRegistry>>,
+    /// The opening system-prompt section, or `None` for the engine's own.
+    prompt: Option<String>,
+    /// Who the agent is, as a section of its own.
+    persona: Option<String>,
 }

@@ -2000,6 +2000,10 @@ async fn session(
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
         max_steps: Some(max_steps),
+        // A run composes no preset: `run` takes its model and adapter from
+        // flags, and a preset would be a second answer to the same question.
+        // Selecting one per session is served over `session.create`.
+        preset: None,
     };
     let anonymous = tetanus_protocol::methods::SessionCreateParams {
         session_id: None,

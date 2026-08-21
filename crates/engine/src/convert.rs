@@ -46,6 +46,18 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
     }
 }
 
+/// A `session.create` naming a preset this harness does not compose. The
+/// caller asked for an agent by name, and the ids that exist travel with the
+/// refusal so a surface can offer them.
+pub fn unknown_preset(error: crate::preset::PresetError) -> RpcError {
+    let crate::preset::PresetError::Unknown { id, known } = &error;
+    RpcError::new(ErrorCode::InvalidParams, error.to_string()).with_data(serde_json::json!({
+        "field": "preset",
+        "preset": id,
+        "known": known,
+    }))
+}
+
 /// Contract section 4.5: a journal that is not a faithful copy of a log is
 /// `LogCorrupt`, anything else the filesystem refused is `Io`.
 ///

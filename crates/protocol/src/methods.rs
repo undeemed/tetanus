@@ -145,6 +145,12 @@ pub struct SessionCreateParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u32>,
+    /// The named agent preset this session is composed from: a model, a tool
+    /// subset, a prompt shape and a persona, resolved server-side. Omit for
+    /// the server's default preset, if it has one. An explicit `provider`,
+    /// `model` or `max_steps` above wins over what the preset says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// Params for every call that names one session and nothing else.

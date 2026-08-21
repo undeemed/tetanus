@@ -237,3 +237,127 @@ fn health_of(directory: &Path) -> Health {
         Err(fault) => Health::Unreadable(fault.to_string()),
     }
 }
+
+/// What a preset says an agent is.
+///
+/// A preset directory holds an ordinary settings document, and these are the
+/// keys an *agent* preset sets in it. Every one is optional: a preset that
+/// names only a model is a perfectly good preset, and what it does not say is
+/// inherited from the harness it is applied to.
+///
+/// The keys are the ones the rest of the workspace already uses for the same
+/// things (`model.default`, `agent.max_steps`), plus two that only a preset
+/// sets: the tool subset and the persona. That is deliberate - a preset
+/// document a user can also use as a whole settings document is one fewer
+/// vocabulary to learn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentPreset {
+    /// The model a session composed from this preset runs on.
+    pub model: Option<String>,
+    /// The provider route that model is reached over.
+    pub provider: Option<String>,
+    /// The step budget.
+    pub max_steps: Option<u32>,
+    /// The tools this agent may call. `None` is every tool the harness has;
+    /// an empty list is an agent with no tools, which is a thing to ask for.
+    pub tools: Option<Vec<String>>,
+    /// The opening system-prompt section - the shape of the prompt rather
+    /// than its whole text, since plugins still contribute their sections.
+    pub prompt: Option<String>,
+    /// Who the agent is, as one section the deployment's own text goes in.
+    pub persona: Option<String>,
+}
+
+/// The keys an agent preset is written with.
+pub mod agent_key {
+    pub const MODEL: &str = "model.default";
+    pub const PROVIDER: &str = "provider.default";
+    pub const MAX_STEPS: &str = "agent.max_steps";
+    pub const TOOLS: &str = "agent.tools";
+    pub const PROMPT: &str = "agent.prompt";
+    pub const PERSONA: &str = "agent.persona";
+}
+
+impl AgentPreset {
+    /// Read one from a settings document.
+    ///
+    /// A value of the wrong type is refused rather than ignored, for the
+    /// reason [`crate::ConfigError::BadValue`] exists: a preset that quietly
+    /// dropped its model would run a session on a model nobody chose.
+    pub fn read(document: &Document) -> Result<Self, ConfigError> {
+        Ok(Self {
+            model: text(document, agent_key::MODEL)?,
+            provider: text(document, agent_key::PROVIDER)?,
+            max_steps: steps(document, agent_key::MAX_STEPS)?,
+            tools: names(document, agent_key::TOOLS)?,
+            prompt: text(document, agent_key::PROMPT)?,
+            persona: text(document, agent_key::PERSONA)?,
+        })
+    }
+
+    /// Whether this preset says anything at all. A directory whose document
+    /// sets none of these keys is a settings preset, not an agent one.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// A key holding text, which is never blank when it is present.
+fn text(document: &Document, key: &str) -> Result<Option<String>, ConfigError> {
+    let Some(value) = document.get(key) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some(text) if !text.trim().is_empty() => Ok(Some(text.to_string())),
+        _ => Err(ConfigError::BadValue {
+            key: key.to_string(),
+            expected: "text with something in it".to_string(),
+            found: value.to_string(),
+        }),
+    }
+}
+
+fn steps(document: &Document, key: &str) -> Result<Option<u32>, ConfigError> {
+    let Some(value) = document.get(key) else {
+        return Ok(None);
+    };
+    match value
+        .as_u64()
+        .filter(|steps| (1..=u32::MAX as u64).contains(steps))
+    {
+        Some(steps) => Ok(Some(steps as u32)),
+        None => Err(ConfigError::BadValue {
+            key: key.to_string(),
+            expected: "a whole number of steps, one or more".to_string(),
+            found: value.to_string(),
+        }),
+    }
+}
+
+/// A key holding a list of tool names.
+///
+/// An element that is not a name fails the whole list rather than dropping out
+/// of it, exactly as a configured tool order does: a list quietly one entry
+/// shorter is an agent missing a tool nobody took away.
+fn names(document: &Document, key: &str) -> Result<Option<Vec<String>>, ConfigError> {
+    let Some(value) = document.get(key) else {
+        return Ok(None);
+    };
+    let listed = value.as_array().ok_or_else(|| ConfigError::BadValue {
+        key: key.to_string(),
+        expected: "a list of tool names".to_string(),
+        found: value.to_string(),
+    })?;
+    listed
+        .iter()
+        .map(|name| match name.as_str() {
+            Some(name) if !name.trim().is_empty() => Ok(name.trim().to_string()),
+            _ => Err(ConfigError::BadValue {
+                key: key.to_string(),
+                expected: "a list of tool names".to_string(),
+                found: value.to_string(),
+            }),
+        })
+        .collect::<Result<Vec<String>, ConfigError>>()
+        .map(Some)
+}
