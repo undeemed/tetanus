@@ -14,7 +14,7 @@ use std::io::{self, IsTerminal, Write};
 use crate::color::{self, ColorChoice, Env};
 use crate::progress::Progress;
 use crate::screen::Screen;
-use crate::text::{or_empty, visible_width};
+use crate::text::{or_empty, visible_width, wrap};
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -148,8 +148,28 @@ impl<W: Write> Ui<W> {
         self.tagged(Role::Error, "error", text)
     }
 
+    /// One diagnostic, folded under its own tag.
+    ///
+    /// A sentence longer than the terminal is folded by the terminal, at
+    /// column zero, where its second half reads as a line this build wrote
+    /// without a tag - and the sentences here are the ones a reader meets when
+    /// something has already gone wrong. Folded here instead, the rest of it
+    /// lands under the text rather than under the tag: the shape says at a
+    /// glance that it is one diagnostic and not two.
+    ///
+    /// Folded on the words, because these are sentences. The values inside
+    /// them - a path, a key - are cut to the width by whoever composed them,
+    /// which is where the width of a value is known.
     fn tagged(&mut self, role: Role, tag: &str, text: &str) -> io::Result<()> {
-        writeln!(self.out, "{}: {text}", self.theme.paint(role, tag))
+        let label = tag.chars().count() + 2;
+        let mut folded = wrap(text, self.width.saturating_sub(label).max(1)).into_iter();
+        let first = folded.next().unwrap_or_default();
+        writeln!(self.out, "{}: {first}", self.theme.paint(role, tag))?;
+        let indent = " ".repeat(label);
+        for line in folded {
+            writeln!(self.out, "{indent}{line}")?;
+        }
+        Ok(())
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
