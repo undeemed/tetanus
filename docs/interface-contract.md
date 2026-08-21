@@ -1050,6 +1050,26 @@ The presentation lane owns the binary and wires each subcommand to the calls §4
 Neither lane edits the other's files.
 A change that seems to need one is a gap in this document, and the fix is a contract pull request.
 
+#### 4.7.1 Which rules this document can enforce, and which it cannot
+
+Most of this contract is held by a case. Three rules are not, and cannot be, because they are properties of a consuming lane's *source* rather than of any value that crosses the boundary.
+
+| Rule | Where it is stated |
+| --- | --- |
+| Match a struct variant with a rest pattern | §5, rule 4 |
+| Never match an engine enum - `tetanus_turn::StopReason`, `tetanus_turn::TurnError`, `tetanus_session::SessionError` - to derive a code or a rendering | §3, §4.5 |
+| Derive a failure's code from `tetanus_engine::convert`, not from a match of your own | §4.5 |
+
+Nothing in `crates/protocol`, `crates/engine` or `crates/rpc` can observe any of these, so no conformance case can hold them.
+They are promises, and a promise that is described as a check is worse than one described as a promise - the second gets audited.
+
+**They are not currently kept, and that is recorded here rather than rediscovered.**
+`crates/cli` matches `tetanus_turn::StopReason` variants and `tetanus_session::SessionError` variants today.
+§4.5 already noted the second when the failure mapping was published, and it is still true; the first arrived with the growable-enum rule and outlived it.
+
+Neither is a defect this lane can fix - §4.7 forbids the engine lane editing that file - and neither is urgent: the engine enums have no fallback variant, so the failure mode is a build break in that lane on the day an engine names a new failure, which is loud and immediate rather than silent and wrong.
+What would be a defect is letting them sit unnamed, so that the next reader of §3 believes the rule is being kept because nothing says otherwise.
+
 ## 5. Versioning and compatibility
 
 `PROTOCOL_VERSION` is `major.minor`.
@@ -1227,6 +1247,7 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.7 a path whose file is not a journal is `LogCorrupt` | TC-PATH-3 |
 | §4.7 every id `session.list` reports is one `session.events` opens | TC-ID-2 |
 | §4.7 a failure is not on stdout, and the status is read first | TC-PROTO-115 |
+| §4.7.1 the rules no case can hold, and their live exceptions | none - see §4.7.1 |
 
 ## 7. Design rationale
 
@@ -1242,7 +1263,12 @@ The cost is that it says nothing about streams; §4.4.2 answers that by streamin
 ### 7.1.1 One sink, three carriers
 
 The first draft left `session.subscribe` off the `Engine` trait, on the reasoning that a subscription binds to a connection and an in-process caller has none.
-The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by importing `tetanus-core` and `tetanus-turn`, which is the lane boundary §3 draws.
+The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by reaching into `tetanus-core` and `tetanus-turn` for the bus, which is the lane boundary §3 draws.
+
+That is narrower than it first reads, and the narrowing matters.
+`EventSink` removed the need to reach past the contract *to watch a session*.
+It did not remove those crates from the presentation lane's dependency list, and was never going to: §4.7's ownership table gives that lane "the whole binary ... and the wiring to the crates above", so composing an engine out of them is its job.
+The boundary is about **what a surface does with a type, not which crate it imports** - and §3 and §4.5 say the part that actually binds.
 
 `EventSink` is the fix. The subscription binds to a sink rather than to a connection, the carrier supplies the sink, and the wire never carries it.
 The alternative was a second in-process-only call, which would have meant two code paths to keep in step and a renderer that behaves differently depending on how it was launched.
@@ -1336,3 +1362,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | No boundary change. Records in §6 that §4.4.5's qualifier is now exercised: the promise is no gap and no repeat "whatever is appended while the replay runs", and TC-SUB-1 and TC-SUB-2 append before a subscription or after one, never during - so the mechanism that exists for the qualifier, the engine's held buffer and its watermark, had no case reaching it. TC-SUB-10 makes the race rather than hoping for it: a writer spanning the replay window, a sink slow enough for the window to be wide, and a check that the overlap actually happened, so a run that quietly stopped being concurrent fails instead of passing. A first attempt without the widening caught a dropped-held-event mutation one run in three, which is close to useless as a gate and looks like coverage - the case now catches it five times in five. One mutation it does not catch is named in the case rather than left implied: removing the de-duplication of held events against the replay needs an append landing between the listener being registered and the log being snapshotted, two statements apart, which no test enters reliably. |
 | 1.0 | Publishes `methods::ALL` (§4.2), the method table as a value, and makes §4.2's completeness claims checkable by a machine. Both promises in that section are about *every* call - a served one answers, a reserved one answers `NotImplemented` rather than `MethodNotFound` - and both were held by cases that name methods one at a time: TC-ENG-3 for the served ones, TC-RPC-12 for the reserved ones. A routing arm is written by hand, so the arm that gets forgotten is the one no case names, and a hand-written case has exactly the same hole one level up. TC-RPC-13 iterates the list instead: a method added to the contract and wired into the codec's match nowhere now fails at once, naming itself, where previously every suite stayed green. That is not hypothetical - two methods have been added to this contract recently and each needed a routing arm written by hand. The single mistake this cannot catch is adding a constant without adding it to `ALL`, which is why the two sit adjacent and the list says so. One added constant, no type changes, no behaviour change. |
 | 1.0 | No boundary change. Records in §6 that §4.2's hangup promise is plural and is now checked as such. It says a carrier that drops a connection unsubscribes its sinks, and TC-STDIO-4 and TC-WS-4 each hold one subscription - the case a bug is least likely to reach, since a `close` that handled only the first, or stopped at the first failure, passes it while leaking every other subscription on the connection. TC-WS-8 takes three, has the peer close one itself, then hangs up, and asserts all three are closed exactly once: the two halves of the bookkeeping - forgetting an id the peer unsubscribed, forgetting the rest at hangup - shown agreeing rather than each alone. The mutation is the shape of the bug: closing only the first subscription fails the new case and leaves the old one green. The test double also had to be fixed first, because it answered `sub-1` to every subscribe, which would have made any case about several subscriptions agree with itself whatever the carrier did. §4.2's wording now says "every one it holds" and why it matters. |
+| 1.0 | Corrects §7.1.1 and adds §4.7.1. §7.1.1 justified `EventSink` by saying the alternative left the renderer importing `tetanus-core` and `tetanus-turn`, which reads as a claim that it no longer does - and `crates/cli` imports both. The claim was narrower than its wording: `EventSink` removed the need to reach past the contract *to watch a session*, and it never removed those crates from that lane's dependency list, because §4.7's ownership table gives it the wiring. The boundary is about what a surface does with a type, not which crate it imports, and the wording now says so. §4.7.1 then names the three rules no conformance case can hold - the rest-pattern rule, the ban on matching engine enums, and using `convert` rather than a private mapping - because each is a property of the consuming lane's source rather than of any value crossing the boundary. A promise described as a check is worse than one described as a promise, since only the second gets audited. It records that two of the three are not kept today: `crates/cli` matches `tetanus_turn::StopReason` and `tetanus_session::SessionError` variants. Neither is this lane's to fix, and neither is urgent - an engine enum has no fallback, so the failure is a loud build break rather than a silent wrong answer - but leaving them unnamed would let the next reader assume the rules are kept because nothing says otherwise. No type changes. |
