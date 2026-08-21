@@ -1718,6 +1718,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-subagent"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "tetanus-turn"
 version = "0.1.0"
 dependencies = [
