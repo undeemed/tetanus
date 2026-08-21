@@ -618,44 +618,25 @@ fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<protocol::Session
 }
 
 /// One event across the same boundary.
+///
+/// The engine's own `convert::session_event`, taking a reference because every
+/// caller here is reading a journal it does not own. A copy of this crossing
+/// lived in this file until the engine published one; two copies of a field
+/// list are two places to forget a field the day the type grows one.
 fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
-    protocol::SessionEvent {
-        ty: event.ty.clone(),
-        seq: event.seq,
-        time: event.time,
-        data: event.data.clone(),
-        source_event_seqs: event.source_event_seqs.clone(),
-    }
+    tetanus_engine::convert::session_event(event.clone())
 }
 
-/// Carry a stop reason across. The one crossing where neither enum contains
-/// the other: the contract names reasons only a served call can produce, and
-/// the engine names `MaxTokens` and `Interrupted`, which the contract carries
-/// as values of the growable `StopReason` rather than as variants.
+/// Carry a stop reason across.
 ///
-/// The match has no wildcard arm on purpose. A reason the engine adds stops
-/// this crate from compiling until someone decides how it crosses, which is
-/// the cheapest moment to decide it.
+/// The engine's, and only the engine's. Section 4 of the contract names
+/// `tetanus_turn::StopReason` as the example of a type a surface must never
+/// reach past the wire for: an internal enum has no fallback arm, so a match
+/// on one outside the engine crate stops compiling the day the engine names a
+/// new case - and, worse than stopping, decides on its own what the new case
+/// means to a reader.
 fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
-    match reason {
-        tetanus_turn::StopReason::Natural => protocol::StopReason::Natural,
-        tetanus_turn::StopReason::PreStepRejected => protocol::StopReason::PreStepRejected,
-        tetanus_turn::StopReason::MaxSteps => protocol::StopReason::MaxSteps,
-        tetanus_turn::StopReason::Cancelled => protocol::StopReason::Cancelled,
-        // Neither reason is one the contract names as a variant. Section 7.5
-        // makes both values of the growable enum and fixes what a surface does
-        // with one, so each crosses as `Other` carrying the engine's own word
-        // for it - the same word the journal holds, and the one the timeline
-        // then prints.
-        //
-        // `MaxTokens` is the provider stopping the completion at its output
-        // cap, so the answer is unfinished (§4.4.2). `Interrupted` is written
-        // by crash repair when a later run finds a journal left open (§4.4.4),
-        // never by a turn this process ran.
-        tetanus_turn::StopReason::MaxTokens | tetanus_turn::StopReason::Interrupted => {
-            protocol::StopReason::Other(reason.as_str().to_string())
-        }
-    }
+    tetanus_engine::convert::stop_reason(reason)
 }
 
 /// Every provider this build registers, in the contract's shape.
@@ -881,19 +862,24 @@ fn journal_lines(path: &str) -> Result<Vec<render::raw::Line>, tetanus_session::
         .collect())
 }
 
-/// Carry a journal failure across to the contract's error view. A corrupt
-/// journal and an unreadable one are different codes, because they are
-/// different things for the user to do.
+/// Carry a journal failure across to the contract's error view.
+///
+/// `convert::journal_error` decides the code, as §4.5 says it must: the
+/// mapping from an engine failure to a code is the engine's and is published,
+/// and a surface that matched `SessionError` for itself would be a second
+/// table deciding what a script acts on. It also has no fallback variant, so
+/// the match this replaced would have stopped compiling the day the engine
+/// named a new failure.
+///
+/// The id is the journal's own file name. `session.create` is what knows the
+/// id a journal carries, and every caller here is reporting a file it could
+/// not open - there is no session yet to name.
 fn journal_fault(error: &tetanus_session::SessionError, path: &std::path::Path) -> RpcError {
-    match error {
-        tetanus_session::SessionError::Corrupt(line) => {
-            RpcError::new(ErrorCode::LogCorrupt, error.to_string())
-                .with_data(serde_json::json!({ "line": line }))
-        }
-        tetanus_session::SessionError::Io(io) => RpcError::new(ErrorCode::Io, io.to_string())
-            .with_data(serde_json::json!({ "path": path.display().to_string() })),
-        other => RpcError::new(ErrorCode::Internal, other.to_string()),
-    }
+    let named = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    tetanus_engine::convert::journal_error(&named, Some(path), error)
 }
 
 /// Carry a turn failure across to the contract's error view.

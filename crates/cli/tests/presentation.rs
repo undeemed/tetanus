@@ -358,6 +358,48 @@ fn a_playback_that_cannot_happen_is_a_usage_error() {
     );
 }
 
+/// TC-CLI-UI-31: the two crossings this binary no longer makes for itself.
+/// Expected: a stop reason the contract does not name as a variant crosses as
+/// the engine's own word for it, and a journal that cannot be read reports the
+/// code §4.5 gives it. Both mappings are the engine's and published
+/// (`convert::stop_reason`, `convert::journal_error`); this case is what says
+/// the surface still answers the same way now that it only calls them.
+#[test]
+fn what_the_engine_maps_is_what_the_page_reports() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // A budget of one stops the turn on a reason the contract names.
+    let spent = run(
+        dir.path(),
+        &[
+            "run",
+            "--max-steps",
+            "1",
+            "-p",
+            "echo this",
+            "--session",
+            "j.jsonl",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(spent.status.success(), "{}", stderr(&spent));
+    let last = stdout(&spent);
+    let last = last.lines().last().expect("a result").to_string();
+    let result: serde_json::Value = serde_json::from_str(&last).expect(&last);
+    assert_eq!(result["summary"]["stop_reason"], "max-steps", "{last}");
+
+    // And a journal that is not one is `LogCorrupt`, which §4.5 exits 1 for.
+    std::fs::write(dir.path().join("bad.jsonl"), "not json\n").expect("write");
+    let corrupt = run(dir.path(), &["replay", "bad.jsonl"], &[]);
+    assert_eq!(corrupt.status.code(), Some(1), "{}", stderr(&corrupt));
+    assert!(
+        stderr(&corrupt).contains("not readable at line 1"),
+        "{}",
+        stderr(&corrupt)
+    );
+}
+
 /// TC-CLI-UI-13: a journal whose model thought before it answered.
 /// Expected: `replay` shows one folded line naming what is behind it, and
 /// `replay --think` shows every line of it. The mock adapter never thinks, so

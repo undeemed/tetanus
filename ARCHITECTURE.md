@@ -525,6 +525,14 @@ The contract's own status table and changelog are authoritative for what is serv
 A boundary change is its own pull request touching the document and the types together
 ([AGENTS.md](AGENTS.md)).
 
+Crossing an engine type to a wire type is the engine's, and published: `convert::session_event`,
+`convert::stop_reason`, and the three error mappings §4.5 names.
+The binary calls them and never matches an engine enum for itself.
+Two reasons, and the second is the one that bites: two tables deciding what a script acts on is one
+table too many, and an engine enum has no fallback arm, so a match on one outside the engine crate
+stops compiling the day the engine names a new case - after quietly deciding, until then, what that
+case means to a reader.
+
 ## 5. Verification - the conformance approach
 
 Parity with upstream is asserted, not asserted about.
