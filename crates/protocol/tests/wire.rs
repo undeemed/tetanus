@@ -6,8 +6,8 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
-    SessionEventPush, SessionForkParams,
+    capability, method, push, AgentPromptResult, AgentStatusPush, ApprovalSetParams, ApproveParams,
+    ApproveResult, SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
@@ -801,4 +801,102 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-115: contract section 4.7. A failure is not on stdout, and the
+/// exit status is read before the last line.
+///
+/// The trap this pins is a real misreading of the previous wording. A
+/// streaming subcommand whose turn fails partway has printed events and no
+/// result line, so the last line on stdout is a `SessionEvent` - and a script
+/// told to "treat the last line as the answer" would report a chunk of a
+/// model's reply as the outcome of the run.
+///
+/// The types are what make the confusion possible: an event line and a result
+/// line are both JSON objects, and neither carries a marker saying which it
+/// is. That is deliberate - a marker would be a field on every line to
+/// describe a case the exit status already answers - so the case asserts the
+/// ambiguity exists rather than pretending the shapes can be told apart.
+#[test]
+fn a_failure_is_not_on_stdout_and_the_status_is_read_first() {
+    // What a streaming run prints when it succeeds: events, then the answer.
+    let event = serde_json::to_value(SessionEvent {
+        ty: "assistant/chunk".into(),
+        seq: 4,
+        time: 0,
+        data: json!({ "chunk": "text", "delta": "hel", "turn": 1, "step": 1 }),
+        source_event_seqs: None,
+    })
+    .expect("serialize");
+    let answer = serde_json::to_value(AgentPromptResult {
+        summary: TurnSummary {
+            turn: 1,
+            steps: 1,
+            stop_reason: StopReason::Natural,
+            stop_veto: None,
+            content: "hello".into(),
+            duration_ms: None,
+            usage: None,
+        },
+    })
+    .expect("serialize");
+
+    // Both are objects, and neither says which it is. A consumer cannot
+    // discriminate by shape, which is why the status is the discriminator.
+    assert!(event.is_object() && answer.is_object());
+    assert_eq!(event.get("kind"), None);
+    assert_eq!(answer.get("kind"), None);
+
+    // Zero: the last line is the answer.
+    let succeeded: Vec<&serde_json::Value> = vec![&event, &answer];
+    assert_eq!(
+        succeeded.last().copied(),
+        Some(&answer),
+        "on success the answer is last"
+    );
+
+    // Non-zero: there is no answer on stdout, whatever is on it. The failure
+    // is the section 4.5 object, on stderr, and its status is what a script
+    // branches on.
+    let failed: Vec<&serde_json::Value> = vec![&event];
+    assert_eq!(
+        failed.last().copied(),
+        Some(&event),
+        "a partway failure leaves an event last, which is not an answer"
+    );
+
+    let reported = RpcError::new(ErrorCode::ProviderError, "provider answered 503")
+        .with_data(json!({ "provider": "deepseek-official", "status": 503 }));
+    assert_eq!(reported.kind(), Some(ErrorCode::ProviderError));
+    assert_eq!(
+        ErrorCode::ProviderError.exit_status(),
+        6,
+        "non-zero, which is the whole signal"
+    );
+    // The rule rests on this and nothing else: if any code in section 4.5
+    // exited zero, "non-zero means no answer" would be false and a script
+    // would read an event as an answer for exactly that failure.
+    for code in [
+        ErrorCode::ParseError,
+        ErrorCode::InvalidRequest,
+        ErrorCode::MethodNotFound,
+        ErrorCode::InvalidParams,
+        ErrorCode::Internal,
+        ErrorCode::UnsupportedProtocolVersion,
+        ErrorCode::NotImplemented,
+        ErrorCode::SessionNotFound,
+        ErrorCode::SessionBusy,
+        ErrorCode::Cancelled,
+        ErrorCode::MissingCredential,
+        ErrorCode::ProviderError,
+        ErrorCode::ToolUnknown,
+        ErrorCode::LogCorrupt,
+        ErrorCode::Io,
+    ] {
+        assert_ne!(
+            code.exit_status(),
+            0,
+            "{code:?} exits zero, which would make a failure indistinguishable from an answer"
+        );
+    }
 }
