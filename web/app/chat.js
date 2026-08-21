@@ -281,107 +281,141 @@ function streaming(kind, who, delta) {
   toBottom();
 }
 
+/**
+ * One event, drawn.
+ *
+ * Split by the question each group answers rather than kept as one switch:
+ * what the conversation said, what a tool did, what a decision was, and where
+ * a turn or step began and ended. They were one function with nine arms and
+ * three of them holding real work, which is one function doing four jobs.
+ */
 function drawn(event) {
   // Kept whole. The trace is a fold over the journal, not a second stream to
   // maintain, so a fact that reaches the page reaches it too.
   seen.push(event);
   const data = event.data || {};
-  switch (event.type) {
+  const drew =
+    boundary(event.type, data) ||
+    conversation(event.type, data) ||
+    toolWork(event.type, data) ||
+    audited(event.type, data);
+  // A durable type nobody has taken yet is drawn raw, which is what §4.3.2
+  // asks of a surface and what makes a landed event visible on day one.
+  if (!drew) row("other", null, `${event.type}  ${JSON.stringify(data)}`);
+}
+
+/** Where a turn or a step began and ended. */
+function boundary(type, data) {
+  switch (type) {
     case "session/start":
-      break;
+      return true;
     case "turn/start":
       turnCard(data.turn);
-      break;
+      return true;
     case "step/start":
       row("step", null, `step ${data.step}`);
-      break;
+      return true;
+    case "step/end":
+      return true;
+    case "turn/end":
+      return closing(data);
+    default:
+      return false;
+  }
+}
+
+/** The closing line: the facts as pills, and the cap's own sentence. */
+function closing(data) {
+  const here = card || turnCard(data.turn);
+  const steps = data.steps === 1 ? "1 step" : `${data.steps} steps`;
+  const end = document.createElement("div");
+  end.className = "end";
+  // Facts as pills, and the reason coloured by whether the turn ended the way
+  // it meant to - the same rule the terminal's closing line follows: only
+  // `natural` is a turn that finished, and every other reason means the
+  // answer is missing something the reader cannot see is missing.
+  end.append(pill(`turn ${data.turn}`));
+  end.append(pill(data.stop_reason, data.stop_reason === "natural" ? "ok" : "bad"));
+  end.append(pill(steps));
+  if (here.tokens > 0) end.append(pill(`${here.tokens} tokens`));
+  if (data.stop_reason === "max-tokens") {
+    const cut = document.createElement("div");
+    cut.className = "hint";
+    cut.textContent = "the answer stops where the cap did; ask again to go on";
+    end.append(cut);
+  }
+  here.el.append(end);
+  card = null;
+  return true;
+}
+
+/** What was said, by either side. */
+function conversation(type, data) {
+  switch (type) {
     case "user/message":
       row("you", "you", data.content);
-      break;
+      return true;
     case "assistant/chunk":
       if (data.chunk === "text") streaming("ai", "ai", data.delta);
       if (data.chunk === "reasoning") streaming("think", "think", data.delta);
-      break;
-    case "assistant/message": {
-      const here = card || turnCard(undefined);
-      here.tokens += (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
-      const settled = here.live && here.live.kind === "ai" ? here.live.body : row("ai", "ai", "");
-      // A settled answer is a document: the model writes markdown, and a
-      // reader who has to parse fences by eye is reading the source of an
-      // answer rather than the answer. It replaces the streamed text, which
-      // stays plain while it arrives - a half-written fence is not a document
-      // yet.
-      settled.replaceChildren(markdown(data.content));
-      settled.parentElement.classList.remove("live");
-      if (here.live) here.live.body.parentElement.classList.remove("live");
-      here.live = null;
-      break;
-    }
-    case "tool/call": {
-      const here = card || turnCard(undefined);
-      here.calls.push(data.id);
-      // The arguments are a value a model wrote, so they are drawn as a tree
-      // of elements rather than stringified into a line: it folds, it is
-      // readable at depth, and nothing in it is ever treated as markup.
-      const line = row("call", null, "", "▸");
-      // The fold goes on the row rather than inside the text span: a
-      // disclosure is a block, and a block inside an inline element is a
-      // shape the browser has to guess at.
-      line.parentElement.append(toolCall(data.name, data.arguments));
-      break;
-    }
-    case "tool/result": {
-      const here = card || turnCard(undefined);
-      // Pairing is by `call_id`, never by arrival order (contract §4.3.1). A
-      // result that is not the newest open call says which call it answers.
-      const newest = here.calls[here.calls.length - 1];
-      const whose = data.call_id === newest ? "" : ` (for ${data.call_id})`;
-      here.calls = here.calls.filter((id) => id !== data.call_id);
-      const glyph = data.ok ? "✓" : "✗";
-      const line = row(data.ok ? "ok" : "bad", null, whose, glyph);
-      line.parentElement.append(toolResult(data.name, data.content, data.ok));
-      break;
-    }
-    case "step/end":
-      break;
-    case "turn/end": {
-      const here = card || turnCard(data.turn);
-      const steps = data.steps === 1 ? "1 step" : `${data.steps} steps`;
-      const end = document.createElement("div");
-      end.className = "end";
-      // Facts as pills, and the reason coloured by whether the turn ended the
-      // way it meant to - the same rule the terminal's closing line follows:
-      // only `natural` is a turn that finished, and every other reason means
-      // the answer is missing something the reader cannot see is missing.
-      end.append(pill(`turn ${data.turn}`));
-      end.append(pill(data.stop_reason, data.stop_reason === "natural" ? "ok" : "bad"));
-      end.append(pill(steps));
-      if (here.tokens > 0) end.append(pill(`${here.tokens} tokens`));
-      if (data.stop_reason === "max-tokens") {
-        const cut = document.createElement("div");
-        cut.className = "hint";
-        cut.textContent = "the answer stops where the cap did; ask again to go on";
-        end.append(cut);
-      }
-      here.el.append(end);
-      card = null;
-      break;
-    }
-    case "approval/asked":
-    case "approval/decided":
-    case "approval/policy": {
-      // The durable audit of a decision (§4.3.2). It is drawn from the journal
-      // rather than from a live socket, so a conversation opened tomorrow
-      // still shows what was asked and how it went.
-      const here = card || turnCard(undefined);
-      const drawnRow = approvalRow(event.type, data);
-      if (drawnRow) here.el.append(drawnRow);
-      else row("other", null, `${event.type}  ${JSON.stringify(data)}`);
-      break;
-    }
+      return true;
+    case "assistant/message":
+      return answered(data);
     default:
-      row("other", null, `${event.type}  ${JSON.stringify(data)}`);
+      return false;
   }
+}
+
+/** A settled answer replaces the text that streamed into place. */
+function answered(data) {
+  const here = card || turnCard(undefined);
+  here.tokens += (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
+  const settled = here.live && here.live.kind === "ai" ? here.live.body : row("ai", "ai", "");
+  // A settled answer is a document: the model writes markdown, and a reader
+  // who has to parse fences by eye is reading the source of an answer rather
+  // than the answer. The streamed text stays plain while it arrives, because
+  // a half-written fence is not a document yet.
+  settled.replaceChildren(markdown(data.content));
+  settled.parentElement.classList.remove("live");
+  if (here.live) here.live.body.parentElement.classList.remove("live");
+  here.live = null;
+  return true;
+}
+
+/** What a tool was asked to do, and what it answered. */
+function toolWork(type, data) {
+  if (type === "tool/call") {
+    const here = card || turnCard(undefined);
+    here.calls.push(data.id);
+    const line = row("call", null, "", "▸");
+    // The fold goes on the row rather than inside the text span: a disclosure
+    // is a block, and a block inside an inline element is a shape the browser
+    // has to guess at.
+    line.parentElement.append(toolCall(data.name, data.arguments));
+    return true;
+  }
+  if (type === "tool/result") {
+    const here = card || turnCard(undefined);
+    // Pairing is by `call_id`, never by arrival order (contract §4.3.1). A
+    // result that is not the newest open call says which call it answers.
+    const newest = here.calls[here.calls.length - 1];
+    const whose = data.call_id === newest ? "" : ` (for ${data.call_id})`;
+    here.calls = here.calls.filter((id) => id !== data.call_id);
+    const line = row(data.ok ? "ok" : "bad", null, whose, data.ok ? "✓" : "✗");
+    line.parentElement.append(toolResult(data.name, data.content, data.ok));
+    return true;
+  }
+  return false;
+}
+
+/** The durable audit of a decision about whether a tool may run (§4.3.2). */
+function audited(type, data) {
+  if (!type.startsWith("approval/")) return false;
+  const here = card || turnCard(undefined);
+  const said = approvalRow(type, data);
+  if (!said) return false;
+  here.el.append(said);
+  return true;
 }
 
 function reported(status) {

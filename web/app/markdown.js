@@ -51,82 +51,100 @@ export function markdown(text) {
   return root;
 }
 
+/**
+ * Every kind of block, in the order they are tried.
+ *
+ * A table rather than a chain of `if`s inside one loop: each entry answers one
+ * question - "does this line start my kind of block, and if so where does it
+ * end" - and adding a kind is an entry rather than another branch in a
+ * function that already had six.
+ *
+ * Order matters and is the only thing the table encodes: a fence is tried
+ * before a rule, because ``` is not three dashes but a lazier reader of both
+ * would have to say so.
+ */
+const KINDS = [fenced, blank, rule, heading, quoted, listed];
+
 /** Split source into block elements. */
 function* blocks(text) {
   const lines = text.split("\n");
   let at = 0;
   while (at < lines.length) {
-    const line = lines[at];
-
-    // A fence runs to its closing fence, or to the end - an unclosed fence is
-    // a model that stopped mid-answer, and the right rendering is the code it
-    // did write rather than the rest of the document as code.
-    const fence = /^```(\w*)\s*$/.exec(line);
-    if (fence) {
-      const said = [];
-      at += 1;
-      while (at < lines.length && !/^```\s*$/.test(lines[at])) said.push(lines[at++]);
-      at += 1;
-      yield codeBlock(said.join("\n"), fence[1]);
-      continue;
-    }
-
-    if (/^\s*$/.test(line)) {
-      at += 1;
-      continue;
-    }
-
-    if (/^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-      yield document.createElement("hr");
-      at += 1;
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const node = document.createElement(`h${heading[1].length}`);
-      inline(node, heading[2]);
-      yield node;
-      at += 1;
-      continue;
-    }
-
-    if (/^\s*>\s?/.test(line)) {
-      const said = [];
-      while (at < lines.length && /^\s*>\s?/.test(lines[at])) {
-        said.push(lines[at++].replace(/^\s*>\s?/, ""));
-      }
-      const quote = document.createElement("blockquote");
-      for (const block of blocks(said.join("\n"))) quote.append(block);
-      yield quote;
-      continue;
-    }
-
-    const bullet = /^\s*([-*+]|\d+[.)])\s+/.exec(line);
-    if (bullet) {
-      const ordered = /\d/.test(bullet[1]);
-      const list = document.createElement(ordered ? "ol" : "ul");
-      while (at < lines.length) {
-        const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(lines[at]);
-        if (!item) break;
-        const li = document.createElement("li");
-        inline(li, item[1]);
-        list.append(li);
-        at += 1;
-      }
-      yield list;
-      continue;
-    }
-
-    // A paragraph runs to the next blank line or block opener.
-    const said = [];
-    while (at < lines.length && !/^\s*$/.test(lines[at]) && !/^```/.test(lines[at])) {
-      said.push(lines[at++]);
-    }
-    const para = document.createElement("p");
-    inline(para, said.join(" "));
-    yield para;
+    const read = KINDS.reduce((found, kind) => found ?? kind(lines, at), null) ?? paragraph(lines, at);
+    if (read.node) yield read.node;
+    // Every reader returns where the next block starts, and every one of them
+    // moves: a reader that returned its own line would spin here for ever.
+    at = read.at > at ? read.at : at + 1;
   }
+}
+
+/**
+ * A fence runs to its closing fence, or to the end - an unclosed fence is a
+ * model that stopped mid-answer, and the right rendering is the code it did
+ * write rather than the rest of the document as code.
+ */
+function fenced(lines, at) {
+  const fence = /^```(\w*)\s*$/.exec(lines[at]);
+  if (!fence) return null;
+  const said = [];
+  let to = at + 1;
+  while (to < lines.length && !/^```\s*$/.test(lines[to])) said.push(lines[to++]);
+  return { node: codeBlock(said.join("\n"), fence[1]), at: to + 1 };
+}
+
+/** Blank lines separate blocks and draw nothing themselves. */
+function blank(lines, at) {
+  return /^\s*$/.test(lines[at]) ? { node: null, at: at + 1 } : null;
+}
+
+function rule(lines, at) {
+  if (!/^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[at])) return null;
+  return { node: document.createElement("hr"), at: at + 1 };
+}
+
+function heading(lines, at) {
+  const hit = /^(#{1,6})\s+(.*)$/.exec(lines[at]);
+  if (!hit) return null;
+  const node = document.createElement(`h${hit[1].length}`);
+  inline(node, hit[2]);
+  return { node, at: at + 1 };
+}
+
+/** A quote is a block of its own, so its contents are blocks too. */
+function quoted(lines, at) {
+  if (!/^\s*>\s?/.test(lines[at])) return null;
+  const said = [];
+  let to = at;
+  while (to < lines.length && /^\s*>\s?/.test(lines[to])) said.push(lines[to++].replace(/^\s*>\s?/, ""));
+  const node = document.createElement("blockquote");
+  for (const block of blocks(said.join("\n"))) node.append(block);
+  return { node, at: to };
+}
+
+function listed(lines, at) {
+  const bullet = /^\s*([-*+]|\d+[.)])\s+/.exec(lines[at]);
+  if (!bullet) return null;
+  const node = document.createElement(/\d/.test(bullet[1]) ? "ol" : "ul");
+  let to = at;
+  while (to < lines.length) {
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(lines[to]);
+    if (!item) break;
+    const li = document.createElement("li");
+    inline(li, item[1]);
+    node.append(li);
+    to += 1;
+  }
+  return { node, at: to };
+}
+
+/** Whatever is left, to the next blank line or block opener. */
+function paragraph(lines, at) {
+  const said = [];
+  let to = at;
+  while (to < lines.length && !/^\s*$/.test(lines[to]) && !/^```/.test(lines[to])) said.push(lines[to++]);
+  const node = document.createElement("p");
+  inline(node, said.join(" "));
+  return { node, at: to };
 }
 
 /**
