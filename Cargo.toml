@@ -10,6 +10,7 @@ members = [
   "crates/engine",
   "crates/exec",
   "crates/rpc",
+  "crates/sandbox",
   "crates/turn",
   "crates/fs",
 ]
