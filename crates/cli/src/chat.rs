@@ -100,6 +100,8 @@ pub enum Input<'a> {
     Think,
     /// Print a tool's result whole, or cap it again.
     More,
+    /// What this conversation has cost, and how fast it has been.
+    Stats,
     /// Every key the full-screen chat answers. The ordinary one has no keys
     /// of its own: its prompt is a line editor and its scrollback is the
     /// terminal's.
@@ -154,6 +156,7 @@ fn commanded(said: &str) -> Option<Input<'_>> {
         "/exit" | "/quit" | "/q" => Some(Input::Leave),
         "/help" | "/?" => Some(Input::Help),
         "/keys" => Some(Input::Keys),
+        "/stats" => Some(Input::Stats),
         "/think" => Some(Input::Think),
         "/more" => Some(Input::More),
         _ => None,
@@ -169,6 +172,9 @@ fn commanded(said: &str) -> Option<Input<'_>> {
 fn elsewhere(command: &Input) -> &'static str {
     match command {
         Input::Keys => "/keys is for `tetanus chat --ui`; this chat answers your shell's keys",
+        Input::Stats => {
+            "/stats is for `tetanus chat --ui`; here every turn's own line already says it"
+        }
         Input::Find(_) => {
             "/find is for `tetanus chat --ui`; this chat's lines are in your scrollback"
         }
@@ -322,7 +328,8 @@ pub async fn chat<W: Write>(
                 continue;
             }
             // Every command that acts on a page this chat does not own.
-            command @ (Input::Keys | Input::Think | Input::More | Input::Find(_)) => {
+            command
+            @ (Input::Keys | Input::Think | Input::More | Input::Find(_) | Input::Stats) => {
                 policy.stderr().note(elsewhere(&command)).ok();
                 continue;
             }
@@ -523,6 +530,7 @@ impl Session<'_> {
         match command {
             Input::Help => self.view.card(),
             Input::Keys => self.view.card_of_keys(),
+            Input::Stats => self.view.stats(),
             Input::Find(word) => self.view.find(word),
             Input::Think => {
                 let said = match self.view.thinking() {
@@ -886,6 +894,7 @@ mod tests {
         assert_eq!(parse("/keys\n"), Input::Keys);
         assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
         assert_eq!(parse("/think\n"), Input::Think);
+        assert_eq!(parse("/stats\n"), Input::Stats);
         assert_eq!(parse("/more\n"), Input::More);
         assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
     }

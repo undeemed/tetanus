@@ -165,6 +165,8 @@ enum Said {
     Card,
     /// The card `/keys` prints.
     Keys,
+    /// The strip `/stats` prints, as of the moment it was asked for.
+    Stats(Box<super::timeline::Stats>),
     /// The page a conversation with nothing asked in it yet opens on.
     Opening,
     /// One line of this build's own words - a command it does not have, a
@@ -431,6 +433,24 @@ impl Fire {
         self.say(Said::Keys);
     }
 
+    /// What this conversation has cost and how fast it has been, as of now.
+    ///
+    /// A snapshot rather than a strip that keeps itself up to date: it is one
+    /// of the things that were said, so it stays where it was said and answers
+    /// what was true then - and a reader who wants the figure again asks
+    /// again, which is cheaper to read than a number moving in the corner.
+    pub fn stats(&mut self) {
+        let events: Vec<SessionEvent> = self
+            .said
+            .iter()
+            .filter_map(|said| match said {
+                Said::Event(event) => Some((**event).clone()),
+                _ => None,
+            })
+            .collect();
+        self.say(Said::Stats(Box::new(super::timeline::stats(&events))));
+    }
+
     /// One line of this build's own words.
     pub fn note(&mut self, said: &str) {
         self.say(Said::Note(said.to_string()));
@@ -508,6 +528,7 @@ impl Fire {
             Said::Event(event) => self.live.push(event),
             Said::Card => super::chat::card(&self.theme, cols),
             Said::Keys => self.keys(cols),
+            Said::Stats(stats) => super::timeline::told(&self.theme, stats),
             Said::Opening => self.opening(cols),
             Said::Note(text) => {
                 vec![self.theme.paint(Role::Warn, text).to_string()]
@@ -901,7 +922,8 @@ impl Fire {
 /// the draft they were writing, and keep a repeated question once; and that a
 /// conversation with nothing in it says so and names its journal, until the
 /// first turn answers it; and that `/more` and `/think` open what is already
-/// on the page, both ways; and that the prompt grows for a question longer
+/// on the page, both ways; that `/stats` lands on the conversation and counts
+/// what the journal holds; and that the prompt grows for a question longer
 /// than a row, up to a bound, with the transcript giving up those rows.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
@@ -1757,6 +1779,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// TC-CLI-FIRE-24: `/stats` on a conversation with a turn on it.
+    /// Expected: the strip lands on the transcript like the other cards, and
+    /// says what the journal holds - a snapshot of the moment it was asked
+    /// for, which is why it stays where it was said rather than keeping itself
+    /// up to date in a corner.
+    #[test]
+    fn stats_lands_on_the_conversation() {
+        let mut view = fire();
+        view.push(&turn_start(1));
+        view.push(&said_by("you", "a question"));
+        view.stats();
+
+        let drawn = rows(&mut view, ROWS + 4);
+        assert!(drawn.iter().any(|row| row.trim() == "stats"), "{drawn:?}");
+        assert!(
+            drawn.iter().any(|row| row.contains("1 turn")),
+            "the count is missing: {drawn:?}"
+        );
+        // The conversation is still under it.
+        assert!(
+            drawn.iter().any(|row| row.contains("a question")),
+            "{drawn:?}"
+        );
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
