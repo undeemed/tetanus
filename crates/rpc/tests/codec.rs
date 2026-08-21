@@ -16,8 +16,8 @@ use tetanus_protocol::methods::{
     method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
     ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
     SessionCreateParams, SessionEventPush, SessionEventsParams, SessionEventsResult,
-    SessionListResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
-    SessionUnsubscribeParams, ToolCatalogResult,
+    SessionForkParams, SessionListResult, SessionRef, SessionSubscribeParams,
+    SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, SessionInfo, StopReason, TurnSummary};
@@ -97,6 +97,10 @@ impl Engine for Script {
     }
     async fn session_create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
         self.record(method::SESSION_CREATE, params)?;
+        Ok(info())
+    }
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        self.record(method::SESSION_FORK, params)?;
         Ok(info())
     }
     async fn session_list(&self) -> Result<SessionListResult, RpcError> {
@@ -350,29 +354,14 @@ async fn an_unknown_method_names_itself() {
 /// this call", and 2 on the second, meaning the caller is wrong. A reserved
 /// call that fell through to the unknown arm would tell every surface building
 /// against the frozen shape that the shape does not exist.
+///
+/// The subject is whichever call is reserved now. `session.fork` was it until
+/// the slice that served it, and a routing arm is added by hand, so the arm
+/// that gets forgotten is the one no case names.
 #[tokio::test]
 async fn a_reserved_method_is_routed_rather_than_unknown() {
     let (codec, _engine) = greeted().await;
 
-    let answer = send(
-        &codec,
-        json!({
-            "jsonrpc": "2.0", "id": 3, "method": method::SESSION_FORK,
-            "params": { "session_id": "s1" }
-        }),
-    )
-    .await;
-
-    assert_eq!(answer["id"], 3);
-    assert_eq!(
-        answer["error"]["code"],
-        ErrorCode::NotImplemented as i32,
-        "{answer}"
-    );
-    assert_eq!(answer["error"]["data"]["method"], method::SESSION_FORK);
-
-    // Every reserved call, not just the first one written: a routing arm is
-    // added by hand, so the one that is forgotten is the one no case names.
     let answer = send(
         &codec,
         json!({
@@ -455,6 +444,7 @@ async fn every_method_reaches_its_own_call() {
             method::SESSION_EVENTS,
             json!({ "session_id": "s1", "from_seq": 0 }),
         ),
+        (method::SESSION_FORK, json!({ "session_id": "s1" })),
         (method::SESSION_SUBSCRIBE, json!({ "session_id": "s1" })),
         (
             method::SESSION_UNSUBSCRIBE,

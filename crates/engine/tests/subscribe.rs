@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
     capability, AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams, PeerInfo,
-    SessionCreateParams, SessionEventPush, SessionRef, SessionSubscribeParams,
+    SessionCreateParams, SessionEventPush, SessionForkParams, SessionRef, SessionSubscribeParams,
     SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
@@ -257,6 +257,19 @@ async fn every_advertised_capability_is_served_and_no_other() {
         .await;
     assert!(served.is_ok(), "an advertised call must answer");
 
+    assert!(capabilities.contains(&capability::SESSION_FORK.to_string()));
+    assert!(
+        engine
+            .session_fork(SessionForkParams {
+                session_id: id.clone(),
+                through_seq: None,
+                child_session_id: None,
+            })
+            .await
+            .is_ok(),
+        "an advertised call must answer"
+    );
+
     assert!(capabilities.contains(&capability::AGENT_INTERRUPT.to_string()));
     assert!(
         engine
@@ -273,6 +286,7 @@ async fn every_advertised_capability_is_served_and_no_other() {
         capabilities,
         vec![
             capability::SESSION_SUBSCRIBE.to_string(),
+            capability::SESSION_FORK.to_string(),
             capability::AGENT_INTERRUPT.to_string(),
         ]
     );
