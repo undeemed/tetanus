@@ -1108,6 +1108,9 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 
     let started = std::time::Instant::now();
     let mut seen = from;
+    // How long the journal was when it was last read, so a frame that has
+    // nothing new to settle costs one `stat` instead of a copy of every event.
+    let mut length = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
     let mut stop = std::pin::pin!(interrupt());
@@ -1116,7 +1119,7 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
             done = &mut work => break Some(done),
             _ = &mut stop => break None,
             _ = frames.tick() => {
-                seen = settle(&mut view, &mut screen, log, seen);
+                seen = settle(&mut view, &mut screen, log, seen, &mut length);
                 // The window can be resized while the turn runs. Asked once,
                 // the block would keep drawing at a width that stopped being
                 // true, and every frame after the resize would land wrong.
@@ -1136,7 +1139,7 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 
     // Whatever the last frame did not catch. A turn shorter than one frame
     // interval - every offline turn - is committed entirely here.
-    settle(&mut view, &mut screen, log, seen);
+    settle(&mut view, &mut screen, log, seen, &mut length);
     screen.finish().ok();
     if let Some(status) = status {
         status.finish().ok();
@@ -1248,6 +1251,7 @@ where
         page: Page::new(theme, "tetanus", title),
         size: (cols, rows),
         seen: 0,
+        length: 0,
         help: false,
         started: std::time::Instant::now(),
         painted: None,
@@ -1313,6 +1317,10 @@ struct Watch<'a> {
     size: (usize, usize),
     /// Journal events already settled onto the page.
     seen: usize,
+    /// How long the journal's file was when it was last read. A view that
+    /// outlives its turn - this one does, until the reader closes it - polls
+    /// for as long as it is up.
+    length: u64,
     /// Whether the key card is up in place of the turn.
     help: bool,
     started: std::time::Instant,
@@ -1414,6 +1422,10 @@ impl Watch<'_> {
     /// The journal is polled rather than subscribed to, for the reason
     /// [`with_live`] gives, so this is the only way anything reaches the page.
     fn settle(&mut self) {
+        let Some(grown) = appended(self.log.path(), self.length) else {
+            return;
+        };
+        self.length = grown;
         let events = self.log.events();
         for event in events.iter().skip(self.seen) {
             let settled = self.live.push(&crossing(event));
@@ -1524,6 +1536,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
         }
     };
     let mut seen = 0;
+    let mut length = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
     let mut stop = std::pin::pin!(interrupt());
@@ -1532,7 +1545,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
             done = &mut work => break Some(done),
             _ = &mut stop => break None,
             _ = frames.tick() => {
-                seen = flush(out, log, seen);
+                seen = flush(out, log, seen, &mut length);
                 if let Some(status) = &mut status {
                     status.tick().ok();
                 }
@@ -1541,7 +1554,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
     };
     // Whatever the last poll did not catch. Every offline turn ends inside one
     // frame interval, so for those this is the whole stream.
-    flush(out, log, seen);
+    flush(out, log, seen, &mut length);
     if let Some(status) = status {
         status.finish().ok();
     }
@@ -1550,12 +1563,40 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
 
 /// Write every event the log gained since the last look, and report how many
 /// it now holds.
-fn flush<W: std::io::Write>(out: &mut Ui<W>, log: &JsonlSessionLog, seen: usize) -> usize {
+fn flush<W: std::io::Write>(
+    out: &mut Ui<W>,
+    log: &JsonlSessionLog,
+    seen: usize,
+    length: &mut u64,
+) -> usize {
+    let Some(grown) = appended(log.path(), *length) else {
+        return seen;
+    };
+    *length = grown;
     let events = log.events();
     for event in events.iter().skip(seen) {
         render::json::line(out, &crossing(event)).ok();
     }
     events.len()
+}
+
+/// A journal's length, when that is not the length it was.
+///
+/// Every view in this binary polls its journal on a clock, and
+/// `SessionLog::events` copies every event it holds - which is the right shape
+/// for the call and the wrong thing to ask twelve times a second: the cost
+/// grows with the conversation, and on a journal of six thousand events it was
+/// a sixth of a core spent watching nothing happen.
+///
+/// A journal is append-only, so a file the same length as last time holds
+/// nothing the caller has not seen. `None` is "nothing new". A file the
+/// filesystem will not answer for reads as new every time, which is what this
+/// replaced and the safe way to be wrong.
+pub fn appended(journal: &std::path::Path, seen: u64) -> Option<u64> {
+    let length = std::fs::metadata(journal)
+        .map(|file| file.len())
+        .unwrap_or(u64::MAX);
+    (length != seen).then_some(length)
 }
 
 /// Commit every event written since the last look, and report how many events
@@ -1565,7 +1606,12 @@ fn settle<W: std::io::Write>(
     screen: &mut Screen<W>,
     log: &JsonlSessionLog,
     seen: usize,
+    length: &mut u64,
 ) -> usize {
+    let Some(grown) = appended(log.path(), *length) else {
+        return seen;
+    };
+    *length = grown;
     let events = log.events();
     for event in events.iter().skip(seen) {
         let lines = view.push(&crossing(event));

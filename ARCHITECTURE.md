@@ -348,12 +348,16 @@ pressed up to check what they asked last time has not thrown away the question t
 and a question asked twice in a row is kept once, because pressing up means the question before
 this one.
 
-The loop asks the filesystem whether the journal has grown before it asks the log for its events.
+Every view that polls a journal asks the filesystem whether it has grown before it asks the log for
+its events ([`appended`](crates/cli/src/main.rs)).
 A journal is append-only, so a file the same length as last time holds nothing this view has not
 seen - and `SessionLog::events` copies every event it holds, which a view polling twelve times a
 second turns into a cost that grows with the conversation.
 Measured on a journal of six thousand events: a sixth of a core, spent on a conversation nobody was
 having; one `stat` a frame instead.
+`run --ui` had the same burn for as long as its view was left up - the view outlives the turn, and
+the poll outlives both - and the plain block and the `--json` stream poll through the same helper
+now.
 What a second process appends is not on this page either way: those lines are on the file and not
 in this log's memory, and reading a file back is what `tetanus replay` is for.
 
