@@ -98,3 +98,9 @@
 
 .said { white-space:pre-wrap; overflow-wrap:anywhere;
   font:var(--size-body)/1.55 var(--font-prose); color:var(--text); }
+
+/* --- a tool's call and result ---------------------------------------- */
+
+.tool-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+.tool-failed > .disclose-head { color:var(--state-bad); }

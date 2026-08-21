@@ -110,6 +110,9 @@ export function disclosure(summaryText, { open = false, tone } = {}) {
   head.append(make("span", "disclose-mark", "›"), make("span", null, summaryText));
   const body = make("div", "disclose-body");
   root.append(head, body);
+  // Both halves are handed back rather than found again: a caller reaching for
+  // `firstChild` depends on the order this function happens to append in.
+  root.head = head;
   root.body = body;
   return root;
 }

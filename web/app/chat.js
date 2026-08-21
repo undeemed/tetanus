@@ -1,4 +1,5 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
+import { toolCall, toolResult } from "./tools.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -268,11 +269,11 @@ function drawn(event) {
       // The arguments are a value a model wrote, so they are drawn as a tree
       // of elements rather than stringified into a line: it folds, it is
       // readable at depth, and nothing in it is ever treated as markup.
-      const line = row("call", null, `${data.name}`, "▸");
+      const line = row("call", null, "", "▸");
       // The fold goes on the row rather than inside the text span: a
       // disclosure is a block, and a block inside an inline element is a
       // shape the browser has to guess at.
-      line.parentElement.append(jsonBlock(data.arguments, "arguments"));
+      line.parentElement.append(toolCall(data.name, data.arguments));
       break;
     }
     case "tool/result": {
@@ -283,7 +284,8 @@ function drawn(event) {
       const whose = data.call_id === newest ? "" : ` (for ${data.call_id})`;
       here.calls = here.calls.filter((id) => id !== data.call_id);
       const glyph = data.ok ? "✓" : "✗";
-      row(data.ok ? "ok" : "bad", null, `${data.name}  ${data.content}${whose}`, glyph);
+      const line = row(data.ok ? "ok" : "bad", null, whose, glyph);
+      line.parentElement.append(toolResult(data.name, data.content, data.ok));
       break;
     }
     case "step/end":
