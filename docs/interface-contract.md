@@ -132,6 +132,21 @@ The crate is authoritative for field-level detail; this section states the invar
 **`SessionEvent`** is one durable fact, byte-identical to one line of the JSONL journal.
 `type` stays a free string because the durable vocabulary grows, and a surface must pass an unknown type through rather than drop it.
 `seq` equals the index of the line, so a replay verifies contiguity.
+
+**`seq` is the order. `time` is not, and must not be used as one.**
+`time` is epoch milliseconds from the clock of the machine that wrote the line, and nothing makes it monotonic within a journal.
+Three ordinary things break it, and the last is not an edge case at all:
+
+- a clock correction - NTP stepping, an operator setting the time, a virtual machine resuming - moves it backwards mid-session;
+- a journal is read on a machine that is not the one that wrote it, whose clock never agreed in the first place;
+- **a forked journal is non-monotonic by construction.** §4.4.6 copies the parent's events as they stand, so seqs 1 upward carry the parent's timestamps while seq 0 is the child's own `session/start`, written later. Every forked journal has a header stamped after the events that follow it.
+
+So a surface sorts, bisects and pages by `seq`, always.
+`time` is for showing a reader when something happened, and for nothing that has to be correct.
+
+**Subtracting two `time` values is not a duration.**
+It is an estimate that is usually close and occasionally negative, and a reader that computes one had better be prepared for both.
+`TurnSummary.duration_ms` is measured on a monotonic clock, which is immune to every case above, so it is the answer to "how long did this take" and the difference of two stamps is not.
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
@@ -234,7 +249,8 @@ The engine already holds the journal open when it lists; a picker paging every j
 **`TurnSummary`** is the closing shape of one turn.
 Most of it is reconstructable from the journal; the summary is the convenience form.
 `duration_ms` and `usage` are the two exceptions worth stating.
-Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once.
+`duration_ms` is **not** a restatement of what the journal already holds, though this document used to say it was.
+It is measured on a monotonic clock while the turn runs, and `SessionEvent.time` is wall clock; the two answer the same question and only one of them is right when a clock moves (§4.3).
 `usage` is **not** derivable from anything else here, so it is named now even where a provider does not report it: both fields are `Option`, and `None` means "this build did not measure it", never zero.
 `Usage` uses the provider's own words, `prompt_tokens` and `completion_tokens`, because the same object is what `assistant/message.usage` carries in the journal.
 
@@ -999,6 +1015,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 error object shape and code round trip | TC-PROTO-3 |
 | §5 an unknown code is not remapped | TC-PROTO-4 |
 | §4.3 `SessionEvent` matches a journal line | TC-PROTO-5 |
+| §4.3 `seq` orders a journal and `time` does not | TC-PROTO-85 |
+| §4.3 a duration is measured, not subtracted | TC-PROTO-86 |
 | §5 unknown enum variants survive | TC-PROTO-6 |
 | §4.2 pushes name their session | TC-PROTO-7 |
 | §5 compatibility is decided by major alone | TC-PROTO-8 |
@@ -1192,3 +1210,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Says which calls a client may repeat (§4.4.12). A carrier drops a connection or an answer is lost, and the client cannot tell whether the call ran - every RPC contract meets this, and one that does not say so leaves each integrator to guess. The reads are free; `session.create`, `agent.interrupt`, `approval.set` and `session.unsubscribe` are safe because repeating them lands in the same place, which is stated per call rather than asserted in general. Three are not safe and now carry the reason and the alternative: `agent.prompt` runs a second turn, `agent.steer` delivers twice, `session.subscribe` leaks the first subscription. `agent.prompt` is the one that costs money, and the sharp edge is worth spelling out - `SessionBusy` only guards the window where the first call is still running, which is exactly the window a client that gave up waiting has already left, so a retry after completion starts a genuine second turn. The alternative needs nothing new: `agent.status` and `session.events` from the last seq seen say whether a turn ran and what it produced, because the journal is the record rather than a copy of it (§7.2). An idempotency key would remove the problem and is deliberately not added - `AgentPromptParams` is a type the presentation lane constructs, so by §5 it is a change both lanes land together, and the read-then-decide route is what a client should do anyway before repeating work a user paid for. A second `rpc.hello` on one connection is settled too: accepted, because the handshake is connection state and re-greeting says the same thing twice. No type changes. |
 | 1.0 | States who may write a journal (§4.4.13): one writer at a time, any number of readers. The rule is written down because its absence is silent and the damage is delayed. A `seq` is assigned from the length the writing process holds in memory, so two processes appending to one file both write `seq` 41; both succeed, both fsync, both callers are told the event is durable, and the failure appears later and elsewhere as `LogCorrupt` on a line neither of them wrote. §4.4.6 already half-said this - "a source *this process* holds open cannot reach that state" - and now says why no other process can put it there either. A second writer is refused at `session.create` with `Io` carrying the path, before any turn starts, rather than at some later replay. Reading stays unrestricted and is safe by construction: a journal is append-only, a prefix is stable however busy its writer is, and a half-written last line is the crash tail a reader already drops - so `session.list`, `session.events` and `session.fork` work across processes and only writing is exclusive. A dedicated error code would let a surface say "another tetanus is using this session" rather than "this path could not be opened", and is deferred for §4.5's reason: a code is a change both lanes land together. No type changes; the engine slice that takes the lock lands separately. |
 | 1.0 | Says how the two push kinds are ordered against each other (§4.6). `agent/status running` arrives before any `session/event` of its turn and `idle` after that turn's `turn/end`, which a surface may rely on: told `idle` while events were still arriving it would stop its spinner and keep drawing, and told `running` after `turn/start` it would draw a turn's first events while showing an idle session. Three more facts that were true and unwritten. `idle` means the journal is flushed, so "watch the stream, then open the file" is correct rather than a race. `idle` is pushed however the turn ended - natural, cancelled, guarded or failed - so a surface cannot be left showing `running` for a session that stopped; a failed turn pushes it and then the call answers its error. And ordering between a push and a call's *reply* is explicitly not guaranteed, because they travel by different paths and a carrier may interleave them - the reply is the authoritative summary, the pushes are the stream, and a surface that infers anything from their relative arrival is relying on something no carrier promises. No type changes; every claim describes behaviour the engine already has, and §6 now names cases for it. |
+| 1.0 | Corrects what this document said about time (§4.3). It claimed "elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once", and both halves were wrong. `time` is wall clock from the writing machine and nothing makes it monotonic within a journal: a clock correction moves it backwards mid-session, a journal read elsewhere was stamped by a clock that never agreed, and - the case that is not hypothetical - **every forked journal is non-monotonic by construction**, because §4.4.6 copies the parent's events as they stand while seq 0 is the child's own header, written later. So a surface orders, bisects and pages by `seq`, and `time` is for telling a reader when something happened and for nothing that has to be correct. `duration_ms` is measured on a monotonic clock rather than derived, which makes it the answer to how long a turn took and the difference of two stamps merely an estimate that is usually close and occasionally negative. No type changes and no behaviour change: this describes what the engine has always done and withdraws a claim the document should not have made. |
