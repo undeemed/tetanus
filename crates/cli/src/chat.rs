@@ -96,6 +96,10 @@ pub enum Input<'a> {
     /// chat can answer it: the ordinary one hands each line to the terminal's
     /// own scrollback, where the reader's own pager already searches.
     Find(&'a str),
+    /// Unfold what the model thought, or fold it back.
+    Think,
+    /// Print a tool's result whole, or cap it again.
+    More,
     /// Every key the full-screen chat answers. The ordinary one has no keys
     /// of its own: its prompt is a line editor and its scrollback is the
     /// terminal's.
@@ -118,24 +122,57 @@ pub fn parse(line: &str) -> Input<'_> {
             asked => Input::Ask(asked),
         };
     }
+    match said {
+        "" => Input::Blank,
+        said => match commanded(said) {
+            Some(command) => command,
+            // The command is the first word: `/reset now` is not a message,
+            // and saying which command is missing is what tells the user it is
+            // not.
+            None => match said.starts_with('/') {
+                true => Input::Unknown(said.split_whitespace().next().unwrap_or(said)),
+                false => Input::Ask(said),
+            },
+        },
+    }
+}
+
+/// The commands, read off a line that has already been trimmed.
+///
+/// Separate from [`parse`] because they are a list and it is a rule: the list
+/// grows every time the screen learns something, and a function that answered
+/// both would grow an arm each time as well.
+fn commanded(said: &str) -> Option<Input<'_>> {
     if let Some(word) = said.strip_prefix("/find") {
         // `/find` with nothing after it takes the marks off, which is what a
         // reader who has found what they were looking for wants next.
         if word.is_empty() || word.starts_with(' ') {
-            return Input::Find(word.trim());
+            return Some(Input::Find(word.trim()));
         }
     }
     match said {
-        "" => Input::Blank,
-        "/exit" | "/quit" | "/q" => Input::Leave,
-        "/help" | "/?" => Input::Help,
-        "/keys" => Input::Keys,
-        // The command is the first word: `/reset now` is not a message, and
-        // saying which command is missing is what tells the user it is not.
-        _ => match said.starts_with('/') {
-            true => Input::Unknown(said.split_whitespace().next().unwrap_or(said)),
-            false => Input::Ask(said),
-        },
+        "/exit" | "/quit" | "/q" => Some(Input::Leave),
+        "/help" | "/?" => Some(Input::Help),
+        "/keys" => Some(Input::Keys),
+        "/think" => Some(Input::Think),
+        "/more" => Some(Input::More),
+        _ => None,
+    }
+}
+
+/// Why a command does nothing in a chat that has no screen of its own.
+///
+/// Each of them acts on a page: the rows already printed, or the keys a view
+/// answers. This chat's page is the reader's own scrollback, which it cannot
+/// rewrite and their terminal already searches, and its prompt answers the
+/// keys their shell gave it.
+fn elsewhere(command: &Input) -> &'static str {
+    match command {
+        Input::Keys => "/keys is for `tetanus chat --ui`; this chat answers your shell's keys",
+        Input::Find(_) => {
+            "/find is for `tetanus chat --ui`; this chat's lines are in your scrollback"
+        }
+        _ => "/think and /more are for `tetanus chat --ui`; here they are flags: --think",
     }
 }
 
@@ -284,22 +321,9 @@ pub async fn chat<W: Write>(
                     .ok();
                 continue;
             }
-            // No keys of its own: the prompt is a line editor, which `/help`
-            // has never listed either, and the scrollback is the terminal's.
-            Input::Keys => {
-                policy
-                    .stderr()
-                    .note("/keys is for `tetanus chat --ui`; this chat answers your shell's keys")
-                    .ok();
-                continue;
-            }
-            // Nothing to search: every line this chat has printed is in the
-            // reader's own scrollback, where their pager already looks.
-            Input::Find(_) => {
-                policy
-                    .stderr()
-                    .note("/find is for `tetanus chat --ui`; this chat's lines are in your scrollback")
-                    .ok();
+            // Every command that acts on a page this chat does not own.
+            command @ (Input::Keys | Input::Think | Input::More | Input::Find(_)) => {
+                policy.stderr().note(elsewhere(&command)).ok();
                 continue;
             }
             Input::Ask(asked) => {
@@ -471,22 +495,49 @@ impl Session<'_> {
         asked: &str,
     ) -> Option<Leaving> {
         match parse(asked) {
-            Input::Blank => {}
-            Input::Leave => return Some(Leaving::Ended),
+            Input::Leave => Some(Leaving::Ended),
+            Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
+                Some(Ok(())) => None,
+                Some(Err(fault)) => Some(Leaving::Failed(fault)),
+                None => Some(Leaving::Stopped),
+            },
+            // Everything else changes the page and nothing else.
+            command => {
+                self.shown(command);
+                None
+            }
+        }
+    }
+
+    /// A command that acts on the page, and says what it did where saying so
+    /// is the whole of the answer.
+    fn shown(&mut self, command: Input<'_>) {
+        match command {
             Input::Help => self.view.card(),
             Input::Keys => self.view.card_of_keys(),
             Input::Find(word) => self.view.find(word),
+            Input::Think => {
+                let said = match self.view.thinking() {
+                    true => "thinking is shown in full",
+                    false => "thinking is folded to its first line",
+                };
+                self.said(said);
+            }
+            Input::More => {
+                let said = match self.view.whole() {
+                    true => "tool results are shown whole",
+                    false => "tool results are capped again",
+                };
+                self.said(said);
+            }
             Input::Unknown(command) => self.said(&format!(
                 "{} is not a command; /help lists them",
                 tame_line(command)
             )),
-            Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
-                Some(Ok(())) => {}
-                Some(Err(fault)) => return Some(Leaving::Failed(fault)),
-                None => return Some(Leaving::Stopped),
-            },
+            // A blank line is a keypress, and a question is answered by the
+            // caller, which is the one that can await a turn.
+            Input::Blank | Input::Leave | Input::Ask(_) => {}
         }
-        None
     }
 
     /// Wait for the reader to finish a line, painting while they type.
@@ -815,6 +866,8 @@ mod tests {
     fn the_screens_own_commands_are_read_by_both_chats() {
         assert_eq!(parse("/keys\n"), Input::Keys);
         assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
+        assert_eq!(parse("/think\n"), Input::Think);
+        assert_eq!(parse("/more\n"), Input::More);
         assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
     }
 }

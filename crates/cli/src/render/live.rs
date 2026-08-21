@@ -111,6 +111,11 @@ impl Live {
         self.width = width;
     }
 
+    /// Print a tool's result whole, or capped.
+    pub fn whole(&mut self, whole: bool) {
+        self.reader.whole(whole);
+    }
+
     /// Advance the spinner. Called on the caller's frame interval, not on an
     /// event, so a long silence still looks alive.
     pub fn tick(&mut self) {

@@ -196,7 +196,11 @@ pub struct Fire {
     /// how big a screenful is.
     body: usize,
     width: usize,
+    /// Whether the model's thinking is printed in full, and whether a tool's
+    /// result is. Both are the reader's to change while they read: `/think`
+    /// and `/more` toggle them, and the conversation is composed again.
     think: bool,
+    whole: bool,
     /// What the block says the turn is waiting on, kept so that a composer
     /// built again after a resize opens on the phase the last one was in.
     phase: String,
@@ -239,6 +243,7 @@ impl Fire {
             body: 0,
             width,
             think,
+            whole: false,
             phase: String::new(),
             wanted: None,
             hits: Vec::new(),
@@ -312,6 +317,30 @@ impl Fire {
             .len()
             .saturating_sub(line + room)
             .min(self.lines.len().saturating_sub(room.min(self.lines.len())));
+    }
+
+    /// Unfold the model's thinking, or fold it back. Answers what it is now.
+    ///
+    /// The conversation is composed again for it, which is what makes this a
+    /// reader's decision rather than a flag they had to know about before
+    /// they started: `--think` is the flag, and this is the same view changing
+    /// its mind about what it has already drawn.
+    pub fn thinking(&mut self) -> bool {
+        self.think = !self.think;
+        self.fill(self.width);
+        self.think
+    }
+
+    /// Print tool results whole, or cap them again. Answers what it is now.
+    ///
+    /// A capped result says how many lines it is hiding, and a reader who
+    /// wants those came for the output rather than for the answer it led to.
+    /// The browser panel opens the same card; this is the terminal's way of
+    /// opening it.
+    pub fn whole(&mut self) -> bool {
+        self.whole = !self.whole;
+        self.fill(self.width);
+        self.whole
     }
 
     /// Look for `word` in what has been said, or - given nothing - stop
@@ -497,6 +526,7 @@ impl Fire {
         self.turns.clear();
         self.back = 0;
         self.live = Live::new(self.theme, cols, &self.phase, self.think);
+        self.live.whole(self.whole);
         for one in &said {
             let lines = self.compose(one, cols);
             self.lines.extend(lines);
@@ -534,6 +564,7 @@ impl Fire {
     pub fn started(&mut self, phase: &str) {
         self.phase = phase.to_string();
         self.live = Live::new(self.theme, self.width, phase, self.think);
+        self.live.whole(self.whole);
         self.working = true;
         // The reader asked for this turn, so they are shown it: a question
         // sent from three screens back would otherwise be answered off-screen.
@@ -830,7 +861,8 @@ impl Fire {
 /// it; and that the up and down keys walk what this reader has asked, keep
 /// the draft they were writing, and keep a repeated question once; and that a
 /// conversation with nothing in it says so and names its journal, until the
-/// first turn answers it.
+/// first turn answers it; and that `/more` and `/think` open what is already
+/// on the page, both ways.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -919,6 +951,40 @@ mod tests {
             seq: u64::from(turn),
             time: 0,
             data: serde_json::json!({ "turn": turn }),
+            source_event_seqs: None,
+        }
+    }
+
+    /// A message the model reasoned before it wrote.
+    fn thought(reasoning: &str, content: &str) -> SessionEvent {
+        SessionEvent {
+            ty: "assistant/message".into(),
+            seq: 2,
+            time: 0,
+            data: serde_json::json!({
+                "content": content,
+                "reasoning": reasoning,
+                "turn": 1,
+                "step": 1,
+            }),
+            source_event_seqs: None,
+        }
+    }
+
+    /// A tool result carrying `content`.
+    fn produced(content: &str) -> SessionEvent {
+        SessionEvent {
+            ty: "tool/result".into(),
+            seq: 3,
+            time: 0,
+            data: serde_json::json!({
+                "call_id": "c1",
+                "name": "echo",
+                "ok": true,
+                "content": content,
+                "turn": 1,
+                "step": 1,
+            }),
             source_event_seqs: None,
         }
     }
@@ -1453,6 +1519,69 @@ mod tests {
         for row in rows_at(&mut view, 34, ROWS + 4) {
             assert!(visible_width(&row) <= 34, "`{row}` overruns 34");
         }
+    }
+
+    /// TC-CLI-FIRE-21: `/more` over a tool result longer than the cap, and
+    /// `/think` over a message that reasoned before it answered.
+    /// Expected: both change what is already on the page, both ways, because
+    /// they are a reader changing their mind about what they are looking at
+    /// rather than a flag they had to know about before they started. The
+    /// browser panel opens the same card; this is the terminal's way of
+    /// opening it.
+    #[test]
+    fn more_and_think_open_what_is_already_on_the_page() {
+        let mut view = fire();
+        view.push(&turn_start(1));
+        view.push(&thought("first thought\nsecond thought", "the answer"));
+        view.push(&produced(
+            &(1..=40)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+
+        let capped = rows(&mut view, ROWS + 30);
+        assert!(
+            capped.iter().any(|row| row.contains("+24 lines")),
+            "the result is not capped: {capped:?}"
+        );
+        assert!(
+            !capped.iter().any(|row| row.contains("line 20")),
+            "a capped result is showing its middle: {capped:?}"
+        );
+        assert!(
+            !capped.iter().any(|row| row.contains("second thought")),
+            "the thinking is not folded: {capped:?}"
+        );
+
+        assert!(view.whole(), "/more did not turn on");
+        let whole = rows(&mut view, ROWS + 40);
+        assert!(
+            whole.iter().any(|row| row.contains("line 20")),
+            "the middle is still hidden: {whole:?}"
+        );
+
+        assert!(view.thinking(), "/think did not turn on");
+        assert!(
+            rows(&mut view, ROWS + 40)
+                .iter()
+                .any(|row| row.contains("second thought")),
+            "the thinking is still folded"
+        );
+
+        // And back: both are toggles, because a reader who opened one to look
+        // at something wants their page back afterwards.
+        assert!(!view.whole());
+        assert!(!view.thinking());
+        let folded = rows(&mut view, ROWS + 30);
+        assert!(
+            !folded.iter().any(|row| row.contains("line 20")),
+            "{folded:?}"
+        );
+        assert!(
+            !folded.iter().any(|row| row.contains("thought hard")),
+            "{folded:?}"
+        );
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.

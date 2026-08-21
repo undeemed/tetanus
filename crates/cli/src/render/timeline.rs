@@ -75,6 +75,9 @@ pub struct Reader {
     /// Whether the reasoning of a message is printed in full. Folded to its
     /// first line otherwise, which is what a reader of the answer wants.
     think: bool,
+    /// Whether a tool's result is printed whole. Capped at [`CAP`] otherwise,
+    /// so one long result cannot push the answer it led to off the screen.
+    whole: bool,
     open_call: Option<String>,
     /// Tokens billed by every step of the turn in progress. `None` until a
     /// message carries usage, because a build that does not measure tokens
@@ -91,6 +94,17 @@ impl Reader {
             think,
             ..Self::default()
         }
+    }
+
+    /// Print a tool's result whole, or capped.
+    ///
+    /// Told after the reader was built, because this is a reader changing
+    /// their mind about what is already on the page: the view composes the
+    /// conversation again with it. The thinking is not here for the same
+    /// reason it does not need to be - a view rebuilds its composer to change
+    /// that, and `think` is what it is built with.
+    pub fn whole(&mut self, whole: bool) {
+        self.whole = whole;
     }
 
     /// The lines one event produces, in order, and none for an event a
@@ -178,7 +192,9 @@ impl Reader {
                     Some(open) if open == call_id => None,
                     _ => Some(call_id.as_str()),
                 };
-                produced(theme, width, glyph, role, name, content, answers)
+                produced(
+                    theme, width, self.whole, glyph, role, name, content, answers,
+                )
             }
             KnownEvent::TurnEnd {
                 turn,
@@ -393,10 +409,14 @@ fn more(lines: usize) -> String {
 /// Folded like prose, so newlines the tool wrote are newlines on the page -
 /// command output is lines, and flattening them to one paragraph loses the
 /// shape a reader reads it by. Capped at [`CAP`], so one long result cannot
-/// push the answer it led to off the top of the screen.
+/// push the answer it led to off the top of the screen - unless the caller
+/// asked for the whole of it, which is a reader saying they came for the
+/// output rather than for the answer it led to.
+#[allow(clippy::too_many_arguments)]
 fn produced(
     theme: &Theme,
     width: usize,
+    whole: bool,
     glyph: &str,
     role: Role,
     name: &str,
@@ -417,9 +437,9 @@ fn produced(
     let pad = " ".repeat(visible_width(&head));
 
     let mut said: Vec<&str> = content.lines().collect();
-    let folded = said
-        .len()
-        .checked_sub(CAP)
+    let folded = (!whole)
+        .then_some(said.len())
+        .and_then(|lines| lines.checked_sub(CAP))
         .filter(|hidden| *hidden > 0)
         .map(|hidden| {
             let keep = CAP.div_ceil(2);

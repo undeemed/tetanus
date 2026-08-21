@@ -99,7 +99,7 @@ pub fn space<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
 /// One list, read by the page a chat prints and by the card the full-screen
 /// view settles onto its transcript. Two lists would be two answers to
 /// `/help`, and the one a reader met would depend on which chat they were in.
-pub const COMMANDS: [(&str, &str); 5] = [
+pub const COMMANDS: [(&str, &str); 7] = [
     ("/help", "this card; `/?` does the same"),
     (
         "/keys",
@@ -112,6 +112,14 @@ pub const COMMANDS: [(&str, &str); 5] = [
     (
         "/find word",
         "on a screen of its own: mark it, and walk the marks with ctrl-n and ctrl-p; `/find` alone takes the marks off",
+    ),
+    (
+        "/think",
+        "on a screen of its own: unfold what the model thought, or fold it back",
+    ),
+    (
+        "/more",
+        "on a screen of its own: print a tool's result whole, or cap it again",
     ),
     ("//text", "ask `/text`, rather than run it as a command"),
 ];
