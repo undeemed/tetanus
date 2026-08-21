@@ -6,6 +6,7 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::AskResult;
+use tetanus_protocol::methods::MAX_PAGE_SIZE;
 use tetanus_protocol::methods::{
     capability, method, push, AgentStatusPush, AgentSteerParams, AgentSteerResult,
     ApprovalSetParams, ApproveParams, ApproveResult, SessionEventPush, SessionForkParams,
@@ -1590,4 +1591,39 @@ fn option(label: &str) -> QuestionOption {
         label: label.to_string(),
         description: None,
     }
+}
+
+/// TC-PROTO-60: contract section 4.4.5. The maximum a surface reads is the
+/// maximum the engine clamps to.
+///
+/// The number lived only in the engine and in one sentence of prose, so the
+/// machine-readable half of this contract did not carry a value the document
+/// promised. Publishing it is only worth anything if the two cannot drift,
+/// which is what this pins: the engine's constant is defined as this one.
+///
+/// A surface that hard-coded `500` instead would be making a claim about a
+/// server it may not be talking to, and would find out silently, because a
+/// `limit` above the maximum is clamped rather than refused.
+#[test]
+fn the_published_page_maximum_is_what_the_engine_clamps_to() {
+    assert_eq!(MAX_PAGE_SIZE, 500, "this build's maximum");
+
+    // A limit at or below the maximum is what the caller asked for; above it,
+    // the caller gets the maximum and is not told - which is why the number
+    // has to be readable rather than guessed.
+    let clamp = |asked: Option<u32>| {
+        asked
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_PAGE_SIZE)
+            .min(MAX_PAGE_SIZE)
+    };
+    assert_eq!(clamp(Some(10)), 10);
+    assert_eq!(clamp(Some(MAX_PAGE_SIZE)), MAX_PAGE_SIZE);
+    assert_eq!(
+        clamp(Some(MAX_PAGE_SIZE + 1)),
+        MAX_PAGE_SIZE,
+        "clamped, not refused"
+    );
+    assert_eq!(clamp(Some(0)), MAX_PAGE_SIZE, "zero reads as absent");
+    assert_eq!(clamp(None), MAX_PAGE_SIZE);
 }

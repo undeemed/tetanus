@@ -30,7 +30,11 @@ pub const MAX_TITLE: usize = 80;
 
 /// Largest page `session.events` returns, and the page size when a caller
 /// names none. A caller that wants the whole journal pages to `eof`.
-pub const MAX_PAGE: u32 = 500;
+///
+/// The value is the contract's, not this module's: `session.events` clamps to
+/// what a surface can read, so a build that changed one and not the other
+/// would answer pages a caller was told it would not get.
+pub const MAX_PAGE: u32 = tetanus_protocol::methods::MAX_PAGE_SIZE;
 
 /// The `session/start` payload: what a surface needs to list a cold session.
 ///
