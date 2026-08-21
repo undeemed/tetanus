@@ -348,6 +348,15 @@ pressed up to check what they asked last time has not thrown away the question t
 and a question asked twice in a row is kept once, because pressing up means the question before
 this one.
 
+The loop asks the filesystem whether the journal has grown before it asks the log for its events.
+A journal is append-only, so a file the same length as last time holds nothing this view has not
+seen - and `SessionLog::events` copies every event it holds, which a view polling twelve times a
+second turns into a cost that grows with the conversation.
+Measured on a journal of six thousand events: a sixth of a core, spent on a conversation nobody was
+having; one `stat` a frame instead.
+What a second process appends is not on this page either way: those lines are on the file and not
+in this log's memory, and reading a file back is what `tetanus replay` is for.
+
 A conversation with nothing asked in it opens on a page that says so, names the journal every turn
 will be appended to, and points at the two commands.
 A blank screen with a prompt on it is a screen that might be broken; the browser panel says
