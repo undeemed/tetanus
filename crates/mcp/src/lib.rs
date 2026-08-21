@@ -42,6 +42,7 @@ pub mod connection;
 pub mod fault;
 pub mod link;
 pub mod memory;
+pub mod settings;
 pub mod stdio;
 pub mod supervisor;
 pub mod tools;
@@ -51,6 +52,7 @@ pub use client::{ClientInfo, McpClient, ServerInfo, Timeouts, ToolAnswer, ToolDe
 pub use connection::{Connection, Notice};
 pub use fault::McpFault;
 pub use link::{Departure, Exit, Link};
+pub use settings::{connect_all, servers, ServerSettings};
 pub use stdio::ServerCommand;
 pub use supervisor::{Health, Launcher, ReconnectPolicy, Supervisor};
 pub use tools::{install, public_name, McpTool};

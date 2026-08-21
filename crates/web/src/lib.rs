@@ -36,6 +36,7 @@ pub mod mock;
 pub mod provider;
 pub mod render;
 pub mod search;
+pub mod settings;
 pub mod tools;
 
 pub use fault::WebFault;

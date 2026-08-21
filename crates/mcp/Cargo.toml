@@ -24,11 +24,13 @@ tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tetanus-turn = { path = "../turn" }
+tetanus-config = { path = "../config" }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
+tetanus-config = { path = "../config" }
 tempfile = { workspace = true }
 # Self-dependency: the only way to enable `fixture` for the test profile, so
 # the suite gets the server binary and a release build does not.

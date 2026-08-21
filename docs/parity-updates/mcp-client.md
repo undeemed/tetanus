@@ -52,3 +52,22 @@ Extends the row above with the bridge and supervisor files.
 ## 3. Changelog row
 
 | 2026-08-21 | The MCP tool bridge and reconnect supervisor (`crates/mcp/src/tools.rs`, `src/supervisor.rs`, TC-PORT-MCP-21..33). A server's tools now reach the model: they are registered under `mcp__<server>__<raw>` beside tetanus's own and dispatched by the ordinary pipeline, so nothing in the turn engine knows an MCP tool from a native one. Every MCP call is exclusive, deliberately - `ToolMode` is opt-in because a tool may overlap only for arguments it has looked at, and nothing here has looked at anything, so a barrier is the answer that cannot make things worse. The supervisor's budget is the part with teeth: delays double to a ceiling, a cap ends the retrying for good, and the budget resets only on real uptime past that ceiling, so a server that connects and dies four times a second exhausts its cap instead of restarting for ever. Shutdown cancels a pending backoff rather than joining it. Two findings came out of writing the cases. Upstream's public name collides for distinct identities when a server's own name carries the `__` separator, and since a tetanus server name comes from a settings document that is reachable here too, so a separator in a server name now forces the hash. And a reconnect that has launched a process has not yet finished a handshake, which is why the health state and not the launch count is what a caller waits on. |
+
+---
+
+# Parity update: the servers a document declares (slice `mcp-settings`)
+
+Extends the two notes above; the `mcp/*` row's `Today` column gains one
+clause and the port table gains one file.
+
+## 1. Section 3, the `mcp/*` row
+
+Append to `Today`: ", declared in the settings document under `mcp.servers.<name>` with its command, arguments, environment and working directory, started at boot with the servers that fail reported beside the ones that serve".
+
+Remove from `Gap`: nothing. Add: "a surface that lists the connected servers and their health".
+
+## 2. Section 4, the port table
+
+| Upstream file | tetanus case file | What it pins | Status |
+| --- | --- | --- | --- |
+| `mcp/mcp-client/tests/mcp-client.spec.ts` (the `Config` schema cases) | `crates/mcp/tests/settings.rs` | The servers a deployment declares, and what a harness does when one will not start | part ported: TC-PORT-MCP-34..38 for a server read out of the document with its argv, environment and working directory, one switched off, a server with no command and a malformed argument list both refused where they are written, the reconnect block read over the defaults and an impossible policy refused at load, the declared servers started with their tools registered beside the harness's own, and a server that will not start reported by name with a class while the rest of the harness comes up. Upstream refuses an unknown key in its reconnect block because Schemastery knows every key; a tetanus document is flat dotted keys with no per-namespace schema, which is the `settings/*` gap already recorded. Its per-app-root `serverName` reservation has no counterpart: the id is a document key, so it is unique by construction |

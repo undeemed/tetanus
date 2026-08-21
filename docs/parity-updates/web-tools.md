@@ -21,3 +21,17 @@ Replaces the row reading `| `web/*` (fetch, search providers) | 11 | None | Web 
 ## 3. Changelog row
 
 | 2026-08-21 | The web tools implemented (`crates/web`, TC-PORT-WEB-1..26), opening the `web/*` row. Both tools sit above one transport seam, and that is the design decision rather than a testing convenience: every rule worth having - the scheme, the redirect, the size, the type, the charset - is a decision made above the socket, so the whole policy is asserted with no network in the suite and the live transport is thin enough to read in one sitting. Three rules have teeth. A URL carrying credentials is never sent, and neither is a redirect to one, because `https://user:token@host/` in a model's output is a credential about to be handed to whoever answers. A hop that leaves the origin is refused, because a page that redirects to an internal address is how a fetch tool becomes a request forgery - TC-PORT-WEB-7 asserts the blocked destination was never requested, not merely that the call failed. And truncation is always stated in the text the model reads, because a model given half a page and no notice answers confidently about the half it did not get. Search resolves rather than picks: two usable providers and no configured choice is a refusal naming both, since answering the same query from a different engine per run is not something anyone can debug from a journal. One provider is real and mapped over the same seam, with upstream's strict mode kept - an answer with no result block is refused, because an uncited paragraph presented as search results is how a citation becomes a hallucination. |
+
+---
+
+# Parity update: turning the web tools on (slice `web-settings`)
+
+## 1. Section 3, the `web/*` row
+
+Append to `Today`: ", both registered from the settings document under `web.tools.*`, with the fetch limits, the search provider and its credential read from the same document and refused there when they cannot be run".
+
+## 2. Section 4, the port table
+
+| Upstream file | tetanus case file | What it pins | Status |
+| --- | --- | --- | --- |
+| `web/tool-web/tests/tool-web.spec.ts` (registration), `web-search-deepseek/tests/settings.spec.ts` | `crates/web/tests/settings.rs` | Which web tools a document turns on, and with what | part ported: TC-PORT-WEB-27..31 for both tools off unless the document says otherwise, `web_search` registered whether or not a provider can serve, the fetch limits read and every impossible one refused where it is written (with a hop cap of zero accepted, because following no redirect is a thing to ask for), the credential read from the document or from the environment behind it with a blank value counting as absent, and a configured provider this build does not carry refused when a search resolves. One difference is deliberate and TC-PORT-WEB-27 states it: upstream registers both tools by default, because loading its plugin is already the deployment's choice, while a tetanus registry is compiled in - so a harness whose first run in a sandbox quietly fetched a URL a model invented would be a surprise nobody asked for. Its per-tool timeout budget belongs to a tool-call scheduler this build does not have |
