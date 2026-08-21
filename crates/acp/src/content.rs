@@ -60,39 +60,10 @@ pub fn admit(prompt: &[ContentBlock]) -> Result<String, ContentError> {
         ));
     }
 
-    let mut parts: Vec<String> = Vec::new();
-    for block in prompt {
-        match block {
-            ContentBlock::Text { text } => parts.push(text.clone()),
-            ContentBlock::ResourceLink { name, uri } => {
-                parts.push(format!("[resource_link name={name} uri={uri}]"))
-            }
-            ContentBlock::Image { .. } => {
-                return Err(ContentError::new(
-                    "this agent did not advertise the `image` prompt capability",
-                    Some("image"),
-                ))
-            }
-            ContentBlock::Audio { .. } => {
-                return Err(ContentError::new(
-                    "this agent did not advertise the `audio` prompt capability",
-                    Some("audio"),
-                ))
-            }
-            ContentBlock::Resource { .. } => {
-                return Err(ContentError::new(
-                    "this agent did not advertise the `embeddedContext` prompt capability",
-                    Some("resource"),
-                ))
-            }
-            ContentBlock::Other(_) => {
-                return Err(ContentError::new(
-                    format!("unsupported content block `{}`", block.kind()),
-                    Some(block.kind()),
-                ))
-            }
-        }
-    }
+    let parts = prompt
+        .iter()
+        .map(words_of)
+        .collect::<Result<Vec<String>, ContentError>>()?;
 
     let admitted = parts.join("\n");
     if admitted.trim().is_empty() {
@@ -102,4 +73,29 @@ pub fn admit(prompt: &[ContentBlock]) -> Result<String, ContentError> {
         return Err(ContentError::new("a prompt carries some text", None));
     }
     Ok(admitted)
+}
+
+/// One block's contribution to the message, or the reason it has none.
+fn words_of(block: &ContentBlock) -> Result<String, ContentError> {
+    match block {
+        ContentBlock::Text { text } => Ok(text.clone()),
+        ContentBlock::ResourceLink { name, uri } => {
+            Ok(format!("[resource_link name={name} uri={uri}]"))
+        }
+        ContentBlock::Image { .. } => Err(unadvertised("image", "image")),
+        ContentBlock::Audio { .. } => Err(unadvertised("audio", "audio")),
+        ContentBlock::Resource { .. } => Err(unadvertised("embeddedContext", "resource")),
+        ContentBlock::Other(_) => Err(ContentError::new(
+            format!("unsupported content block `{}`", block.kind()),
+            Some(block.kind()),
+        )),
+    }
+}
+
+/// A block whose capability `initialize` said this agent does not have.
+fn unadvertised(capability: &str, kind: &str) -> ContentError {
+    ContentError::new(
+        format!("this agent did not advertise the `{capability}` prompt capability"),
+        Some(kind),
+    )
 }

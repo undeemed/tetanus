@@ -3,7 +3,7 @@
 use tetanus_protocol::methods::MAX_PAGE_SIZE;
 use tetanus_protocol::types::{KnownEvent, SessionEvent};
 
-use crate::filter::{EventFilter, QueryError, Role};
+use crate::filter::{Bound, EventFilter, QueryError, Role};
 
 /// One journal event with everything the fold worked out about where it sits.
 ///
@@ -48,63 +48,73 @@ impl Located {
         self.event.time
     }
 
+    /// Whether this event satisfies every clause of the filter.
+    ///
+    /// Three groups, each its own function: what the event *is*, where it
+    /// *sits*, and what it *says*. Split that way because the interesting rules
+    /// are per-group - an absent list clause differs from an empty one, and a
+    /// range clause is refused by an event that has no such coordinate at all -
+    /// and one long chain of `if let` made those rules nine separate places to
+    /// get right instead of two.
     fn matches(&self, filter: &EventFilter) -> bool {
-        if let Some(types) = &filter.types {
-            if !types.iter().any(|ty| ty == self.ty()) {
-                return false;
+        self.is_named_by(filter) && self.sits_within(filter) && self.reads_as(filter)
+    }
+
+    /// The clauses about what the event is: its type, its role, its tool.
+    fn is_named_by(&self, filter: &EventFilter) -> bool {
+        listed(&filter.types, |want| want == self.ty())
+            && listed(&filter.roles, |want| *want == self.role)
+            // An event with no tool matches no tool clause: it is not one of
+            // the tools asked for.
+            && listed(&filter.tools, |want| {
+                Some(want.as_str()) == self.tool.as_deref()
+            })
+    }
+
+    /// The clauses about where the event sits: turn, step, time, seq.
+    fn sits_within(&self, filter: &EventFilter) -> bool {
+        bounded(&filter.turns, self.turn)
+            && bounded(&filter.steps, self.step)
+            && bounded(&filter.time, Some(self.time()))
+            && bounded(&filter.seq, Some(self.seq()))
+    }
+
+    /// The clauses about what the event says: its outcome and its words.
+    fn reads_as(&self, filter: &EventFilter) -> bool {
+        let outcome = filter.ok.is_none_or(|ok| self.ok == Some(ok));
+        let text = match &filter.text {
+            None => true,
+            Some(text) => {
+                let needle = text.to_lowercase();
+                self.search
+                    .as_ref()
+                    .is_some_and(|words| words.contains(&needle))
             }
-        }
-        if let Some(roles) = &filter.roles {
-            if !roles.contains(&self.role) {
-                return false;
-            }
-        }
-        if let Some(tools) = &filter.tools {
-            match &self.tool {
-                Some(tool) => {
-                    if !tools.iter().any(|want| want == tool) {
-                        return false;
-                    }
-                }
-                // An event with no tool is not one of the tools asked for.
-                None => return false,
-            }
-        }
-        if let Some(turns) = &filter.turns {
-            match self.turn {
-                Some(turn) if turns.contains(turn) => {}
-                _ => return false,
-            }
-        }
-        if let Some(steps) = &filter.steps {
-            match self.step {
-                Some(step) if steps.contains(step) => {}
-                _ => return false,
-            }
-        }
-        if let Some(time) = &filter.time {
-            if !time.contains(self.time()) {
-                return false;
-            }
-        }
-        if let Some(seq) = &filter.seq {
-            if !seq.contains(self.seq()) {
-                return false;
-            }
-        }
-        if let Some(ok) = filter.ok {
-            if self.ok != Some(ok) {
-                return false;
-            }
-        }
-        if let Some(text) = &filter.text {
-            let needle = text.to_lowercase();
-            match &self.search {
-                Some(hay) if hay.contains(&needle) => {}
-                _ => return false,
-            }
-        }
-        true
+        };
+        outcome && text
+    }
+}
+
+/// One list clause, with the absent-versus-empty rule in one place.
+///
+/// `None` asks nothing and accepts everything; `Some(vec![])` asks and accepts
+/// nothing, because `any` over no values is false. Writing it once is why that
+/// distinction cannot be lost in one clause and kept in another.
+fn listed<T>(clause: &Option<Vec<T>>, accepts: impl FnMut(&T) -> bool) -> bool {
+    match clause {
+        None => true,
+        Some(values) => values.iter().any(accepts),
+    }
+}
+
+/// One range clause over a coordinate the event may not have.
+///
+/// An event outside every turn - the session header - has no turn, and so
+/// satisfies no turn range. `None` for the clause still accepts everything.
+fn bounded<T: Copy + PartialOrd>(clause: &Option<Bound<T>>, value: Option<T>) -> bool {
+    match clause {
+        None => true,
+        Some(bound) => value.is_some_and(|value| bound.contains(value)),
     }
 }
 

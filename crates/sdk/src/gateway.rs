@@ -296,6 +296,13 @@ impl Gateway {
         Ok(descriptor)
     }
 
+    /// Route to the engine, grouped the way contract section 4.4 groups the
+    /// calls themselves.
+    ///
+    /// By namespace rather than as one flat table because that is the order a
+    /// reader checking this against the contract reads it in, and because a
+    /// namespace with no arm for one of its calls is a smaller thing to spot
+    /// than a missing line in a list of fifteen.
     async fn dispatch(
         &self,
         endpoint: &str,
@@ -305,6 +312,25 @@ impl Gateway {
         let engine = &self.engine;
         match endpoint {
             method::HELLO => encode(engine.hello(typed(params)?).await?),
+            method::CONFIG_DUMP => encode(engine.config_dump().await?),
+            method::APPROVAL_SET => encode(engine.approval_set(typed(params)?).await?),
+            _ if endpoint.starts_with("session.") => {
+                self.dispatch_session(endpoint, params, sink).await
+            }
+            _ if endpoint.starts_with("agent.") => self.dispatch_agent(endpoint, params).await,
+            _ if endpoint.starts_with("catalog.") => self.dispatch_catalog(endpoint).await,
+            unknown => Err(undispatched(unknown)),
+        }
+    }
+
+    async fn dispatch_session(
+        &self,
+        endpoint: &str,
+        params: Value,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<Value, RpcError> {
+        let engine = &self.engine;
+        match endpoint {
             method::SESSION_CREATE => encode(engine.session_create(typed(params)?).await?),
             method::SESSION_LIST => encode(engine.session_list().await?),
             method::SESSION_EVENTS => encode(engine.session_events(typed(params)?).await?),
@@ -315,24 +341,42 @@ impl Gateway {
             method::SESSION_UNSUBSCRIBE => {
                 encode(engine.session_unsubscribe(typed(params)?).await?)
             }
+            unknown => Err(undispatched(unknown)),
+        }
+    }
+
+    async fn dispatch_agent(&self, endpoint: &str, params: Value) -> Result<Value, RpcError> {
+        let engine = &self.engine;
+        match endpoint {
             method::AGENT_PROMPT => encode(engine.agent_prompt(typed(params)?).await?),
             method::AGENT_STATUS => encode(engine.agent_status(typed(params)?).await?),
             method::AGENT_INTERRUPT => encode(engine.agent_interrupt(typed(params)?).await?),
             method::AGENT_STEER => encode(engine.agent_steer(typed(params)?).await?),
-            method::CATALOG_TOOLS => encode(engine.catalog_tools().await?),
-            method::CATALOG_MODELS => encode(engine.catalog_models().await?),
-            method::CONFIG_DUMP => encode(engine.config_dump().await?),
-            method::APPROVAL_SET => encode(engine.approval_set(typed(params)?).await?),
-            // Unreachable while `validate` runs first: an endpoint with a
-            // descriptor and no arm is the mistake the catalog exists to catch,
-            // and it is reported rather than panicked on.
-            unknown => Err(RpcError::new(
-                ErrorCode::NotImplemented,
-                format!("`{unknown}` is described but this build routes it nowhere"),
-            )
-            .with_data(serde_json::json!({ "method": unknown }))),
+            unknown => Err(undispatched(unknown)),
         }
     }
+
+    async fn dispatch_catalog(&self, endpoint: &str) -> Result<Value, RpcError> {
+        let engine = &self.engine;
+        match endpoint {
+            method::CATALOG_TOOLS => encode(engine.catalog_tools().await?),
+            method::CATALOG_MODELS => encode(engine.catalog_models().await?),
+            unknown => Err(undispatched(unknown)),
+        }
+    }
+}
+
+/// An endpoint with a descriptor and no arm behind it.
+///
+/// Unreachable while `validate` runs first, and reported rather than panicked
+/// on: a descriptor for a call nobody routes is exactly the mistake the catalog
+/// exists to catch, and TC-PORT-API-2 catches it by looking for this message.
+fn undispatched(endpoint: &str) -> RpcError {
+    RpcError::new(
+        ErrorCode::NotImplemented,
+        format!("`{endpoint}` is described but this build routes it nowhere"),
+    )
+    .with_data(serde_json::json!({ "method": endpoint }))
 }
 
 /// The sink a unary call gets: one that throws away what it is given.

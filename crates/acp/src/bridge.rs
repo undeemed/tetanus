@@ -414,61 +414,17 @@ impl AcpBridge {
             .expect("pending")
             .insert(id.clone(), sender);
 
-        let request = Request {
-            jsonrpc: V2,
-            // Text, and prefixed, so an id this side mints can never collide
-            // with one the client is using for its own calls.
-            id: Id::Text(id.clone()),
-            method: agent::REQUEST_PERMISSION.to_string(),
-            params: Some(
-                serde_json::to_value(RequestPermissionRequest {
-                    session_id: session_id.to_string(),
-                    tool_call: PermissionToolCall {
-                        tool_call_id: tool_call_id.to_string(),
-                    },
-                    options: vec![
-                        PermissionOption {
-                            option_id: ALLOW_ONCE.to_string(),
-                            name: "Allow once".to_string(),
-                            kind: "allow_once".to_string(),
-                        },
-                        PermissionOption {
-                            option_id: REJECT_ONCE.to_string(),
-                            name: "Reject".to_string(),
-                            kind: "reject_once".to_string(),
-                        },
-                    ],
-                })
-                .expect("a request serializes"),
-            ),
-        };
+        let request = permission_request(&id, session_id, tool_call_id);
         out.send_frame(serde_json::to_string(&request).expect("a frame serializes"));
 
-        let answered = match receiver.await {
-            Ok(answered) => answered,
+        match receiver.await {
+            Ok(answered) => outcome_of(answered),
             // The sender was dropped: the connection is closing. Nobody will
             // answer, so nobody granted.
             Err(_) => {
                 self.pending.lock().expect("pending").remove(&id);
-                return ApprovalOutcome::Unavailable;
+                ApprovalOutcome::Unavailable
             }
-        };
-
-        match answered {
-            Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
-                Ok(response) => match response.outcome {
-                    PermissionOutcome::Cancelled => ApprovalOutcome::Cancelled,
-                    PermissionOutcome::Selected { option_id } if option_id == ALLOW_ONCE => {
-                        ApprovalOutcome::AllowedOnce
-                    }
-                    PermissionOutcome::Selected { option_id } if option_id == REJECT_ONCE => {
-                        ApprovalOutcome::Rejected
-                    }
-                    PermissionOutcome::Selected { .. } => ApprovalOutcome::Unavailable,
-                },
-                Err(_) => ApprovalOutcome::Unavailable,
-            },
-            Err(_) => ApprovalOutcome::Unavailable,
         }
     }
 
@@ -541,6 +497,63 @@ impl EventSink for Updates {
     /// ACP has no word for the harness's live agent state, and inventing one
     /// would be this bridge extending someone else's protocol.
     fn agent_status(&self, _: AgentStatusPush) {}
+}
+
+/// The question, as a frame.
+fn permission_request(id: &str, session_id: &str, tool_call_id: &str) -> Request {
+    Request {
+        jsonrpc: V2,
+        // Text, and prefixed, so an id this side mints can never collide with
+        // one the client is using for its own calls.
+        id: Id::Text(id.to_string()),
+        method: agent::REQUEST_PERMISSION.to_string(),
+        params: Some(
+            serde_json::to_value(RequestPermissionRequest {
+                session_id: session_id.to_string(),
+                tool_call: PermissionToolCall {
+                    tool_call_id: tool_call_id.to_string(),
+                },
+                options: vec![
+                    PermissionOption {
+                        option_id: ALLOW_ONCE.to_string(),
+                        name: "Allow once".to_string(),
+                        kind: "allow_once".to_string(),
+                    },
+                    PermissionOption {
+                        option_id: REJECT_ONCE.to_string(),
+                        name: "Reject".to_string(),
+                        kind: "reject_once".to_string(),
+                    },
+                ],
+            })
+            .expect("a request serializes"),
+        ),
+    }
+}
+
+/// The client's answer, read as a decision.
+///
+/// Every path that is not an explicit `allow-once` denies, and they are
+/// gathered here so that is one readable list rather than a shape spread over
+/// three nested matches: a JSON-RPC error, a body that is not an outcome, a
+/// withdrawal, and an option this agent never offered.
+fn outcome_of(answered: Result<serde_json::Value, RpcError>) -> ApprovalOutcome {
+    let Ok(value) = answered else {
+        return ApprovalOutcome::Unavailable;
+    };
+    let Ok(response) = serde_json::from_value::<RequestPermissionResponse>(value) else {
+        return ApprovalOutcome::Unavailable;
+    };
+    match response.outcome {
+        PermissionOutcome::Cancelled => ApprovalOutcome::Cancelled,
+        PermissionOutcome::Selected { option_id } if option_id == ALLOW_ONCE => {
+            ApprovalOutcome::AllowedOnce
+        }
+        PermissionOutcome::Selected { option_id } if option_id == REJECT_ONCE => {
+            ApprovalOutcome::Rejected
+        }
+        PermissionOutcome::Selected { .. } => ApprovalOutcome::Unavailable,
+    }
 }
 
 fn refusal(code: ErrorCode, message: impl Into<String>) -> Response {
