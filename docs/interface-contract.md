@@ -134,7 +134,7 @@ The crate is authoritative for field-level detail; this section states the invar
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
-Five more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, and `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run (§4.3.2).
+Six more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run, and `context/snapshot`, the live facts a turn told the model about the world it is running in (§4.3.2).
 A surface renders them raw until it takes them, which is what "the vocabulary grows" means in practice.
 `session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
 `assistant/chunk` is the streaming surface.
@@ -176,6 +176,7 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | `approval/asked` | `id`, `tool_name`, plus `call_id` and `reason` when the asker had them |
 | `approval/decided` | `id`, `outcome` |
 | `approval/policy` | `policy` |
+| `context/snapshot` | `turn`, `parts` (each `name` and `text`) |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
@@ -186,6 +187,10 @@ The three `approval/*` types are §4.4.7's audit.
 `approval/asked` and `approval/decided` are one pair sharing an `id`, and `approval/policy` is the durable form of a policy switch: the last one on the journal is the session's override.
 `outcome` is one of §4.4.7's four words and `policy` one of its two, both spelled exactly as the wire enums spell them.
 They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: their place is their position between the boundaries of the step that asked.
+
+`context/snapshot` is §4.4.8's record of what a turn told the model about the world outside the conversation - the date, the working directory, the branch it is on.
+It carries the parts rather than the rendered text, joined the way §4.4.8 fixes, so a surface can show which provider contributed what and a reader can still reconstruct exactly what the model saw.
+It names its `turn`, because unlike the approval pair it belongs to the turn rather than to a moment inside a step.
 
 This step is not a version bump.
 `SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
@@ -506,6 +511,47 @@ A surface learns it from the ask.
 `ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
 The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
 
+#### 4.4.8 Telling the model where it is
+
+Some of what a model needs is not in the conversation and is not stable: today's date, the working directory, the branch, whether the sandbox is on.
+A **runtime context** is that, gathered once per turn and written to the journal as `context/snapshot`.
+
+```text
+session/event turn/start
+session/event context/snapshot   { turn, parts: [ { name, text }, ... ] }
+session/event step/start
+```
+
+**It is a user message, not part of the system prompt, and that is the whole design.**
+A provider caches a prompt by its longest stable prefix.
+The system prompt is the same on every turn of a session, so it caches; a sentence saying what time it is changes every turn, and putting it there would invalidate the cached prefix on every request of every session.
+Carrying it after the retained history instead leaves the prefix untouched, and costs a message.
+
+**Only the newest snapshot is history.**
+A turn writes one, so a long session accumulates them, and yesterday's date is worse than no date.
+When history is derived, the last `context/snapshot` on the journal becomes a `user` message and every earlier one is skipped.
+They stay on the journal, because the journal records what happened and a reader may want to know what the model was told at the time; they simply do not travel again.
+
+**The parts are the record; the joining rule is here.**
+`parts` is an ordered list of `name` and `text`.
+The message the model reads is the parts whose `text` is non-empty, joined with a blank line between them, in the order the list gives - the same rule §4.3 already fixes for prompt sections, because two joining rules would be one too many.
+A snapshot whose parts are all empty is not written at all, so a deployment that configures no providers pays nothing.
+
+Carrying the parts rather than the rendered text is deliberate.
+The rendering is reproducible from them by the rule above, so nothing is lost, and a surface that wants to show which provider said what has it.
+It is the same choice §4.3 makes when `turn/end` declines to repeat the answer that is already on the last `assistant/message`.
+
+**A snapshot is a fact, not a promise about the future.**
+It says what was true when the turn started.
+Nothing re-reads it mid-turn, so a step that runs for ten minutes is working from the time the turn began, and a tool that changes the working directory does not retroactively change what the model was told.
+
+**Ordering is the provider's, not the reader's.**
+`parts` arrives in the order the engine assembled it and a surface renders it in that order.
+There is no priority field on the wire: which provider comes first is a deployment's configuration, settled before the snapshot is written, and putting an order on the durable record would let two readers disagree about the text the model actually saw.
+
+This adds no call and no capability.
+A runtime context is contributed inside the engine, and what crosses this boundary is only the record of what was contributed.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -726,6 +772,9 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.7 an outcome the engine does not know denies rather than failing to parse | TC-PROTO-22 |
 | §4.4.7 the two policies, and a third word that stays readable | TC-PROTO-23 |
 | §4.3.2 the three `approval/*` types stage like the other two | TC-PROTO-24 |
+| §4.3.2 `context/snapshot` stages, and carries its parts | TC-PROTO-25 |
+| §4.4.8 the joining rule reproduces what the model read | TC-PROTO-26 |
+| §4.4.8 an empty part contributes nothing | TC-PROTO-27 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
@@ -828,3 +877,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Publishes `context/snapshot` (§4.3.2, §4.4.8): what a turn told the model about the world outside the conversation - the date, the working directory, the branch - recorded once per turn. It is carried as a user message after the retained history rather than in the system prompt, and that placement is the design rather than a detail: a provider caches a prompt by its longest stable prefix, and a sentence saying what time it is would invalidate that prefix on every request of every session. Only the newest snapshot derives to a message; earlier ones stay on the journal, because it records what happened, but do not travel again - yesterday's date is worse than no date. The record carries the parts and §4.4.8 fixes the joining rule, which is the rule §4.3 already gives prompt sections, so the rendering is reproducible and a surface can still show which provider contributed what. No type changes, no new call and no capability: a runtime context is contributed inside the engine and only the record of it crosses this boundary. `type` is a free string by §4.3, so the staged type is not a `KnownEvent` variant and §4.3.2's two-step rule applies as it did for `llm/retry`. The engine slice that writes it lands separately. |

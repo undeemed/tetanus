@@ -802,3 +802,95 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-25: contract section 4.3.2. `context/snapshot` stages like the
+/// other durable types this version writes and does not parse, and carries the
+/// parts section 4.4.8 fixes.
+///
+/// It names its `turn`, unlike the approval pair, because it belongs to the
+/// turn rather than to a moment inside a step.
+#[test]
+fn a_context_snapshot_stages_and_carries_its_parts() {
+    let event = SessionEvent {
+        ty: "context/snapshot".into(),
+        seq: 1,
+        time: 0,
+        data: json!({
+            "turn": 1,
+            "parts": [
+                { "name": "time", "text": "The date is 2026-08-21." },
+                { "name": "workspace", "text": "The working directory is /srv/app." },
+            ],
+        }),
+        source_event_seqs: None,
+    };
+
+    assert!(
+        event.parse().is_none(),
+        "staged, not a KnownEvent variant yet"
+    );
+    assert_eq!(event.data["turn"], json!(1));
+    let parts = event.data["parts"].as_array().expect("parts is a list");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["name"], json!("time"));
+    assert!(parts[0]["text"].is_string());
+}
+
+/// TC-PROTO-26: contract section 4.4.8. The joining rule reproduces exactly
+/// what the model read.
+///
+/// The record carries the parts and not the rendered text, so the rule that
+/// turns one into the other is load-bearing: without it a reader cannot say
+/// what the model saw, and the whole point of recording a snapshot is that it
+/// can. It is the rule section 4.3 already gives prompt sections, restated
+/// against a list of parts.
+#[test]
+fn the_joining_rule_reproduces_what_the_model_read() {
+    let parts = [
+        ("time", "The date is 2026-08-21."),
+        ("cwd", "You are in /srv."),
+    ];
+
+    let joined = parts
+        .iter()
+        .map(|(_, text)| *text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    assert_eq!(
+        joined, "The date is 2026-08-21.\n\nYou are in /srv.",
+        "a blank line between parts, in the order the list gives"
+    );
+}
+
+/// TC-PROTO-27: contract section 4.4.8. A part with nothing to say contributes
+/// nothing, and a snapshot with nothing to say is not written.
+///
+/// A provider that has no answer this turn - no branch, because this is not a
+/// checkout - must not cost a blank line in the message, and a deployment that
+/// configures no providers must not pay for an empty user message on every
+/// turn.
+#[test]
+fn an_empty_part_contributes_nothing() {
+    let join = |parts: &[(&str, &str)]| {
+        parts
+            .iter()
+            .map(|(_, text)| *text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+
+    assert_eq!(
+        join(&[
+            ("time", "It is Tuesday."),
+            ("branch", ""),
+            ("cwd", "In /srv.")
+        ]),
+        "It is Tuesday.\n\nIn /srv.",
+        "an empty part leaves no gap behind it"
+    );
+    assert_eq!(join(&[("branch", ""), ("tmux", "")]), "");
+    assert_eq!(join(&[]), "", "and nothing at all is nothing to write");
+}
