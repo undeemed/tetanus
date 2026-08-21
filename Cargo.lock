@@ -1548,6 +1548,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tetanus-core",
+ "tetanus-exec",
+ "tetanus-sandbox",
  "tetanus-session",
  "tetanus-turn",
  "thiserror",

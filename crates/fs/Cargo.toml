@@ -13,8 +13,12 @@ tracing.workspace = true
 tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+tetanus-sandbox = { path = "../sandbox" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# TC-PORT-SANDBOX-23 asserts that one policy gives the file service and the
+# process executor the same answer, which needs both seams in one case.
+tetanus-exec = { path = "../exec" }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
