@@ -1,6 +1,7 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
+import { approvalRow, askCard } from "./questions.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -119,6 +120,25 @@ function received(frame) {
   }
   if (frame.method === "session/event") drawn(frame.params.event);
   if (frame.method === "agent/status") reported(frame.params);
+  // A server-to-client request, which is a thing this page must answer rather
+  // than observe: §4.4.3 makes the engine block on `ui/ask`, and a client that
+  // advertises the capability and stays silent is read as a denial.
+  if (frame.method === "ui/ask" && frame.id !== undefined && frame.id !== null) {
+    asked(frame.id, frame.params || {});
+  }
+}
+
+/** Draw an ask, and answer the request it came in on. */
+function asked(id, params) {
+  const here = card || turnCard(undefined);
+  let answered = false;
+  const reply = (result) => {
+    if (answered) return;
+    answered = true;
+    socket?.send(JSON.stringify({ jsonrpc: "2.0", id, result }));
+  };
+  here.el.append(askCard(params, reply));
+  toBottom();
 }
 
 class RpcFailure extends Error {
@@ -326,6 +346,18 @@ function drawn(event) {
       }
       here.el.append(end);
       card = null;
+      break;
+    }
+    case "approval/asked":
+    case "approval/decided":
+    case "approval/policy": {
+      // The durable audit of a decision (§4.3.2). It is drawn from the journal
+      // rather than from a live socket, so a conversation opened tomorrow
+      // still shows what was asked and how it went.
+      const here = card || turnCard(undefined);
+      const drawnRow = approvalRow(event.type, data);
+      if (drawnRow) here.el.append(drawnRow);
+      else row("other", null, `${event.type}  ${JSON.stringify(data)}`);
       break;
     }
     default:

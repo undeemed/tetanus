@@ -120,3 +120,21 @@
 .list-facts { flex:0 0 auto; display:flex; gap:var(--gap-tight); align-items:center; }
 .list-empty { margin:0; padding:var(--gap-wide); color:var(--text-muted);
   font:var(--size-body)/1.4 var(--font-prose); }
+
+/* --- being asked something -------------------------------------------- */
+
+.ask { border:1px solid var(--state-busy); border-radius:var(--radius);
+  background:var(--surface-raised); padding:var(--gap-wide); margin:var(--gap) 0; }
+.ask-head { margin:0 0 var(--gap) 0; font:var(--size-head)/1.3 var(--font-prose);
+  color:var(--text-bright); }
+.ask-one { border:0; margin:0 0 var(--gap) 0; padding:0; }
+.ask-one legend { padding:0; font:var(--size-body)/1.5 var(--font-prose); color:var(--text); }
+.ask-detail { margin:var(--gap-tight) 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); }
+.ask-option { display:flex; gap:var(--gap); align-items:baseline; padding:3px 0;
+  font:var(--size-body)/1.5 var(--font-prose); cursor:pointer; }
+.ask-why { color:var(--text-muted); font-size:var(--size-small); }
+.ask-foot { display:flex; gap:var(--gap); margin-top:var(--gap); }
+/* Answered, and kept on the page: what was decided is part of the transcript. */
+.ask-done { border-color:var(--line); opacity:.75; }
+.ask-decided { margin:var(--gap-tight) 0; }
