@@ -4,7 +4,8 @@
 //! Features tested: that the resolved palette reaches clap's own rendering as
 //! well as the lines this crate writes itself; that a colour-hostile
 //! environment cannot change the bytes of plain output; the shape and exit
-//! status of a reported failure; that a bad `--color` value is a usage error;
+//! status of a reported failure; that a bad `--color` value and an empty
+//! value for any flag that takes one are usage errors;
 //! which of the two views - the turn, or the raw sequence - a command prints;
 //! that a model's thinking stays folded until it is asked for; that the
 //! journal a run leaves behind says what it ran under; that the session list
@@ -994,6 +995,42 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
     assert!(
         !dir.path().join("nope.jsonl").exists(),
         "a read created a file"
+    );
+}
+
+/// TC-CLI-ERR-12: an empty value, on every flag that takes one.
+/// Expected: clap's usage error and exit 2 from all five, and nothing done.
+/// The two paths already refused it because clap refuses an empty `PathBuf`;
+/// the three that stay text did not, and each carried the empty string
+/// somewhere further on - a run announced itself on a model with no name and
+/// wrote that name into the journal header, `replay` reported a journal
+/// missing when none had been named, and `serve` said `: invalid socket
+/// address`. One mistake now reads one way.
+#[test]
+fn a_value_that_names_nothing_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    for (args, named) in [
+        (vec!["run", "--model", "", "-p", "hi"], "--model <ID>"),
+        (vec!["replay", ""], "<PATH>"),
+        (vec!["serve", "--listen", ""], "--listen <ADDR>"),
+        // The two that were already refused, asserted here so that the five
+        // cannot drift back into two answers for one mistake.
+        (vec!["run", "--session", "", "-p", "hi"], "--session <PATH>"),
+        (vec!["sessions", "--dir", ""], "--dir <PATH>"),
+    ] {
+        let out = run(dir.path(), &args, &[]);
+
+        assert_eq!(out.status.code(), Some(2), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "`{args:?}` printed a page");
+        let err = stderr(&out);
+        assert!(err.contains(named), "`{args:?}` did not name it: {err}");
+        assert!(err.contains("a value is required"), "`{args:?}`: {err}");
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("read").count(),
+        0,
+        "a refused run left something behind"
     );
 }
 
