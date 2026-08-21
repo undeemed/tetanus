@@ -62,8 +62,11 @@ pub enum MergedDecision {
 /// wanted to observe says nothing at all, and that is the common case.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookOutput {
-    /// The process's exit status.
-    pub exit_code: i32,
+    /// The process's exit status, or `None` when it could not be run at all.
+    ///
+    /// "Did not run" and "ran and said nothing" are different facts, and a
+    /// hook that could not be spawned must not read as one that approved.
+    pub exit_code: Option<i32>,
     /// What it wrote to stdout.
     pub stdout: String,
     /// What it wrote to stderr.
@@ -83,6 +86,14 @@ pub struct HookOutput {
     pub additional_context: Option<String>,
     /// A warning for the user.
     pub system_message: Option<String>,
+    /// The event a `hookSpecificOutput` block claimed to be for.
+    ///
+    /// Recorded even when it names the wrong event, because a diagnostic that
+    /// says a block was discarded is only useful if it can say what the block
+    /// claimed.
+    pub hook_event_name: Option<String>,
+    /// A replacement for the tool input, when the hook rewrote it.
+    pub updated_input: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Every matched hook's answer at one point, folded into one.

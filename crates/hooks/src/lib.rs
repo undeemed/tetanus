@@ -11,10 +11,12 @@
 //!
 //! Parity: upstream `packages/hooks/*`.
 
+pub mod codec;
 pub mod matcher;
 pub mod merge;
 pub mod types;
 
+pub use codec::parse_hook_output;
 pub use matcher::{matcher_diagnostic, matches_matcher, MatcherMode};
 pub use merge::merge_hook_outputs;
 pub use types::{HookDecision, HookOutput, MergedDecision, MergedHookOutcome};
