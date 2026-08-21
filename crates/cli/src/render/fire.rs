@@ -108,8 +108,16 @@ use tetanus_ui::{
 use super::live::Live;
 
 /// Rows the arrangement spends on furniture: the heading, the blank under it,
-/// the rule over the prompt, the prompt itself, and the footer.
+/// the rule over the prompt, one row of prompt, and the footer. A prompt that
+/// has grown takes its extra rows from the transcript.
 const CHROME: usize = 5;
+
+/// The most rows a prompt may grow to.
+///
+/// Enough for a question somebody typed rather than pasted, and few enough
+/// that the conversation is still the page. A longer line scrolls inside
+/// these, the way the one row scrolled sideways.
+const PROMPT: usize = 5;
 
 /// The marker the prompt row opens with, and what it costs in columns.
 const MARKER: &str = "> ";
@@ -703,7 +711,16 @@ impl Fire {
             self.fill(cols);
         }
         let block = self.live.block(spent);
-        let body = rows.saturating_sub(CHROME);
+        // How many rows the prompt wants, before the body is measured: the
+        // two share the screen, and the prompt is the one that must not be
+        // cut - a reader cannot steer a caret onto a row that is not drawn.
+        let most = PROMPT.min(rows.saturating_sub(CHROME - 1).max(1));
+        let grown = self
+            .line
+            .rows(cols.saturating_sub(visible_width(MARKER)), most)
+            .0
+            .len();
+        let body = rows.saturating_sub(CHROME + grown - 1);
         self.body = body;
         let block = &block[block.len().saturating_sub(body)..];
 
@@ -722,7 +739,7 @@ impl Fire {
         }
         // What is left goes above the rule, so a conversation that has just
         // started sits at the top of the screen rather than the middle.
-        while frame.free() > 3 {
+        while frame.free() > 2 + grown {
             frame.blank();
         }
         frame.row(
@@ -732,11 +749,21 @@ impl Fire {
         );
 
         let label = visible_width(MARKER);
-        let (typed, cursor) = self.line.shown(cols.saturating_sub(label));
-        frame.row(format!("{}{typed}", self.theme.paint(Role::Accent, MARKER)));
+        // The prompt takes what it needs, up to `PROMPT`, and the transcript
+        // above it gives up those rows: what is being written is what the
+        // reader is looking at.
+        let (typed, at) = self.line.rows(cols.saturating_sub(label), most);
+        for (number, row) in typed.iter().enumerate() {
+            let marker = match number {
+                0 => self.theme.paint(Role::Accent, MARKER).to_string(),
+                _ => " ".repeat(label),
+            };
+            frame.row(format!("{marker}{row}"));
+        }
         frame.row(self.footer(cols));
-        // The one row on this screen the terminal's own cursor belongs on.
-        frame.cursor(rows.saturating_sub(2), label + cursor);
+        // The row of the prompt the caret is on, counted from the footer up:
+        // the prompt is the last thing before it, however many rows it took.
+        frame.cursor(rows.saturating_sub(1 + typed.len() - at.0), label + at.1);
         frame
     }
 
@@ -862,7 +889,8 @@ impl Fire {
 /// the draft they were writing, and keep a repeated question once; and that a
 /// conversation with nothing in it says so and names its journal, until the
 /// first turn answers it; and that `/more` and `/think` open what is already
-/// on the page, both ways.
+/// on the page, both ways; and that the prompt grows for a question longer
+/// than a row, up to a bound, with the transcript giving up those rows.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -1581,6 +1609,56 @@ mod tests {
         assert!(
             !folded.iter().any(|row| row.contains("thought hard")),
             "{folded:?}"
+        );
+    }
+
+    /// TC-CLI-FIRE-22: a question longer than one row of the prompt.
+    /// Expected: the prompt grows, the transcript gives up the rows, the caret
+    /// stays on the row the last character is on, and the growth stops at
+    /// `PROMPT` rows - after which the prompt scrolls inside them the way a
+    /// single row scrolled sideways. Every panel with a text box grows it,
+    /// this project's own included; a reader cannot check the sentence they
+    /// are writing if the prompt only ever shows its tail.
+    #[test]
+    fn the_prompt_grows_for_a_question_longer_than_a_row() {
+        let mut view = fire();
+        for n in 1..=12 {
+            view.note(&format!("line {n}"));
+        }
+        let one = rows(&mut view, ROWS);
+        assert_eq!(one[ROWS - 2], ">", "the prompt is not one row: {one:?}");
+
+        typing(&mut view, &"x".repeat((COLS - 2) * 2 + 4));
+        let grown = rows(&mut view, ROWS);
+        assert_eq!(grown.len(), ROWS, "the frame changed height");
+        assert!(grown[ROWS - 4].starts_with("> x"), "{grown:?}");
+        assert!(grown[ROWS - 3].starts_with("  x"), "{grown:?}");
+        assert!(grown[ROWS - 2].starts_with("  x"), "{grown:?}");
+        assert_eq!(
+            cursor(&mut view, ROWS).0,
+            ROWS - 2,
+            "the caret left the row"
+        );
+
+        // The transcript gave up exactly the rows the prompt took.
+        let shown = |rows: &[String]| rows.iter().filter(|row| row.starts_with("line ")).count();
+        assert_eq!(
+            shown(&one) - shown(&grown),
+            2,
+            "the transcript did not give up two rows: {grown:?}"
+        );
+
+        // And it stops growing: a very long line keeps the prompt at PROMPT
+        // rows and scrolls inside them.
+        typing(&mut view, &"y".repeat(COLS * 6));
+        let capped = rows(&mut view, ROWS + 6);
+        let prompt = capped
+            .iter()
+            .filter(|row| row.contains('y') || row.starts_with("> "))
+            .count();
+        assert!(
+            prompt <= PROMPT,
+            "the prompt grew past {PROMPT}: {capped:?}"
         );
     }
 

@@ -282,6 +282,68 @@ impl Line {
         (self.window(room), cursor)
     }
 
+    /// The same, as up to `most` rows of `room` columns, and where the cursor
+    /// is among them.
+    ///
+    /// A prompt that only ever has one row scrolls a long question sideways,
+    /// and a reader cannot see the sentence they are writing. A composer that
+    /// grows is what every panel with a text box does, including this
+    /// project's own; a terminal can do it too, up to the rows it is willing
+    /// to spend.
+    ///
+    /// Broken at the column and not between words. The rows are a text box
+    /// rather than a paragraph: a word break moves every character after it,
+    /// so the cursor a reader is steering would jump a row as they typed a
+    /// space, and the arithmetic that puts the terminal's own caret on it
+    /// would have to guess where the break went.
+    ///
+    /// Once the line is longer than `most` rows the last rows are shown, which
+    /// are the rows the cursor is in while a line is being typed. Walking back
+    /// through a longer line with the arrows moves the window with the cursor,
+    /// the way the single row already scrolls.
+    pub fn rows(&mut self, room: usize, most: usize) -> (Vec<String>, (usize, usize)) {
+        let room = room.max(1);
+        let most = most.max(1);
+        // One row is the case the whole of `shown` already answers, and its
+        // sideways window is what a one-row prompt has to do.
+        if most == 1 {
+            let (text, cursor) = self.shown(room);
+            return (vec![text], (0, cursor));
+        }
+        self.offset = 0;
+        let drawn: Vec<char> = self.text.iter().copied().map(drawn).collect();
+        let mut rows: Vec<String> = Vec::new();
+        let mut at = (0, 0);
+        let mut row = String::new();
+        let mut columns = 0;
+        for (index, char) in drawn.iter().enumerate() {
+            let wide = visible_width(&char.to_string());
+            if columns + wide > room {
+                rows.push(std::mem::take(&mut row));
+                columns = 0;
+            }
+            if index == self.cursor {
+                at = (rows.len(), columns);
+            }
+            row.push(*char);
+            columns += wide;
+        }
+        if self.cursor == drawn.len() {
+            at = (rows.len(), columns);
+        }
+        rows.push(row);
+
+        // The tail, when there is more of it than the rows allowed - and the
+        // cursor's row with it, because a caret drawn on a row nobody can see
+        // is a caret the reader cannot find.
+        let over = rows.len().saturating_sub(most);
+        if over > 0 {
+            rows.drain(..over);
+            at.0 = at.0.saturating_sub(over);
+        }
+        (rows, at)
+    }
+
     /// As much of the text from the window's start as `room` columns hold.
     ///
     /// Cut and not [`truncate`](crate::truncate)d: the mark that function adds
@@ -757,6 +819,34 @@ mod tests {
             line.key(Key::Enter),
             Typed::Asked("fn main() {\n    ok()\n}".into())
         );
+    }
+
+    /// TC-UI-EDIT-13: a line longer than one row, as rows.
+    /// Expected: broken at the column, the cursor where the character it is
+    /// on is drawn, and - once there is more of it than the rows allowed -
+    /// the tail, which is where the cursor is while a line is being typed. A
+    /// caret drawn on a row nobody can see is a caret the reader cannot find.
+    #[test]
+    fn a_line_longer_than_a_row_is_given_as_rows() {
+        let mut line = Line::new();
+        for char in "abcdefghij".chars() {
+            line.key(Key::Char(char));
+        }
+
+        let (rows, at) = line.rows(4, 5);
+        assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
+        assert_eq!(at, (2, 2), "the caret is not after the last character");
+
+        // Two rows of room for three rows of line: the last two, and the
+        // caret moved up with them.
+        let (rows, at) = line.rows(4, 2);
+        assert_eq!(rows, vec!["efgh", "ij"]);
+        assert_eq!(at, (1, 2));
+
+        // One row of room is the sideways window the prompt already had.
+        let (rows, at) = line.rows(4, 1);
+        assert_eq!(rows.len(), 1);
+        assert!(at.0 == 0 && at.1 <= 4, "{at:?}");
     }
 
     /// TC-UI-EDIT-15: the other two keys that end a line.
