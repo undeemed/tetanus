@@ -1,0 +1,17 @@
+[package]
+name = "tetanus-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reading a tetanus session journal as data: filter, count, aggregate and page, over the contract's own event vocabulary."
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tetanus-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tetanus-engine = { path = "../engine" }
+tokio = { workspace = true }
