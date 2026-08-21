@@ -9,6 +9,7 @@
 
 pub mod assistant_output;
 pub mod depth;
+pub mod descriptor;
 pub mod invariant;
 pub mod settlement;
 pub mod timing;
