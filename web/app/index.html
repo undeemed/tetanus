@@ -98,6 +98,33 @@
  .hint { max-width:920px; margin:8px auto 0; color:var(--muted); font-size:12.5px;
    display:flex; gap:14px; flex-wrap:wrap; }
  .hint .fault { color:var(--red); }
+ /* The workspace chooser. A dialog rather than a page of its own: picking a
+    directory is a question asked in the middle of something else, and a
+    reader who is answering it has not left the conversation behind. */
+ dialog { border:1px solid var(--line); border-radius:12px; padding:0; width:min(760px,92vw);
+   background:var(--pane); color:var(--text); }
+ dialog::backdrop { background:rgba(0,0,0,.55); }
+ .pick-head { display:flex; gap:10px; align-items:center; padding:12px 14px;
+   border-bottom:1px solid var(--line); }
+ .crumbs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; font:12.5px ui-monospace,monospace; }
+ .crumbs button { padding:3px 7px; border-radius:6px; font:inherit; }
+ .panes { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line);
+   height:min(46vh,340px); }
+ .pane { background:var(--pane); overflow:auto; }
+ .pane[hidden] { display:none; }
+ /* One pane when there is one level to show, two when the parent is worth
+    seeing beside it: stepping back should not make the view collapse. */
+ .panes.alone { grid-template-columns:1fr; }
+ .row { display:block; width:100%; text-align:left; border:0; border-radius:0;
+   padding:7px 12px; font:13px ui-monospace,monospace; background:transparent; color:var(--text); }
+ .row:hover:not(:disabled) { background:#22353a; }
+ .row.here { background:#24424a; }
+ .row.dot { color:var(--muted); }
+ .pick-foot { display:flex; gap:10px; align-items:center; padding:11px 14px;
+   border-top:1px solid var(--line); }
+ .pick-foot .grow { margin-left:auto; }
+ .pick-note { font:12.5px ui-monospace,monospace; color:var(--muted); }
+ .pick-note.fault { color:var(--red); }
  /* Wrapped onto its own line, the state has no row to sit at the end of. */
  @media (max-width:620px) { .state { margin-left:0; } }
 </style>
@@ -107,8 +134,28 @@
   <h1>tetanus chat</h1>
   <span class="meta" id="where">connecting…</span>
   <span class="meta" id="who"></span>
+  <button id="pick" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+    workspace…
+  </button>
   <span class="state" id="state">offline</span>
 </header>
+
+<dialog id="picker">
+  <div class="pick-head">
+    <nav class="crumbs" id="crumbs" aria-label="path"></nav>
+  </div>
+  <div class="panes" id="panes">
+    <div class="pane" id="parent"></div>
+    <div class="pane" id="here"></div>
+  </div>
+  <div class="pick-foot">
+    <label class="pick-note"><input type="checkbox" id="dots"> show hidden</label>
+    <span class="pick-note" id="picknote"></span>
+    <span class="grow"></span>
+    <button type="button" id="newdir">New folder</button>
+    <button type="button" id="pickclose">Close</button>
+  </div>
+</dialog>
 
 <main id="scroll"><div class="turns" id="turns"></div></main>
 

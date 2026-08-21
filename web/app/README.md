@@ -65,3 +65,19 @@ instruction rather than left waiting for a lane that is not currently running. N
 directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
+
+## Choosing a workspace directory
+
+The **workspace…** button opens the chooser: two panes, the level and its
+parent, drawn entirely out of `host.listDirectory` and `host.createDirectory`.
+
+Everything the host said is drawn and nothing is inferred. `hidden` is a flag
+on the row rather than a name this page re-derives, so the footer's toggle acts
+on the host's answer; `truncated` is said out loud rather than quietly shown as
+a short level; and the three failures the picker can return are printed as the
+host worded them, because each one says what to do next.
+
+Two panes rather than one because stepping back should not make the view
+collapse - a chooser that shows a single level loses the reader's place every
+time they go up. The parent leg is best-effort: a level whose parent cannot be
+read is still worth showing, and the pane is simply not there.

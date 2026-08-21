@@ -423,3 +423,121 @@ view.asked.addEventListener("keydown", (key) => {
 });
 
 connect();
+
+// ---------------------------------------------------------------------------
+// The workspace chooser.
+//
+// Upstream's browse backend exists because a remote client cannot reach an OS
+// dialog, and this is the client half of that seam: it draws a chooser out of
+// `host.listDirectory` and `host.createDirectory` and nothing else. Two panes,
+// the level and its parent, because stepping back should not make the view
+// collapse - a chooser that shows one level at a time loses the reader's place
+// every time they go up.
+//
+// Everything the host said is drawn and nothing is inferred: `hidden` is a
+// flag on the row, not a name this page re-derives, and `truncated` is said
+// out loud rather than quietly shown as a short level.
+// ---------------------------------------------------------------------------
+
+const picker = document.getElementById("picker");
+const crumbsBar = document.getElementById("crumbs");
+const panes = document.getElementById("panes");
+const parentPane = document.getElementById("parent");
+const herePane = document.getElementById("here");
+const pickNote = document.getElementById("picknote");
+const dots = document.getElementById("dots");
+
+/** Where the chooser is, and what the host said about it. */
+let standing = { path: null, listing: null };
+
+/** Ask the host for a level and draw it, keeping the reader's place. */
+async function walk(path) {
+  say("");
+  try {
+    const listing = await window.TETANUS_CALL("host.listDirectory", path ? { path } : {});
+    standing = { path: listing.path, listing };
+    // The parent leg is best-effort: a level whose parent cannot be read is
+    // still a level worth showing, and the pane simply is not there.
+    let above = null;
+    const parent = listing.crumbs.length > 1 ? listing.crumbs[listing.crumbs.length - 2] : null;
+    if (parent) {
+      try {
+        above = await window.TETANUS_CALL("host.listDirectory", { path: parent.path });
+      } catch { above = null; }
+    }
+    draw(listing, above);
+  } catch (err) {
+    say(err.message, true);
+  }
+}
+
+/** One level, and its parent beside it when there is one. */
+function draw(listing, above) {
+  crumbsBar.replaceChildren(...listing.crumbs.map((crumb) => {
+    const jump = document.createElement("button");
+    jump.className = "row";
+    jump.style.width = "auto";
+    jump.textContent = crumb.name;
+    jump.onclick = () => walk(crumb.path);
+    return jump;
+  }));
+
+  panes.classList.toggle("alone", !above);
+  parentPane.hidden = !above;
+  if (above) {
+    // The level we came from is marked in its parent, so the reader can see
+    // where they are standing rather than work it out from the crumbs.
+    fill(parentPane, above, listing.path);
+  }
+  fill(herePane, listing, null);
+
+  const cut = listing.truncated ? " · the level is longer than this" : "";
+  say(`${listing.entries.length} directories${cut}`);
+}
+
+/** Draw one pane's rows, under the reader's own hidden-files choice. */
+function fill(pane, listing, mark) {
+  const rows = listing.entries.filter((row) => dots.checked || !row.hidden);
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "row dot";
+    empty.textContent = listing.entries.length ? "· every entry here is hidden" : "· nothing here";
+    pane.replaceChildren(empty);
+    return;
+  }
+  pane.replaceChildren(...rows.map((row) => {
+    const go = document.createElement("button");
+    go.className = "row" + (row.hidden ? " dot" : "") + (row.path === mark ? " here" : "");
+    go.textContent = row.name;
+    go.onclick = () => walk(row.path);
+    return go;
+  }));
+}
+
+/** A sentence under the panes: what the level is, or what went wrong. */
+function say(text, bad) {
+  pickNote.textContent = text;
+  pickNote.classList.toggle("fault", Boolean(bad));
+}
+
+document.getElementById("pick").onclick = () => {
+  picker.showModal();
+  // No path: the host opens at the account's home, which is where a chooser
+  // that was not told where to start should start.
+  walk(standing.path);
+};
+document.getElementById("pickclose").onclick = () => picker.close();
+dots.onchange = () => { if (standing.listing) walk(standing.path); };
+
+document.getElementById("newdir").onclick = async () => {
+  const name = prompt("New folder in " + (standing.path || "?"));
+  if (!name) return;
+  try {
+    await window.TETANUS_CALL("host.createDirectory", { path: standing.path, name });
+    await walk(standing.path);
+  } catch (err) {
+    // The host's three failures each say what to do next, so its sentence is
+    // shown rather than replaced with one of this page's own.
+    say(err.message, true);
+  }
+};
