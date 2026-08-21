@@ -167,6 +167,16 @@ enum Cmd {
         /// this is the directory holding the page's `index.html`.
         #[arg(long, value_name = "PATH", default_value = "web/app")]
         frontend: PathBuf,
+        /// Secret a reader's URL must carry to reach the protocol. Required
+        /// for a bind that is not loopback, per contract §4.1.2, unless
+        /// `--open-to-anyone` says the opposite out loud.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+        /// Serve the protocol to anybody who can reach this machine, with no
+        /// token. Only meaningful with a non-loopback `--listen`, and only
+        /// ever right for a demonstration on a network you trust.
+        #[arg(long, conflicts_with = "token")]
+        open_to_anyone: bool,
     },
     /// Print version/build info
     Info,
@@ -663,7 +673,19 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             dir,
             listen,
             frontend,
-        } => web::web(policy, &document, dir, &listen, &frontend),
+            token,
+            open_to_anyone,
+        } => web::web(
+            policy,
+            &document,
+            dir,
+            &listen,
+            &frontend,
+            web::Posture {
+                token,
+                open_to_anyone,
+            },
+        ),
         Cmd::Info => {
             // Counted from the same two functions the catalogue pages print,
             // so the number here and the list there cannot disagree.

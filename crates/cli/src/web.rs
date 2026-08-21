@@ -38,6 +38,29 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 
 use crate::{fail, render, settings, Policy, Reported};
 
+/// Who is allowed to reach the protocol behind the page.
+///
+/// §4.1.2 is emphatic that a carrier off loopback authenticates, and this
+/// subcommand offers the two honest ways to do it.
+///
+/// **A stated token** is the strong one. It rides in the reader's own URL and
+/// never in the page, so a stranger who can reach the port is served the same
+/// HTML and still cannot dial the socket.
+///
+/// **`--open-to-anyone`** is the weak one, for a demonstration on a network
+/// somebody trusts. It mints a token per boot and publishes it in the page's
+/// own manifest, so any reader of the page can dial and a reader who never
+/// fetched it cannot. Be exact about what that is worth: it closes the attack
+/// §4.1.2 actually names - a page the user happens to be visiting driving this
+/// agent, which cannot read our HTML because of the same-origin policy - and
+/// it does not pretend to stop somebody who can simply fetch the page. The
+/// boundary there is the port, and the flag says so out loud, which is the
+/// point of making it a flag rather than a default.
+pub struct Posture {
+    pub token: Option<String>,
+    pub open_to_anyone: bool,
+}
+
 /// Where the protocol lives on the page's own server.
 ///
 /// Under `/api` because that is the prefix upstream's connection plugin owns,
@@ -51,6 +74,7 @@ pub fn web(
     dir: Option<PathBuf>,
     listen: &str,
     frontend: &Path,
+    posture: Posture,
 ) -> Result<(), Reported> {
     let mut err = policy.stderr();
     // The frontend is checked before anything is bound. A server that came up
@@ -74,6 +98,22 @@ pub fn web(
         .map_err(|err| crate::report(policy, &err.to_string(), None))?;
 
     let (host, page, pages) = bound(policy, &runtime, listen)?;
+    // §4.1.2: a deployment bound off-box says so, rather than getting there by
+    // omission. The wildcard is every interface, so the protocol behind it is
+    // reachable by anybody who can route to this machine, and the contract's
+    // answer to that is a token rather than a hope.
+    if host == "0.0.0.0" && posture.token.is_none() && !posture.open_to_anyone {
+        return Err(fail(
+            policy,
+            &RpcError::new(
+                ErrorCode::InvalidParams,
+                "a bind on 0.0.0.0 needs --token, or --open-to-anyone to say \
+                 out loud that the protocol is open to everybody who can reach \
+                 this machine",
+            )
+            .with_data(serde_json::json!({ "field": "token" })),
+        ));
+    }
 
     // The address a reader can reach, which is not always the one that was
     // bound: `0.0.0.0` is every interface and nobody's hostname.
@@ -87,19 +127,40 @@ pub fn web(
             &RpcError::new(ErrorCode::Internal, taken.to_string()),
         )
     })?;
+    // Minted here so both the carrier and the manifest carry the same one.
+    let secret = match (&posture.token, posture.open_to_anyone) {
+        (Some(token), _) => Some(token.clone()),
+        (None, true) => Some(minted()),
+        (None, false) => None,
+    };
+    let auth = origins(&host, page.address().port(), secret.clone());
     let address = format!("ws://{}{CARRIER}", reachable(page.address().port()));
     let _manifest = page.tap_index(
         Manifest {
             carrier: address.clone(),
             protocol: tetanus_protocol::PROTOCOL_VERSION.to_string(),
+            // Only the published posture puts it here. A stated token stays in
+            // the reader's URL, which is the whole of its strength.
+            token: match posture.open_to_anyone {
+                true => secret.clone(),
+                false => None,
+            },
         }
         .tap(),
     );
 
+    // The token rides in the reader's own URL and never in the page, so a
+    // stranger who can reach the port gets the page and no way to use it,
+    // while the reader who was handed this line is admitted. It is written
+    // here, once, because the operator is the only one who can pass it on.
+    let opened = match &posture.token {
+        Some(token) => format!("http://{}/?token={token}", reachable(page.address().port())),
+        None => format!("http://{}", reachable(page.address().port())),
+    };
     render::web::banner(
         &mut err,
         &render::web::Serving {
-            page: &format!("http://{}", reachable(page.address().port())),
+            page: &opened,
             carrier: &address,
             sessions: &booted.sessions_root,
             frontend: &frontend.display().to_string(),
@@ -125,7 +186,6 @@ pub fn web(
     // `localhost` and `127.0.0.1` are different origins to a browser and the
     // same machine to everybody else, so both are named when the bind is
     // loopback.
-    let auth = origins(&host, page.address().port());
 
     // The socket seat. `crates/rpc` is handed the connection with nothing read
     // off it, so its handshake, its origin check and its token check all run
@@ -203,8 +263,14 @@ fn bound(
 /// the addresses this server can be opened on. Nothing else is added: an
 /// origin that is not one of ours is the cross-site case §4.1.2 exists to
 /// refuse, and a wildcard here would be that refusal deleted.
-fn origins(host: &str, port: u16) -> Arc<tetanus_rpc::auth::Auth> {
-    let mut auth = tetanus_rpc::auth::Auth::default();
+fn origins(host: &str, port: u16, secret: Option<String>) -> Arc<tetanus_rpc::auth::Auth> {
+    // A token turns off the loopback rule, because it is the stronger check:
+    // §4.1.2's postures are token-or-loopback, and a deployment that named a
+    // secret has said which one it means.
+    let mut auth = match secret {
+        Some(token) => tetanus_rpc::auth::Auth::require_token(token),
+        None => tetanus_rpc::auth::Auth::default(),
+    };
     let names = match host {
         "0.0.0.0" => vec![hostname(), "localhost".into(), "127.0.0.1".into()],
         host => vec![host.to_string(), "localhost".into()],
@@ -216,6 +282,21 @@ fn origins(host: &str, port: u16) -> Arc<tetanus_rpc::auth::Auth> {
         auth = auth.allow_origin(format!("https://{name}:{port}"));
     }
     Arc::new(auth)
+}
+
+/// A secret nobody typed, for the posture that admits every reader of the
+/// page.
+///
+/// The clock and the process are what this build can mint from without a
+/// dependency on a random source, and they are enough for what this token
+/// does: it is not keeping a determined stranger out - the page publishes it -
+/// it is keeping a page the reader is merely visiting from guessing it.
+fn minted() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("{:x}{:x}", now, std::process::id())
 }
 
 /// The name a reader off this machine reaches it by.
@@ -235,7 +316,7 @@ mod tests {
     /// wildcard here would be that refusal deleted.
     #[test]
     fn only_the_origins_this_server_serves_are_allowed() {
-        let loopback = origins("127.0.0.1", 5300);
+        let loopback = origins("127.0.0.1", 5300, None);
         let allows = |auth: &tetanus_rpc::auth::Auth, origin: &str| {
             auth.admit(
                 std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -267,7 +348,7 @@ mod tests {
     #[test]
     fn a_wildcard_bind_allows_the_name_a_reader_reaches_it_by() {
         std::env::set_var("TETANUS_PUBLIC_HOST", "example.test");
-        let wildcard = origins("0.0.0.0", 5300);
+        let wildcard = origins("0.0.0.0", 5300, None);
         std::env::remove_var("TETANUS_PUBLIC_HOST");
 
         let allows = |auth: &tetanus_rpc::auth::Auth, origin: &str| {

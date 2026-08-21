@@ -34,10 +34,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 mod frontend;
+mod picker;
 mod respond;
 mod route;
 
 pub use frontend::Frontend;
+pub use picker::{Browse, Capability, Entry, Listing, PickerError, MAX_ENTRIES};
 pub use respond::{Response, Status};
 pub use route::{answered, Answering, Handler, Pattern, Request, Route};
 
@@ -94,6 +96,10 @@ struct Table {
 pub struct Manifest {
     pub carrier: String,
     pub protocol: String,
+    /// The secret a reader of this page may dial the carrier with, when the
+    /// deployment's posture is to admit every reader of the page. `None` when
+    /// the secret is the reader's own and belongs in their URL instead.
+    pub token: Option<String>,
 }
 
 impl Manifest {
@@ -103,11 +109,19 @@ impl Manifest {
     /// `</` is escaped inside it: a value containing `</script>` would
     /// otherwise close the tag and the rest of the manifest would be markup.
     pub fn tap(self) -> Tap {
-        let said = format!(
-            "{{\"carrier\":{},\"protocol\":{}}}",
-            quoted(&self.carrier),
-            quoted(&self.protocol)
-        );
+        let said = match &self.token {
+            Some(token) => format!(
+                "{{\"carrier\":{},\"protocol\":{},\"token\":{}}}",
+                quoted(&self.carrier),
+                quoted(&self.protocol),
+                quoted(token)
+            ),
+            None => format!(
+                "{{\"carrier\":{},\"protocol\":{}}}",
+                quoted(&self.carrier),
+                quoted(&self.protocol)
+            ),
+        };
         let script = format!("<script>window.TETANUS_BOOT = {said};</script>");
         Arc::new(move |html| match html.find("</head>") {
             Some(at) => {

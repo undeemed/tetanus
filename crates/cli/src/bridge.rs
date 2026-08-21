@@ -45,7 +45,10 @@
 
 use std::sync::Arc;
 
-use tetanus_host::{Handler, Pattern, Registered, Request, Response, Status, Taken, WebServer};
+use tetanus_host::{
+    Browse, Handler, Listing, Pattern, PickerError, Registered, Request, Response, Status, Taken,
+    WebServer,
+};
 use tetanus_protocol::methods::{AgentStatusPush, Engine, EventSink, SessionEventPush};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_rpc::Codec;
@@ -56,18 +59,31 @@ pub const PREFIX: &str = "/api/";
 /// The media type every call must declare, per the argument above.
 const JSON: &str = "application/json";
 
+/// The methods that are the host's own rather than the engine's.
+///
+/// Upstream splits its gateway the same way - `HostApi` beside `SessionsApi` -
+/// and the split is real: choosing a directory is a question about the machine
+/// this server runs on, not about a conversation. Routing them here rather
+/// than through the codec keeps the engine's method table the contract's, with
+/// nothing in it that the engine cannot answer.
+mod host {
+    pub const LIST: &str = "host.listDirectory";
+    pub const CREATE: &str = "host.createDirectory";
+}
+
 /// Mount the bridge on a carrier.
 pub fn mount(server: &WebServer, engine: Arc<dyn Engine>) -> Result<Registered, Taken> {
     let codec = Arc::new(Codec::new(engine));
+    let picker = Browse::default();
     let handler: Handler = Arc::new(move |request| {
         let codec = Arc::clone(&codec);
-        Box::pin(async move { answer(codec, request).await })
+        Box::pin(async move { answer(codec, picker, request).await })
     });
     server.register(Pattern::Prefix, PREFIX, handler)
 }
 
 /// One call, from the request that carried it to the answer that goes back.
-async fn answer(codec: Arc<Codec>, request: Request) -> Response {
+async fn answer(codec: Arc<Codec>, picker: Browse, request: Request) -> Response {
     if request.method != "POST" {
         return refused(
             Status::MethodNotAllowed,
@@ -117,6 +133,13 @@ async fn answer(codec: Arc<Codec>, request: Request) -> Response {
         },
     };
 
+    // The host's own methods are answered here, before the codec sees a frame:
+    // they are questions about this machine, and the engine's method table
+    // stays the contract's.
+    if let Some(answer) = picked(picker, method, &params) {
+        return answer;
+    }
+
     // The id is the carrier's, not the caller's: one POST is one call, and the
     // answer goes back down the connection it came up. A caller that wants to
     // correlate has the response body in its hand.
@@ -141,6 +164,105 @@ async fn answer(codec: Arc<Codec>, request: Request) -> Response {
             "that call has no answer over this carrier",
         ),
     }
+}
+
+/// The two host methods, or `None` for a call that is not one of them.
+fn picked(picker: Browse, method: &str, params: &serde_json::Value) -> Option<Response> {
+    match method {
+        host::LIST => {
+            // An absent path is the account's home, which is where a chooser
+            // that did not say where to open should open.
+            let path = params.get("path").and_then(|path| path.as_str());
+            Some(match picker.list(path.map(std::path::Path::new)) {
+                Ok(listing) => result(listed(&listing)),
+                Err(err) => result_error(&refusal(&err)),
+            })
+        }
+        host::CREATE => {
+            let (Some(path), Some(name)) = (
+                params.get("path").and_then(|path| path.as_str()),
+                params.get("name").and_then(|name| name.as_str()),
+            ) else {
+                return Some(result_error(&RpcError::new(
+                    ErrorCode::InvalidParams,
+                    "a directory is made at a path, under a name",
+                )));
+            };
+            Some(match picker.create(std::path::Path::new(path), name) {
+                Ok(entry) => result(serde_json::json!({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "hidden": entry.hidden,
+                })),
+                Err(err) => result_error(&refusal(&err)),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A listing, as the wire carries it.
+fn listed(listing: &Listing) -> serde_json::Value {
+    let rows = |entries: &[tetanus_host::Entry]| {
+        entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "hidden": entry.hidden,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "path": listing.path,
+        "entries": rows(&listing.entries),
+        "crumbs": rows(&listing.crumbs),
+        "truncated": listing.truncated,
+    })
+}
+
+/// The picker's three failures, mapped one to one onto codes a caller can act
+/// on - which is what upstream's gateway does with the same three.
+///
+/// The subject path travels in `data`, because a chooser showing "cannot be
+/// read" with nothing named is a dialog the reader cannot argue with.
+fn refusal(err: &PickerError) -> RpcError {
+    let (code, path) = match err {
+        // A path that cannot be read is the filesystem's answer, which §4.5
+        // spells `Io` and gives a `path` field for exactly this.
+        PickerError::Unreadable(path) => (ErrorCode::Io, path),
+        // Already there is not a fault of the machine: the caller named a
+        // directory that exists, and the argument is what was wrong.
+        PickerError::Exists(path) => (ErrorCode::InvalidParams, path),
+        PickerError::CreateFailed(path) => (ErrorCode::Io, path),
+    };
+    RpcError::new(code, err.to_string())
+        .with_data(serde_json::json!({ "path": path.display().to_string() }))
+}
+
+/// A host method's answer, in the envelope every other answer uses.
+fn result(value: serde_json::Value) -> Response {
+    envelope(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": value }))
+}
+
+/// The same, for one that failed. Still 200: the carrier worked.
+fn result_error(error: &RpcError) -> Response {
+    envelope(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": serde_json::to_value(error).unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+/// The bytes of an answer.
+fn envelope(body: serde_json::Value) -> Response {
+    Response::body(
+        Status::Ok,
+        "application/json; charset=utf-8",
+        serde_json::to_vec(&body).unwrap_or_default(),
+    )
 }
 
 /// The sink for a carrier with nowhere to push.

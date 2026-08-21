@@ -8,6 +8,12 @@
 //! rather than the pathname; that an upgrade handler is handed the socket
 //! with nothing read off it; and the two addresses this server will bind.
 //!
+//! For the directory picker: that a listing is directories only, name-sorted,
+//! with dead links left out and hidden reported rather than applied; that the
+//! crumbs are the chain from the root; that a level past the bound is cut and
+//! says so; that creation is one directory and never a tree; and that a path
+//! which is not fully qualified is refused.
+//!
 //! For the frontend on that seat: that a file is served as what it is and an
 //! unknown extension as bytes; that a miss is the page with 200 rather than a
 //! 404; that nothing outside the dist root is served, written, escaped or
@@ -20,6 +26,7 @@
 //! Environmental needs: a loopback port the operating system picks. No case
 //! binds a fixed port, so the suite runs beside anything.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
@@ -418,6 +425,7 @@ async fn the_manifest_reaches_the_page_as_data() {
         Manifest {
             carrier: "ws://127.0.0.1:9/</script><b>".into(),
             protocol: "1.0".into(),
+            token: None,
         }
         .tap(),
     );
@@ -429,4 +437,159 @@ async fn the_manifest_reaches_the_page_as_data() {
     assert!(boot < head, "the manifest is outside the head: {said}");
     assert!(!said.contains("/</script><b>"), "unescaped: {said}");
     assert!(said.contains("\\u003c/script>"), "{said}");
+}
+
+/// A tree with a hidden directory, a file, a good link and a broken one.
+fn tree() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for name in ["beta", "alpha", ".hidden"] {
+        std::fs::create_dir(dir.path().join(name)).expect("a directory");
+    }
+    std::fs::write(dir.path().join("a-file.txt"), "not a directory").expect("a file");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(dir.path().join("alpha"), dir.path().join("link-good"))
+            .expect("a good link");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join("link-dead"))
+            .expect("a dead link");
+    }
+    dir
+}
+
+/// TC-HOST-PICK-1: one level of a real tree.
+/// Expected: directories only, name-sorted, a link to a directory followed and
+/// a link to nothing left out - the probe failing is what "not enterable"
+/// means. Hidden is reported and not applied, because whether to show a dot
+/// directory is the reader's choice and not the host's.
+#[test]
+fn a_listing_is_directories_only_and_says_which_are_hidden() {
+    let dir = tree();
+    let listed = Browse::default().list(Some(dir.path())).expect("it lists");
+
+    let names: Vec<&str> = listed.entries.iter().map(|row| row.name.as_str()).collect();
+    assert!(!names.contains(&"a-file.txt"), "a file got in: {names:?}");
+    assert!(
+        !names.contains(&"link-dead"),
+        "a dead link got in: {names:?}"
+    );
+    #[cfg(unix)]
+    assert!(
+        names.contains(&"link-good"),
+        "a good link was dropped: {names:?}"
+    );
+    assert!(names.contains(&".hidden"), "{names:?}");
+
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "the level is not name-sorted");
+
+    let hidden = listed
+        .entries
+        .iter()
+        .find(|row| row.name == ".hidden")
+        .expect("the dot directory");
+    assert!(hidden.hidden, "the dot convention was not reported");
+    assert!(!listed.truncated);
+}
+
+/// TC-HOST-PICK-2: the ancestor chain.
+/// Expected: root first, every crumb a path that can be listed, and the root
+/// labelled by its own path rather than by an empty name - a crumb with no
+/// text is a target nobody can click.
+#[test]
+fn the_crumbs_are_the_chain_from_the_root() {
+    let dir = tree();
+    let listed = Browse::default()
+        .list(Some(&dir.path().join("alpha")))
+        .expect("it lists");
+
+    let first = listed.crumbs.first().expect("a root crumb");
+    assert!(!first.name.is_empty(), "the root crumb has no label");
+    assert_eq!(
+        listed.crumbs.last().map(|crumb| crumb.path.clone()),
+        Some(dir.path().join("alpha"))
+    );
+    for crumb in &listed.crumbs {
+        assert!(crumb.path.is_absolute(), "{crumb:?}");
+    }
+}
+
+/// TC-HOST-PICK-3: a level with more children than the bound.
+/// Expected: the name-sorted head, cut to the bound, and `truncated` set so
+/// the client can say the level is incomplete. Memory stays with the bound
+/// rather than with the directory.
+#[test]
+fn a_level_bigger_than_the_bound_is_cut_and_says_so() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for at in 0..40 {
+        std::fs::create_dir(dir.path().join(format!("d{at:03}"))).expect("a directory");
+    }
+    let browse = Browse {
+        max_entries: Some(10),
+    };
+
+    let listed = browse.list(Some(dir.path())).expect("it lists");
+
+    assert_eq!(listed.entries.len(), 10, "the bound was not applied");
+    assert!(listed.truncated, "a cut level did not say so");
+    assert_eq!(listed.entries[0].name, "d000", "not the sorted head");
+}
+
+/// TC-HOST-PICK-4: making a directory - the ordinary case, one already there,
+/// a missing parent, and a name that is not one segment.
+/// Expected: the three failures upstream's wire codes name, and no recursion:
+/// a missing parent is a real failure and not a level to invent, because a
+/// reader who mistyped a segment should be told rather than handed a tree.
+#[test]
+fn creation_is_one_directory_and_never_a_tree() {
+    let dir = tree();
+    let browse = Browse::default();
+
+    let made = browse.create(dir.path(), "new-one").expect("it is made");
+    assert!(made.path.is_dir());
+
+    assert_eq!(
+        browse.create(dir.path(), "alpha"),
+        Err(PickerError::Exists(dir.path().join("alpha")))
+    );
+    assert!(matches!(
+        browse.create(&dir.path().join("no-such-parent"), "child"),
+        Err(PickerError::CreateFailed(_))
+    ));
+    for bad in ["", "  ", "a/b", "..", "."] {
+        assert!(
+            matches!(
+                browse.create(dir.path(), bad),
+                Err(PickerError::CreateFailed(_))
+            ),
+            "{bad:?} was accepted as a name"
+        );
+    }
+}
+
+/// TC-HOST-PICK-5: a path that is not fully qualified.
+/// Expected: refused, both for listing and for creation. A relative path would
+/// be rebased under whatever directory the host process happens to be in,
+/// which is a different place from the one the reader named.
+#[test]
+fn a_path_that_is_not_fully_qualified_is_refused() {
+    let browse = Browse::default();
+
+    assert_eq!(
+        browse.list(Some(Path::new("relative/thing"))),
+        Err(PickerError::Unreadable(PathBuf::from("relative/thing")))
+    );
+    assert!(matches!(
+        browse.create(Path::new("relative/thing"), "child"),
+        Err(PickerError::Unreadable(_))
+    ));
+}
+
+/// TC-HOST-PICK-6: the capability a consumer asks about first.
+/// Expected: `browse`. The seam is worth keeping with one backend behind it,
+/// because a consumer that switches on the kind hides the feature for a host
+/// it does not understand rather than failing against it.
+#[test]
+fn the_backend_says_what_it_can_do() {
+    assert_eq!(Browse::default().capability(), Capability::Browse);
 }

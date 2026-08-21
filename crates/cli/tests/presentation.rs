@@ -2211,3 +2211,83 @@ fn the_api_bridge_answers_the_published_contract_over_http() {
     assert_eq!(unknown, 200, "{nothing}");
     assert!(nothing.contains("-32601"), "{nothing}");
 }
+
+/// TC-CLI-WEB-6: the host's own methods on the bridge - a listing, a
+/// creation, one that is already there, and a path that is not qualified.
+/// Expected: the picker's three failures arrive as codes with the subject path
+/// in `data`, because a chooser saying "cannot be read" with nothing named is
+/// a dialog the reader cannot argue with. The carrier says 200 throughout: the
+/// filesystem refusing is an answer, not a transport fault.
+#[test]
+fn the_bridge_answers_the_host_methods_too() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+    std::fs::create_dir(dir.path().join("already")).expect("a directory");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["web", "--frontend", "app", "--listen", "127.0.0.1:5398"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let root = dir.path().display().to_string();
+    let (listed, listing) = over_http(
+        5398,
+        "host.listDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}"}}"#),
+    );
+    let (made, created) = over_http(
+        5398,
+        "host.createDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}","name":"fresh"}}"#),
+    );
+    let (again, exists) = over_http(
+        5398,
+        "host.createDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}","name":"already"}}"#),
+    );
+    let (relative, unqualified) = over_http(
+        5398,
+        "host.listDirectory",
+        "application/json",
+        r#"{"path":"not/absolute"}"#,
+    );
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(listed, 200, "{listing}");
+    assert!(listing.contains("\"crumbs\""), "{listing}");
+    assert!(listing.contains("already"), "{listing}");
+    // A listing is directories only, so the frontend directory is in it and
+    // its index.html is not.
+    assert!(!listing.contains("index.html"), "{listing}");
+
+    assert_eq!(made, 200, "{created}");
+    assert!(dir.path().join("fresh").is_dir(), "{created}");
+
+    assert_eq!(again, 200, "{exists}");
+    assert!(
+        exists.contains("-32602"),
+        "already there is a bad argument: {exists}"
+    );
+    assert!(
+        exists.contains("already"),
+        "the subject path is missing: {exists}"
+    );
+
+    assert_eq!(relative, 200, "{unqualified}");
+    assert!(unqualified.contains("-32009"), "{unqualified}");
+    assert!(unqualified.contains("not/absolute"), "{unqualified}");
+}

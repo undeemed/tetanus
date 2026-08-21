@@ -36,7 +36,18 @@ const query = new URLSearchParams(location.search);
 // is told what the assembly bound; `?ws=` stays because a page opened
 // against a server somebody else started is a real thing to do.
 const manifest = window.TETANUS_BOOT || {};
-const address = query.get("ws") || manifest.carrier || window.TETANUS_WS || "";
+const carrier = query.get("ws") || manifest.carrier || window.TETANUS_WS || "";
+// A deployment that is not loopback needs a token, and it is in the reader's
+// own URL rather than in the page: a stranger who can reach the port is served
+// the same HTML and cannot dial the socket with it. The page passes on what it
+// was opened with, and adds nothing when there is nothing to add.
+// The reader's own URL first: a stated token is theirs and never ours to
+// publish. The manifest's is the demonstration posture, where the deployment
+// has said out loud that every reader of this page may dial.
+const token = query.get("token") || manifest.token || "";
+const address = carrier && token
+  ? carrier + (carrier.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
+  : carrier;
 let session = query.get("session") || null;
 
 let journal = "";
