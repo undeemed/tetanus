@@ -154,29 +154,48 @@ impl CodeRuntime for LocalRuntime {
         // The wall-clock ceiling is enforced from out here as well as inside
         // the evaluator, because a host binding that never returns is not
         // something the evaluator can interrupt: it is not running.
-        let ceiling = budget.wall + budget.reap_grace;
-        // Whether the worker is known to have finished. A thread that has
-        // answered can be joined at once; one that has not is inside a host
-        // binding, and joining it would make this call wait exactly as long as
-        // the binding does - which is the thing the ceiling exists to prevent.
-        let mut finished = true;
-        let settled = match tokio::time::timeout(ceiling, wait).await {
-            Ok(Ok(mut result)) => {
-                result.duration = started.elapsed();
-                result
-            }
-            // The worker dropped its side without sending: it panicked, which
-            // is this substrate's version of a worker that died.
-            Ok(Err(_)) => RunResult {
+        let (settled, finished) = settle(wait, budget, started, &abort).await;
+        reap(worker, finished);
+        Ok(settled)
+    }
+
+    async fn shutdown(&self) {
+        self.closing.stop();
+    }
+}
+
+/// Wait for the worker's answer, or stop waiting.
+///
+/// Answers what to report and whether the worker is known to have finished -
+/// a thread that has answered can be joined at once, and one that has not is
+/// inside a host binding, where joining would make this call wait exactly as
+/// long as the binding does.
+async fn settle(
+    wait: tokio::sync::oneshot::Receiver<RunResult>,
+    budget: Budget,
+    started: Instant,
+    abort: &Abort,
+) -> (RunResult, bool) {
+    match tokio::time::timeout(budget.wall + budget.reap_grace, wait).await {
+        Ok(Ok(mut result)) => {
+            result.duration = started.elapsed();
+            (result, true)
+        }
+        // The worker dropped its side without sending: it panicked, which is
+        // this substrate's version of a worker that died.
+        Ok(Err(_)) => (
+            RunResult {
                 duration: started.elapsed(),
                 ..RunResult::failed(
                     FailureKind::WorkerExit,
                     "the worker running this program stopped without answering",
                 )
             },
-            Err(_) => {
-                abort.stop();
-                finished = false;
+            true,
+        ),
+        Err(_) => {
+            abort.stop();
+            (
                 RunResult {
                     duration: started.elapsed(),
                     ..RunResult::failed(
@@ -187,35 +206,33 @@ impl CodeRuntime for LocalRuntime {
                             budget.reap_grace.as_millis()
                         ),
                     )
-                }
-            }
-        };
-
-        if finished {
-            // It has answered, so joining it costs nothing and reclaims the
-            // thread here, where a caller can see that it happened.
-            let reaped = tokio::task::spawn_blocking(move || worker.join()).await;
-            if matches!(reaped, Ok(Err(_))) {
-                tracing::error!("a code worker panicked; the run is reported as worker-exit");
-            }
-        } else {
-            // Stuck in a host binding. It is counted as live for as long as
-            // that lasts - `live_workers` tells the truth rather than a
-            // comfortable number - and this reaps it whenever the binding
-            // finally returns, so the thread is not leaked either.
-            std::thread::Builder::new()
-                .name("tetanus-code-reaper".to_string())
-                .spawn(move || {
-                    let _ = worker.join();
-                })
-                .ok();
+                },
+                false,
+            )
         }
-        Ok(settled)
     }
+}
 
-    async fn shutdown(&self) {
-        self.closing.stop();
+/// Reclaim the worker thread.
+///
+/// A worker that has answered is joined here, where a caller can see that it
+/// happened. One still inside a host binding is joined in the background: it
+/// stays counted as live for as long as that lasts, because `live_workers`
+/// should tell the truth rather than a comfortable number, and this is what
+/// stops the thread being leaked when the binding finally returns.
+fn reap(worker: std::thread::JoinHandle<()>, finished: bool) {
+    if finished {
+        if worker.join().is_err() {
+            tracing::error!("a code worker panicked; the run is reported as worker-exit");
+        }
+        return;
     }
+    std::thread::Builder::new()
+        .name("tetanus-code-reaper".to_string())
+        .spawn(move || {
+            let _ = worker.join();
+        })
+        .ok();
 }
 
 /// One evaluation, on the worker thread.

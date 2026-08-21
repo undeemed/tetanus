@@ -270,58 +270,7 @@ impl CodeRuntime for RemoteRuntime {
             Err(fault) => return Ok(remote_failure(&fault, started)),
         };
 
-        // Poll until it settles, the caller gives up, or the ceiling passes.
-        loop {
-            if request.abort.is_stopped() {
-                return Ok(self
-                    .stop(&job, started, FailureKind::Abort, "the run was aborted")
-                    .await);
-            }
-            if started.elapsed() > self.config.wall {
-                return Ok(self
-                    .stop(
-                        &job,
-                        started,
-                        FailureKind::Timeout,
-                        &format!(
-                            "the remote run passed its ceiling of {}ms",
-                            self.config.wall.as_millis()
-                        ),
-                    )
-                    .await);
-            }
-
-            match self.provider.poll(&job).await {
-                Ok(JobState::Running) => tokio::time::sleep(self.config.poll_every).await,
-                Ok(JobState::Done) => {
-                    return Ok(match self.provider.result(&job).await {
-                        Ok(mut result) => {
-                            // The provider measures the program; this measures
-                            // the round trip, which is what the caller waited.
-                            result.duration = started.elapsed();
-                            result
-                        }
-                        Err(fault) => remote_failure(&fault, started),
-                    });
-                }
-                Ok(JobState::Cancelled) => {
-                    return Ok(RunResult {
-                        duration: started.elapsed(),
-                        ..RunResult::failed(FailureKind::Abort, "the remote run was cancelled")
-                    })
-                }
-                // The sandbox died under the job: not the program's failure,
-                // and not a timeout either.
-                Ok(JobState::Gone(why)) => {
-                    self.forget().await;
-                    return Ok(RunResult {
-                        duration: started.elapsed(),
-                        ..RunResult::failed(FailureKind::WorkerExit, why)
-                    });
-                }
-                Err(fault) => return Ok(remote_failure(&fault, started)),
-            }
-        }
+        Ok(self.await_job(&job, &request, started).await)
     }
 
     async fn shutdown(&self) {
@@ -342,6 +291,57 @@ impl CodeRuntime for RemoteRuntime {
 }
 
 impl RemoteRuntime {
+    /// Poll until the job settles, the caller gives up, or the ceiling passes.
+    async fn await_job(&self, job: &JobId, request: &RunRequest, started: Instant) -> RunResult {
+        loop {
+            if request.abort.is_stopped() {
+                return self
+                    .stop(job, started, FailureKind::Abort, "the run was aborted")
+                    .await;
+            }
+            if started.elapsed() > self.config.wall {
+                let why = format!(
+                    "the remote run passed its ceiling of {}ms",
+                    self.config.wall.as_millis()
+                );
+                return self.stop(job, started, FailureKind::Timeout, &why).await;
+            }
+            match self.provider.poll(job).await {
+                Ok(JobState::Running) => tokio::time::sleep(self.config.poll_every).await,
+                Ok(JobState::Done) => return self.fetch(job, started).await,
+                Ok(JobState::Cancelled) => {
+                    return RunResult {
+                        duration: started.elapsed(),
+                        ..RunResult::failed(FailureKind::Abort, "the remote run was cancelled")
+                    }
+                }
+                // The sandbox died under the job: not the program's failure,
+                // and not a timeout either.
+                Ok(JobState::Gone(why)) => {
+                    self.forget().await;
+                    return RunResult {
+                        duration: started.elapsed(),
+                        ..RunResult::failed(FailureKind::WorkerExit, why)
+                    };
+                }
+                Err(fault) => return remote_failure(&fault, started),
+            }
+        }
+    }
+
+    /// Fetch what a finished job produced.
+    async fn fetch(&self, job: &JobId, started: Instant) -> RunResult {
+        match self.provider.result(job).await {
+            Ok(mut result) => {
+                // The provider measures the program; this measures the round
+                // trip, which is what the caller actually waited.
+                result.duration = started.elapsed();
+                result
+            }
+            Err(fault) => remote_failure(&fault, started),
+        }
+    }
+
     /// Cancel a job and report why this client stopped waiting for it.
     ///
     /// The cancel is best effort: the caller has already stopped waiting, and

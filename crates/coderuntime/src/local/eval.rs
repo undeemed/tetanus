@@ -384,27 +384,8 @@ fn run_statement(statement: &Stmt, state: &mut Run) -> Result<(), Stop> {
             let value = eval(value, state)?;
             assign_to(target, value, state)
         }
-        Stmt::If { test, then, other } => {
-            let taken = eval(test, state)?.truthy();
-            state.push_scope();
-            let outcome = if taken {
-                block(then, state)
-            } else {
-                block(other, state)
-            };
-            state.pop_scope();
-            outcome
-        }
-        Stmt::While { test, body } => loop {
-            state.step()?;
-            if !eval(test, state)?.truthy() {
-                return Ok(());
-            }
-            state.push_scope();
-            let outcome = block(body, state);
-            state.pop_scope();
-            outcome?;
-        },
+        Stmt::If { test, then, other } => run_if(test, then, other, state),
+        Stmt::While { test, body } => run_while(test, body, state),
         Stmt::Return(value) => {
             let value = match value {
                 Some(expression) => eval(expression, state)?,
@@ -413,6 +394,33 @@ fn run_statement(statement: &Stmt, state: &mut Run) -> Result<(), Stop> {
             Err(Stop::Return(value))
         }
         Stmt::Eval(expression) => eval(expression, state).map(|_| ()),
+    }
+}
+
+fn run_if(test: &Expr, then: &[Stmt], other: &[Stmt], state: &mut Run) -> Result<(), Stop> {
+    let taken = eval(test, state)?.truthy();
+    state.push_scope();
+    let outcome = if taken {
+        block(then, state)
+    } else {
+        block(other, state)
+    };
+    state.pop_scope();
+    outcome
+}
+
+fn run_while(test: &Expr, body: &[Stmt], state: &mut Run) -> Result<(), Stop> {
+    loop {
+        // Every iteration spends a step of its own, so a loop with an empty
+        // body still runs out of fuel rather than spinning for free.
+        state.step()?;
+        if !eval(test, state)?.truthy() {
+            return Ok(());
+        }
+        state.push_scope();
+        let outcome = block(body, state);
+        state.pop_scope();
+        outcome?;
     }
 }
 
@@ -480,14 +488,7 @@ fn eval(expression: &Expr, state: &mut Run) -> Result<Val, Stop> {
             .map(|item| eval(item, state))
             .collect::<Result<Vec<Val>, Stop>>()
             .map(Val::List),
-        Expr::Map(entries) => {
-            let mut map = BTreeMap::new();
-            for (key, value) in entries {
-                let value = eval(value, state)?;
-                map.insert(key.clone(), value);
-            }
-            Ok(Val::Map(map))
-        }
+        Expr::Map(entries) => eval_map(entries, state),
         Expr::Member { of, name } => {
             let holder = eval(of, state)?;
             member(&holder, name)
@@ -495,65 +496,84 @@ fn eval(expression: &Expr, state: &mut Run) -> Result<Val, Stop> {
         Expr::Index { of, at } => {
             let holder = eval(of, state)?;
             let index = eval(at, state)?;
-            match (&holder, &index) {
-                (Val::List(items), Val::Num(position)) => {
-                    let position = *position;
-                    if position < 0.0 || position.fract() != 0.0 {
-                        return Err(Stop::Failed(format!(
-                            "a list index is a whole number that is not negative, not {position}"
-                        )));
-                    }
-                    items.get(position as usize).cloned().ok_or_else(|| {
-                        Stop::Failed(format!(
-                            "index {position} is past the end of a list of {}",
-                            items.len()
-                        ))
-                    })
-                }
-                (Val::Map(_), Val::Str(key)) => member(&holder, key),
-                (Val::Str(text), Val::Num(position)) => text
-                    .chars()
-                    .nth(*position as usize)
-                    .map(|c| Val::Str(c.to_string()))
-                    .ok_or_else(|| {
-                        Stop::Failed(format!("index {position} is past the end of a string"))
-                    }),
-                (holder, index) => Err(Stop::Failed(format!(
-                    "{} cannot be indexed by {}",
-                    holder.kind(),
-                    index.kind()
-                ))),
-            }
+            index_into(&holder, &index)
         }
-        Expr::Call { callee, args } => {
-            let target = eval(callee, state)?;
-            let mut values = Vec::with_capacity(args.len());
-            for argument in args {
-                values.push(eval(argument, state)?);
-            }
-            call(target, values, state)
-        }
+        Expr::Call { callee, args } => eval_call(callee, args, state),
         Expr::Unary { op, of } => {
             let value = eval(of, state)?;
-            match (*op, &value) {
-                ("-", Val::Num(number)) => Ok(Val::Num(-number)),
-                ("-", other) => Err(Stop::Failed(format!("{} cannot be negated", other.kind()))),
-                _ => Ok(Val::Bool(!value.truthy())),
-            }
+            eval_unary(op, value)
         }
-        Expr::Binary { op, left, right } => {
-            // Short circuit before the right side is evaluated at all, which
-            // is what lets `x != null && x.name` be written.
-            let head = eval(left, state)?;
-            match *op {
-                "&&" if !head.truthy() => return Ok(head),
-                "||" if head.truthy() => return Ok(head),
-                "&&" | "||" => return eval(right, state),
-                _ => {}
+        Expr::Binary { op, left, right } => eval_binary(op, left, right, state),
+    }
+}
+
+fn eval_map(entries: &[(String, Expr)], state: &mut Run) -> Result<Val, Stop> {
+    let mut map = BTreeMap::new();
+    for (key, value) in entries {
+        let value = eval(value, state)?;
+        map.insert(key.clone(), value);
+    }
+    Ok(Val::Map(map))
+}
+
+fn eval_call(callee: &Expr, args: &[Expr], state: &mut Run) -> Result<Val, Stop> {
+    let target = eval(callee, state)?;
+    let mut values = Vec::with_capacity(args.len());
+    for argument in args {
+        values.push(eval(argument, state)?);
+    }
+    call(target, values, state)
+}
+
+fn eval_unary(op: &str, value: Val) -> Result<Val, Stop> {
+    match (op, &value) {
+        ("-", Val::Num(number)) => Ok(Val::Num(-number)),
+        ("-", other) => Err(Stop::Failed(format!("{} cannot be negated", other.kind()))),
+        _ => Ok(Val::Bool(!value.truthy())),
+    }
+}
+
+/// The two short-circuiting operators decide before the right side is
+/// evaluated at all, which is what lets `x != null && x.name` be written.
+fn eval_binary(op: &str, left: &Expr, right: &Expr, state: &mut Run) -> Result<Val, Stop> {
+    let head = eval(left, state)?;
+    match op {
+        "&&" if !head.truthy() => return Ok(head),
+        "||" if head.truthy() => return Ok(head),
+        "&&" | "||" => return eval(right, state),
+        _ => {}
+    }
+    let tail = eval(right, state)?;
+    binary(op, head, tail)
+}
+
+/// One element of a list, one member of an object, one character of a string.
+fn index_into(holder: &Val, index: &Val) -> Result<Val, Stop> {
+    match (holder, index) {
+        (Val::List(items), Val::Num(position)) => {
+            if *position < 0.0 || position.fract() != 0.0 {
+                return Err(Stop::Failed(format!(
+                    "a list index is a whole number that is not negative, not {position}"
+                )));
             }
-            let tail = eval(right, state)?;
-            binary(op, head, tail)
+            items.get(*position as usize).cloned().ok_or_else(|| {
+                Stop::Failed(format!(
+                    "index {position} is past the end of a list of {}",
+                    items.len()
+                ))
+            })
         }
+        (Val::Map(_), Val::Str(key)) => member(holder, key),
+        (Val::Str(text), Val::Num(position)) => text
+            .chars()
+            .nth(*position as usize)
+            .map(|c| Val::Str(c.to_string()))
+            .ok_or_else(|| Stop::Failed(format!("index {position} is past the end of a string"))),
+        (holder, index) => Err(Stop::Failed(format!(
+            "{} cannot be indexed by {}",
+            holder.kind(),
+            index.kind()
+        ))),
     }
 }
 
@@ -623,59 +643,14 @@ fn call(target: Val, args: Vec<Val>, state: &mut Run) -> Result<Val, Stop> {
 }
 
 fn builtin(name: &'static str, args: Vec<Val>, state: &mut Run) -> Result<Val, Stop> {
-    let first = args.first();
     match name {
-        "log" => {
-            let line = args
-                .iter()
-                .map(Val::render)
-                .collect::<Vec<String>>()
-                .join(" ");
-            state.log(line)?;
-            Ok(Val::Null)
-        }
-        "len" => match first {
-            Some(Val::Str(text)) => Ok(Val::Num(text.chars().count() as f64)),
-            Some(Val::List(items)) => Ok(Val::Num(items.len() as f64)),
-            Some(Val::Map(entries)) => Ok(Val::Num(entries.len() as f64)),
-            Some(other) => Err(Stop::Failed(format!(
-                "len() cannot measure {}",
-                other.kind()
-            ))),
-            None => Err(Stop::Failed("len() takes one argument".to_string())),
-        },
-        "keys" => match first {
-            Some(Val::Map(entries)) => Ok(Val::List(
-                entries.keys().map(|key| Val::Str(key.clone())).collect(),
-            )),
-            Some(other) => Err(Stop::Failed(format!(
-                "keys() takes an object, not {}",
-                other.kind()
-            ))),
-            None => Err(Stop::Failed("keys() takes one argument".to_string())),
-        },
-        "str" => Ok(Val::Str(first.map(Val::render).unwrap_or_default())),
-        "num" => match first {
-            Some(Val::Num(value)) => Ok(Val::Num(*value)),
-            Some(Val::Str(text)) => text
-                .trim()
-                .parse::<f64>()
-                .map(Val::Num)
-                .map_err(|_| Stop::Failed(format!("num() cannot read {text:?} as a number"))),
-            Some(other) => Err(Stop::Failed(format!("num() cannot read {}", other.kind()))),
-            None => Err(Stop::Failed("num() takes one argument".to_string())),
-        },
-        "push" => match (args.first(), args.get(1)) {
-            (Some(Val::List(items)), Some(value)) => {
-                let mut grown = items.clone();
-                grown.push(value.clone());
-                Ok(Val::List(grown))
-            }
-            _ => Err(Stop::Failed(
-                "push() takes a list and a value, and answers a new list".to_string(),
-            )),
-        },
-        "floor" => match first {
+        "log" => builtin_log(&args, state),
+        "len" => builtin_len(args.first()),
+        "keys" => builtin_keys(args.first()),
+        "str" => Ok(Val::Str(args.first().map(Val::render).unwrap_or_default())),
+        "num" => builtin_num(args.first()),
+        "push" => builtin_push(args.first(), args.get(1)),
+        "floor" => match args.first() {
             Some(Val::Num(value)) => Ok(Val::Num(value.floor())),
             _ => Err(Stop::Failed("floor() takes a number".to_string())),
         },
@@ -683,8 +658,74 @@ fn builtin(name: &'static str, args: Vec<Val>, state: &mut Run) -> Result<Val, S
     }
 }
 
+fn builtin_log(args: &[Val], state: &mut Run) -> Result<Val, Stop> {
+    let line = args
+        .iter()
+        .map(Val::render)
+        .collect::<Vec<String>>()
+        .join(" ");
+    state.log(line)?;
+    Ok(Val::Null)
+}
+
+fn builtin_len(of: Option<&Val>) -> Result<Val, Stop> {
+    match of {
+        Some(Val::Str(text)) => Ok(Val::Num(text.chars().count() as f64)),
+        Some(Val::List(items)) => Ok(Val::Num(items.len() as f64)),
+        Some(Val::Map(entries)) => Ok(Val::Num(entries.len() as f64)),
+        Some(other) => Err(Stop::Failed(format!(
+            "len() cannot measure {}",
+            other.kind()
+        ))),
+        None => Err(Stop::Failed("len() takes one argument".to_string())),
+    }
+}
+
+fn builtin_keys(of: Option<&Val>) -> Result<Val, Stop> {
+    match of {
+        Some(Val::Map(entries)) => Ok(Val::List(
+            entries.keys().map(|key| Val::Str(key.clone())).collect(),
+        )),
+        Some(other) => Err(Stop::Failed(format!(
+            "keys() takes an object, not {}",
+            other.kind()
+        ))),
+        None => Err(Stop::Failed("keys() takes one argument".to_string())),
+    }
+}
+
+fn builtin_num(of: Option<&Val>) -> Result<Val, Stop> {
+    match of {
+        Some(Val::Num(value)) => Ok(Val::Num(*value)),
+        Some(Val::Str(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map(Val::Num)
+            .map_err(|_| Stop::Failed(format!("num() cannot read {text:?} as a number"))),
+        Some(other) => Err(Stop::Failed(format!("num() cannot read {}", other.kind()))),
+        None => Err(Stop::Failed("num() takes one argument".to_string())),
+    }
+}
+
+/// Answers a new list rather than growing the one it was given: a program that
+/// mutated a value another name still holds is a program nobody can read.
+fn builtin_push(list: Option<&Val>, value: Option<&Val>) -> Result<Val, Stop> {
+    match (list, value) {
+        (Some(Val::List(items)), Some(value)) => {
+            let mut grown = items.clone();
+            grown.push(value.clone());
+            Ok(Val::List(grown))
+        }
+        _ => Err(Stop::Failed(
+            "push() takes a list and a value, and answers a new list".to_string(),
+        )),
+    }
+}
+
 fn binary(op: &str, left: Val, right: Val) -> Result<Val, Stop> {
     match (op, &left, &right) {
+        ("==", a, b) => Ok(Val::Bool(equal(a, b))),
+        ("!=", a, b) => Ok(Val::Bool(!equal(a, b))),
         ("+", Val::Str(a), b) => Ok(Val::Str(format!("{a}{}", b.render()))),
         ("+", a, Val::Str(b)) => Ok(Val::Str(format!("{}{b}", a.render()))),
         ("+", Val::List(a), Val::List(b)) => {
@@ -692,38 +733,44 @@ fn binary(op: &str, left: Val, right: Val) -> Result<Val, Stop> {
             joined.extend(b.iter().cloned());
             Ok(Val::List(joined))
         }
-        ("==", a, b) => Ok(Val::Bool(equal(a, b))),
-        ("!=", a, b) => Ok(Val::Bool(!equal(a, b))),
-        (_, Val::Num(a), Val::Num(b)) => match op {
-            "+" => Ok(Val::Num(a + b)),
-            "-" => Ok(Val::Num(a - b)),
-            "*" => Ok(Val::Num(a * b)),
-            "/" if *b == 0.0 => Err(Stop::Failed(
-                "a number cannot be divided by zero".to_string(),
-            )),
-            "/" => Ok(Val::Num(a / b)),
-            "%" if *b == 0.0 => Err(Stop::Failed(
-                "a number cannot be divided by zero".to_string(),
-            )),
-            "%" => Ok(Val::Num(a % b)),
-            "<" => Ok(Val::Bool(a < b)),
-            "<=" => Ok(Val::Bool(a <= b)),
-            ">" => Ok(Val::Bool(a > b)),
-            ">=" => Ok(Val::Bool(a >= b)),
-            other => Err(Stop::Failed(format!("{other} is not an operator"))),
-        },
-        (_, Val::Str(a), Val::Str(b)) if matches!(op, "<" | "<=" | ">" | ">=") => {
-            Ok(Val::Bool(match op {
-                "<" => a < b,
-                "<=" => a <= b,
-                ">" => a > b,
-                _ => a >= b,
-            }))
-        }
+        (_, Val::Num(a), Val::Num(b)) => arithmetic(op, *a, *b),
+        (_, Val::Str(a), Val::Str(b)) => text_compare(op, a, b),
         (op, a, b) => Err(Stop::Failed(format!(
             "{} {op} {} is not something this language does",
             a.kind(),
             b.kind()
+        ))),
+    }
+}
+
+fn arithmetic(op: &str, a: f64, b: f64) -> Result<Val, Stop> {
+    let divisor = || {
+        (b != 0.0)
+            .then_some(b)
+            .ok_or_else(|| Stop::Failed("a number cannot be divided by zero".to_string()))
+    };
+    match op {
+        "+" => Ok(Val::Num(a + b)),
+        "-" => Ok(Val::Num(a - b)),
+        "*" => Ok(Val::Num(a * b)),
+        "/" => divisor().map(|b| Val::Num(a / b)),
+        "%" => divisor().map(|b| Val::Num(a % b)),
+        "<" => Ok(Val::Bool(a < b)),
+        "<=" => Ok(Val::Bool(a <= b)),
+        ">" => Ok(Val::Bool(a > b)),
+        ">=" => Ok(Val::Bool(a >= b)),
+        other => Err(Stop::Failed(format!("{other} is not an operator"))),
+    }
+}
+
+fn text_compare(op: &str, a: &str, b: &str) -> Result<Val, Stop> {
+    match op {
+        "<" => Ok(Val::Bool(a < b)),
+        "<=" => Ok(Val::Bool(a <= b)),
+        ">" => Ok(Val::Bool(a > b)),
+        ">=" => Ok(Val::Bool(a >= b)),
+        other => Err(Stop::Failed(format!(
+            "two strings cannot be combined with {other}"
         ))),
     }
 }

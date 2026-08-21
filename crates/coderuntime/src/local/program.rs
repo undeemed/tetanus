@@ -61,124 +61,30 @@ const SYMBOLS: &[&str] = &[
 ];
 
 /// Turn a program into tokens, or say where it stopped making sense.
+///
+/// One scanner per kind of thing a program can start with, so each of them is
+/// readable on its own and this is only the dispatch.
 pub fn tokens(source: &str) -> Result<Vec<Token>, String> {
     let bytes = source.as_bytes();
     let mut out: Vec<Token> = Vec::new();
     let mut at = 0usize;
 
     while at < bytes.len() {
-        let byte = bytes[at];
-        if byte.is_ascii_whitespace() {
-            at += 1;
-            continue;
+        at = match skip_trivia(source, at) {
+            Some(next) => next,
+            None => at,
+        };
+        if at >= bytes.len() {
+            break;
         }
-        // A comment runs to the end of its line. `//` is what every language
-        // this seam is portable to spells it as, bar Python.
-        if source[at..].starts_with("//") || byte == b'#' {
-            at += source[at..].find('\n').unwrap_or(source.len() - at);
-            continue;
-        }
-        if byte.is_ascii_digit() {
-            let start = at;
-            while at < bytes.len() && (bytes[at].is_ascii_digit() || bytes[at] == b'.') {
-                at += 1;
-            }
-            // An exponent, so a program can write a number big enough to stop
-            // being lossless JSON - which is a case, not a curiosity.
-            if at < bytes.len() && (bytes[at] == b'e' || bytes[at] == b'E') {
-                at += 1;
-                if at < bytes.len() && (bytes[at] == b'+' || bytes[at] == b'-') {
-                    at += 1;
-                }
-                while at < bytes.len() && bytes[at].is_ascii_digit() {
-                    at += 1;
-                }
-            }
-            let text = &source[start..at];
-            let number: f64 = text
-                .parse()
-                .map_err(|_| format!("{text:?} at {start} is not a number"))?;
-            out.push(Token {
-                at: start,
-                kind: Tok::Number(number),
-            });
-            continue;
-        }
-        if byte == b'"' || byte == b'\'' {
-            let quote = byte;
-            let start = at;
-            at += 1;
-            let mut text = String::new();
-            loop {
-                if at >= bytes.len() {
-                    return Err(format!("the string starting at {start} is never closed"));
-                }
-                match bytes[at] {
-                    b'\\' if at + 1 < bytes.len() => {
-                        let escaped = match bytes[at + 1] {
-                            b'n' => '\n',
-                            b't' => '\t',
-                            b'r' => '\r',
-                            other => char::from(other),
-                        };
-                        text.push(escaped);
-                        at += 2;
-                    }
-                    end if end == quote => {
-                        at += 1;
-                        break;
-                    }
-                    _ => {
-                        let char_len = source[at..].chars().next().map_or(1, char::len_utf8);
-                        text.push_str(&source[at..at + char_len]);
-                        at += char_len;
-                    }
-                }
-            }
-            out.push(Token {
-                at: start,
-                kind: Tok::Text(text),
-            });
-            continue;
-        }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = at;
-            while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
-                at += 1;
-            }
-            let word = &source[start..at];
-            let kind = match word {
-                "true" => Tok::True,
-                "false" => Tok::False,
-                "null" => Tok::Null,
-                "let" => Tok::Let,
-                "if" => Tok::If,
-                "else" => Tok::Else,
-                "while" => Tok::While,
-                "return" => Tok::Return,
-                name => Tok::Name(name.to_string()),
-            };
-            out.push(Token { at: start, kind });
-            continue;
-        }
-        match SYMBOLS
-            .iter()
-            .find(|symbol| source[at..].starts_with(**symbol))
-        {
-            Some(symbol) => {
-                out.push(Token {
-                    at,
-                    kind: Tok::Sym(symbol),
-                });
-                at += symbol.len();
-            }
-            None => {
-                return Err(format!(
-                    "{:?} at {at} is not part of this language",
-                    char::from(byte)
-                ))
-            }
-        }
+        let (token, next) = match bytes[at] {
+            byte if byte.is_ascii_digit() => scan_number(source, at)?,
+            b'"' | b'\'' => scan_text(source, at)?,
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => scan_word(source, at),
+            _ => scan_symbol(source, at)?,
+        };
+        out.push(token);
+        at = next;
     }
 
     out.push(Token {
@@ -186,6 +92,138 @@ pub fn tokens(source: &str) -> Result<Vec<Token>, String> {
         kind: Tok::End,
     });
     Ok(out)
+}
+
+/// Skip whitespace and comments. `None` when there was nothing to skip.
+fn skip_trivia(source: &str, from: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    loop {
+        let before = at;
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        // A comment runs to the end of its line. `//` is what every language
+        // this seam is portable to spells it as, bar Python, which is why `#`
+        // is read the same way.
+        if at < bytes.len() && (source[at..].starts_with("//") || bytes[at] == b'#') {
+            at += source[at..].find('\n').unwrap_or(source.len() - at);
+        }
+        if at == before {
+            return (at != from).then_some(at);
+        }
+    }
+}
+
+/// A number, including an exponent - so a program can write one big enough to
+/// stop being lossless JSON, which is a case rather than a curiosity.
+fn scan_number(source: &str, from: usize) -> Result<(Token, usize), String> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while at < bytes.len() && (bytes[at].is_ascii_digit() || bytes[at] == b'.') {
+        at += 1;
+    }
+    if at < bytes.len() && (bytes[at] == b'e' || bytes[at] == b'E') {
+        at += 1;
+        if at < bytes.len() && (bytes[at] == b'+' || bytes[at] == b'-') {
+            at += 1;
+        }
+        while at < bytes.len() && bytes[at].is_ascii_digit() {
+            at += 1;
+        }
+    }
+    let text = &source[from..at];
+    let number: f64 = text
+        .parse()
+        .map_err(|_| format!("{text:?} at {from} is not a number"))?;
+    Ok((
+        Token {
+            at: from,
+            kind: Tok::Number(number),
+        },
+        at,
+    ))
+}
+
+/// A quoted string, with the escapes a program is likely to write.
+fn scan_text(source: &str, from: usize) -> Result<(Token, usize), String> {
+    let bytes = source.as_bytes();
+    let quote = bytes[from];
+    let mut at = from + 1;
+    let mut text = String::new();
+    loop {
+        if at >= bytes.len() {
+            return Err(format!("the string starting at {from} is never closed"));
+        }
+        match bytes[at] {
+            b'\\' if at + 1 < bytes.len() => {
+                text.push(match bytes[at + 1] {
+                    b'n' => '\n',
+                    b't' => '\t',
+                    b'r' => '\r',
+                    other => char::from(other),
+                });
+                at += 2;
+            }
+            end if end == quote => {
+                at += 1;
+                break;
+            }
+            _ => {
+                let char_len = source[at..].chars().next().map_or(1, char::len_utf8);
+                text.push_str(&source[at..at + char_len]);
+                at += char_len;
+            }
+        }
+    }
+    Ok((
+        Token {
+            at: from,
+            kind: Tok::Text(text),
+        },
+        at,
+    ))
+}
+
+/// A word: a keyword if it is one, a name otherwise.
+fn scan_word(source: &str, from: usize) -> (Token, usize) {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+        at += 1;
+    }
+    let kind = match &source[from..at] {
+        "true" => Tok::True,
+        "false" => Tok::False,
+        "null" => Tok::Null,
+        "let" => Tok::Let,
+        "if" => Tok::If,
+        "else" => Tok::Else,
+        "while" => Tok::While,
+        "return" => Tok::Return,
+        name => Tok::Name(name.to_string()),
+    };
+    (Token { at: from, kind }, at)
+}
+
+/// One of the punctuation tokens, longest first.
+fn scan_symbol(source: &str, from: usize) -> Result<(Token, usize), String> {
+    match SYMBOLS
+        .iter()
+        .find(|symbol| source[from..].starts_with(**symbol))
+    {
+        Some(symbol) => Ok((
+            Token {
+                at: from,
+                kind: Tok::Sym(symbol),
+            },
+            from + symbol.len(),
+        )),
+        None => Err(format!(
+            "{:?} at {from} is not part of this language",
+            source[from..].chars().next().unwrap_or('?')
+        )),
+    }
 }
 
 /// One statement.
@@ -305,75 +343,85 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, String> {
         match self.peek().clone() {
-            Tok::Let => {
-                self.next();
-                let Tok::Name(name) = self.next() else {
-                    return Err(format!("`let` needs a name at offset {}", self.here()));
-                };
-                self.expect("=")?;
-                let value = self.expression()?;
-                self.expect(";")?;
-                Ok(Stmt::Let { name, value })
-            }
-            Tok::If => {
-                self.next();
-                self.expect("(")?;
-                let test = self.expression()?;
-                self.expect(")")?;
-                let then = self.block()?;
-                let other = if matches!(self.peek(), Tok::Else) {
-                    self.next();
-                    // `else if` chains without needing braces around the if.
-                    if matches!(self.peek(), Tok::If) {
-                        vec![self.statement()?]
-                    } else {
-                        self.block()?
-                    }
-                } else {
-                    Vec::new()
-                };
-                Ok(Stmt::If { test, then, other })
-            }
-            Tok::While => {
-                self.next();
-                self.expect("(")?;
-                let test = self.expression()?;
-                self.expect(")")?;
-                let body = self.block()?;
-                Ok(Stmt::While { test, body })
-            }
-            Tok::Return => {
-                self.next();
-                if self.eat(";") {
-                    return Ok(Stmt::Return(None));
-                }
-                let value = self.expression()?;
-                self.expect(";")?;
-                Ok(Stmt::Return(Some(value)))
-            }
-            _ => {
-                let first = self.expression()?;
-                if self.eat("=") {
-                    let value = self.expression()?;
-                    self.expect(";")?;
-                    // Only a place can be assigned to. `1 = 2;` parses as an
-                    // expression and is refused here, where the message can
-                    // say what a place is.
-                    return match &first {
-                        Expr::Name(_) | Expr::Member { .. } | Expr::Index { .. } => {
-                            Ok(Stmt::Assign {
-                                target: first,
-                                value,
-                            })
-                        }
-                        _ => {
-                            Err("only a name, a member or an index can be assigned to".to_string())
-                        }
-                    };
-                }
-                self.expect(";")?;
-                Ok(Stmt::Eval(first))
-            }
+            Tok::Let => self.let_statement(),
+            Tok::If => self.if_statement(),
+            Tok::While => self.while_statement(),
+            Tok::Return => self.return_statement(),
+            _ => self.expression_statement(),
+        }
+    }
+
+    fn let_statement(&mut self) -> Result<Stmt, String> {
+        self.next();
+        let Tok::Name(name) = self.next() else {
+            return Err(format!("`let` needs a name at offset {}", self.here()));
+        };
+        self.expect("=")?;
+        let value = self.expression()?;
+        self.expect(";")?;
+        Ok(Stmt::Let { name, value })
+    }
+
+    fn if_statement(&mut self) -> Result<Stmt, String> {
+        self.next();
+        self.expect("(")?;
+        let test = self.expression()?;
+        self.expect(")")?;
+        let then = self.block()?;
+        let other = self.else_arm()?;
+        Ok(Stmt::If { test, then, other })
+    }
+
+    /// The `else` half, which is also where `else if` chains without needing
+    /// braces around the inner `if`.
+    fn else_arm(&mut self) -> Result<Vec<Stmt>, String> {
+        if !matches!(self.peek(), Tok::Else) {
+            return Ok(Vec::new());
+        }
+        self.next();
+        if matches!(self.peek(), Tok::If) {
+            return Ok(vec![self.statement()?]);
+        }
+        self.block()
+    }
+
+    fn while_statement(&mut self) -> Result<Stmt, String> {
+        self.next();
+        self.expect("(")?;
+        let test = self.expression()?;
+        self.expect(")")?;
+        let body = self.block()?;
+        Ok(Stmt::While { test, body })
+    }
+
+    fn return_statement(&mut self) -> Result<Stmt, String> {
+        self.next();
+        if self.eat(";") {
+            return Ok(Stmt::Return(None));
+        }
+        let value = self.expression()?;
+        self.expect(";")?;
+        Ok(Stmt::Return(Some(value)))
+    }
+
+    /// An expression, and then either `= value;` - which makes it an
+    /// assignment - or `;`.
+    fn expression_statement(&mut self) -> Result<Stmt, String> {
+        let first = self.expression()?;
+        if !self.eat("=") {
+            self.expect(";")?;
+            return Ok(Stmt::Eval(first));
+        }
+        let value = self.expression()?;
+        self.expect(";")?;
+        // Only a place can be assigned to. `1 = 2;` parses as an expression
+        // and is refused here, where the message can say what a place is.
+        match &first {
+            Expr::Name(_) | Expr::Member { .. } | Expr::Index { .. } => Ok(Stmt::Assign {
+                target: first,
+                value,
+            }),
+            _ => Err("only a name, a member or an index can be assigned to".to_string()),
         }
     }
 
@@ -486,37 +534,39 @@ impl Parser {
                 self.expect(")")?;
                 Ok(inner)
             }
-            Tok::Sym("[") => {
-                let mut items = Vec::new();
-                while !self.eat("]") {
-                    items.push(self.expression()?);
-                    if !self.eat(",") {
-                        self.expect("]")?;
-                        break;
-                    }
-                }
-                Ok(Expr::List(items))
-            }
-            Tok::Sym("{") => {
-                let mut entries = Vec::new();
-                while !self.eat("}") {
-                    let key = match self.next() {
-                        Tok::Name(name) => name,
-                        Tok::Text(text) => text,
-                        other => {
-                            return Err(format!("a key is a name or a string, found {other:?}"))
-                        }
-                    };
-                    self.expect(":")?;
-                    entries.push((key, self.expression()?));
-                    if !self.eat(",") {
-                        self.expect("}")?;
-                        break;
-                    }
-                }
-                Ok(Expr::Map(entries))
-            }
+            Tok::Sym("[") => self.list_literal(),
+            Tok::Sym("{") => self.map_literal(),
             other => Err(format!("{other:?} at offset {at} does not start a value")),
         }
+    }
+
+    fn list_literal(&mut self) -> Result<Expr, String> {
+        let mut items = Vec::new();
+        while !self.eat("]") {
+            items.push(self.expression()?);
+            if !self.eat(",") {
+                self.expect("]")?;
+                break;
+            }
+        }
+        Ok(Expr::List(items))
+    }
+
+    fn map_literal(&mut self) -> Result<Expr, String> {
+        let mut entries = Vec::new();
+        while !self.eat("}") {
+            let key = match self.next() {
+                Tok::Name(name) => name,
+                Tok::Text(text) => text,
+                other => return Err(format!("a key is a name or a string, found {other:?}")),
+            };
+            self.expect(":")?;
+            entries.push((key, self.expression()?));
+            if !self.eat(",") {
+                self.expect("}")?;
+                break;
+            }
+        }
+        Ok(Expr::Map(entries))
     }
 }
