@@ -1313,3 +1313,123 @@ fn withheld(key: &str) -> ConfigEntry {
         layer: ConfigLayer::File,
     }
 }
+
+/// TC-PROTO-50: contract section 4.3. A result nobody ran carries a code
+/// saying why, and a code this build does not know is still readable.
+///
+/// A call the engine dispatched reports its outcome in `ok` and `content` and
+/// needs no reason for not having one. A result the engine *synthesized* -
+/// crash repair closing an interrupted call, or a call refused before it ran -
+/// has no outcome, so the code is the whole explanation.
+///
+/// The vocabulary grows with the reasons, so an unknown code reads as "not
+/// run, for a reason this build does not know" rather than failing: a journal
+/// written by a newer engine must stay readable by an older surface.
+#[test]
+fn a_synthesized_result_carries_a_code_and_an_unknown_one_is_readable() {
+    for code in [
+        "TOOL_NOT_STARTED",
+        "TOOL_OUTCOME_UNKNOWN",
+        "TOOL_NOT_PERMITTED",
+        "SOMETHING_A_LATER_ENGINE_ADDED",
+    ] {
+        let event = SessionEvent {
+            ty: "tool/result".into(),
+            seq: 9,
+            time: 0,
+            data: json!({
+                "call_id": "c1",
+                "name": "shell",
+                "ok": false,
+                "content": "the call did not run",
+                "code": code,
+            }),
+            source_event_seqs: Some(vec![7]),
+        };
+
+        // The extra field never stops the event parsing: rule 1 of section 5.
+        let parsed = event
+            .parse()
+            .expect("an unknown field is ignored, not fatal");
+        assert!(matches!(parsed, KnownEvent::ToolResult { ok: false, .. }));
+        assert_eq!(event.data["code"], json!(code), "and it is on the journal");
+    }
+
+    // A result that was actually run carries no code, and its absence is the
+    // signal that it has a real outcome.
+    let ran = SessionEvent {
+        ty: "tool/result".into(),
+        seq: 9,
+        time: 0,
+        data: json!({ "call_id": "c1", "name": "shell", "ok": true, "content": "done" }),
+        source_event_seqs: Some(vec![7]),
+    };
+    assert!(ran.parse().is_some());
+    assert_eq!(ran.data.get("code"), None);
+}
+
+/// TC-PROTO-51: contract section 4.3. The typed path cannot see the code yet,
+/// and this is the case that says so on purpose.
+///
+/// Section 4.4.4 calls the distinction load-bearing - `TOOL_NOT_STARTED` is
+/// safe to retry and `TOOL_OUTCOME_UNKNOWN` is not - and a surface using
+/// `parse()` cannot make it today. The value is on `SessionEvent.data`, so
+/// nothing is lost to a reader willing to look there; what is missing is the
+/// compiler-checked path.
+///
+/// It is deferred rather than fixed because `KnownEvent::ToolResult` is
+/// matched field by field in the presentation lane, so the field is a build
+/// break there and a change both lanes land together (section 5). When that
+/// lane adopts a rest pattern and the field lands, this case fails and asks
+/// for section 4.3's wording to be spent with it.
+#[test]
+fn the_typed_path_cannot_see_the_code_yet_and_says_so() {
+    let not_started = synthesized("TOOL_NOT_STARTED");
+    let outcome_unknown = synthesized("TOOL_OUTCOME_UNKNOWN");
+
+    let (Some(a), Some(b)) = (not_started.parse(), outcome_unknown.parse()) else {
+        panic!("both parse");
+    };
+    assert_eq!(
+        a, b,
+        "the typed forms are identical: the reason one is safe to retry and \
+         the other is not does not survive `parse()`"
+    );
+
+    // The raw data does keep them apart, which is where a surface must look
+    // until the field lands.
+    assert_ne!(not_started.data["code"], outcome_unknown.data["code"]);
+
+    match a {
+        KnownEvent::ToolResult {
+            call_id,
+            name,
+            ok,
+            content,
+        } => {
+            assert_eq!(
+                (call_id.as_str(), name.as_str(), ok),
+                ("c1", "shell", false)
+            );
+            assert!(!content.is_empty());
+        }
+        other => panic!("expected a tool result, got {other:?}"),
+    }
+}
+
+/// A `tool/result` the engine synthesized rather than ran.
+fn synthesized(code: &str) -> SessionEvent {
+    SessionEvent {
+        ty: "tool/result".into(),
+        seq: 9,
+        time: 0,
+        data: json!({
+            "call_id": "c1",
+            "name": "shell",
+            "ok": false,
+            "content": "the call did not run",
+            "code": code,
+        }),
+        source_event_seqs: Some(vec![7]),
+    }
+}

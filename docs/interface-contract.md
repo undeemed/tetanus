@@ -159,7 +159,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `assistant/chunk` | `chunk` (`text` \| `reasoning` \| `tool_call`), plus `delta` for the first two and `call` for the third, plus `turn` and `step` |
 | `assistant/message` | `content`, `reasoning`, `tool_calls`, `finish_reason`, `usage` |
 | `tool/call` | `id`, `name`, `arguments` |
-| `tool/result` | `call_id`, `name`, `ok`, `content` |
+| `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
 
@@ -197,6 +197,16 @@ It names its `turn`, because unlike the approval pair it belongs to the turn rat
 This step is not a version bump.
 `SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
 The second step is the minor bump, because a `KnownEvent` variant is an addition under §5.
+
+**`tool/result.code` is present only on a result nobody ran.**
+A call the engine dispatched has an outcome, and the outcome is `ok` and `content`.
+A result the engine *synthesized* - crash repair closing a call that was interrupted (§4.4.4), or a call refused before it ran (§4.4.7) - has no outcome to report, so it carries a code saying why there is none.
+The vocabulary grows with the reasons, so a surface reads an unknown code as "not run, for a reason this build does not know" rather than failing.
+
+`KnownEvent::ToolResult` does **not** carry it yet, and that is a gap rather than a decision.
+`parse()` drops the field, so a surface on the typed path cannot today tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, because the first is safe to retry and the second is not.
+The field is on the journal and on `SessionEvent.data`, so nothing is lost to a surface willing to read it there; what is missing is the compiler-checked path.
+It is deferred for the reason below rather than added here, and it lands in the version the presentation lane takes.
 
 **`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
 A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
@@ -807,21 +817,30 @@ The constant is in `tetanus-protocol`, and a literal `"1.0"` in a consuming lane
 The version is the one string in this contract that no peer should hard-code.
 
 **An added field is minor on the wire and not always minor in Rust.**
-A JSON reader ignores a field it was not sent; a Rust struct literal does not, so adding even an optional field to a type the *other* lane constructs - rather than only receives - stops that lane compiling.
+A JSON reader ignores a field it was not sent; Rust does not, so adding even an optional field can stop the other lane compiling.
 Wire-optional is not source-optional.
-So an addition to a constructed type is a change both lanes land together, and until they do, an addition goes on the types a surface only ever reads.
-That is why §4.4.6 puts a forked session's lineage on its `session/start` line and not on `SessionInfo`, which the presentation lane builds in its own cases.
+
+Two shapes break, not one, and the second was missed when this rule was first written.
+A **struct literal** must name every field, so a lane that *constructs* the type stops compiling.
+An **exhaustive destructuring pattern** must also name every field, so a lane that only ever *receives* the type stops compiling too.
+`crates/cli/src/render/timeline.rs` is the live example: it never builds a `KnownEvent`, and it still cannot survive a field being added to `KnownEvent::ToolResult`, because it matches that variant by naming all four.
+
+So the rule is about both, and a fourth rule joins the three below to make it avoidable: a consumer matches a struct variant with a rest pattern.
+Until a type's consumers do, an addition to it is a change both lanes land together, and an addition goes on the types nobody names field by field.
+That is why §4.4.6 puts a forked session's lineage on its `session/start` line rather than on `SessionInfo`, and why §4.3's `tool/result.code` is documented but not yet a `KnownEvent` field.
 
 **A major bump covers everything else.**
 Removing or renaming a method or field, changing a field's type, making an optional field required, narrowing an accepted value, or changing what an existing error code means is a major bump.
 
-Three rules make additions safe, and a surface must follow all three.
+Four rules make additions safe, and a surface must follow all four.
 
 1. Ignore unknown object fields.
 2. Ignore unknown notification methods, and answer unknown request methods `MethodNotFound`.
 3. Render unknown enum variants through the `Other(String)` fallback, and unknown error codes through their raw code.
+4. Match a struct variant with a rest pattern, so a field added to it is not a build break.
 
-The conformance cases in §6 hold these rules to their word.
+The conformance cases in §6 hold the first three to their word.
+The fourth cannot be checked from this side - it is a property of the consuming lane's source, not of any value that crosses the boundary - so it is a promise, and the cost of breaking it is paid by whoever adds the next field.
 
 ## 6. Verification
 
@@ -846,6 +865,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.3.1 every durable payload parses from the journal shape | TC-PROTO-10 |
 | §4.3.1 an unknown type parses to `None` and keeps its data | TC-PROTO-11 |
 | §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
+| §4.3 a synthesized result carries a code, and an unknown one is readable | TC-PROTO-50 |
+| §4.3 the typed path cannot see the code yet, and says so | TC-PROTO-51 |
 | §4.3.1 every event the engine writes parses, and all ten types appear | TC-CONTRACT-1 |
 | §4.3.1 the engine's own `tool/result` names and cites its call | TC-CONTRACT-2 |
 | §4.3.1 `TurnSummary.content` restates the last `assistant/message` | TC-CONTRACT-3 |
@@ -1011,3 +1032,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Reserves `agent.steer` (§4.2, §4.4.10), the separate call §4.4.2 promised for a follow-up sent while a turn is running. `agent.prompt` still refuses with `SessionBusy`, which is right for a caller that meant to start a turn and wrong for the commonest thing a person does - notice something mid-answer and say so. The message joins the running turn's inbox and is claimed at the next step boundary, never sooner: a turn inside a provider call cannot be given anything, since the request has gone and the answer was formed without it. `user/steer` joins §4.3.2 and is written whether or not a step ever reads it, carrying `taken` to say which - a message the caller was told was accepted and which then vanished from the history is the worst outcome available, because the person believes they have said something and the transcript disagrees. It is deliberately not a `user/message`: both derive to the same role, and a reader must still be able to tell a message that opened a turn from one that arrived during it. No error code is added; an idle session is `SessionBusy` with a null turn, because a session that is not busy is exactly what makes steering impossible and the code should name the condition to fix. The engine slice that serves the call takes the `Served` row and the capability with it. |
 | 1.0 | States what a turn a guard stopped looks like (§4.4.2): `turn/end` carries `stop_reason: "timed-out"` or `"repeated"`, and `agent.prompt` still answers a summary rather than an error, because a bound the deployment chose being reached is the bound working. A guard is a bound on the turn rather than on a request - how long the whole turn may take, and how many times the model may do the same thing - which is what distinguishes these from the request deadline the provider seam already has. The two reasons are separate because they need opposite answers: `"timed-out"` usually means a bigger budget or a smaller task, while `"repeated"` means the model was looping and a bigger budget makes it strictly worse, so collapsing them would leave a reader unable to tell "this needs longer" from "longer will not help". A guard stops at a step boundary like `agent.interrupt`, so the journal is balanced and §4.6 holds unchanged. No type changes and no error code: both are values of the growable `StopReason` by §7.5, carried across by §7.6's mapping exactly as `"interrupted"` and `"max-tokens"` already are. The engine slice that runs the guards lands separately, and it will add reasons to `tetanus_turn::StopReason`, which by §3 no surface may match - the arm belongs to the presentation lane. |
 | 1.0 | Settles how `config.dump` decides a value is a secret (§4.3): the schema where the engine has one, the name rule for everything else, and the two compose by **union, never by override**. That direction is the whole change. A schema that could un-mark a key would make adding a key to the schema a way to start publishing it, and the mistake would be silent and permanent. Each rule alone fails one way - a schema misses what it does not describe, a name rule misses a credential called `authorization` - and the union fails safe, at the cost of occasionally withholding a `monkey_token` the user can still read in their own file. The schema half is what catches a credential whose name says nothing, which no rule reading the name could find. One ambiguity in the previous wording is now stated rather than left implicit: nothing distinguishes a withheld value from a document that literally contains `<redacted>`, so a surface must not read the sentinel as proof of secrecy. The honest signal is a flag on the entry, and it is deliberately deferred - `ConfigEntry` is a type the presentation lane constructs, so by §5 that field is a change both lanes land together. No type changes here, and the engine slice that consults a schema lands separately; until it does, the name rule is what runs and its behaviour is unchanged. |
+| 1.0 | Corrects two things this document had wrong about itself. §4.3.1's payload table omitted `tool/result.code`, which §4.4.4 has promised since crash repair landed and the engine has written ever since - so the table was not a description of what the engine writes. The row now lists it, and §4.3 says when it is present: only on a result nobody ran, because a call that was dispatched reports its outcome in `ok` and `content` and needs no reason for not having one. And §5's rule about added fields was stated too narrowly. It said a field breaks the lane that *constructs* a type; an exhaustive destructuring pattern breaks the same way in a lane that only *receives* one, and `crates/cli/src/render/timeline.rs` is the live example - it never builds a `KnownEvent` and still could not survive a field on `ToolResult`. A fourth compatibility rule follows: a consumer matches a struct variant with a rest pattern. It cannot be verified from this side, because it is a property of the other lane's source rather than of anything crossing the boundary, so it is a promise whose cost is paid by whoever adds the next field. `KnownEvent::ToolResult` is therefore *not* given the field here: the gap is named instead, with what unblocks it. Today a surface on the typed path cannot tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, since one is safe to retry and the other is not - though the value is on `SessionEvent.data` for a reader willing to look. No type changes. |
