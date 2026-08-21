@@ -802,3 +802,103 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-105: contract section 4.3.3. A journal with no `format` reads as
+/// the first one.
+///
+/// Every journal written before this field existed lacks it, and none of them
+/// may become unreadable for that. Absent-means-one is what makes the field
+/// addable at all - the alternative is a flag day for data already on disk.
+#[test]
+fn a_journal_with_no_format_reads_as_the_first_one() {
+    let existing = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        source_event_seqs: None,
+    };
+    assert!(
+        existing.parse().is_some(),
+        "a journal written before this still parses"
+    );
+    assert_eq!(
+        existing.data.get("format"),
+        None,
+        "and absent is how it says format 1, rather than carrying a 1 nobody wrote"
+    );
+
+    let versioned = SessionEvent {
+        data: json!({
+            "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8,
+            "format": 1
+        }),
+        ..existing.clone()
+    };
+    assert!(versioned.parse().is_some());
+    assert_eq!(versioned.data["format"], json!(1));
+
+    // A format from a later build is readable *as a value* - which is what
+    // lets a reader refuse it deliberately rather than fail to parse the line
+    // and report damage instead.
+    let newer = SessionEvent {
+        data: json!({
+            "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8,
+            "format": 9
+        }),
+        ..existing
+    };
+    assert_eq!(newer.data["format"], json!(9));
+    assert!(
+        newer.parse().is_some(),
+        "the header still parses, so the refusal is a decision and not a crash"
+    );
+}
+
+/// TC-PROTO-106: contract section 4.3.3. An envelope change is a different
+/// problem from a new type, and the two have different answers.
+///
+/// Section 4.3.2 lets the vocabulary grow because an unknown `type` is a line
+/// a reader can skip while still understanding the rest of the journal. That
+/// argument does not extend to the shape around it: a changed envelope is a
+/// journal that cannot be read at all, or that reads into something meaning
+/// something else. This case pins the distinction the two rules rest on.
+#[test]
+fn an_envelope_change_is_a_different_problem_from_a_new_type() {
+    // A type from a later build: skipped, and everything around it still
+    // works. This is section 4.3.2's whole promise.
+    let unknown_type = SessionEvent {
+        ty: "something/from-a-later-build".into(),
+        seq: 5,
+        time: 0,
+        data: json!({ "whatever": true }),
+        source_event_seqs: None,
+    };
+    assert!(unknown_type.parse().is_none(), "skipped, not fatal");
+    assert_eq!(unknown_type.seq, 5, "and the envelope still reads");
+    assert_eq!(unknown_type.data["whatever"], json!(true));
+
+    // The envelope is what every line depends on, so it is the thing a
+    // version has to protect: `seq` is how a journal is ordered and paged,
+    // and a reader that misread it would page a history that never happened.
+    let ordinary = SessionEvent {
+        ty: "turn/start".into(),
+        seq: 6,
+        time: 7,
+        data: json!({ "turn": 1 }),
+        source_event_seqs: None,
+    };
+    let wire = serde_json::to_value(&ordinary).expect("serialize");
+    let mut fields: Vec<&str> = wire
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["data", "seq", "time", "type"],
+        "the envelope every line carries; `format` names which one this is"
+    );
+}

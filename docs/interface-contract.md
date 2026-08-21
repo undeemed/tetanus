@@ -151,7 +151,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
-| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6) |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `format` (§4.3.3) and `parent_session` and `fork_seq` on a journal that was forked (§4.4.6) |
 | `turn/start` | `turn` |
 | `step/start` | `turn`, `step` |
 | `user/message` | `content` |
@@ -161,6 +161,32 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `tool/result` | `call_id`, `name`, `ok`, `content` |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
+
+#### 4.3.3 The journal's envelope has a version, and the vocabulary does not need one
+
+§4.3.2 says how the durable *vocabulary* grows: a new `type` is a free string, a surface renders what it does not know, and the `KnownEvent` variant follows later.
+That covers everything said *inside* an event and nothing about the shape around it.
+
+The envelope - `type`, `seq`, `time`, `data`, `sourceEventSeqs` - has no such story, and the two are different problems.
+An unknown `type` is a line a reader can skip and still understand the rest of the journal.
+A changed envelope is a journal a reader cannot parse at all, or worse, can parse into something that means something else.
+
+**So the header carries `format`.**
+`session/start.format` is an integer naming the envelope its journal was written under.
+It is absent on every journal written before this, which reads as format 1, so nothing already on disk becomes unreadable for lacking it.
+
+**On the header, not on every line.**
+A journal is the largest file this harness writes and its lines are its bulk, so a per-event version would cost bytes forever to answer a question once.
+The header is read first by every path that opens a journal - listing, paging, forking, repairing - so it is where the answer already has to be looked up.
+
+**A format a reader does not know is refused, not guessed at.**
+Guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not.
+The refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one: it says "this journal cannot be read", and the message says why.
+
+**Four codes are now deferred for the same reason, and they should land together.**
+This one, "another process holds the journal" (§4.4.13), "the server is stopping" (§4.4.11), and a redaction flag's neighbour (§4.3).
+Each is deferred because a surface's `ErrorCode` match is exhaustive, so any one of them breaks the presentation lane's build - and four separate breaks is four times the disruption of one.
+When the lanes coordinate, they land as a single change, and a reader meeting `LogCorrupt` for a foreign format until then is being told the truth coarsely rather than a lie precisely.
 
 #### 4.3.2 Types that are durable but not yet parsed
 
@@ -720,6 +746,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.2 a reserved call answers `NotImplemented`, and is not advertised | TC-ENG-4 |
 | §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
 | §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
+| §4.3.3 a journal with no `format` reads as the first one | TC-PROTO-105 |
+| §4.3.3 an envelope change is a different problem from a new type | TC-PROTO-106 |
 | §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
 | §4.4.7 an ask names its audit line, its tool and its call | TC-PROTO-20 |
 | §4.4.7 the four outcomes, and only one of them grants | TC-PROTO-21 |
@@ -828,3 +856,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Versions the journal's envelope (§4.3.1, §4.3.3). §4.3.2 already says how the durable *vocabulary* grows - a new `type` is a free string and a surface renders what it does not know - and that covers everything said inside an event and nothing about the shape around it. The two are different problems: an unknown type is a line a reader skips and still understands the rest of the journal, while a changed envelope is a journal it cannot parse at all, or worse can parse into something that means something else. `session/start.format` now names the envelope, absent reading as format 1 so nothing on disk becomes unreadable for lacking it. It is on the header rather than on every line because a journal is the largest file this harness writes and a per-event version would cost bytes forever to answer a question once, while every path that opens a journal reads the header first anyway. A format a reader does not know is refused rather than guessed at, because guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not; the refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one. The section also records that four codes are now deferred for one reason - an exhaustive `ErrorCode` match in the presentation lane - and that they should land as a single change rather than four separate breaks of that lane's build. No type changes here; the engine slice that writes `format` lands separately. |
