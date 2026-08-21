@@ -78,6 +78,7 @@ pub struct WebServer {
 struct Table {
     routes: HashMap<(Pattern, String), Route>,
     upgrades: HashMap<String, Upgrade>,
+    streams: HashMap<String, Upgrade>,
     fallback: Option<Route>,
     taps: Vec<(usize, Tap)>,
     /// The number the next tap is filed under, so that a tap removed and one
@@ -171,6 +172,15 @@ pub type Tap = Arc<dyn Fn(String) -> String + Send + Sync>;
 /// check unchanged (contract §4.1.2).
 pub type Upgrade = Arc<dyn Fn(TcpStream, Request) + Send + Sync>;
 
+/// A route that answers over time rather than at once.
+///
+/// The same handover as an upgrade and for the same reason - the handler is
+/// given the socket and writes what it likes - but the request stays HTTP. A
+/// server-sent event stream is the case: one response whose body never ends
+/// until the reader goes away, which is not a shape a `Response` value can
+/// hold.
+pub type Streaming = Upgrade;
+
 /// A registration, undone by dropping it.
 ///
 /// Upstream returns a disposer and ties the seat to the plugin's fiber. The
@@ -184,6 +194,7 @@ pub struct Registered {
 enum What {
     Route(Pattern, String),
     Upgrade(String),
+    Stream(String),
     Fallback,
     Tap(usize),
 }
@@ -266,6 +277,23 @@ impl WebServer {
         Ok(Registered {
             table: Arc::clone(&self.table),
             what: What::Upgrade(path.to_string()),
+        })
+    }
+
+    /// Add a route that writes its own response, over time.
+    ///
+    /// Matched on the exact path, before the ordinary table, and handed the
+    /// socket with the head already taken off - unlike an upgrade, because
+    /// nothing here re-reads the request.
+    pub fn register_stream(&self, path: &str, handler: Streaming) -> Result<Registered, Taken> {
+        let mut table = self.table.lock().expect("the route table");
+        if table.streams.contains_key(path) {
+            return Err(Taken::Route(path.to_string()));
+        }
+        table.streams.insert(path.to_string(), handler);
+        Ok(Registered {
+            table: Arc::clone(&self.table),
+            what: What::Stream(path.to_string()),
         })
     }
 
@@ -380,6 +408,15 @@ impl WebServer {
                 return lingering_close(stream).await;
             }
         }
+        // A stream takes the socket and answers in its own time.
+        let streaming = {
+            let table = self.table.lock().expect("the route table");
+            table.streams.get(&request.path).cloned()
+        };
+        if let Some(handler) = streaming {
+            handler(stream, request);
+            return Ok(());
+        }
         let found = {
             let table = self.table.lock().expect("the route table");
             table.find(&request)
@@ -425,6 +462,9 @@ impl Drop for Registered {
             }
             What::Upgrade(path) => {
                 table.upgrades.remove(path);
+            }
+            What::Stream(path) => {
+                table.streams.remove(path);
             }
             What::Fallback => table.fallback = None,
             What::Tap(at) => table.taps.retain(|(filed, _)| filed != at),

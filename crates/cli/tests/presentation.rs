@@ -2376,3 +2376,116 @@ fn the_bridge_is_locked_the_way_the_socket_is() {
     assert_eq!(with_header, 200, "a bearer token was not accepted");
     assert!(page, "the page stopped being served");
 }
+
+/// The SSE stream, read on a thread while calls are made on another.
+fn stream_frames(port: u16, want: usize, seconds: u64) -> std::sync::mpsc::Receiver<String> {
+    use std::io::{Read, Write};
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut socket =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("the stream connects");
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(seconds)))
+            .ok();
+        socket
+            .write_all(b"GET /api/events HTTP/1.1\r\nhost: x\r\naccept: text/event-stream\r\n\r\n")
+            .expect("asked for the stream");
+        let mut seen = Vec::new();
+        let mut byte = [0_u8; 4096];
+        let mut sent = 0;
+        while sent < want {
+            match socket.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => seen.extend_from_slice(&byte[..read]),
+            }
+            let text = String::from_utf8_lossy(&seen).to_string();
+            let mut parts: Vec<&str> = text.split("\n\n").collect();
+            parts.pop();
+            for part in parts.iter().skip(sent) {
+                if sender.send(part.to_string()).is_err() {
+                    return;
+                }
+                sent += 1;
+            }
+        }
+    });
+    receiver
+}
+
+/// TC-CLI-WEB-8: a subscription made over HTTP, and the turn that follows it.
+/// Expected: the stream opens, and the pushes arrive on it as the same
+/// notification frames the socket sends - §4.1's promise is that every carrier
+/// moves the same payloads, and an SSE line whose `data:` held a different
+/// shape would make this a second contract wearing the first one's names.
+#[test]
+fn a_subscription_over_http_has_somewhere_to_deliver() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["serve", "--listen", "127.0.0.1:5395", "--frontend", "app"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // Enough frames for a whole mock turn: the header, the status, and the
+    // events the turn writes. The loop below stops at the one it is looking
+    // for rather than at a count.
+    let frames = stream_frames(5395, 24, 20);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let hello = r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#;
+    over_http(5395, "rpc.hello", "application/json", hello);
+    let (_, made) = over_http(5395, "session.create", "application/json", "{}");
+    let id = made
+        .split("\"session_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a session id")
+        .to_string();
+    over_http(
+        5395,
+        "session.subscribe",
+        "application/json",
+        &format!(r#"{{"session_id":"{id}","from_seq":0}}"#),
+    );
+    over_http(
+        5395,
+        "agent.prompt",
+        "application/json",
+        &format!(r#"{{"session_id":"{id}","content":"over http"}}"#),
+    );
+
+    let mut read = Vec::new();
+    while let Ok(frame) = frames.recv_timeout(std::time::Duration::from_secs(10)) {
+        let done = frame.contains("over http");
+        read.push(frame);
+        if done {
+            break;
+        }
+    }
+    served.kill().ok();
+    served.wait().ok();
+
+    let whole = read.join("\n");
+    // The stream says it is open before anything has happened on it, so a
+    // reader is not left wondering whether it connected.
+    assert!(whole.contains(": open"), "{whole}");
+    assert!(
+        whole.contains("data: {\"jsonrpc\":\"2.0\",\"method\":\"session/event\""),
+        "the pushes are not the contract's own frames: {whole}"
+    );
+    assert!(
+        whole.contains("over http"),
+        "the turn's own events never arrived: {whole}"
+    );
+}

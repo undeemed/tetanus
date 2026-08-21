@@ -43,7 +43,7 @@
 //! draws when it says business errors ride the result and "HTTP status
 //! expresses only the carrier".
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tetanus_host::{
     Browse, Handler, Listing, Pattern, PickerError, Registered, Request, Response, Status, Taken,
@@ -51,11 +51,21 @@ use tetanus_host::{
 };
 use tetanus_protocol::methods::{AgentStatusPush, Engine, EventSink, SessionEventPush};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
 use tetanus_rpc::auth::{Auth, Presented};
 use tetanus_rpc::Codec;
 
 /// Where the bridge lives. A prefix, because the method is the rest of it.
 pub const PREFIX: &str = "/api/";
+
+/// Where a caller over HTTP reads the pushes it subscribed to.
+///
+/// Upstream carries its server-initiated frames on an SSE stream, and the
+/// reason is the same one that makes this necessary: a POST answers once, and
+/// a subscription is a thing that keeps answering.
+pub const EVENTS: &str = "/api/events";
 
 /// The media type every call must declare, per the argument above.
 const JSON: &str = "application/json";
@@ -83,19 +93,98 @@ pub fn mount(
     server: &WebServer,
     engine: Arc<dyn Engine>,
     auth: Arc<Auth>,
-) -> Result<Registered, Taken> {
+) -> Result<(Registered, Registered), Taken> {
     let codec = Arc::new(Codec::new(engine));
     let picker = Browse::default();
-    let handler: Handler = Arc::new(move |request| {
-        let codec = Arc::clone(&codec);
+    let pushes = Pushes::default();
+
+    // The stream is registered first and matched before the prefix, so
+    // `/api/events` is the reader's ears rather than a method nobody has.
+    let stream = {
+        let pushes = pushes.clone();
         let auth = Arc::clone(&auth);
-        Box::pin(async move { answer(codec, picker, auth, request).await })
-    });
-    server.register(Pattern::Prefix, PREFIX, handler)
+        server.register_stream(
+            EVENTS,
+            Arc::new(move |socket, request| {
+                let pushes = pushes.clone();
+                let auth = Arc::clone(&auth);
+                tokio::spawn(async move { events(socket, request, pushes, auth).await });
+            }),
+        )?
+    };
+
+    let calls = {
+        let auth = Arc::clone(&auth);
+        let handler: Handler = Arc::new(move |request| {
+            let codec = Arc::clone(&codec);
+            let auth = Arc::clone(&auth);
+            let pushes = pushes.clone();
+            Box::pin(async move { answer(codec, picker, auth, pushes, request).await })
+        });
+        server.register(Pattern::Prefix, PREFIX, handler)?
+    };
+    Ok((stream, calls))
+}
+
+/// Hold one reader's stream open and write every push to it.
+///
+/// The head is already off the socket, so this writes its own status line and
+/// then nothing but events. `text/event-stream` and `no-cache` are the two
+/// headers that matter: without the second, a proxy between here and the
+/// reader is entitled to hold the whole thing until it ends, which for a
+/// stream is never.
+async fn events(
+    mut socket: tokio::net::TcpStream,
+    request: Request,
+    pushes: Pushes,
+    auth: Arc<Auth>,
+) {
+    let presented = Presented {
+        token: request
+            .query("token")
+            .map(str::to_string)
+            .or_else(|| bearer(&request)),
+        origin: request.header("origin").map(str::to_string),
+    };
+    if auth.admit(request.peer, &presented).is_err() {
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        return;
+    }
+    let head = "HTTP/1.1 200 OK\r\n        content-type: text/event-stream; charset=utf-8\r\n        cache-control: no-cache\r\n        connection: close\r\n\r\n";
+    if socket.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    // A comment line first, so a reader knows the stream is open before
+    // anything has happened on it. `EventSource` fires `open` on the headers,
+    // but a proxy that buffers until the first byte of body does not.
+    if socket.write_all(b": open\n\n").await.is_err() {
+        return;
+    }
+
+    let mut frames = pushes.listen();
+    while let Some(frame) = frames.recv().await {
+        // One `data:` line per frame. A frame with a newline in it would end
+        // the event early, and the codec never writes one - a JSON string
+        // escapes them - but the stream says so rather than trusting it.
+        let line = format!("data: {}\n\n", frame.replace('\n', " "));
+        if socket.write_all(line.as_bytes()).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// One call, from the request that carried it to the answer that goes back.
-async fn answer(codec: Arc<Codec>, picker: Browse, auth: Arc<Auth>, request: Request) -> Response {
+async fn answer(
+    codec: Arc<Codec>,
+    picker: Browse,
+    auth: Arc<Auth>,
+    pushes: Pushes,
+    request: Request,
+) -> Response {
     if request.method != "POST" {
         return refused(
             Status::MethodNotAllowed,
@@ -181,7 +270,7 @@ async fn answer(codec: Arc<Codec>, picker: Browse, auth: Arc<Auth>, request: Req
         "params": params,
     });
     let raw = frame.to_string();
-    match codec.frame(&raw, Arc::new(Unheard)).await {
+    match codec.frame(&raw, Arc::new(pushes)).await {
         Some(answer) => Response::body(
             Status::Ok,
             "application/json; charset=utf-8",
@@ -308,19 +397,59 @@ fn envelope(body: serde_json::Value) -> Response {
     )
 }
 
-/// The sink for a carrier with nowhere to push.
+/// Everyone reading the event stream, and the frames going to them.
 ///
-/// `session.subscribe` over HTTP would have to hold the response open and
-/// stream, which is upstream's SSE frame and is not this slice. Until then a
-/// push here is dropped rather than buffered: a subscription whose events go
-/// nowhere is a caller waiting for something that will never arrive, and
-/// pretending to hold them would make that worse rather than better. The
-/// socket at `/api/ws` is the carrier that pushes.
-struct Unheard;
+/// One list rather than one per POST, because the bridge is one logical
+/// connection spread over many requests: it holds one codec, so it greets
+/// once, and a subscription made by one POST is the same connection's
+/// subscription however many POSTs follow it. A reader who opens the stream is
+/// that connection's ears.
+///
+/// A sender that will not take a frame is dropped from the list rather than
+/// waited on. The reader has gone; the turn it was watching has not, and a
+/// carrier that blocked a turn on a browser that closed its tab would make
+/// this the worst way to watch a session rather than the second best.
+#[derive(Clone, Default)]
+struct Pushes {
+    readers: Arc<Mutex<Vec<UnboundedSender<String>>>>,
+}
 
-impl EventSink for Unheard {
-    fn session_event(&self, _: SessionEventPush) {}
-    fn agent_status(&self, _: AgentStatusPush) {}
+impl Pushes {
+    /// Add a reader, and hand back the frames meant for it.
+    fn listen(&self) -> UnboundedReceiver<String> {
+        let (sender, receiver) = unbounded_channel();
+        self.readers.lock().expect("the readers").push(sender);
+        receiver
+    }
+
+    /// Serialize one push and give it to every reader still there.
+    ///
+    /// The frame is the notification the other carriers send, built the same
+    /// way, because §4.1's promise is that every carrier moves the same
+    /// payloads - an SSE line whose `data:` held a different shape would make
+    /// this a second contract wearing the first one's method names.
+    fn notify<T: serde::Serialize>(&self, method: &str, params: T) {
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let Ok(text) = serde_json::to_string(&frame) else {
+            return;
+        };
+        let mut readers = self.readers.lock().expect("the readers");
+        readers.retain(|reader| reader.send(text.clone()).is_ok());
+    }
+}
+
+impl EventSink for Pushes {
+    fn session_event(&self, event: SessionEventPush) {
+        self.notify("session/event", event);
+    }
+
+    fn agent_status(&self, status: AgentStatusPush) {
+        self.notify("agent/status", status);
+    }
 }
 
 /// A refusal by the carrier: a status that means it, and the same envelope

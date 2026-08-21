@@ -39,12 +39,35 @@ not among them, so demanding it turns every cross-site attempt into a preflight
 that the origin rules then refuse. Upstream says this in as many words; the
 case asserts it.
 
+## The push half
+
+`GET /api/events` is the stream, and it is upstream's `ServerRequest` seat: a
+POST answers once, and a subscription is a thing that keeps answering.
+
+- The frames on it are **the notifications the other carriers send**, built the
+  same way. §4.1's promise is that every carrier moves the same payloads, and a
+  `data:` line holding a different shape would make this a second contract
+  wearing the first one's method names.
+- **One reader list, not one per POST.** The bridge is one logical connection
+  spread over many requests - it holds one codec, so it greets once - and a
+  subscription made by one POST belongs to that connection however many POSTs
+  follow. A reader who opens the stream is that connection's ears.
+- **A reader who stops reading is dropped, never waited on.** The reader has
+  gone; the turn it was watching has not, and a carrier that blocked a turn on
+  a closed tab would make this the worst way to watch a session rather than the
+  second best.
+- **`: open` is written before anything happens.** `EventSource` fires on the
+  headers, but a proxy that buffers until the first byte of the body does not,
+  and a reader should not have to guess whether it is connected.
+- `cache-control: no-cache`, because without it a proxy between here and the
+  reader may hold the whole response until it ends, which for a stream is
+  never.
+
 ## Not here yet
 
-- **`ServerRequest`/`ClientResponse`** - the SSE half and `POST /api/respond`.
-  A push needs a held-open response, and until it exists a subscription made
-  over this carrier has nowhere to deliver: the sink drops rather than buffers,
-  and the socket at `/api/ws` is the carrier that pushes.
+- **`POST /api/respond`** - the client's answer to a server-initiated question.
+  Nothing on this contract asks one yet: `ui.ask` is reserved (§4.2), and the
+  seat for its answers lands with it.
 - **Projections, `session.history` paging, model selection.** Those are
   gateway-owned domains upstream, and each needs contract surface this build
   does not publish yet.
