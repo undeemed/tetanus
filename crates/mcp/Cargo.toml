@@ -1,0 +1,35 @@
+[package]
+name = "tetanus-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tetanus MCP client: a Model Context Protocol server's tools, in the tetanus registry."
+
+[features]
+# The fixture server is a real MCP server the suite talks to over a real pipe.
+# It is behind a feature so a published build does not ship a test double, and
+# the self-dev-dependency below turns it on for `cargo test`.
+fixture = []
+
+[[bin]]
+name = "tetanus-mcp-fixture"
+path = "src/bin/fixture.rs"
+required-features = ["fixture"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+tempfile = { workspace = true }
+# Self-dependency: the only way to enable `fixture` for the test profile, so
+# the suite gets the server binary and a release build does not.
+tetanus-mcp = { path = ".", features = ["fixture"] }
