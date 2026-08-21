@@ -16,6 +16,7 @@
 
 pub mod backend;
 pub mod proc;
+pub mod session;
 pub mod shell;
 
 pub use backend::{BackendError, Bash, PowerShell, Resolved, ShellBackend};

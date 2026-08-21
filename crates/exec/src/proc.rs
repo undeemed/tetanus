@@ -676,6 +676,30 @@ enum Signal {
     Kill,
 }
 
+/// Run the termination ladder against a process group somebody else is
+/// waiting on: SIGTERM, a grace period, then SIGKILL.
+///
+/// A persistent shell is the caller this exists for. Its child is owned by the
+/// task watching it exit, so the ladder cannot be a method on a `Child` here;
+/// `exited` is how the caller says "it is down", and the answer says whether
+/// the polite rung was enough.
+pub async fn terminate_group<F>(group: Option<u32>, grace: Duration, exited: F) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    kill_group(group, Signal::Term);
+    tokio::pin!(exited);
+    if tokio::time::timeout(grace, &mut exited).await.is_ok() {
+        return true;
+    }
+    kill_group(group, Signal::Kill);
+    // Nothing survives SIGKILL, so the second wait is bounded by the kernel;
+    // the grace here only stops a caller hanging on a group the platform
+    // cannot signal at all.
+    let _ = tokio::time::timeout(grace, exited).await;
+    false
+}
+
 /// Deliver `signal` to the process group the spawned child leads.
 ///
 /// Answers whether anything received it, which is how a sweep tells "there

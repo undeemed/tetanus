@@ -100,6 +100,17 @@ pub trait ShellBackend: Send + Sync {
     /// the input closes - the long-lived session a turn reuses.
     fn session(&self) -> Vec<String>;
 
+    /// What a fresh session has to be told before it behaves like one, one
+    /// command per line.
+    ///
+    /// Bash puts its own stderr onto its stdout here, so a session transcript
+    /// reads in the order the shell wrote it rather than in the order two
+    /// pipes happened to be drained - which is what a terminal gives, and what
+    /// a model reading a warning next to the line that provoked it needs.
+    fn setup(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The environment this backend wants, before the caller's own entries.
     fn environment(&self) -> BTreeMap<String, String> {
         ENV_OVERRIDES
@@ -178,6 +189,10 @@ impl ShellBackend for Bash {
         // operator's dotfiles is a session that behaves differently for every
         // deployment, and a model cannot be told which one it got.
         vec!["--noprofile".to_string(), "--norc".to_string()]
+    }
+
+    fn setup(&self) -> Vec<String> {
+        vec!["exec 2>&1".to_string()]
     }
 
     fn wrap(&self, command: &str, markers: &Markers) -> String {
@@ -266,6 +281,13 @@ impl ShellBackend for PowerShell {
             "-Command".to_string(),
             "-".to_string(),
         ]
+    }
+
+    fn setup(&self) -> Vec<String> {
+        // PowerShell has no `exec 2>&1`: a redirection applies to a command,
+        // not to the shell, so its two pipes are drained separately and the
+        // transcript keeps each line whole rather than each ordering exact.
+        vec![PWSH_ENCODING_PREAMBLE.trim_end().to_string()]
     }
 
     fn wrap(&self, command: &str, markers: &Markers) -> String {
