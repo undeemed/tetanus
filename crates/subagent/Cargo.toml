@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
+tetanus-session = { path = "../session" }

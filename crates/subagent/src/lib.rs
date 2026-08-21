@@ -7,4 +7,5 @@
 //!
 //! Parity: upstream `packages/subagent/*`.
 
+pub mod assistant_output;
 pub mod depth;
