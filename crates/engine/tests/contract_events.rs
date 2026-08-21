@@ -243,3 +243,82 @@ async fn run(name: &str) -> (TurnSummary, Vec<SessionEvent>, Held) {
         },
     )
 }
+
+/// TC-CONTRACT-5: a pushed event is byte-identical to the line on disk.
+///
+/// The contract says this twice - section 4.3 calls `SessionEvent` "byte-
+/// identical to one line of the JSONL journal", and section 4.7 says dropping
+/// the push envelope "makes the stream byte-identical to the journal on disk"
+/// - and until now nothing checked it anywhere.
+///
+/// Section 7.6 said TC-PROTO-5 did. It cannot: that case lives in
+/// `crates/protocol`, which deliberately does not depend on the crate owning
+/// the journal type, so it compares the wire type against a hand-written
+/// literal. A literal is a copy of the journal's shape and goes stale exactly
+/// when the shape changes, which is the moment the check was for. It also
+/// compares through `serde_json::to_value`, which is a structural comparison
+/// and blind to field order - so even "identical" was being read loosely.
+///
+/// This is the case that can make the claim, because `crates/engine` is where
+/// both types exist. It compares the two serialized *strings*, so a reordered
+/// field, a changed rename, or a differing `skip_serializing_if` all fail here
+/// while every existing suite stays green.
+#[tokio::test]
+async fn a_pushed_event_is_byte_identical_to_the_line_on_disk() {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    });
+
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("session.create");
+    engine
+        .agent_prompt(AgentPromptParams {
+            session_id: info.session_id.clone(),
+            content: "write a line to the journal".into(),
+        })
+        .await
+        .expect("agent.prompt");
+
+    // What the journal holds, through the crate that owns it.
+    let on_disk =
+        tetanus_session::replay(std::path::Path::new(&info.path)).expect("the journal replays");
+    assert!(!on_disk.is_empty(), "a turn wrote something");
+
+    // What the boundary carries, through the call a surface makes.
+    let served = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("session.events")
+        .events;
+
+    assert_eq!(
+        served.len(),
+        on_disk.len(),
+        "the boundary serves every line the journal holds"
+    );
+
+    for (wire, line) in served.iter().zip(&on_disk) {
+        let wire_json = serde_json::to_string(wire).expect("serialize the wire event");
+        let line_json = serde_json::to_string(line).expect("serialize the journal event");
+        assert_eq!(
+            wire_json, line_json,
+            "byte-identical is a claim about bytes: `{}` differs from the line at seq {}",
+            wire.ty, line.seq
+        );
+    }
+
+    // And at least one event carries `sourceEventSeqs`, so the case covers the
+    // field whose rename and omission are the likeliest thing to drift.
+    assert!(
+        on_disk.iter().any(|e| e.source_event_seqs.is_some()),
+        "a turn writes at least one surface event, which is where the camel-case field lives"
+    );
+}
