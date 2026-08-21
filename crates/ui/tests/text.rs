@@ -1,9 +1,11 @@
 //! Test Design Specification: the text rules every renderer shares.
 //!
 //! Features tested: cutting a value to a width and saying so, folding a
-//! paragraph to a width without losing a word, measuring and cutting a line
-//! that a theme has already painted, and making text the harness did not write
-//! safe to draw, as a paragraph and as one row. Features NOT tested here: what any particular renderer does
+//! paragraph to a width without losing a word, measuring and cutting text a
+//! terminal joins as it draws - an emoji family, a skin tone, a flag - as the
+//! one thing it draws, measuring and cutting a line that a theme has already
+//! painted, and making text the harness did not write safe to draw, as a
+//! paragraph and as one row. Features NOT tested here: what any particular renderer does
 //! with the result - the status line owns its own cases in `progress.rs`, the
 //! timeline owns its own in `render/timeline.rs`.
 //!
@@ -364,4 +366,67 @@ fn a_value_that_draws_nothing_is_given_a_word() {
         or_empty(&tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}")),
         "(empty)"
     );
+}
+
+/// TC-UI-TEXT-26: the width of text that a terminal joins as it draws.
+/// Expected: two columns for a family emoji, a skin tone and a flag, however
+/// many characters each is spelled with; one for a letter with a combining
+/// mark; four for two CJK characters. A row measured per character says the
+/// family is six, pads four columns short, and every column after it on that
+/// row lands wrong.
+#[test]
+fn what_is_drawn_as_one_thing_is_measured_as_one_thing() {
+    assert_eq!(
+        visible_width("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"),
+        2
+    );
+    assert_eq!(visible_width("\u{1f44d}\u{1f3fd}"), 2);
+    assert_eq!(visible_width("\u{1f1ef}\u{1f1f5}"), 2);
+    assert_eq!(visible_width("e\u{301}"), 1);
+    assert_eq!(visible_width("한글"), 4);
+    // Two flags are two flags, not one wide one.
+    assert_eq!(visible_width("\u{1f1ef}\u{1f1f5}\u{1f1e9}\u{1f1ea}"), 4);
+}
+
+/// TC-UI-TEXT-27: a cut that would land inside a join.
+/// Expected: the join is kept whole or dropped whole. A cut between the man
+/// and the woman of a family leaves two people where there was one emoji, and
+/// the row is a column wider than it was promised to be either way.
+#[test]
+fn a_cut_never_lands_inside_a_join() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let said = format!("{family}{family}");
+
+    let cut = truncate(&said, 3, Charset::Unicode);
+    assert!(visible_width(&cut) <= 3, "{cut:?} overruns three columns");
+    assert!(
+        !cut.contains('\u{200d}') || cut.matches('\u{1f468}').count() == 1,
+        "a family was cut in half: {cut:?}"
+    );
+    assert_eq!(truncate(&said, 4, Charset::Unicode), said);
+}
+
+/// TC-UI-TEXT-28: a word of joined emoji, folded narrower than the word.
+/// Expected: every row holds whole emoji and no row overruns, and the rows put
+/// back together are the word that went in.
+#[test]
+fn a_fold_breaks_between_joins_and_not_inside_them() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let word = family.repeat(4);
+    let lines = wrap(&word, 5);
+
+    for line in &lines {
+        assert!(visible_width(line) <= 5, "`{line:?}` overruns five");
+    }
+    assert_eq!(lines.concat(), word, "the word changed: {lines:?}");
+}
+
+/// TC-UI-TEXT-29: a painted line that also holds a joined emoji.
+/// Expected: the sequences a theme wrote are still not counted, and the emoji
+/// is still two columns. The two rules compose, because the escapes are taken
+/// out before the clusters are measured.
+#[test]
+fn a_painted_line_with_an_emoji_is_measured_by_what_is_drawn() {
+    let line = "\u{1b}[1mai\u{1b}[0m \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    assert_eq!(visible_width(line), 5);
 }
