@@ -23,6 +23,12 @@ libc.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# The tool suites drive a real turn: a booted engine, a real journal, and a
+# scripted adapter standing in for the model.
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The suites ask the kernel whether a process is still there (signal zero),

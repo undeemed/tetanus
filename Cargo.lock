@@ -1530,6 +1530,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tetanus-core",
+ "tetanus-session",
  "tetanus-turn",
  "thiserror",
  "tokio",

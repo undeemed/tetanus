@@ -40,6 +40,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Notify};
 
+use tetanus_turn::interrupt::Interrupt;
+
 use crate::backend::{BackendError, Markers, ShellBackend};
 use crate::proc::{terminate_group, Chunk, OutputSink, Stream};
 
@@ -147,6 +149,13 @@ pub enum SessionError {
     /// shell still running a command nobody is waiting for cannot be reused.
     #[error("the command ran past its {}ms budget; the session was ended with it", .after.as_millis())]
     TimedOut { after: Duration, partial: String },
+    /// The turn was stopped while the command was running. The session goes
+    /// with it for the same reason a timeout ends one: a shell still running a
+    /// command nobody is waiting for cannot be reused.
+    #[error(
+        "the turn was interrupted while the command was running; the session was ended with it"
+    )]
+    Interrupted { partial: String },
     /// The shell stopped accepting input.
     #[error("the shell stopped accepting input: {0}")]
     Input(#[source] std::io::Error),
@@ -159,9 +168,9 @@ impl SessionError {
     /// has to tell a model what happened.
     pub fn partial(&self) -> Option<&str> {
         match self {
-            SessionError::Died { partial, .. } | SessionError::TimedOut { partial, .. } => {
-                Some(partial)
-            }
+            SessionError::Died { partial, .. }
+            | SessionError::TimedOut { partial, .. }
+            | SessionError::Interrupted { partial } => Some(partial),
             _ => None,
         }
     }
@@ -252,6 +261,20 @@ impl ShellSession {
         command: &str,
         sink: Option<Arc<dyn OutputSink>>,
     ) -> Result<SessionRun, SessionError> {
+        self.run_watching(command, sink, None).await
+    }
+
+    /// [`ShellSession::run_with`], ended if the turn is interrupted.
+    ///
+    /// The session goes with the interrupt rather than staying open: the shell
+    /// is mid-command, nobody will read the answer, and the next caller would
+    /// have their own command read by a program that is still running.
+    pub async fn run_watching(
+        &self,
+        command: &str,
+        sink: Option<Arc<dyn OutputSink>>,
+        interrupt: Option<&Interrupt>,
+    ) -> Result<SessionRun, SessionError> {
         // One command at a time, so two callers cannot interleave markers on
         // one shell.
         let _one_at_a_time = self.running.lock().await;
@@ -310,8 +333,21 @@ impl ShellSession {
                 });
             }
 
+            if interrupt.is_some_and(Interrupt::stopped) {
+                let cut = partial(seen, &markers);
+                self.close_now(Gone::Closed).await;
+                return Err(SessionError::Interrupted { partial: cut });
+            }
+
+            let stopping = async {
+                match interrupt {
+                    Some(interrupt) => interrupt.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 _ = woken => {}
+                _ = stopping => {}
                 _ = tokio::time::sleep(POLL) => {}
                 _ = tokio::time::sleep_until(deadline) => {}
             }

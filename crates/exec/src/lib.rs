@@ -9,6 +9,11 @@
 //!   a loud refusal for a backend whose binary this host does not have.
 //! - [`shell`] is one command through one backend: the deployment's defaults
 //!   and caps, the run, and the text a model reads afterwards.
+//! - [`session`] is a persistent shell: one long-lived process a turn reuses,
+//!   keeping its directory and its variables between tool calls, with a death
+//!   that is reported rather than restarted underneath the caller.
+//! - [`tools`] is what the model can actually call: `shell` for one command,
+//!   and `shell_open`/`shell_run`/`shell_close`/`shell_list` for the sessions.
 //!
 //! Parity: upstream `packages/subprocess`, `packages/shell` and
 //! `packages/terminal`, restated against this seam. `docs/parity.md` records
@@ -18,9 +23,12 @@ pub mod backend;
 pub mod proc;
 pub mod session;
 pub mod shell;
+pub mod tools;
 
 pub use backend::{BackendError, Bash, PowerShell, Resolved, ShellBackend};
 pub use proc::{
     Captured, Chunk, Collected, Command, Ending, Limits, Output, OutputSink, ProcessError, Stream,
 };
+pub use session::{SessionConfig, SessionError, ShellSession, ShellSessions};
 pub use shell::{ShellConfig, ShellError, ShellExec, ShellRequest, ShellRun, ShellSpec};
+pub use tools::ShellTools;

@@ -36,7 +36,7 @@ use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
 use tetanus_session::{SessionError, SessionLog};
 
 use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalService};
-use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
+use crate::boot::{InterruptService, LlmService, PromptService, SessionService, ToolsService};
 use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
@@ -247,7 +247,11 @@ impl TurnEngine {
             _base: base,
             config,
             turns: AtomicU64::new(turns),
-            interrupt: Interrupt::new(),
+            // The composition's switch when it provided one, so a tool holding
+            // a child process hears the same interrupt the loop does; a fresh
+            // one otherwise, which is every composition with nothing outside
+            // the process to stop.
+            interrupt: ctx.services.get::<InterruptService>().unwrap_or_default(),
         })
     }
 
@@ -342,6 +346,12 @@ impl TurnEngine {
     /// `false` means there was nothing to ask: no turn is running.
     pub fn cancel(&self) -> bool {
         self.interrupt.stop()
+    }
+
+    /// The switch [`TurnEngine::cancel`] throws, for a composition that has to
+    /// hand it to something outside the loop.
+    pub fn interrupt(&self) -> &Arc<Interrupt> {
+        &self.interrupt
     }
 
     pub fn bus(&self) -> &EventBus {
