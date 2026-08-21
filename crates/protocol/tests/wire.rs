@@ -10,7 +10,7 @@ use tetanus_protocol::methods::MAX_PAGE_SIZE;
 use tetanus_protocol::methods::{
     capability, method, push, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush,
     AgentSteerParams, AgentSteerResult, ApprovalSetParams, ApproveParams, ApproveResult,
-    MAX_FRAME_BYTES, SessionEventPush, SessionEventsResult, SessionForkParams,
+    SessionEventPush, SessionEventsResult, SessionForkParams, MAX_FRAME_BYTES,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
