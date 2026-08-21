@@ -366,6 +366,11 @@ jump a row as they typed a space.
 Past five rows it scrolls inside them, keeping the rows the caret is on, the way the single row
 scrolled sideways.
 
+The caret is placed from where the prompt began rather than from the bottom of the screen, and only
+when that row was drawn: a terminal too short for the whole arrangement drops what does not fit -
+the footer first - so a caret counted from the footer lands on the rule above the prompt, and a
+terminal with no room for a prompt at all has nowhere to put one.
+
 `/think` and `/more` open what is already on the page: the model's thinking, folded to its first
 line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
 to off the screen.

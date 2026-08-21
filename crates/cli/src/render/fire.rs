@@ -753,6 +753,12 @@ impl Fire {
         // above it gives up those rows: what is being written is what the
         // reader is looking at.
         let (typed, at) = self.line.rows(cols.saturating_sub(label), most);
+        // Where the prompt actually starts, counted as the rows already
+        // spent. On a terminal too short for the whole arrangement the frame
+        // drops what does not fit - the footer first - so the prompt is not
+        // always two rows off the bottom, and a caret placed as though it were
+        // lands on the rule above it.
+        let first = rows.saturating_sub(frame.free());
         for (number, row) in typed.iter().enumerate() {
             let marker = match number {
                 0 => self.theme.paint(Role::Accent, MARKER).to_string(),
@@ -761,9 +767,13 @@ impl Fire {
             frame.row(format!("{marker}{row}"));
         }
         frame.row(self.footer(cols));
-        // The row of the prompt the caret is on, counted from the footer up:
-        // the prompt is the last thing before it, however many rows it took.
-        frame.cursor(rows.saturating_sub(1 + typed.len() - at.0), label + at.1);
+        // The row of the prompt the caret is on, counted from where the
+        // prompt began - and only when that row was drawn at all. A terminal
+        // with no room for a prompt has nowhere to put a caret, and one placed
+        // anyway would sit on whatever the frame did have room for.
+        if first + at.0 < rows {
+            frame.cursor(first + at.0, label + at.1);
+        }
         frame
     }
 
@@ -1660,6 +1670,81 @@ mod tests {
             prompt <= PROMPT,
             "the prompt grew past {PROMPT}: {capped:?}"
         );
+    }
+
+    /// TC-CLI-FIRE-23: every size a terminal can be, including the ones it
+    /// should not be.
+    /// Expected: the frame is exactly the height asked for, no row overruns
+    /// the width, and the caret is inside the frame - at four columns by one
+    /// row as much as at two hundred by sixty. Six slices have moved rows
+    /// between the transcript, the block, the opening page and a prompt that
+    /// grows, and each of them is arithmetic that has to hold at both ends.
+    #[test]
+    fn the_arrangement_holds_at_every_size() {
+        for rows in 1..=10 {
+            for cols in 4..=24 {
+                for working in [false, true] {
+                    let mut view = Fire::new(theme(), cols, "mock-echo-1", "j.jsonl", false);
+                    view.note("something said before");
+                    if working {
+                        view.started("running the turn");
+                        view.push(&said_by("you", "a question of some length"));
+                    }
+                    typing(&mut view, "a question long enough to fold");
+
+                    let frame = view.frame(cols, rows, Duration::from_secs(1));
+                    assert_eq!(frame.rows(), rows, "{cols}x{rows} working={working}");
+
+                    let mut ui = buffered(theme(), cols);
+                    frame.paint(&mut ui).expect("paint");
+                    let painted = ui.contents();
+                    for row in painted
+                        .trim_start_matches("\x1b[H")
+                        .split("\r\n")
+                        .map(|row| row.split('\x1b').next().unwrap_or_default())
+                    {
+                        assert!(
+                            visible_width(row) <= cols,
+                            "`{row}` overruns {cols} at {cols}x{rows}"
+                        );
+                    }
+                    let drawn: Vec<&str> = painted
+                        .trim_start_matches("\x1b[H")
+                        .split("\r\n")
+                        .map(|row| row.split('\x1b').next().unwrap_or_default())
+                        .collect();
+                    let shown = painted.ends_with("\x1b[?25h");
+                    // A terminal with no room for a prompt has nowhere to put
+                    // a caret and does not claim one.
+                    let prompted = drawn.iter().any(|row| row.starts_with("> "));
+                    assert_eq!(
+                        shown, prompted,
+                        "caret and prompt disagree at {cols}x{rows}"
+                    );
+                    if !shown {
+                        continue;
+                    }
+                    let at = painted.rfind('H').expect("a cursor move");
+                    let place = painted[..at].rsplit_once("\x1b[").expect("a move").1;
+                    let (row, col) = place.split_once(';').expect("row;col");
+                    let (row, col): (usize, usize) =
+                        (row.parse().expect("row"), col.parse().expect("col"));
+                    assert!(
+                        row <= rows && col <= cols,
+                        "the caret is off the screen at {cols}x{rows}: {row};{col}"
+                    );
+                    // And on the prompt, not on whatever the frame had room
+                    // for above it: a terminal too short for the arrangement
+                    // drops the footer, and a caret placed as though the
+                    // footer were always there lands on the rule.
+                    let on = drawn.get(row - 1).copied().unwrap_or_default();
+                    assert!(
+                        on.starts_with("> ") || on.starts_with("  "),
+                        "the caret is not on the prompt at {cols}x{rows}: `{on}`"
+                    );
+                }
+            }
+        }
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
