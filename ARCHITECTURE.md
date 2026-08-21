@@ -859,6 +859,15 @@ the HTML as it served it, which works exactly once, because the page then only r
 that one program. A manifest is a published seam any assembly can write to and the page reads as
 data.
 
+The socket is on that same server, at `/api/ws`, and that is not tidiness.
+A page served from one origin and dialling another is a cross-origin WebSocket, which is the case
+the carrier's own origin check exists to refuse (§4.1.2); same origin, and the check protects the
+deployment instead of fighting the page.
+An upgrade route is handed the raw socket with nothing read off it, so `crates/rpc` performs its own
+handshake, origin check and token check exactly as it does under `tetanus serve --listen`.
+That is why the carrier peeks at a request head rather than reading it, and consumes the head only
+for the requests it answers itself.
+
 The host itself ([crates/host](crates/host)) is upstream's `host/webserver` and `host/frontend-static`:
 a route carrier that knows no harness concepts, serves no files and prints nothing.
 What it owns is the table and the order - exact, then longest prefix, then the one fallback - because

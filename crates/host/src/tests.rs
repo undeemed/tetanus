@@ -5,7 +5,8 @@
 //! than shadowed at request time; that dropping a registration frees the seat;
 //! that the fallback seat is single-owner and that an unclaimed carrier
 //! answers 404; that an upgrade is matched on its own table and on the header
-//! rather than the pathname; and the two addresses this server will bind.
+//! rather than the pathname; that an upgrade handler is handed the socket
+//! with nothing read off it; and the two addresses this server will bind.
 //!
 //! For the frontend on that seat: that a file is served as what it is and an
 //! unknown extension as bytes; that a miss is the page with 200 rather than a
@@ -169,8 +170,34 @@ async fn dropping_a_registration_frees_the_seat() {
 async fn an_upgrade_is_told_by_its_header_and_not_by_its_path() {
     let (server, listener) = carrier().await;
     let address = server.address();
+    // The handler is handed the socket with nothing read off it, so what it
+    // sees first is the request line the client sent: this one reads it back
+    // to prove it, then says so.
     let _socket = server
-        .register_upgrade("/ws", says("the socket"))
+        .register_upgrade(
+            "/ws",
+            Arc::new(|mut stream, _| {
+                tokio::spawn(async move {
+                    // Read the whole head the way a handshake would, so the
+                    // socket is empty before it is closed: a close with bytes
+                    // still unread sends RST and throws away the reply.
+                    let mut seen = Vec::new();
+                    let mut byte = [0_u8; 256];
+                    while !seen.windows(4).any(|four| four == b"\r\n\r\n") {
+                        match stream.read(&mut byte).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => seen.extend_from_slice(&byte[..read]),
+                        }
+                    }
+                    let said = match String::from_utf8_lossy(&seen).starts_with("GET /ws") {
+                        true => "the socket, with its own head",
+                        false => "the head was eaten",
+                    };
+                    let _ = stream.write_all(said.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }),
+        )
         .expect("free");
     tokio::spawn(server.serve(listener));
 
@@ -179,7 +206,10 @@ async fn an_upgrade_is_told_by_its_header_and_not_by_its_path() {
         "GET /ws HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
     )
     .await;
-    assert!(upgraded.contains("the socket"), "{upgraded}");
+    assert!(
+        upgraded.contains("the socket, with its own head"),
+        "{upgraded}"
+    );
 
     let plain = ask(address, "GET /ws HTTP/1.1\r\nhost: x\r\n\r\n").await;
     assert!(plain.starts_with("HTTP/1.1 404"), "{plain}");

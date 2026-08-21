@@ -50,6 +50,13 @@ const BINDABLE: [&str; 2] = ["127.0.0.1", "0.0.0.0"];
 /// any browser sends and less than a socket can use to hold memory open.
 const HEAD_LIMIT: usize = 16 * 1024;
 
+/// How long a client has to finish sending a request head.
+///
+/// A peek returns what has arrived, so a head that stops arriving would
+/// otherwise be waited on forever - one socket, one task, held by a client
+/// that need not even be malicious to do it.
+const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How long a refused connection is drained before it is shut down.
 const LINGER: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -68,7 +75,7 @@ pub struct WebServer {
 #[derive(Default)]
 struct Table {
     routes: HashMap<(Pattern, String), Route>,
-    upgrades: HashMap<String, Route>,
+    upgrades: HashMap<String, Upgrade>,
     fallback: Option<Route>,
     taps: Vec<(usize, Tap)>,
     /// The number the next tap is filed under, so that a tap removed and one
@@ -137,6 +144,18 @@ fn quoted(value: &str) -> String {
 /// browser has to be told, the frontend knows nothing about the assembly, and
 /// the index is the one document both of them touch.
 pub type Tap = Arc<dyn Fn(String) -> String + Send + Sync>;
+
+/// Who takes over a connection that asked to stop being HTTP.
+///
+/// Handed the socket with nothing read off it, so the handshake belongs
+/// entirely to the protocol taking over: this carrier delivers the raw socket
+/// and the request that came with it, and has no opinion about what is said
+/// next. That is upstream's line - "the upgrade handler owns the protocol
+/// handshake and connection contents; the webserver only delivers the raw
+/// socket and request" - and it is the only arrangement under which
+/// `crates/rpc` can do its own WebSocket handshake, origin check and token
+/// check unchanged (contract §4.1.2).
+pub type Upgrade = Arc<dyn Fn(TcpStream, Request) + Send + Sync>;
 
 /// A registration, undone by dropping it.
 ///
@@ -224,14 +243,12 @@ impl WebServer {
     }
 
     /// Add an upgrade route, matched on the exact pathname.
-    pub fn register_upgrade(&self, path: &str, handler: Handler) -> Result<Registered, Taken> {
+    pub fn register_upgrade(&self, path: &str, handler: Upgrade) -> Result<Registered, Taken> {
         let mut table = self.table.lock().expect("the route table");
         if table.upgrades.contains_key(path) {
             return Err(Taken::Route(path.to_string()));
         }
-        table
-            .upgrades
-            .insert(path.to_string(), Route::new(path, handler));
+        table.upgrades.insert(path.to_string(), handler);
         Ok(Registered {
             table: Arc::clone(&self.table),
             what: What::Upgrade(path.to_string()),
@@ -307,10 +324,35 @@ impl WebServer {
 
     /// Read one request, find who owns it, and write what they said.
     async fn answer(&self, mut stream: TcpStream) -> io::Result<()> {
-        let Some(request) = read_head(&mut stream).await? else {
+        let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&stream))
+            .await
+            .unwrap_or(Ok(None))?;
+        let Some((request, head)) = head else {
             respond::write(&mut stream, &Response::status(Status::BadRequest)).await?;
             return lingering_close(stream).await;
         };
+        // An upgrade leaves with the socket exactly as it arrived: the head was
+        // read by peeking, so the protocol taking over reads its own request
+        // and performs its own handshake.
+        if request.upgrade {
+            let taken = {
+                let table = self.table.lock().expect("the route table");
+                table.upgrades.get(&request.path).cloned()
+            };
+            return match taken {
+                Some(handler) => {
+                    handler(stream, request);
+                    Ok(())
+                }
+                None => {
+                    respond::write(&mut stream, &Response::status(Status::NotFound)).await?;
+                    lingering_close(stream).await
+                }
+            };
+        }
+        // Everything else is answered here, so the head this carrier peeked at
+        // is taken off the socket before the body is anybody's business.
+        take(&mut stream, head).await?;
         let found = {
             let table = self.table.lock().expect("the route table");
             table.find(&request)
@@ -330,9 +372,6 @@ impl Table {
     /// fallback. The order is the contract; nothing here reads registration
     /// order.
     fn find(&self, request: &Request) -> Option<Route> {
-        if request.upgrade {
-            return self.upgrades.get(&request.path).cloned();
-        }
         if let Some(route) = self.routes.get(&(Pattern::Exact, request.path.clone())) {
             return Some(route.clone());
         }
@@ -395,26 +434,46 @@ async fn lingering_close(mut stream: TcpStream) -> io::Result<()> {
 /// head longer than the limit, or bytes that are not a request. Every one of
 /// them is answered 400 rather than logged and left, because a socket held
 /// open for a reply that never comes is worse than a refusal.
-async fn read_head(stream: &mut TcpStream) -> io::Result<Option<Request>> {
-    let mut head = Vec::new();
-    let mut byte = [0_u8; 1024];
+async fn read_head(stream: &TcpStream) -> io::Result<Option<(Request, usize)>> {
+    let mut head = vec![0_u8; HEAD_LIMIT];
+    let mut waited = 0;
     loop {
-        let read = stream.read(&mut byte).await?;
-        if read == 0 {
-            return Ok(None);
+        // Peeked rather than read, because an upgrade leaves with a socket
+        // nobody has taken bytes off: the protocol that takes over reads its
+        // own request. The kernel keeps the bytes until they are taken, so
+        // each peek returns everything that has arrived so far, and a head
+        // that arrived in pieces is re-read whole rather than reassembled.
+        let seen = match stream.peek(&mut head).await? {
+            0 => return Ok(None),
+            seen => seen,
+        };
+        // A peek answers with what is already buffered, so a head still
+        // arriving would spin this loop. Nothing new means wait a moment; the
+        // whole read is bounded by `HEAD_TIMEOUT` either way.
+        if seen == waited {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        head.extend_from_slice(&byte[..read]);
-        if head.len() > HEAD_LIMIT {
-            return Ok(None);
-        }
+        waited = seen;
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut parsed = httparse::Request::new(&mut headers);
-        match parsed.parse(&head) {
-            Ok(httparse::Status::Complete(_)) => return Ok(Request::of(&parsed)),
+        match parsed.parse(&head[..seen]) {
+            Ok(httparse::Status::Complete(length)) => {
+                return Ok(Request::of(&parsed).map(|request| (request, length)))
+            }
+            // A head that fills the buffer and is still not a head is one this
+            // carrier will not wait any longer for.
+            Ok(httparse::Status::Partial) if seen >= HEAD_LIMIT => return Ok(None),
             Ok(httparse::Status::Partial) => continue,
             Err(_) => return Ok(None),
         }
     }
+}
+
+/// Take a peeked head off the socket, so the body starts where a reader of it
+/// would expect.
+async fn take(stream: &mut TcpStream, head: usize) -> io::Result<()> {
+    let mut taken = vec![0_u8; head];
+    stream.read_exact(&mut taken).await.map(|_| ())
 }
 
 #[cfg(test)]
