@@ -53,6 +53,7 @@ The one live case is the position of `system-prompt/assemble`
 
 ```text
 crates/cli      tetanus-hardness   the `tetanus` binary
+  -> crates/toolset  tetanus-toolset   the one assembly of the tools this build offers
   -> crates/turn     tetanus-turn      turn engine, events, LLM seam, tools, boot, trace
        -> crates/session  tetanus-session   durable event vocabulary, JSONL and SQLite journals, projections
        -> crates/core     tetanus-core      registry, services, event bus, effects
@@ -79,6 +80,12 @@ implementations and reads its own section of the settings document. Everything e
 decides sits above a seam - a `Link` for a server on a pipe, an `HttpTransport` for a request - so
 the whole policy is asserted with no socket in the suite, and a failure out there is a failed tool
 call carrying a class rather than a turn that ended.
+
+`tetanus-toolset` is where a tool crate registers itself, and both the binary and the engine read it,
+so what `tetanus tools` lists and what a turn can dispatch are one list rather than two expressions
+that agree today ([crates/toolset/src/lib.rs](crates/toolset/src/lib.rs)).
+It refuses an assembly in which two sources offer one tool name, because a registry keyed by name
+would otherwise offer the model one tool's schema and run another's body.
 
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.

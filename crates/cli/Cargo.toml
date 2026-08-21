@@ -20,6 +20,7 @@ tetanus-engine = { path = "../engine" }
 tetanus-exec = { path = "../exec" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+tetanus-toolset = { path = "../toolset" }
 tetanus-protocol = { path = "../protocol" }
 tetanus-host = { path = "../host" }
 tetanus-rpc = { path = "../rpc" }

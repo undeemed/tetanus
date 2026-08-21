@@ -32,7 +32,7 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::SessionInfo;
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
-use tetanus_turn::tools::{EchoTool, ToolRegistry};
+use tetanus_turn::tools::ToolRegistry;
 
 use crate::agent::{MockProviders, Providers, Runtime};
 use crate::catalog::Catalogs;
@@ -112,7 +112,10 @@ impl Default for EngineConfig {
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
-            tools: Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
+            // One assembly, shared with the binary: what `tetanus tools`
+            // lists and what a turn can dispatch are the same list rather than
+            // two expressions that agree today.
+            tools: Arc::new(tetanus_toolset::stock_registry()),
             // The library composes no tool that leaves the process; the
             // binary does, and sets this when it does.
             session_tools: None,

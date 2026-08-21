@@ -253,12 +253,13 @@ That server has no end of file to stop it, so Ctrl-C is the shutdown and it exit
 
 ## Workspace layout
 
-A Cargo workspace of fifteen crates.
+A Cargo workspace of nineteen crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
 | `tetanus-core` | [crates/core](crates/core) | Plugin registry, typed service registry, four-mode event bus, RAII effect handles, the durable key-value store and the spill store |
 | `tetanus-session` | [crates/session](crates/session) | Durable `SessionEvent` vocabulary, the JSONL and SQLite journals behind one seam, replay, and the projection registry with the units that need no pricing |
+| `tetanus-toolset` | [crates/toolset](crates/toolset) | The one assembly of the tools this build offers, shared by the binary and the engine |
 | `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, the decision seams a call and a question are gated on, boot composition, tracer, compaction and the priced projections |
 | `tetanus-fs` | [crates/fs](crates/fs) | The filesystem service, its local and sandboxed backends, the read-before-write policy, the model-facing file tools, and the permission presets over them |
 | `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, the settings document it reads, and the credential store that deliberately is not in it |
@@ -270,6 +271,8 @@ A Cargo workspace of fifteen crates.
 | `tetanus-host` | [crates/host](crates/host) | The HTTP route carrier the web GUI rides on: named routes, one fallback seat, upgrade seats, and the directory picker behind them |
 | `tetanus-mcp` | [crates/mcp](crates/mcp) | The MCP client: a server on stdio, its tools in the registry, and the supervisor that keeps it up |
 | `tetanus-web` | [crates/web](crates/web) | `web_fetch` and `web_search`, the transport seam under them, and one search provider |
+| `tetanus-hooks` | [crates/hooks](crates/hooks) | The out-of-process hooks protocol: which hooks an event selects, what is written to them, and how several answers combine |
+| `tetanus-subagent` | [crates/subagent](crates/subagent) | Delegation: an agent that starts another, and the budget that stops the recursion |
 | `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, the whole-screen frame and the scrollable page on it, held terminal and loop a full-screen view runs in |
 | `tetanus-features` | [crates/features](crates/features) | The built-in feature tools: skill, todo, goal, plan, feedback, attachment and workspace |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |

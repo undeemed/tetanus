@@ -12,6 +12,7 @@ members = [
   "crates/rpc",
   "crates/sandbox",
   "crates/turn",
+  "crates/toolset",
   "crates/host",
   "crates/features",
   "crates/fs",

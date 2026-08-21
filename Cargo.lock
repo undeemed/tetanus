@@ -1549,6 +1549,7 @@ dependencies = [
  "tetanus-core",
  "tetanus-protocol",
  "tetanus-session",
+ "tetanus-toolset",
  "tetanus-turn",
  "thiserror",
  "tokio",
@@ -1625,6 +1626,7 @@ dependencies = [
  "tetanus-protocol",
  "tetanus-rpc",
  "tetanus-session",
+ "tetanus-toolset",
  "tetanus-turn",
  "tetanus-ui",
  "tokio",
@@ -1727,6 +1729,19 @@ dependencies = [
  "serde_json",
  "tetanus-session",
  "thiserror",
+]
+
+[[package]]
+name = "tetanus-toolset"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tetanus-config",
+ "tetanus-engine",
+ "tetanus-turn",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

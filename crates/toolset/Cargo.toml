@@ -1,0 +1,19 @@
+[package]
+name = "tetanus-toolset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tetanus-config = { path = "../config" }
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+# The assembly is what the engine defaults to, so TC-TOOLSET-2 reads the
+# engine's own default rather than a copy of it. A dev-dependency only: nothing
+# in this crate's own build knows the engine exists.
+tetanus-engine = { path = "../engine" }
