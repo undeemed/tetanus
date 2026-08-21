@@ -293,7 +293,7 @@ impl Reader {
             } => {
                 let dot = theme.glyph("·", "-");
                 let shown = stopped(stop_reason);
-                let reason = theme.paint(Role::Ok, &shown);
+                let reason = theme.paint(settled(stop_reason), &shown);
                 let unit = if *steps == 1 { "step" } else { "steps" };
                 let mut closing = format!("turn {turn} {dot} {reason} {dot} {steps} {unit}");
                 // Under a second is not worth reporting: nobody waited for
@@ -337,6 +337,20 @@ impl Reader {
                 let mut lines = vec![String::new(), closing];
                 if let Some(veto) = stop_veto {
                     lines.push(format!("{INDENT}held open by {}", tame(veto)));
+                }
+                // The one reason worth a sentence of its own. The contract
+                // asks for it in as many words (§4.4.2): a surface that
+                // renders a cut-off turn as an ordinary end tells the reader
+                // that a sentence the model never finished is the whole reply.
+                if matches!(stop_reason, StopReason::Other(reason) if reason == "max-tokens") {
+                    lines.push(
+                        theme
+                            .paint(
+                                Role::Muted,
+                                &format!("{INDENT}the answer stops where the cap did; ask again to go on"),
+                            )
+                            .to_string(),
+                    );
                 }
                 lines
             }
@@ -615,7 +629,26 @@ pub(super) fn stopped(reason: &StopReason) -> String {
         StopReason::PreStepRejected => "rejected before the step".into(),
         StopReason::MaxSteps => "step budget spent".into(),
         StopReason::Cancelled => "cancelled".into(),
+        // The two values §4.4.2 and §4.4.3 name on the growable enum. A
+        // surface that echoed the wire word would print `max-tokens` at a
+        // reader, which says what the field holds rather than what happened.
+        StopReason::Other(reason) if reason == "max-tokens" => "cut off at the output cap".into(),
+        StopReason::Other(reason) if reason == "failed" => "failed".into(),
         StopReason::Other(reason) => tame(reason),
+    }
+}
+
+/// Whether a turn ended the way it meant to.
+///
+/// Only one reason is: a model that stopped writing because it had finished.
+/// Every other reason means the answer on the page is missing something the
+/// reader cannot see is missing - the cap cut it off, a budget ran out, a
+/// listener refused the step, somebody interrupted - and a closing line that
+/// painted them all alike would say so in the colour of a job well done.
+fn settled(reason: &StopReason) -> Role {
+    match reason {
+        StopReason::Natural => Role::Ok,
+        _ => Role::Warn,
     }
 }
 
@@ -1799,6 +1832,71 @@ mod tests {
 
         let nothing = told(&theme, &Stats::default()).join(" ");
         assert!(nothing.contains("nothing has been asked yet"), "{nothing}");
+    }
+
+    /// TC-CLI-TL-30: a turn the provider cut off at its output cap.
+    /// Expected: worded rather than echoed - `max-tokens` is what the field
+    /// holds, not what happened - said in the warning colour rather than the
+    /// one a finished turn gets, and followed by the sentence the contract
+    /// asks for in as many words (§4.4.2): a surface that renders this as an
+    /// ordinary end tells the reader that a sentence the model never finished
+    /// is the whole reply.
+    #[test]
+    fn a_turn_cut_off_at_the_cap_says_the_answer_is_unfinished() {
+        let events = [
+            event("turn/start", json!({ "turn": 1 })),
+            event(
+                "assistant/message",
+                json!({ "content": "it was the best of" }),
+            ),
+            event(
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "max-tokens" }),
+            ),
+        ];
+        let out = rendered(&events, Charset::Unicode, 80);
+
+        assert!(out.contains("cut off at the output cap"), "{out}");
+        assert!(
+            !out.contains("max-tokens"),
+            "the wire word reached the page: {out}"
+        );
+        assert!(out.contains("the answer stops where the cap did"), "{out}");
+
+        // And it is not painted as a turn that ended well.
+        let mut ui = buffered(Theme::new(true, Charset::Unicode), 80);
+        render(&mut ui, &events, false).expect("render");
+        let painted = ui.contents();
+        let cut = painted
+            .lines()
+            .find(|line| line.contains("cut off"))
+            .expect("the closing line");
+        let natural = {
+            let mut ui = buffered(Theme::new(true, Charset::Unicode), 80);
+            let ended = [
+                event("turn/start", json!({ "turn": 1 })),
+                event(
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ];
+            render(&mut ui, &ended, false).expect("render");
+            ui.contents()
+                .lines()
+                .find(|line| line.contains("natural"))
+                .expect("the closing line")
+                .to_string()
+        };
+        let colour = |line: &str| {
+            line.split('\u{1b}')
+                .find(|part| part.starts_with('[') && part.contains('m'))
+                .map(|part| part.split('m').next().unwrap_or_default().to_string())
+        };
+        assert_ne!(
+            colour(cut),
+            colour(&natural),
+            "a cut-off turn is painted like a finished one"
+        );
     }
 
     /// TC-CLI-TL-25: a tool whose name a terminal draws twice as wide.
