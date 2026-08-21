@@ -11,6 +11,7 @@
 //!
 //! Parity: upstream `packages/hooks/*`.
 
+pub mod claude_code;
 pub mod codec;
 pub mod detached;
 pub mod events;
@@ -20,6 +21,7 @@ pub mod merge;
 pub mod runner;
 pub mod types;
 
+pub use claude_code::{parse_claude_code_config, MatcherGroup};
 pub use codec::parse_hook_output;
 pub use detached::{CancelSignal, DetachedRuns};
 pub use events::{append_hook_invoked, append_hook_result, summarize_stderr, HookDialect};
