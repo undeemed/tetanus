@@ -84,9 +84,15 @@ fn armed_child() -> std::process::Child {
 
     let out = child.stdout.as_mut().expect("piped");
     let mut lines = BufReader::new(out).lines();
+    // Ends with, not equals. Run with one test thread, libtest writes the
+    // case's name without a newline and then lets the case's own output
+    // continue that line, so the marker arrives as
+    // `test child_holds_a_terminal_until_it_is_killed ... armed`. Matching the
+    // whole line made this suite depend on the harness's threading mode, which
+    // is not a fact about the code under test.
     let armed = lines
         .by_ref()
-        .any(|line| line.expect("read the child") == ARMED);
+        .any(|line| line.expect("read the child").trim_end().ends_with(ARMED));
     if armed {
         return child;
     }
