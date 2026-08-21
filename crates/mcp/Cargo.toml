@@ -33,3 +33,5 @@ tempfile = { workspace = true }
 # Self-dependency: the only way to enable `fixture` for the test profile, so
 # the suite gets the server binary and a release build does not.
 tetanus-mcp = { path = ".", features = ["fixture"] }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
