@@ -31,7 +31,7 @@ use serde_json::Value;
 use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::tools::{Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema};
 
-use crate::backend::{BackendError, ShellBackend};
+use crate::backend::ShellBackend;
 use crate::proc::OutputSink;
 use crate::session::{SessionConfig, SessionError, ShellSessions};
 use crate::shell::{render, ShellConfig, ShellError, ShellExec, ShellRequest};
@@ -71,7 +71,7 @@ impl ShellTools {
         config: ShellConfig,
         session_config: SessionConfig,
         interrupt: Arc<Interrupt>,
-    ) -> Result<Arc<Self>, BackendError> {
+    ) -> Result<Arc<Self>, ShellError> {
         let exec = ShellExec::new(Arc::clone(&backend), config)?;
         Ok(Arc::new(Self {
             exec,
@@ -100,8 +100,9 @@ impl ShellTools {
         registry
     }
 
-    /// Register the tools, or - on a host whose shell is missing - register one
-    /// `shell` tool that answers every call with the refusal.
+    /// Register the tools, or - on a host whose shell is missing, or whose
+    /// kernel cannot enforce the policy - register one `shell` tool that
+    /// answers every call with the refusal.
     ///
     /// A composition that dropped the tools silently would leave the model
     /// with no shell and no way to find out why: it would look like a build

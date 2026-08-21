@@ -47,6 +47,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
+use tetanus_sandbox::{Confinement, Enforcement};
 use tetanus_turn::interrupt::Interrupt;
 
 /// How much of a stream to keep, how long to wait, and how long a killed
@@ -232,6 +233,11 @@ pub struct Command {
     stdin: Option<String>,
     limits: Limits,
     sink: Option<Arc<dyn OutputSink>>,
+    /// The kernel boundary this command runs behind, prepared by the caller.
+    /// `None` is a command nobody asked to confine; a policy that asked and
+    /// could not be honoured never becomes a `Command` at all, because
+    /// preparing it already failed.
+    confinement: Option<Arc<Confinement>>,
 }
 
 impl std::fmt::Debug for Command {
@@ -259,6 +265,7 @@ impl Command {
             stdin: None,
             limits: Limits::default(),
             sink: None,
+            confinement: None,
         }
     }
 
@@ -330,6 +337,26 @@ impl Command {
         self
     }
 
+    /// Run this command behind a prepared kernel boundary.
+    ///
+    /// The confinement is built by the caller, in the caller's process, where
+    /// a kernel that cannot honour the policy is still something a human can
+    /// be told about. By the time it reaches here every question has been
+    /// answered and what is left is one descriptor to apply.
+    pub fn confined(mut self, confinement: Arc<Confinement>) -> Self {
+        self.confinement = Some(confinement);
+        self
+    }
+
+    /// How completely this command's boundary is enforced, for a caller
+    /// rendering what happened.
+    pub fn enforcement(&self) -> Option<Enforcement> {
+        self.confinement
+            .as_ref()
+            .filter(|confinement| confinement.confines())
+            .map(|confinement| confinement.enforcement)
+    }
+
     /// Run it, and wait for what it produced.
     pub async fn run(&self) -> Result<Output, ProcessError> {
         self.execute(None).await
@@ -366,6 +393,8 @@ impl Command {
         // group and signalling that group would kill the harness too.
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(target_os = "linux")]
+        confine(&mut command, self.confinement.as_ref())?;
 
         let mut child = command.spawn().map_err(|source| ProcessError::NotStarted {
             program: self.program.clone(),
@@ -753,4 +782,41 @@ fn signal_name(status: &std::process::ExitStatus) -> Option<String> {
 #[cfg(not(unix))]
 fn signal_name(_status: &std::process::ExitStatus) -> Option<String> {
     None
+}
+
+/// Apply a prepared boundary to the child, between `fork` and `exec`.
+///
+/// The hook runs in the forked child, so what it may do is narrow: no
+/// allocation, no locks, no library code that might take one - after a fork in
+/// a process with threads, anything another thread held at that instant is
+/// held for ever. Restricting a thread is three system calls, which is exactly
+/// what runs here.
+///
+/// A failure is returned rather than logged. `pre_exec` failing makes `spawn`
+/// fail, so a boundary that could not be applied is a command that does not
+/// run: the alternative is running a model's command unconfined while the
+/// caller believes otherwise.
+#[cfg(target_os = "linux")]
+fn confine(
+    command: &mut tokio::process::Command,
+    confinement: Option<&Arc<Confinement>>,
+) -> Result<(), ProcessError> {
+    use std::os::fd::AsRawFd;
+
+    let Some(confinement) = confinement else {
+        return Ok(());
+    };
+    let Some(ruleset) = confinement.ruleset.as_ref() else {
+        // An unconfined policy, which the caller named out loud.
+        return Ok(());
+    };
+    let ruleset = ruleset.as_raw_fd();
+    // Safety: the closure calls `prctl` and two Landlock syscalls and nothing
+    // else - no allocation, no locks - which is the whole requirement for code
+    // between `fork` and `exec`. The descriptor is owned by the `Confinement`
+    // the caller holds for the length of the spawn.
+    unsafe {
+        command.pre_exec(move || tetanus_sandbox::landlock::restrict_this_thread(ruleset));
+    }
+    Ok(())
 }

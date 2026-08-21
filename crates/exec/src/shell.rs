@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tetanus_sandbox::{Confinement, Enforcement, Mode, Policy, SandboxError};
 use tetanus_turn::interrupt::Interrupt;
 
 use crate::backend::{BackendError, Resolved, ShellBackend};
@@ -41,6 +42,13 @@ pub struct ShellConfig {
     pub max_capture: usize,
     /// How long a killed process group has between SIGTERM and SIGKILL.
     pub grace: Duration,
+    /// The kernel boundary every command runs behind.
+    ///
+    /// The default is `danger-full-access`, which is the behaviour this seam
+    /// had before there was a sandbox, and it is spelled out rather than
+    /// implied: a deployment reading its own configuration can see that it
+    /// chose no confinement. A deployment that wants one writes the mode.
+    pub sandbox: Policy,
 }
 
 impl Default for ShellConfig {
@@ -52,6 +60,9 @@ impl Default for ShellConfig {
             max_timeout: Duration::from_secs(600),
             max_capture: 64 * 1024,
             grace: Duration::from_secs(3),
+            sandbox: Policy::danger_full_access(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
         }
     }
 }
@@ -116,6 +127,11 @@ pub struct ShellSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellRun {
     pub output: Output,
+    /// The mode this command ran under, and how completely it was enforced.
+    /// Carried on the result rather than looked up again, because a reader
+    /// deciding whether a failure was a denial needs the policy that was
+    /// actually applied.
+    pub sandbox: Option<(Mode, Enforcement)>,
     /// The budget this run actually had, after defaulting and capping - the
     /// number the `[timed out after ...]` marker quotes, so a model reads the
     /// limit that applied rather than the one it asked for.
@@ -126,6 +142,11 @@ pub struct ShellRun {
 pub enum ShellError {
     #[error(transparent)]
     Backend(#[from] BackendError),
+    /// The policy could not be enforced on this host. A refusal, never a
+    /// downgrade: the caller asked for a boundary and this host cannot give
+    /// one, so nothing runs.
+    #[error(transparent)]
+    Sandbox(#[from] SandboxError),
     #[error(transparent)]
     Process(#[from] ProcessError),
     /// A command that is only whitespace. Refused rather than run, because a
@@ -140,18 +161,30 @@ pub struct ShellExec {
     backend: Arc<dyn ShellBackend>,
     resolved: Resolved,
     config: ShellConfig,
+    /// Prepared once, at composition, and shared by every command this
+    /// executor runs. Preparing it here is what makes a host that cannot
+    /// honour the policy fail while someone is still watching, rather than on
+    /// the first command a model writes.
+    confinement: Arc<Confinement>,
 }
 
 impl ShellExec {
     /// Resolve the backend now, so a deployment without the shell it named
     /// fails at composition instead of inside a turn.
-    pub fn new(backend: Arc<dyn ShellBackend>, config: ShellConfig) -> Result<Self, BackendError> {
+    pub fn new(backend: Arc<dyn ShellBackend>, config: ShellConfig) -> Result<Self, ShellError> {
         let resolved = backend.resolve()?;
+        let confinement = Arc::new(tetanus_sandbox::prepare(&config.sandbox)?);
         Ok(Self {
             backend,
             resolved,
             config,
+            confinement,
         })
+    }
+
+    /// The boundary every command from this executor runs behind.
+    pub fn confinement(&self) -> &Arc<Confinement> {
+        &self.confinement
     }
 
     pub fn backend(&self) -> &Arc<dyn ShellBackend> {
@@ -224,12 +257,19 @@ impl ShellExec {
         if let Some(sink) = sink {
             command = command.streaming(sink);
         }
+        if self.confinement.confines() {
+            command = command.confined(Arc::clone(&self.confinement));
+        }
         let output = match interrupt {
             Some(interrupt) => command.run_watching(interrupt).await?,
             None => command.run().await?,
         };
         Ok(ShellRun {
             output,
+            sandbox: self
+                .confinement
+                .confines()
+                .then(|| (self.config.sandbox.mode(), self.confinement.enforcement)),
             timeout: spec.timeout,
         })
     }
@@ -270,6 +310,21 @@ pub fn render(run: &ShellRun) -> String {
     }
 
     let mut markers: Vec<String> = Vec::new();
+    if let Some((mode, enforcement)) = run.sandbox {
+        if denied(run) {
+            // Upstream's `sandboxDenialMarker`: a policy denial is not a bug in
+            // the command, and a model that reads it as one will rewrite a
+            // correct command until it gives up. Naming the mode tells it what
+            // would have to change instead.
+            markers.push(format!(
+                "[sandbox: a file or network operation was denied under {mode} mode - this is \
+                 policy, not a bug in the command]"
+            ));
+        }
+        if enforcement == Enforcement::Partial {
+            markers.push("[sandbox: this host enforces only part of that policy]".to_string());
+        }
+    }
     if run.output.swept {
         markers.push(
             "[the command left processes running; they were killed with its process group]"
@@ -357,4 +412,21 @@ fn stream_text(captured: &crate::proc::Captured) -> String {
         "{}\n[output truncated; the beginning was dropped to fit the capture bound]",
         captured.text
     )
+}
+
+/// Whether this run looks like the sandbox refused something.
+///
+/// A guess, and deliberately a conservative one: the kernel denies with
+/// `EACCES` and the program reports it in its own words, so there is nothing
+/// structured to read. The command has to have failed *and* said something
+/// this backend's denial dialect recognises. Upstream carries the same
+/// per-backend dialect rather than a union across backends, because a union
+/// claims denials a given backend never produces.
+fn denied(run: &ShellRun) -> bool {
+    if run.output.ok() {
+        return false;
+    }
+    let text = format!("{}{}", run.output.stdout.text, run.output.stderr.text);
+    let hints = ["Permission denied", "EACCES", "Operation not permitted"];
+    hints.iter().any(|hint| text.contains(hint))
 }

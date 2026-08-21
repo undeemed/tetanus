@@ -63,6 +63,10 @@ pub struct SessionConfig {
     pub grace: Duration,
     /// Extra environment for the shell, over the backend's own overrides.
     pub env: BTreeMap<String, String>,
+    /// The kernel boundary the shell and everything it starts run behind.
+    /// Default `danger-full-access`, spelled out for the reason
+    /// [`crate::shell::ShellConfig`] gives.
+    pub sandbox: tetanus_sandbox::Policy,
 }
 
 impl Default for SessionConfig {
@@ -74,6 +78,9 @@ impl Default for SessionConfig {
             max_scrollback: 256 * 1024,
             grace: Duration::from_secs(3),
             env: BTreeMap::new(),
+            sandbox: tetanus_sandbox::Policy::danger_full_access(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
         }
     }
 }
@@ -129,6 +136,9 @@ pub struct SessionRun {
 pub enum SessionError {
     #[error(transparent)]
     Backend(#[from] BackendError),
+    /// The policy could not be enforced on this host, so no shell was started.
+    #[error(transparent)]
+    Sandbox(#[from] tetanus_sandbox::SandboxError),
     /// The shell could not be started.
     #[error("could not start the {backend} session: {source}")]
     NotStarted {
@@ -685,6 +695,13 @@ async fn start(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    // A session outlives one command, so its boundary is applied once, to the
+    // shell itself: every command it later runs is a child of a restricted
+    // process and inherits the restriction, which is the property that makes a
+    // persistent shell safe to reuse. The handle is held across the spawn,
+    // because dropping it would close the ruleset the child is about to apply.
+    #[cfg(target_os = "linux")]
+    let _confinement = confine_session(&mut command, &config.sandbox)?;
 
     let mut child = command.spawn().map_err(|source| SessionError::NotStarted {
         backend: backend.name(),
@@ -815,4 +832,30 @@ fn signal_of(status: &std::process::ExitStatus) -> Option<String> {
 #[cfg(not(unix))]
 fn signal_of(_status: &std::process::ExitStatus) -> Option<String> {
     None
+}
+
+/// Prepare and attach this session's boundary.
+///
+/// Answers the prepared confinement so the caller holds the descriptor open
+/// across the spawn; dropping it earlier would close the ruleset the child is
+/// about to apply.
+#[cfg(target_os = "linux")]
+fn confine_session(
+    command: &mut tokio::process::Command,
+    policy: &tetanus_sandbox::Policy,
+) -> Result<Option<Arc<tetanus_sandbox::Confinement>>, SessionError> {
+    use std::os::fd::AsRawFd;
+
+    let confinement = Arc::new(tetanus_sandbox::prepare(policy)?);
+    let Some(ruleset) = confinement.ruleset.as_ref() else {
+        return Ok(None);
+    };
+    let ruleset = ruleset.as_raw_fd();
+    // Safety: as in `crate::proc` - the hook is three system calls with no
+    // allocation, and the descriptor lives as long as the returned handle,
+    // which the caller holds across the spawn.
+    unsafe {
+        command.pre_exec(move || tetanus_sandbox::landlock::restrict_this_thread(ruleset));
+    }
+    Ok(Some(confinement))
 }
