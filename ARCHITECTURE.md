@@ -58,6 +58,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
+  -> crates/features tetanus-features  the built-in feature tools over the session journal
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
   -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells, shell tools
        -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
@@ -89,6 +90,12 @@ builds and runs.
 It reuses the containment walk `tetanus-turn` already carries rather than growing a second one
 ([crates/fs/src/local.rs](crates/fs/src/local.rs)), so the fenced and unfenced backends differ only in
 which root a path is judged against.
+`tetanus-features` depends on `tetanus-turn` and nothing depends on it, so a harness composed
+without the feature tools still builds and runs.
+Every module in it has one shape - a durable event type, a fold over the log, a tool that appends and
+answers - because state a replay cannot reproduce is state the harness would lose, and a cache beside
+the journal is a second copy that can disagree with it
+([crates/features/src/lib.rs](crates/features/src/lib.rs)).
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
