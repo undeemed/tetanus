@@ -500,7 +500,7 @@ What the call refuses, and which of §4.5's codes each refusal takes:
 The open-turn refusal names `through_seq` even when the caller omitted it, because naming an earlier one is the fix.
 
 A source whose seqs are not contiguous has no fork boundary to argue about, and takes the answer any read of it takes: `LogCorrupt`, naming the line, from the read that fetches the journal.
-A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written.
+A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written - and §4.4.13 is why no other process can put it there either.
 
 A turn in flight on the source is not a refusal by itself.
 A journal is append-only, so a prefix of it is stable while it grows, and a caller that names a closed boundary gets exactly the child it asked for however busy the parent is.
@@ -769,6 +769,34 @@ When it lands it goes here, and this paragraph is what it replaces.
 
 **A dropped connection unsubscribes.**
 §4.2 already says a carrier that loses a peer drops its sinks, so the leak above is bounded by the connection: a client that reconnects starts clean rather than accumulating deliveries for a socket nobody is reading.
+#### 4.4.13 Who may write a journal
+
+**One writer, many readers.**
+A journal is opened for writing by one process at a time. Any number may read it.
+
+This is not a performance choice, and the rule is here because its absence is silent.
+A `seq` is assigned from the log's own length as the line is written, and the length a process knows is the one it is holding in memory.
+Two processes appending to one file therefore both believe they are writing `seq` 41, and the journal ends up with two of them.
+Nothing notices at the time: both writes succeed, both fsync, both callers are told their event is durable.
+The damage surfaces later and somewhere else, when a reader replays the journal, finds the seq that is not contiguous, and gets `LogCorrupt` (§4.5) naming a line neither writer wrote.
+
+**Which is why a second writer is refused rather than allowed to try.**
+An engine that cannot take a journal for writing answers `Io` carrying the path, exactly as it does for a journal it cannot read.
+The situation is a file it may not have, and the caller's next move is the same: go and look at that path.
+
+**Reading is always allowed, and is safe by construction.**
+A journal is append-only, so a prefix of one is stable however busy its writer is - which §4.4.6 already relies on for forking a session another turn is running on.
+A reader that catches a half-written last line drops it as the crash tail (§4.4.4's neighbour rule), and reads it whole on the next pass.
+So `session.list`, `session.events` and `session.fork` work across processes, and only writing is exclusive.
+
+**What this costs a deployment.**
+Two `tetanus` processes may share a sessions root, and both may read every session in it; they may not have the same session open for work at the same time.
+A second one that tries is told so at `session.create`, before any turn starts, rather than at some later replay.
+
+**A dedicated code would say it better, and is deferred.**
+`Io` tells a surface the journal could not be opened and leaves it to the message to explain that another process has it - and by §4.5 a surface keys its wording on the code, not the message, so it cannot say "another tetanus is using this session" without one.
+A new code is a change both lanes land together, so it is not taken here; when it lands it goes in §4.5's table and this paragraph is what it replaces.
+Until then the message carries the reason and the code carries the path, which is enough to act on and less than a reader deserves.
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -989,6 +1017,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 a log that refused a chunk is `Internal` | TC-FAULT-4 |
 | §4.5 a corrupt journal carries `session_id` and `line` | TC-FAULT-5 |
 | §4.5 `Io` carries the path when the caller knows one | TC-FAULT-6 |
+| §4.4.13 a second writer is refused, naming the journal | TC-PROTO-75 |
+| §4.4.13 a reader is never refused for a writer being present | TC-PROTO-76 |
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
@@ -1141,3 +1171,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Publishes the page maximum as `methods::MAX_PAGE_SIZE` (§4.4.5). §4.4.5 has said since it was written that the server clamps `limit` to "its own maximum, which is 500", and 500 lived only in the engine and in that sentence - so the machine-readable half of this contract did not carry a number the prose did. A surface reads the constant now, for the reason §5 already gives `PROTOCOL_VERSION` and one more: a literal `500` in a consuming lane is a claim about a server it may not be talking to, and it fails silently, because asking for more than the maximum is clamped rather than refused. A surface that pages with `next_seq` and `eof` still needs nothing, which is why this was not noticed earlier; the constant is for the surface that wants one round trip instead of two, and that is exactly the surface a hard-coded number would break. One added constant, no type changes, and no behaviour change - `MAX_PAGE_SIZE` is the value the engine already clamps to, and TC-PROTO-60 pins the two together so they cannot drift. |
 | 1.0 | States what a server owes its journals when it is asked to stop (§4.4.11). `tetanus serve` hosts carriers, so a process being stopped mid-turn is an ordinary Tuesday, and until now the only path was the crash path - every deploy left a trail of half-turns for §4.4.4 to synthesize closers over on the next open. A stopping server stops accepting connections, interrupts each running turn at the next step boundary using the mechanism `agent.interrupt` already has rather than a second one, and waits: `turn/end` carries `stop_reason: "shutdown"`, the interrupted step gets its `step/end`, and `agent.prompt` answers a summary as a cancelled turn does. `"shutdown"` is deliberately not `"cancelled"` - the same event to the engine, different facts to a reader, since one is a decision to respect and the other is something to go and look at, and a transcript blaming a rolling restart on a user who did nothing sends them after the wrong thing. It is a growable `StopReason` value by §7.5, so no type changes. The drain is bounded and best-effort: a tool that will not return cannot be waited for, so a server that runs out of time exits with turns open and §4.4.4 repairs them - seeing `"interrupted"` after a restart now means the drain did not finish. No error code is added: a call arriving mid-drain would need one, and by §4.5 that is a change both lanes land together, so the carrier closes instead - a state every client already handles because a network does it unasked. |
 | 1.0 | Says which calls a client may repeat (§4.4.12). A carrier drops a connection or an answer is lost, and the client cannot tell whether the call ran - every RPC contract meets this, and one that does not say so leaves each integrator to guess. The reads are free; `session.create`, `agent.interrupt`, `approval.set` and `session.unsubscribe` are safe because repeating them lands in the same place, which is stated per call rather than asserted in general. Three are not safe and now carry the reason and the alternative: `agent.prompt` runs a second turn, `agent.steer` delivers twice, `session.subscribe` leaks the first subscription. `agent.prompt` is the one that costs money, and the sharp edge is worth spelling out - `SessionBusy` only guards the window where the first call is still running, which is exactly the window a client that gave up waiting has already left, so a retry after completion starts a genuine second turn. The alternative needs nothing new: `agent.status` and `session.events` from the last seq seen say whether a turn ran and what it produced, because the journal is the record rather than a copy of it (§7.2). An idempotency key would remove the problem and is deliberately not added - `AgentPromptParams` is a type the presentation lane constructs, so by §5 it is a change both lanes land together, and the read-then-decide route is what a client should do anyway before repeating work a user paid for. A second `rpc.hello` on one connection is settled too: accepted, because the handshake is connection state and re-greeting says the same thing twice. No type changes. |
+| 1.0 | States who may write a journal (§4.4.13): one writer at a time, any number of readers. The rule is written down because its absence is silent and the damage is delayed. A `seq` is assigned from the length the writing process holds in memory, so two processes appending to one file both write `seq` 41; both succeed, both fsync, both callers are told the event is durable, and the failure appears later and elsewhere as `LogCorrupt` on a line neither of them wrote. §4.4.6 already half-said this - "a source *this process* holds open cannot reach that state" - and now says why no other process can put it there either. A second writer is refused at `session.create` with `Io` carrying the path, before any turn starts, rather than at some later replay. Reading stays unrestricted and is safe by construction: a journal is append-only, a prefix is stable however busy its writer is, and a half-written last line is the crash tail a reader already drops - so `session.list`, `session.events` and `session.fork` work across processes and only writing is exclusive. A dedicated error code would let a surface say "another tetanus is using this session" rather than "this path could not be opened", and is deferred for §4.5's reason: a code is a change both lanes land together. No type changes; the engine slice that takes the lock lands separately. |
