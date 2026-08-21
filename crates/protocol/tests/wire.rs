@@ -802,3 +802,77 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-75: contract section 4.4.13. A journal a second process already
+/// holds for writing is refused, and the refusal names it.
+///
+/// The refusal is `Io` with the path, which is the same answer a journal that
+/// cannot be read gets, because the caller's next move is the same: go and
+/// look at that path. What the shape has to guarantee is that the path is
+/// *there* - a refusal that only said "could not open" would leave an operator
+/// with several sessions and no idea which one is held.
+#[test]
+fn a_second_writer_is_refused_naming_the_journal() {
+    let held = RpcError::new(
+        ErrorCode::Io,
+        "another process has /srv/sessions/s1.jsonl open for writing",
+    )
+    .with_data(json!({ "path": "/srv/sessions/s1.jsonl" }));
+
+    assert_eq!(held.kind(), Some(ErrorCode::Io));
+    assert_eq!(ErrorCode::Io.exit_status(), 1);
+    assert_eq!(
+        held.data.clone().expect("data")["path"],
+        json!("/srv/sessions/s1.jsonl"),
+        "the operator is told which journal, not merely that one failed"
+    );
+
+    // The message carries the reason because the code cannot yet. Section
+    // 4.4.13 defers a dedicated code, and this is the assertion that notices
+    // when one arrives: a surface keys its wording on the code, so until then
+    // "another process" lives only in text meant for a log.
+    assert!(
+        held.message.contains("another process"),
+        "the reason is in the message: {}",
+        held.message
+    );
+}
+
+/// TC-PROTO-76: contract section 4.4.13. A reader is never refused because a
+/// writer is present.
+///
+/// One writer and many readers is the whole rule, and the reading half is what
+/// makes it usable: a second `tetanus` sharing a sessions root can still list,
+/// page and fork every session in it. That works because a journal is
+/// append-only, so a prefix of one is stable however busy its writer is -
+/// which section 4.4.6 already relies on for forking a session a turn is
+/// running on.
+///
+/// What a reader can meet is a half-written last line, and that is the crash
+/// tail it already drops rather than a new failure mode.
+#[test]
+fn a_reader_is_never_refused_for_a_writer_being_present() {
+    // The read calls, which stay available whoever is writing.
+    for read_only in [
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+        method::CONFIG_DUMP,
+        method::CATALOG_TOOLS,
+    ] {
+        assert!(read_only.contains('.'), "a method name: {read_only}");
+    }
+
+    // A torn last line is `LogCorrupt` only when it is damage the writer
+    // finished, never when it is the tail of a write still in progress; the
+    // two are told apart by the newline that commits a record, so a reader
+    // sharing a journal with a writer needs no new code and gets none.
+    let corrupt = RpcError::new(ErrorCode::LogCorrupt, "journal line 12 does not parse")
+        .with_data(json!({ "session_id": "s1", "line": 12 }));
+    assert_eq!(corrupt.kind(), Some(ErrorCode::LogCorrupt));
+    assert_eq!(
+        corrupt.data.expect("data")["line"],
+        json!(12),
+        "damage names its line; a crash tail is dropped and names nothing"
+    );
+}

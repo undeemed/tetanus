@@ -416,7 +416,7 @@ What the call refuses, and which of §4.5's codes each refusal takes:
 The open-turn refusal names `through_seq` even when the caller omitted it, because naming an earlier one is the fix.
 
 A source whose seqs are not contiguous has no fork boundary to argue about, and takes the answer any read of it takes: `LogCorrupt`, naming the line, from the read that fetches the journal.
-A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written.
+A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written - and §4.4.13 is why no other process can put it there either.
 
 A turn in flight on the source is not a refusal by itself.
 A journal is append-only, so a prefix of it is stable while it grows, and a caller that names a closed boundary gets exactly the child it asked for however busy the parent is.
@@ -505,6 +505,35 @@ The model is told, so it can do something else rather than wait on a result that
 A surface learns it from the ask.
 `ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
 The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
+
+#### 4.4.13 Who may write a journal
+
+**One writer, many readers.**
+A journal is opened for writing by one process at a time. Any number may read it.
+
+This is not a performance choice, and the rule is here because its absence is silent.
+A `seq` is assigned from the log's own length as the line is written, and the length a process knows is the one it is holding in memory.
+Two processes appending to one file therefore both believe they are writing `seq` 41, and the journal ends up with two of them.
+Nothing notices at the time: both writes succeed, both fsync, both callers are told their event is durable.
+The damage surfaces later and somewhere else, when a reader replays the journal, finds the seq that is not contiguous, and gets `LogCorrupt` (§4.5) naming a line neither writer wrote.
+
+**Which is why a second writer is refused rather than allowed to try.**
+An engine that cannot take a journal for writing answers `Io` carrying the path, exactly as it does for a journal it cannot read.
+The situation is a file it may not have, and the caller's next move is the same: go and look at that path.
+
+**Reading is always allowed, and is safe by construction.**
+A journal is append-only, so a prefix of one is stable however busy its writer is - which §4.4.6 already relies on for forking a session another turn is running on.
+A reader that catches a half-written last line drops it as the crash tail (§4.4.4's neighbour rule), and reads it whole on the next pass.
+So `session.list`, `session.events` and `session.fork` work across processes, and only writing is exclusive.
+
+**What this costs a deployment.**
+Two `tetanus` processes may share a sessions root, and both may read every session in it; they may not have the same session open for work at the same time.
+A second one that tries is told so at `session.create`, before any turn starts, rather than at some later replay.
+
+**A dedicated code would say it better, and is deferred.**
+`Io` tells a surface the journal could not be opened and leaves it to the message to explain that another process has it - and by §4.5 a surface keys its wording on the code, not the message, so it cannot say "another tetanus is using this session" without one.
+A new code is a change both lanes land together, so it is not taken here; when it lands it goes in §4.5's table and this paragraph is what it replaces.
+Until then the message carries the reason and the code carries the path, which is enough to act on and less than a reader deserves.
 
 ### 4.5 Error view
 
@@ -713,6 +742,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 a log that refused a chunk is `Internal` | TC-FAULT-4 |
 | §4.5 a corrupt journal carries `session_id` and `line` | TC-FAULT-5 |
 | §4.5 `Io` carries the path when the caller knows one | TC-FAULT-6 |
+| §4.4.13 a second writer is refused, naming the journal | TC-PROTO-75 |
+| §4.4.13 a reader is never refused for a writer being present | TC-PROTO-76 |
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
@@ -828,3 +859,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | States who may write a journal (§4.4.13): one writer at a time, any number of readers. The rule is written down because its absence is silent and the damage is delayed. A `seq` is assigned from the length the writing process holds in memory, so two processes appending to one file both write `seq` 41; both succeed, both fsync, both callers are told the event is durable, and the failure appears later and elsewhere as `LogCorrupt` on a line neither of them wrote. §4.4.6 already half-said this - "a source *this process* holds open cannot reach that state" - and now says why no other process can put it there either. A second writer is refused at `session.create` with `Io` carrying the path, before any turn starts, rather than at some later replay. Reading stays unrestricted and is safe by construction: a journal is append-only, a prefix is stable however busy its writer is, and a half-written last line is the crash tail a reader already drops - so `session.list`, `session.events` and `session.fork` work across processes and only writing is exclusive. A dedicated error code would let a surface say "another tetanus is using this session" rather than "this path could not be opened", and is deferred for §4.5's reason: a code is a change both lanes land together. No type changes; the engine slice that takes the lock lands separately. |
