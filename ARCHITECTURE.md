@@ -300,6 +300,14 @@ same running total - and the same wording - the closing line reports; a build wh
 no usage says nothing rather than saying nothing was spent.
 The browser panel draws the same figure on its turn card, from the same events.
 
+A failed turn ends the turn, not the chat.
+The engine is still booted and the journal is still open, so the fault is settled onto the page
+under the question that drew it and the next line is asked for: a provider that could not be
+reached is the ordinary failure here, and dropping a reader back to a shell to retype
+`tetanus chat -s <path>` answers a network blip by throwing away the conversation.
+Piped input keeps the other behaviour, because there is nobody there to ask again - the status
+§4.5 gives the code is what a script reads, and a run whose turns all failed must not exit 0.
+
 Only one way of ending is painted as a turn that ended well.
 A model that stopped because it had finished is `natural`; every other reason means the answer on
 the page is missing something a reader cannot see is missing - the provider's cap cut it off, a

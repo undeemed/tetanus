@@ -841,6 +841,20 @@ fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
 /// The wording is `render::fault`'s and the status is the contract's table,
 /// so a script can branch on `$?` and read the same number from any tetanus
 /// surface (§4.5).
+/// Say what failed, and stay where you are.
+///
+/// The same words and the same stream as [`fail`], without the status: an
+/// interactive chat reports a failed turn onto the page and asks for the next
+/// line, because a conversation is not over because one turn of it was.
+fn said_fault(policy: &Policy, error: &RpcError) {
+    let (message, hint) = render::fault::wording(error);
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if let Some(hint) = hint {
+        err.note(&hint).ok();
+    }
+}
+
 fn fail(policy: &Policy, error: &RpcError) -> Reported {
     let (message, hint) = render::fault::wording(error);
     let mut err = policy.stderr();

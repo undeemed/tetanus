@@ -13,8 +13,9 @@
 //! a case with a pipe on its standard input cannot press. The pipe reaches the
 //! same two exits: end of input is what Ctrl-D sends.
 //!
-//! Environmental needs: none. Every case runs offline on the mock adapter, and
-//! the one case about a real provider is the case where it is never reached.
+//! Environmental needs: none. Every case runs offline on the mock adapter,
+//! and the two cases about a real provider are the one where it is never
+//! reached and the one where it is pointed at a port nobody is listening on.
 
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -49,6 +50,10 @@ fn chat_with_key(dir: &Path, args: &[&str], typed: &str, key: Option<&str>) -> O
         Some(value) => cmd.env("DEEPSEEK_API_KEY", value),
         None => cmd.env_remove("DEEPSEEK_API_KEY"),
     };
+    // Port 1 is nobody's, so a case that reaches for a provider fails at
+    // connect rather than over the network: the suite stays offline, and the
+    // failure is the ordinary shape of one.
+    cmd.env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1");
     let mut child = cmd.spawn().expect("the binary runs");
     let written = child
         .stdin
@@ -383,4 +388,43 @@ fn a_document_decides_what_a_chat_runs_on() {
     let flagged = chat(dir.path(), &["-s", "flagged/c.jsonl"], "hello\n");
     assert_eq!(flagged.status.code(), Some(0), "{}", page(&flagged));
     assert!(dir.path().join("flagged/c.jsonl").exists());
+}
+
+/// TC-CLI-CHAT-11: a piped chat whose first turn fails on a provider that
+/// cannot be reached.
+/// Expected: the failure ends the run with the status §4.5 gives its code,
+/// and the second line is never asked. A reader at a terminal is asked for
+/// another line after a failed turn - a conversation is not over because one
+/// turn of it was - but a pipe has nobody to ask, and a script whose every
+/// turn failed must not read back success.
+#[test]
+fn a_piped_chat_stops_on_a_turn_that_failed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let out = chat_with_key(
+        dir.path(),
+        &[
+            "--color",
+            "never",
+            "-a",
+            "deepseek",
+            "-m",
+            "deepseek-v4-flash",
+        ],
+        "one\ntwo\n",
+        Some("not-a-key"),
+    );
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("one"), "the question is on the page: {said}");
+    assert!(
+        !said.contains("two"),
+        "the second line was asked after a failure: {said}"
+    );
 }
