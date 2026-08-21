@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod chat;
 pub mod config;
 pub mod fault;
+pub mod fire;
 pub mod help;
 pub mod info;
 pub mod json;

@@ -1,0 +1,557 @@
+//! The conversation on a screen of its own: a transcript, and a line to type
+//! into at the foot of it.
+//!
+//! `tetanus chat` holds the terminal for the length of one line and gives it
+//! back for the length of one turn, so the conversation is written into the
+//! reader's scrollback the way a shell writes into it. That is the right shape
+//! for a command a person runs between other commands, and the wrong one for a
+//! conversation they stay in: the answer scrolls past, going back through it
+//! means leaving the chat, and the row they type on is wherever the last turn
+//! happened to end.
+//!
+//! This is the other shape. The whole terminal is the conversation: the
+//! transcript above, scrollable and kept, the turn arriving in the block that
+//! is pinned under it, and one row at the foot that is always the row you
+//! type on, wherever the reader has scrolled to.
+//!
+//! # Composition
+//!
+//! ```text
+//! tetanus                                   chat on mock-echo-1   heading
+//!                                                                 blank
+//! turn 1                                                       |
+//!   you   run one full turn                                    |  transcript
+//!   ai    the answer as the chunks assemble it                 |
+//!   ⠹ streaming the answer · 1.2s                              |  block
+//!                                                                 blank
+//! > what happens if I ask this                                    prompt
+//! enter ask · pgup/pgdn back · ctrl-c leave           2 back      footer
+//! ```
+//!
+//! # What this module does not do
+//!
+//! It does not read the terminal, run a turn, or look at a clock. It is handed
+//! keys, events and the time a turn has been running, and it hands back a
+//! frame and what the reader asked for. That is what makes every case below a
+//! function of its inputs rather than a session driven through a pty.
+//!
+//! # Why the editor answers first
+//!
+//! Every printable key belongs to the line being typed - including `?` and
+//! `q`, which are keys on every other full-screen view this binary has. A view
+//! that took them would be a view where a reader cannot type a question. So a
+//! key goes to [`Line`] first, and only the ones it does not answer -
+//! the arrows, the page keys, Escape - are the view's own.
+//!
+//! The commands are the ones `tetanus chat` already answers, `/help` and
+//! `/exit` among them, because a reader who knows the chat should not have to
+//! learn a second vocabulary to use the same chat on a screen.
+
+use std::time::Duration;
+
+use tetanus_protocol::types::SessionEvent;
+use tetanus_ui::{bar, tame_line, visible_width, Frame, Key, Line, Role, Theme, Typed};
+
+use super::live::Live;
+
+/// Rows the arrangement spends on furniture: the heading, the blank under it,
+/// the blank over the prompt, the prompt itself, and the footer.
+const CHROME: usize = 5;
+
+/// The marker the prompt row opens with, and what it costs in columns.
+const MARKER: &str = "> ";
+
+/// What the reader asked for with the key they just pressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Act {
+    /// Nothing that leaves this view: keep going, and paint.
+    Go,
+    /// A line was finished. The caller runs it as a turn, or reads it as one
+    /// of the chat's own commands.
+    Asked(String),
+    /// Ctrl-D on an empty line, or `/exit`: the reader is leaving, and the
+    /// conversation ended the way it was meant to.
+    Leave,
+    /// Ctrl-C: the reader is leaving now. §4.5 gives an interrupted command
+    /// 130, and the ordinary chat gives the same key the same status, so a
+    /// script wrapping either reads one answer.
+    Stopped,
+}
+
+/// The conversation, as one screen.
+pub struct Fire {
+    theme: Theme,
+    /// What the heading says on the right: the model this chat is on.
+    title: String,
+    /// Every settled line of the conversation so far. Nothing is dropped: the
+    /// alternate screen has no scrollback, so a page that let a line go has
+    /// lost it.
+    lines: Vec<String>,
+    /// How far back through the transcript the reader has scrolled, in rows.
+    /// Zero is the foot of it, which is where an arriving line lands.
+    back: usize,
+    /// The line being typed, and where its cursor is.
+    line: Line,
+    /// The composer for the turn that is running, when one is.
+    live: Option<Live>,
+    /// Whether the line the reader typed is still being answered.
+    working: bool,
+    /// The last size a frame was built for, so a scroll by a screenful knows
+    /// how big a screenful is.
+    body: usize,
+    width: usize,
+    think: bool,
+}
+
+impl Fire {
+    /// A view over a conversation that has not started yet.
+    pub fn new(theme: Theme, width: usize, model: &str, think: bool) -> Self {
+        Self {
+            theme,
+            title: format!("chat on {}", tame_line(model)),
+            lines: Vec::new(),
+            back: 0,
+            line: Line::new(),
+            live: None,
+            working: false,
+            body: 0,
+            width,
+            think,
+        }
+    }
+
+    /// Put lines on the transcript, above the block.
+    ///
+    /// The window does not move for them. A reader who has scrolled back keeps
+    /// what is under their eye while the answer settles underneath, which is
+    /// the same promise [`Page`](tetanus_ui::Page) makes and for the same
+    /// reason: the alternative drags the page out from under them, one row per
+    /// arriving line.
+    pub fn settle(&mut self, lines: Vec<String>) {
+        // A window that is back stays over the same lines, so it moves back by
+        // as many as arrived. Left alone, the transcript would slide one row
+        // under the reader's eye per line the turn writes.
+        if self.back > 0 {
+            self.back += lines.len();
+        }
+        self.lines.extend(lines);
+    }
+
+    /// The theme this view paints with, for a caller composing a line to
+    /// settle onto its transcript.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// The model this conversation is on, as the heading says it.
+    pub fn model(&self) -> &str {
+        self.title.trim_start_matches("chat on ")
+    }
+
+    /// Put a conversation that was already on the journal onto the page.
+    ///
+    /// A resumed chat opens on what was said before it, because the screen is
+    /// the conversation and a conversation that started this morning did not
+    /// start empty. The events go through a composer of their own and settle
+    /// as ordinary lines: nothing about them is live, and the block that says
+    /// what a turn is waiting on has nothing to say about a turn that ended.
+    pub fn history(&mut self, events: &[SessionEvent]) {
+        let mut past = Live::new(self.theme, self.width, "", self.think);
+        for event in events {
+            let settled = past.push(event);
+            self.settle(settled);
+        }
+    }
+
+    /// A turn has begun: what arrives from here is drawn as it arrives.
+    pub fn started(&mut self, phase: &str) {
+        self.live = Some(Live::new(self.theme, self.width, phase, self.think));
+        self.working = true;
+        // The reader asked for this turn, so they are shown it: a question
+        // sent from three screens back would otherwise be answered off-screen.
+        self.follow();
+    }
+
+    /// One event off the journal, while a turn is running.
+    pub fn push(&mut self, event: &SessionEvent) {
+        let settled = match &mut self.live {
+            Some(live) => live.push(event),
+            // A journal can grow when no turn of this view's is running - a
+            // resumed conversation is read the same way - and those lines are
+            // as settled as any other.
+            None => return,
+        };
+        self.settle(settled);
+    }
+
+    /// The turn is over, however it ended.
+    pub fn finished(&mut self) {
+        if let Some(live) = &mut self.live {
+            live.finish();
+        }
+        self.live = None;
+        self.working = false;
+    }
+
+    /// Advance the spinner. The caller's clock, not this module's.
+    pub fn tick(&mut self) {
+        if let Some(live) = &mut self.live {
+            live.tick();
+        }
+    }
+
+    /// Read one keystroke.
+    ///
+    /// The editor answers first, so every printable key is a character in the
+    /// line. What it does not answer is this view's: the arrows and the page
+    /// keys move the window, and Escape brings it back to the foot.
+    pub fn key(&mut self, key: Key) -> Act {
+        // While a turn is running the reader may keep typing - the next
+        // question is often the answer to what they are watching - but Enter
+        // is not offered to the editor, which would hand the line over and
+        // leave the row empty. A second prompt against a busy session is
+        // refused by the engine, and a refusal landing in the transcript
+        // reads as the question having been swallowed.
+        if self.working && key == Key::Enter {
+            return Act::Go;
+        }
+        match self.line.key(key) {
+            Typed::Editing => Act::Go,
+            Typed::Interrupted => Act::Stopped,
+            Typed::Left => Act::Leave,
+            // An empty line is a keypress, not a question. The chat below
+            // says the same about one typed at a shell prompt.
+            Typed::Asked(said) => match said.trim().is_empty() {
+                true => Act::Go,
+                false => Act::Asked(said),
+            },
+            Typed::Ignored => self.moved(key),
+            _ => Act::Go,
+        }
+    }
+
+    /// The keys the editor does not answer: the way back through what was
+    /// said, and the way to the end of it.
+    fn moved(&mut self, key: Key) -> Act {
+        let screenful = self.body.saturating_sub(1).max(1);
+        match key {
+            Key::Up => self.scroll(1),
+            Key::Down => self.scroll(-1),
+            Key::PageUp => self.scroll(screenful as isize),
+            Key::PageDown => self.scroll(-(screenful as isize)),
+            Key::Esc => self.follow(),
+            _ => {}
+        }
+        Act::Go
+    }
+
+    /// Move the window back through the transcript, or forward towards its
+    /// foot. Positive is back, which is the direction a reader looking for
+    /// something already said is going.
+    fn scroll(&mut self, rows: isize) {
+        let back = self.back as isize + rows;
+        self.back = back.max(0) as usize;
+    }
+
+    /// Back to the foot of the transcript, where arriving lines land.
+    fn follow(&mut self) {
+        self.back = 0;
+    }
+
+    /// The whole screen as of now, for a turn that has been running `spent`.
+    pub fn frame(&mut self, cols: usize, rows: usize, spent: Duration) -> Frame {
+        self.resize(cols);
+        let block = match &self.live {
+            Some(live) => live.block(spent),
+            None => Vec::new(),
+        };
+        let body = rows.saturating_sub(CHROME);
+        self.body = body;
+        let block = &block[block.len().saturating_sub(body)..];
+
+        let mut frame = Frame::new(cols, rows);
+        frame.row(bar(
+            cols,
+            &self.theme.paint(Role::Heading, "tetanus").to_string(),
+            &self.theme.paint(Role::Muted, &self.title).to_string(),
+        ));
+        frame.blank();
+        for line in self.window(body - block.len()) {
+            frame.row(line);
+        }
+        for line in block {
+            frame.row(line);
+        }
+        // What is left goes above the prompt, so a conversation that has just
+        // started sits at the top of the screen rather than the middle.
+        while frame.free() > 2 {
+            frame.blank();
+        }
+
+        let label = visible_width(MARKER);
+        let (typed, cursor) = self.line.shown(cols.saturating_sub(label));
+        frame.row(format!("{}{typed}", self.theme.paint(Role::Accent, MARKER)));
+        frame.row(self.footer(cols));
+        // The one row on this screen the terminal's own cursor belongs on.
+        frame.cursor(rows.saturating_sub(2), label + cursor);
+        frame
+    }
+
+    /// Compose at a new width, after the terminal was resized under the view.
+    fn resize(&mut self, cols: usize) {
+        if cols == self.width {
+            return;
+        }
+        self.width = cols;
+        if let Some(live) = &mut self.live {
+            live.resize(cols);
+        }
+    }
+
+    /// The slice of the transcript this frame shows, `room` rows of it.
+    fn window(&mut self, room: usize) -> &[String] {
+        self.back = self.back.min(self.lines.len().saturating_sub(room));
+        let end = self.lines.len() - self.back;
+        &self.lines[end.saturating_sub(room)..end]
+    }
+
+    /// The keys on the left, where the reader is on the right.
+    fn footer(&self, cols: usize) -> String {
+        let dot = self.theme.glyph("·", "-");
+        let full = format!(
+            "enter ask {dot} {} scroll {dot} /help {dot} ctrl-c leave",
+            self.theme.glyph("↑↓", "up/dn")
+        );
+        let keys = super::keys::hint(cols, &full, &format!("enter ask {dot} ctrl-c leave"));
+        let here = match (self.back, self.working) {
+            (0, true) => "working".to_string(),
+            (0, false) => "end".to_string(),
+            (back, _) => format!("{back} back"),
+        };
+        let role = match self.working {
+            true => Role::Accent,
+            false => Role::Muted,
+        };
+        bar(
+            cols,
+            &self.theme.paint(Role::Muted, &keys).to_string(),
+            &self.theme.paint(role, &here).to_string(),
+        )
+    }
+}
+
+/// Test Design Specification: the conversation as one screen.
+///
+/// Features tested: the arrangement of a frame and where the cursor lands on
+/// it; that every printable key belongs to the line being typed and the keys
+/// the editor does not answer move the window; that Enter asks and an empty
+/// line does not; that a line typed while a turn is running is held rather
+/// than sent; that Ctrl-C and Ctrl-D are told apart; that arriving lines do
+/// not move a window a reader has scrolled back; and that a line longer than
+/// the row keeps the cursor on the row.
+///
+/// Features NOT tested here: what a turn's lines say (owned by
+/// `render::timeline` and `render::live`), what the editor does with a key
+/// (owned by `tetanus_ui::Line`), how a frame is painted (owned by
+/// `tetanus_ui::Frame`), and the loop that reads the terminal and runs the
+/// turns (owned by `chat`, and driven end to end by `target/probe-fire.py`).
+///
+/// Environmental needs: none. Every case builds frames in memory: no terminal,
+/// no journal, no clock.
+#[cfg(test)]
+mod tests {
+    use tetanus_ui::{buffered, Charset};
+
+    use super::*;
+
+    const COLS: usize = 60;
+    const ROWS: usize = 10;
+
+    fn theme() -> Theme {
+        Theme::new(false, Charset::Unicode)
+    }
+
+    fn fire() -> Fire {
+        Fire::new(theme(), COLS, "mock-echo-1", false)
+    }
+
+    /// One frame, as rows of text, with the terminal's own control codes gone.
+    fn rows(view: &mut Fire, rows: usize) -> Vec<String> {
+        let frame = view.frame(COLS, rows, Duration::ZERO);
+        let mut ui = buffered(theme(), COLS);
+        frame.paint(&mut ui).expect("paint");
+        ui.contents()
+            .trim_start_matches("\x1b[H")
+            .split("\r\n")
+            .map(|row| {
+                row.split('\x1b')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Where the paint puts the terminal's cursor, as (row, column), counted
+    /// from zero the way a frame counts them.
+    fn cursor(view: &mut Fire, rows: usize) -> (usize, usize) {
+        let frame = view.frame(COLS, rows, Duration::ZERO);
+        let mut ui = buffered(theme(), COLS);
+        frame.paint(&mut ui).expect("paint");
+        let painted = ui.contents();
+        let at = painted.rfind('H').expect("a cursor move");
+        let place = painted[..at]
+            .rsplit_once("\x1b[")
+            .expect("a cursor sequence")
+            .1;
+        let (row, col) = place.split_once(';').expect("row;col");
+        (
+            row.parse::<usize>().expect("a row") - 1,
+            col.parse::<usize>().expect("a column") - 1,
+        )
+    }
+
+    fn typing(view: &mut Fire, text: &str) {
+        for char in text.chars() {
+            assert_eq!(view.key(Key::Char(char)), Act::Go);
+        }
+    }
+
+    /// TC-CLI-FIRE-1: a conversation with two settled lines, on a ten-row
+    /// terminal.
+    /// Expected: the heading on the first row, the transcript under it, the
+    /// prompt on the second-to-last row with its marker, the footer last, and
+    /// the terminal's cursor on the prompt row, past the marker and the text.
+    /// The prompt row is the one row of this screen whose position a reader
+    /// relies on: it is where the next character lands, whatever is above it.
+    #[test]
+    fn the_prompt_is_the_second_to_last_row_and_the_cursor_is_on_it() {
+        let mut view = fire();
+        view.settle(vec!["turn 1".into(), "  you   hello".into()]);
+        typing(&mut view, "next");
+
+        let rows = rows(&mut view, ROWS);
+        assert_eq!(rows.len(), ROWS, "not the height asked for: {rows:?}");
+        assert!(rows[0].starts_with("tetanus"), "no heading: {rows:?}");
+        assert!(rows[0].ends_with("chat on mock-echo-1"), "{rows:?}");
+        assert_eq!(rows[ROWS - 2], "> next", "not the prompt: {rows:?}");
+        assert!(rows[ROWS - 1].contains("enter ask"), "no footer: {rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("you   hello")),
+            "the transcript is missing: {rows:?}"
+        );
+        assert_eq!(cursor(&mut view, ROWS), (ROWS - 2, "> next".len()));
+    }
+
+    /// TC-CLI-FIRE-2: Enter on a line with something on it, and on one
+    /// without.
+    /// Expected: the line comes back once and the editor is empty after it; an
+    /// empty line is a keypress and not a question, which is what a reader
+    /// pressing Enter to see the screen redraw expects.
+    #[test]
+    fn enter_asks_what_was_typed_and_nothing_when_nothing_was() {
+        let mut view = fire();
+        typing(&mut view, "what is this");
+
+        assert_eq!(view.key(Key::Enter), Act::Asked("what is this".into()));
+        assert_eq!(view.key(Key::Enter), Act::Go);
+        assert_eq!(rows(&mut view, ROWS)[ROWS - 2], ">");
+    }
+
+    /// TC-CLI-FIRE-3: a line finished while a turn is still being answered.
+    /// Expected: it is not sent. A second prompt against a busy session is
+    /// refused by the engine, and a refusal arriving in the transcript reads
+    /// as the question having been swallowed - so the line stays where it is,
+    /// and the footer says the view is working.
+    #[test]
+    fn a_line_typed_while_a_turn_runs_is_held_rather_than_sent() {
+        let mut view = fire();
+        view.started("running the turn on mock-echo-1");
+        typing(&mut view, "and another thing");
+
+        assert_eq!(view.key(Key::Enter), Act::Go);
+        let rows = rows(&mut view, ROWS);
+        assert_eq!(rows[ROWS - 2], "> and another thing", "{rows:?}");
+        assert!(rows[ROWS - 1].contains("working"), "{rows:?}");
+
+        view.finished();
+        assert_eq!(
+            view.key(Key::Enter),
+            Act::Asked("and another thing".into()),
+            "the line was lost when the turn ended"
+        );
+    }
+
+    /// TC-CLI-FIRE-4: the keys the editor does not answer, and a line arriving
+    /// while the window is back.
+    /// Expected: the window moves and stays where it was put; Escape brings it
+    /// back to the foot; and a line settling while a reader is reading does
+    /// not drag the page out from under them.
+    #[test]
+    fn the_window_moves_only_when_the_reader_moves_it() {
+        let mut view = fire();
+        view.settle((1..=40).map(|n| format!("line {n}")).collect());
+        rows(&mut view, ROWS);
+
+        assert_eq!(view.key(Key::Up), Act::Go);
+        assert_eq!(view.key(Key::Up), Act::Go);
+        let back = rows(&mut view, ROWS);
+        assert!(back[ROWS - 1].contains("2 back"), "{back:?}");
+
+        view.settle(vec!["line 41".into()]);
+        let after = rows(&mut view, ROWS);
+        assert_eq!(
+            back[2], after[2],
+            "an arriving line moved the window: {after:?}"
+        );
+
+        assert_eq!(view.key(Key::Esc), Act::Go);
+        let end = rows(&mut view, ROWS);
+        assert!(end[ROWS - 1].contains("end"), "{end:?}");
+        assert!(
+            end.iter().any(|row| row.contains("line 41")),
+            "the foot is not the newest line: {end:?}"
+        );
+    }
+
+    /// TC-CLI-FIRE-5: the two ways out, told apart.
+    /// Expected: Ctrl-D on an empty line leaves, Ctrl-C stops. §4.5 gives an
+    /// interrupted command 130 and an ordinary one 0, and the ordinary chat
+    /// gives the same two keys the same two statuses.
+    #[test]
+    fn the_two_ways_out_are_not_the_same_way_out() {
+        let mut view = fire();
+        assert_eq!(view.key(Key::Ctrl('d')), Act::Leave);
+        assert_eq!(view.key(Key::Ctrl('c')), Act::Stopped);
+
+        // On a line with something on it, Ctrl-D is a delete and not a way
+        // out - which is what every other line editor does with it.
+        let mut typed = fire();
+        typing(&mut typed, "hi");
+        assert_eq!(typed.key(Key::Home), Act::Go);
+        assert_eq!(typed.key(Key::Ctrl('d')), Act::Go);
+        assert_eq!(rows(&mut typed, ROWS)[ROWS - 2], "> i");
+    }
+
+    /// TC-CLI-FIRE-6: a line longer than the row it is typed on.
+    /// Expected: the row shows the window that holds the cursor, nothing
+    /// overruns, and the cursor stays on the prompt row inside the terminal. A
+    /// cursor placed past the edge is one the terminal puts where it likes.
+    #[test]
+    fn a_long_line_keeps_its_cursor_on_the_row() {
+        let mut view = fire();
+        typing(&mut view, &"typing on and on ".repeat(6));
+
+        let rows = rows(&mut view, ROWS);
+        for row in &rows {
+            assert!(
+                visible_width(row) <= COLS,
+                "`{row}` overruns {COLS} columns"
+            );
+        }
+        let (row, col) = cursor(&mut view, ROWS);
+        assert_eq!(row, ROWS - 2, "the cursor left the prompt row");
+        assert!(col < COLS, "the cursor is off the row: {col}");
+    }
+}

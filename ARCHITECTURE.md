@@ -301,6 +301,20 @@ sent again.
 The two views driven by `tetanus_ui::show` never need this - a page over something finished waits an
 hour for a keystroke - and this one cannot wait, because the turn is still arriving.
 
+`tetanus chat --ui` ([crates/cli/src/render/fire.rs](crates/cli/src/render/fire.rs)) is the whole
+conversation as one screen: the transcript above, kept by the view because the alternate screen has
+no scrollback to keep it, the turn arriving in the block under it, and one row at the foot that is
+always the row you type on.
+The editor answers a key before the view does, which is what makes it a place a person can type:
+every printable key belongs to the line, `?` and `q` included, and only the keys `Line` does not
+answer - the arrows, the page keys, Escape - move the window.
+It is the one full-screen view with a cursor, and `Frame::cursor` exists for it: the prompt row is
+the one place on a screen where the terminal's own caret says something true, and a drawn stand-in
+blinks at the repaint's rate, hides the character under it and is invisible to a screen reader.
+The commands are the chat's own, so a reader who knows `/help` and `/exit` needs no second
+vocabulary; the keys, the statuses and the wording are the ordinary chat's too, which is what lets
+a script wrap either.
+
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.

@@ -59,7 +59,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
 | Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home - or the one `--settings <path>` names - re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | The fire UI |
+| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal, and `tetanus chat --ui` for that conversation held on a screen of its own - transcript above, the line you type on pinned to the foot of it; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | A history to walk with the up and down keys; a turn stopped without leaving the chat |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -220,6 +220,13 @@ A settings document that sets `provider.default` decides for both, since a flag 
 A line that opens with a slash is a command: `/help` lists them, `/exit` leaves, and `//text` asks the model `/text` rather than running it as one.
 Ctrl-D leaves the way `/exit` does and exits 0, Ctrl-C stops what is running and exits 130, and either way every turn already written stays on the journal.
 Standard input can be a pipe as well as a keyboard - `tetanus chat -a mock < questions.txt` asks each line in turn - and a piped chat prints the transcript without the prompt marker.
+
+`tetanus chat --ui` holds the same conversation on a screen of its own.
+The transcript is above and scrollable - the arrows a line at a time, the page keys a screenful, Escape back to the foot - the turn arrives in the block under it, and the row you type on is pinned to the foot of the terminal wherever you have scrolled to.
+Every printable key belongs to that row, `?` and `q` included, so the commands are still the chat's own: `/help`, `/exit`, and `//text` to ask a question that opens with a slash.
+A line finished while a turn is still being answered waits on the row rather than being sent, because a session answering one prompt refuses a second.
+Ctrl-C and Ctrl-D mean what they mean in the ordinary chat, and exit with the same statuses, so a script wrapping either reads one answer.
+It needs a terminal to draw on: `tetanus chat --ui | cat` is a usage error rather than a chat with nowhere to put itself.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.

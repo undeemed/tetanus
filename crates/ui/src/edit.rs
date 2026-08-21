@@ -218,15 +218,33 @@ impl Line {
     /// short is the terminal's answer, not something to arrange around.
     pub fn repaint(&mut self, marker: &str, width: usize) -> String {
         let label = visible_width(marker);
-        let room = width.saturating_sub(label);
-        let cursor = self.slide(room);
+        let (text, cursor) = self.shown(width.saturating_sub(label));
         // A column count of zero is not a move of none: terminals read the
         // parameter `0` as `1`, so the row is left as it is instead.
         let place = match label + cursor {
             0 => String::new(),
             columns => format!("\x1b[{columns}C"),
         };
-        format!("\r{marker}\x1b[K{}\r{place}", self.window(room))
+        format!("\r{marker}\x1b[K{text}\r{place}")
+    }
+
+    /// The text a row of `room` columns shows, and where the cursor sits in
+    /// it, counted in columns from the start of that text.
+    ///
+    /// [`Line::repaint`] is this plus the escapes that draw it on a row of the
+    /// reader's own scrollback. A full-screen view wants the other half: its
+    /// prompt is one row of a [`Frame`](crate::Frame), which is written as
+    /// text and told where the cursor goes ([`Frame::cursor`](crate::Frame)),
+    /// so a line drawn there must carry no escapes and no carriage returns of
+    /// its own.
+    ///
+    /// Takes `&mut self` for the same reason `repaint` does: showing a line
+    /// moves the window it is shown through, and the window is kept so that
+    /// walking a long line moves the cursor through a still window rather than
+    /// dragging the text under it.
+    pub fn shown(&mut self, room: usize) -> (String, usize) {
+        let cursor = self.slide(room);
+        (self.window(room), cursor)
     }
 
     /// As much of the text from the window's start as `room` columns hold.
