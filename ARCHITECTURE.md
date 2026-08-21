@@ -426,6 +426,17 @@ than laying it out - `    println!()` inside a function came back flush with the
 which is a different program to read.
 The indent is put back only on a row that has something after it, because an indent alone is
 trailing space that draws nothing and still spends columns.
+
+Width is counted over what a terminal draws as one thing, not per character
+([`clusters`](crates/ui/src/text.rs)).
+A family emoji is three people and two joiners - six columns counted per character, two columns
+drawn - so a row measured the other way is padded four columns short and every column after it on
+that row lands wrong; a skin tone and a flag are the same mistake in smaller print.
+It is also where a cut has to land: between clusters, never inside one, because a cut through a
+join leaves a man, a woman and a girl where a family was.
+Only the joins that change what is drawn are read, not the whole of UAX #29: a combining mark, a
+variation selector or a skin tone belongs to the character before it, a zero-width joiner takes the
+character after it, and two regional indicators are one flag.
 `fit`, `light`, `plain` and `visible_width` keep the sequences they read, because those are the
 theme's own.
 A tool's colour is dropped rather than honoured: upstream's terminal card parses ANSI and draws the
