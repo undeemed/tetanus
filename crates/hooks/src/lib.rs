@@ -12,6 +12,7 @@
 //! Parity: upstream `packages/hooks/*`.
 
 pub mod codec;
+pub mod detached;
 pub mod events;
 pub mod invariant;
 pub mod matcher;
@@ -20,6 +21,7 @@ pub mod runner;
 pub mod types;
 
 pub use codec::parse_hook_output;
+pub use detached::{CancelSignal, DetachedRuns};
 pub use events::{append_hook_invoked, append_hook_result, summarize_stderr, HookDialect};
 pub use invariant::hook_stream_faults;
 pub use matcher::{matcher_diagnostic, matches_matcher, MatcherMode};
