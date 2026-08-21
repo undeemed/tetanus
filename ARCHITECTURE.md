@@ -314,6 +314,16 @@ The count moves a step at a time, because a step is billed when its message sett
 same running total - and the same wording - the closing line reports; a build whose messages carry
 no usage says nothing rather than saying nothing was spent.
 The browser panel draws the same figure on its turn card, from the same events.
+
+A turn's closing line adds how fast the model was, on the turns slow enough for that to be a fact:
+the wait for the first token, and the rate the answer decoded at
+([timeline.rs](crates/cli/src/render/timeline.rs)).
+Upstream's own turn footer carries the same pair and folds it the same way - the first step's wait,
+because a later step is waiting on a tool rather than on the model, and a rate over the steps that
+recorded both halves of it.
+Both are derived from event times the journal already holds, so a surface cannot disagree with the
+journal it read, and both sit behind the threshold the duration sits behind: under a second they
+are noise, and two runs of one turn must print the same bytes.
 `--ui` takes the whole terminal instead and composes each frame with `Page`
 ([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
 still running.
