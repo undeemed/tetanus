@@ -31,6 +31,19 @@
 //! of the schema is left where it is. A schema this view cannot read is not an
 //! error either: the tool is still listed, just without its parameter rows,
 //! because a tool you cannot see is worse than a tool you cannot fully read.
+//!
+//! # Why a narrow window stacks the row
+//!
+//! A name is what a caller types and what a model asks by, so neither page
+//! cuts one. An MCP server's tools are named `server__tool__verb`, and one of
+//! those leaves a fifty-column window nothing for a sentence: the description
+//! becomes a word and an ellipsis, and the argument rows - which line up
+//! under the description - start past the right edge of the page. A provider
+//! named at that length pushes its own state off the edge, which is the one
+//! thing a reader came to the models page for.
+//!
+//! So a window that cannot hold the column gets the name on a line of its
+//! own, with what follows it indented underneath.
 
 use std::io::{self, Write};
 
@@ -61,17 +74,31 @@ pub fn models<W: Write>(ui: &mut Ui<W>, catalog: &ModelCatalogResult) -> io::Res
         .iter()
         .map(|provider| tame(&provider.provider))
         .collect();
-    let pad = column(named.iter().map(String::as_str));
+    let wanted = column(named.iter().map(String::as_str));
+    // A provider's state is the reason a reader opened this page - `ready`,
+    // or the variable to set - so it is never the thing that runs off the
+    // edge. Where the widest name leaves no room for it, it goes under.
+    let stacked = ui.width().saturating_sub(wanted + GAP) < LEAST;
+    let pad = match stacked {
+        true => 0,
+        false => wanted,
+    };
     for (place, (provider, name)) in catalog.providers.iter().zip(&named).enumerate() {
         if place > 0 {
             ui.blank()?;
         }
         let state = state(ui, provider);
-        ui.line(&format!(
-            "{}{}{state}",
-            ui.paint(Role::Accent, name),
-            " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
-        ))?;
+        match stacked {
+            true => {
+                ui.line(&ui.paint(Role::Accent, name).to_string())?;
+                ui.line(&format!("{}{state}", " ".repeat(GAP)))?;
+            }
+            false => ui.line(&format!(
+                "{}{}{state}",
+                ui.paint(Role::Accent, name),
+                " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
+            ))?,
+        }
         for (place, model) in provider.models.iter().enumerate() {
             // Only the first is tagged: tagging every other one `--model` is
             // noise, since that is true of all of them.
@@ -112,18 +139,32 @@ pub fn tools<W: Write>(ui: &mut Ui<W>, catalog: &ToolCatalogResult) -> io::Resul
 
     let charset = ui.theme().charset();
     let named: Vec<String> = catalog.tools.iter().map(|tool| tame(&tool.name)).collect();
-    let pad = column(named.iter().map(String::as_str));
-    let room = ui.width().saturating_sub(pad + GAP);
+    let wanted = column(named.iter().map(String::as_str));
+    // A name is what a caller types and what a model asks by, so it is never
+    // cut. When the widest one leaves no sentence beside it, the page stacks
+    // instead: the name on its own line, and what it does under it.
+    let stacked = ui.width().saturating_sub(wanted + GAP) < LEAST;
+    let pad = match stacked {
+        true => 0,
+        false => wanted,
+    };
+    let room = ui.width().saturating_sub(pad + GAP).max(1);
     for (place, (tool, name)) in catalog.tools.iter().zip(&named).enumerate() {
         if place > 0 {
             ui.blank()?;
         }
         let said = truncate(&tool.description, room, charset);
-        ui.line(&format!(
-            "{}{}{said}",
-            ui.paint(Role::Tool, name),
-            " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
-        ))?;
+        match stacked {
+            true => {
+                ui.line(&ui.paint(Role::Tool, name).to_string())?;
+                ui.line(&format!("{}{said}", " ".repeat(GAP)))?;
+            }
+            false => ui.line(&format!(
+                "{}{}{said}",
+                ui.paint(Role::Tool, name),
+                " ".repeat(pad.saturating_sub(visible_width(name)) + GAP)
+            ))?,
+        }
         // The parameters line up under the description, not under the name:
         // they belong to the sentence above them, not to the column of names.
         for argument in arguments(tool) {
@@ -133,6 +174,11 @@ pub fn tools<W: Write>(ui: &mut Ui<W>, catalog: &ToolCatalogResult) -> io::Resul
     }
     Ok(())
 }
+
+/// The narrowest sentence worth a column of its own. Under this, a
+/// description beside the name is a word and an ellipsis, and the row it is
+/// on has already overrun the window.
+const LEAST: usize = 16;
 
 /// The `name (type, required)` rows of one tool, read out of its schema.
 ///
@@ -181,8 +227,9 @@ fn column<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
 /// model a bare `--adapter` would pick; a provider that advertises nothing; a
 /// tool's parameters lifted out of its JSON Schema, including a schema this
 /// view cannot read; a description too long for the terminal; both empty
-/// catalogues; a name a provider sent that carries escape sequences; and a
-/// name column beside a name a terminal draws twice as wide.
+/// catalogues; a name a provider sent that carries escape sequences; a name
+/// column beside a name a terminal draws twice as wide; and, on each page, a
+/// name so wide that the window has no room left for what belongs beside it.
 ///
 /// Features NOT tested here: which providers and tools this build registers
 /// (owned by `main.rs`, and asserted end to end in `tests/presentation.rs`),
@@ -349,6 +396,73 @@ mod tests {
             assert!(row.chars().count() <= 40, "`{row}` overruns 40");
         }
         assert!(out.contains('…'), "the description was not cut:\n{out}");
+    }
+
+    /// TC-CLI-CAT-12: a provider whose name leaves no room for its state.
+    /// Expected: the name whole on its own line and the state indented under
+    /// it, with nothing over the window. The state - `ready`, or the variable
+    /// to set - is the reason a reader opened this page, so it is never the
+    /// column that runs off the edge.
+    #[test]
+    fn a_provider_name_that_fills_the_row_puts_its_state_underneath() {
+        let name = "deepseek-through-a-corporate-proxy-eu";
+        let out = shown(
+            vec![provider(name, &["m1"], Some("PROXY_TOKEN"), false)],
+            50,
+        );
+
+        for row in out.lines() {
+            assert!(visible_width(row) <= 50, "`{row}` overruns 50");
+        }
+        assert!(
+            out.lines().any(|row| row.trim() == name),
+            "the name is not on a line of its own:\n{out}"
+        );
+        assert!(
+            out.lines()
+                .any(|row| row.starts_with("  ") && row.contains("set PROXY_TOKEN")),
+            "the state is not under it:\n{out}"
+        );
+    }
+
+    /// TC-CLI-CAT-11: a tool whose name is wider than the window leaves for a
+    /// description.
+    /// Expected: nothing overruns, the name is whole - it is what a caller
+    /// types into `--tool` and what the model asks for by - and the
+    /// description and the arguments are on their own lines under it. An MCP
+    /// server's tools are named `server__tool__verb`, so this is the ordinary
+    /// case as soon as one is mounted, not a pathological one.
+    #[test]
+    fn a_name_too_wide_for_the_row_stacks_what_follows_it() {
+        let name = "filesystem__read_text_file__with_a_range";
+        let out = listed(
+            vec![tool(
+                name,
+                "Read part of a file",
+                json!({"properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            )],
+            50,
+        );
+
+        for row in out.lines() {
+            assert!(visible_width(row) <= 50, "`{row}` overruns 50");
+        }
+        assert!(
+            out.lines().any(|row| row.trim() == name),
+            "the name is not on a line of its own:\n{out}"
+        );
+        assert!(
+            out.contains("Read part of a file"),
+            "the description was cut away:\n{out}"
+        );
+        let argument = out
+            .lines()
+            .find(|row| row.contains("path"))
+            .unwrap_or_else(|| panic!("the argument is on no row:\n{out}"));
+        assert!(
+            visible_width(argument) <= 50 && argument.starts_with("  "),
+            "the argument is off the page: `{argument}`"
+        );
     }
 
     /// TC-CLI-CAT-8: no tools at all.
