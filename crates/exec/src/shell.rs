@@ -296,6 +296,20 @@ pub struct ParsedExit {
 /// text: a presentation shows the exit as its own pill and needs to find it
 /// again in a replayed result, where the rendered string is all that survives.
 pub fn render(run: &ShellRun) -> String {
+    let mut body = body_of(run);
+    let markers = markers_of(run);
+    if markers.is_empty() {
+        return body;
+    }
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body + &markers.join("\n")
+}
+
+/// What the command printed: stdout, then a marked stderr section, and a word
+/// for a command that printed nothing at all.
+fn body_of(run: &ShellRun) -> String {
     let mut body = stream_text(&run.output.stdout);
     let err = stream_text(&run.output.stderr);
     if !err.is_empty() {
@@ -308,51 +322,70 @@ pub fn render(run: &ShellRun) -> String {
     if body.is_empty() {
         body.push_str("(no output)");
     }
+    body
+}
 
-    let mut markers: Vec<String> = Vec::new();
-    if let Some((mode, enforcement)) = run.sandbox {
-        if denied(run) {
-            // Upstream's `sandboxDenialMarker`: a policy denial is not a bug in
-            // the command, and a model that reads it as one will rewrite a
-            // correct command until it gives up. Naming the mode tells it what
-            // would have to change instead.
-            markers.push(format!(
-                "[sandbox: a file or network operation was denied under {mode} mode - this is \
-                 policy, not a bug in the command]"
-            ));
-        }
-        if enforcement == Enforcement::Partial {
-            markers.push("[sandbox: this host enforces only part of that policy]".to_string());
-        }
+/// Every marker this run earned, in the order a reader needs them: what the
+/// policy did, what the harness did, what the budget did, and last - because
+/// `parse_exit` anchors on the end of the text - what the command exited with.
+fn markers_of(run: &ShellRun) -> Vec<String> {
+    let mut markers = sandbox_markers(run);
+    markers.extend(sweep_marker(run));
+    markers.extend(ending_marker(run));
+    markers.extend(status_marker(run));
+    markers
+}
+
+/// What the sandbox did, when this run had one.
+///
+/// Upstream's `sandboxDenialMarker`: a policy denial is not a bug in the
+/// command, and a model that reads it as one will rewrite a correct command
+/// until it gives up. Naming the mode tells it what would have to change
+/// instead.
+fn sandbox_markers(run: &ShellRun) -> Vec<String> {
+    let Some((mode, enforcement)) = run.sandbox else {
+        return Vec::new();
+    };
+    let mut markers = Vec::new();
+    if denied(run) {
+        markers.push(format!(
+            "[sandbox: a file or network operation was denied under {mode} mode - this is policy, \
+             not a bug in the command]"
+        ));
     }
-    if run.output.swept {
-        markers.push(
-            "[the command left processes running; they were killed with its process group]"
-                .to_string(),
-        );
+    if enforcement == Enforcement::Partial {
+        markers.push("[sandbox: this host enforces only part of that policy]".to_string());
     }
+    markers
+}
+
+/// What the command left running, when the group had to be swept.
+fn sweep_marker(run: &ShellRun) -> Option<String> {
+    run.output.swept.then(|| {
+        "[the command left processes running; they were killed with its process group]".to_string()
+    })
+}
+
+/// What ended the command, when it was not the command's own choice.
+///
+/// A command can trap SIGTERM and exit 0 after its budget ran out, so this is
+/// reported beside the exit status rather than instead of it.
+fn ending_marker(run: &ShellRun) -> Option<String> {
     match run.output.ending {
-        // A command can trap SIGTERM and exit 0 after its budget ran out; the
-        // interruption is still worth reporting, so this is not an `else`.
-        Ending::TimedOut => {
-            markers.push(format!("[timed out after {}ms]", run.timeout.as_millis()))
-        }
-        Ending::Interrupted => markers.push("[interrupted]".to_string()),
-        Ending::Exited => {}
+        Ending::TimedOut => Some(format!("[timed out after {}ms]", run.timeout.as_millis())),
+        Ending::Interrupted => Some("[interrupted]".to_string()),
+        Ending::Exited => None,
     }
-    match (&run.output.signal, run.output.code) {
-        (Some(signal), _) => markers.push(format!("[killed by signal: {signal}]")),
-        (None, Some(0)) | (None, None) => {}
-        (None, Some(code)) => markers.push(format!("[exit code: {code}]")),
-    }
+}
 
-    if markers.is_empty() {
-        return body;
+/// The exit status, as the marker `parse_exit` reads back. A clean exit says
+/// nothing: silence is what success looks like.
+fn status_marker(run: &ShellRun) -> Option<String> {
+    match (&run.output.signal, run.output.code) {
+        (Some(signal), _) => Some(format!("[killed by signal: {signal}]")),
+        (None, Some(0)) | (None, None) => None,
+        (None, Some(code)) => Some(format!("[exit code: {code}]")),
     }
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body + &markers.join("\n")
 }
 
 /// Split a rendered result back into its body and its exit status: the inverse
