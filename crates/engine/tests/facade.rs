@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
-    AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams, PeerInfo,
-    SessionCreateParams, SessionEventPush, SessionEventsParams, SessionRef, SessionSubscribeParams,
-    SessionUnsubscribeParams,
+    capability, method, AgentPromptParams, AgentStatusPush, Engine, EventSink, HelloParams,
+    PeerInfo, SessionCreateParams, SessionEventPush, SessionEventsParams, SessionForkParams,
+    SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::PROTOCOL_VERSION;
@@ -71,10 +71,11 @@ async fn hello_refuses_a_version_it_cannot_parse() {
     assert_eq!(error.kind(), Some(ErrorCode::UnsupportedProtocolVersion));
 }
 
-/// TC-ENG-3: every call in the contract's method table is served by this
-/// build, so no caller meets `NotImplemented`. This supersedes the earlier
-/// form of the case, which asserted the "not yet" answer of the three
-/// read-only calls now that they are served.
+/// TC-ENG-3: every call the contract's method table marks `Served` is served
+/// by this build, so no caller meets `NotImplemented` where it was promised an
+/// answer. This supersedes the earlier form of the case, which asserted the
+/// "not yet" answer of the three read-only calls now that they are served. The
+/// reserved rows are the other half of the table, and TC-ENG-4 has them.
 #[tokio::test]
 async fn every_call_in_the_table_is_served() {
     let (engine, _dir) = engine();
@@ -127,4 +128,49 @@ async fn every_call_in_the_table_is_served() {
     engine.catalog_tools().await.expect("catalog.tools");
     engine.catalog_models().await.expect("catalog.models");
     engine.config_dump().await.expect("config.dump");
+}
+
+/// TC-ENG-4: contract section 4.2. A reserved call answers `NotImplemented`
+/// and its capability is not advertised, which is the whole of what `Reserved`
+/// promises a surface: the shape is frozen and may be compiled against, the
+/// affordance is hidden until the capability appears, and a surface that calls
+/// it anyway is told so in the one code section 4.5 gives that answer.
+///
+/// Input: `session.fork`, on a session that exists, with params the frozen
+/// shape accepts.
+/// Expected: `NotImplemented` naming the method in `data`, and no
+/// `session.fork` in the handshake's capabilities. TC-SUB-5 asserts the
+/// complement - that every capability which *is* advertised is served - so the
+/// two together leave no room for a call to be half-promised.
+#[tokio::test]
+async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
+    let (engine, _dir) = engine();
+    let capabilities = engine
+        .hello(hello(PROTOCOL_VERSION))
+        .await
+        .expect("hello")
+        .capabilities;
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("session.create");
+
+    assert!(
+        !capabilities.contains(&capability::SESSION_FORK.to_string()),
+        "a reserved call must not be advertised: {capabilities:?}"
+    );
+
+    let error = engine
+        .session_fork(SessionForkParams {
+            session_id: info.session_id,
+            through_seq: None,
+            child_session_id: None,
+        })
+        .await
+        .expect_err("session.fork is reserved");
+    assert_eq!(error.kind(), Some(ErrorCode::NotImplemented));
+    assert_eq!(
+        error.data.expect("data")["method"],
+        serde_json::json!(method::SESSION_FORK)
+    );
 }

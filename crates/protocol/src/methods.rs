@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::RpcError;
+use crate::rpc::{ErrorCode, RpcError};
 use crate::types::{
     Answer, ConfigEntry, ProviderDescriptor, Question, SessionEvent, SessionInfo, ToolDescriptor,
     TurnSummary,
@@ -19,6 +19,7 @@ pub mod method {
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_LIST: &str = "session.list";
     pub const SESSION_EVENTS: &str = "session.events";
+    pub const SESSION_FORK: &str = "session.fork";
     pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
     pub const SESSION_UNSUBSCRIBE: &str = "session.unsubscribe";
     pub const AGENT_PROMPT: &str = "agent.prompt";
@@ -40,6 +41,7 @@ pub mod push {
 /// Capability strings a server advertises in [`HelloResult`]. A surface checks
 /// one before it uses an optional call.
 pub mod capability {
+    pub const SESSION_FORK: &str = "session.fork";
     pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
     pub const UI_ASK: &str = "ui.ask";
@@ -131,6 +133,30 @@ pub struct SessionEventsResult {
     pub next_seq: u64,
     /// True when this page reached the end of the journal.
     pub eof: bool,
+}
+
+/// Fork a session: a new journal seeded with a prefix of another one's.
+///
+/// Contract section 4.4.6. The child is a copy and not a reference, so what is
+/// appended to either after the fork never reaches the other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionForkParams {
+    /// The session to fork from.
+    pub session_id: String,
+    /// Last parent seq the child inherits, inclusive. Omit for the parent's
+    /// last event.
+    ///
+    /// Deliberately not spelled `from_seq`: that name is the *first* event a
+    /// caller receives everywhere else in this contract, and this one is the
+    /// last event a child keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through_seq: Option<u64>,
+    /// Id for the child. Omit and the server mints one. An id that already has
+    /// a journal is refused rather than reopened, which is the one place this
+    /// call differs from `session.create`: a seed appended to a journal that
+    /// already holds a history would splice two of them together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,6 +277,25 @@ pub trait Engine: Send + Sync {
         &self,
         params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError>;
+    /// Contract section 4.2: reserved.
+    ///
+    /// The default body is what `Reserved` states in Rust. A build that does
+    /// not serve the call answers `NotImplemented` instead of failing to
+    /// compile, which is exactly the promise the status makes to a surface
+    /// building against a frozen shape. The slice that serves the call deletes
+    /// this body, and section 7.4's compile error for every implementor comes
+    /// back with it.
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        let _ = params;
+        Err(RpcError::new(
+            ErrorCode::NotImplemented,
+            format!(
+                "`{}` is reserved, and this build does not serve it",
+                method::SESSION_FORK
+            ),
+        )
+        .with_data(serde_json::json!({ "method": method::SESSION_FORK })))
+    }
     /// The one call whose trait form takes an argument the wire does not
     /// carry: where the carrier wants its pushes delivered.
     async fn session_subscribe(

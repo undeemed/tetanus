@@ -5,7 +5,9 @@
 //! round trips through the same code that produced them.
 
 use serde_json::json;
-use tetanus_protocol::methods::{AgentStatusPush, SessionEventPush};
+use tetanus_protocol::methods::{
+    capability, method, AgentStatusPush, SessionEventPush, SessionForkParams,
+};
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
     AgentState, Chunk, ConfigEntry, ConfigLayer, KnownEvent, SessionEvent, StopReason, TurnSummary,
@@ -193,6 +195,13 @@ fn known_payloads_parse_from_the_journal_shape() {
         (
             "session/start",
             json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        ),
+        (
+            "session/start",
+            json!({
+                "session_id": "s2", "provider": "mock", "model": "m", "max_steps": 8,
+                "parent_session": "s1", "fork_seq": 6
+            }),
         ),
         ("turn/start", json!({ "turn": 1 })),
         ("step/start", json!({ "turn": 1, "step": 1 })),
@@ -457,4 +466,109 @@ fn a_withheld_value_is_an_ordinary_value() {
         serde_json::from_value::<ConfigEntry>(wire).expect("parse"),
         entry
     );
+}
+
+/// TC-PROTO-18: contract section 4.4.6. `session.fork` names the source and
+/// nothing else in its smallest form: both other fields are optional, and an
+/// omitted one is absent from the wire rather than sent as `null`, so a server
+/// cannot tell "omitted" from "explicitly nothing" and never has to.
+///
+/// The boundary is `through_seq` and not `from_seq` on purpose: section 4.4.5
+/// spends `from_seq` on the *first* event a caller receives, and this is the
+/// last event a child keeps. Two names for opposite ends of a range is the
+/// cheapest defect a contract can ship.
+#[test]
+fn fork_params_name_a_source_and_leave_the_rest_optional() {
+    let minimal = SessionForkParams {
+        session_id: "parent".into(),
+        through_seq: None,
+        child_session_id: None,
+    };
+
+    let wire = serde_json::to_value(&minimal).expect("serialize");
+    assert_eq!(wire, json!({ "session_id": "parent" }));
+    assert_eq!(
+        serde_json::from_value::<SessionForkParams>(wire).expect("parse"),
+        minimal
+    );
+
+    let full = json!({
+        "session_id": "parent",
+        "through_seq": 6,
+        "child_session_id": "child"
+    });
+    assert_eq!(
+        serde_json::from_value::<SessionForkParams>(full).expect("parse"),
+        SessionForkParams {
+            session_id: "parent".into(),
+            through_seq: Some(6),
+            child_session_id: Some("child".into()),
+        }
+    );
+
+    // The capability a surface checks before it offers the affordance is the
+    // method's own name, as every other optional call's is.
+    assert_eq!(capability::SESSION_FORK, method::SESSION_FORK);
+}
+
+/// TC-PROTO-19: contract section 4.3.1. Lineage is optional on `session/start`
+/// in both directions.
+///
+/// A journal written before forking existed carries neither field and still
+/// parses, with lineage read as absent rather than as a default id. A forked
+/// journal carries both, and `fork_seq` is a seq, so a child that inherited a
+/// parent's whole history reports the parent's last seq and not a count.
+#[test]
+fn session_start_lineage_is_optional_and_absent_means_no_parent() {
+    let opened = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        source_event_seqs: None,
+    };
+    assert_eq!(
+        opened.parse().expect("parse"),
+        KnownEvent::SessionStart {
+            session_id: "s1".into(),
+            provider: "mock".into(),
+            model: "m".into(),
+            max_steps: 8,
+            parent_session: None,
+            fork_seq: None,
+        }
+    );
+
+    let forked = SessionEvent {
+        data: json!({
+            "session_id": "s2", "provider": "mock", "model": "m", "max_steps": 8,
+            "parent_session": "s1", "fork_seq": 6
+        }),
+        ..opened
+    };
+    assert_eq!(
+        forked.parse().expect("parse"),
+        KnownEvent::SessionStart {
+            session_id: "s2".into(),
+            provider: "mock".into(),
+            model: "m".into(),
+            max_steps: 8,
+            parent_session: Some("s1".into()),
+            fork_seq: Some(6),
+        }
+    );
+
+    // What the engine writes is what a reader gets back: an absent parent is
+    // not serialized as `null`, so a journal line stays the shape section
+    // 4.3.1's table lists.
+    let round_tripped = serde_json::to_value(
+        serde_json::from_value::<KnownEvent>(json!({
+            "type": "session/start",
+            "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8
+        }))
+        .expect("parse"),
+    )
+    .expect("serialize");
+    assert_eq!(round_tripped.get("parent_session"), None);
+    assert_eq!(round_tripped.get("fork_seq"), None);
 }

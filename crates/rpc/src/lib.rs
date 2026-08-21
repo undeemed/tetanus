@@ -162,6 +162,11 @@ impl Codec {
             method::SESSION_CREATE => encode(engine.session_create(typed(params)?).await?),
             method::SESSION_LIST => encode(engine.session_list().await?),
             method::SESSION_EVENTS => encode(engine.session_events(typed(params)?).await?),
+            // Routed while it is still reserved, so a caller meets the
+            // `NotImplemented` section 4.2 promises for a reserved call rather
+            // than the `MethodNotFound` it would get for a method no contract
+            // names.
+            method::SESSION_FORK => encode(engine.session_fork(typed(params)?).await?),
             method::SESSION_SUBSCRIBE => {
                 let result = engine.session_subscribe(typed(params)?, sink).await?;
                 self.open
