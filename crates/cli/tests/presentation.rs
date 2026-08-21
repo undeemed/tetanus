@@ -358,6 +358,65 @@ fn a_playback_that_cannot_happen_is_a_usage_error() {
     );
 }
 
+/// TC-CLI-UI-30: a step budget of zero, on both commands that take one.
+/// Expected: exit 2 and a sentence saying why, from the flag rather than from
+/// the run. A budget is spent by taking a step and checked afterwards, so a
+/// turn always takes at least one: accepted, `--max-steps 0` produces a
+/// journal that records a step the command line said it could not have, and
+/// closes it `step budget spent`. One is still accepted, because one step
+/// with no tool call answered is a real thing to ask for.
+#[test]
+fn a_step_budget_of_zero_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    for command in [
+        vec![
+            "run",
+            "--max-steps",
+            "0",
+            "-p",
+            "hi",
+            "--session",
+            "j.jsonl",
+        ],
+        vec!["chat", "--max-steps", "0", "--session", "c.jsonl"],
+    ] {
+        let refused = run(dir.path(), &command, &[]);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{} {}",
+            stdout(&refused),
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains("greater than zero"),
+            "{}",
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains("at least one step"),
+            "{}",
+            stderr(&refused)
+        );
+    }
+
+    let one = run(
+        dir.path(),
+        &[
+            "run",
+            "--max-steps",
+            "1",
+            "-p",
+            "hi",
+            "--session",
+            "j.jsonl",
+        ],
+        &[],
+    );
+    assert_eq!(one.status.code(), Some(0), "{}", stderr(&one));
+}
+
 /// TC-CLI-UI-13: a journal whose model thought before it answered.
 /// Expected: `replay` shows one folded line naming what is behind it, and
 /// `replay --think` shows every line of it. The mock adapter never thinks, so

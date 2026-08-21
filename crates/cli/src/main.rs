@@ -155,7 +155,7 @@ struct RunArgs {
     )]
     session: PathBuf,
     /// Step budget for the turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
+    #[arg(long, value_name = "N", default_value_t = 8, value_parser = step_budget)]
     max_steps: u32,
     /// Print the raw event sequence instead of the turn
     #[arg(long)]
@@ -262,6 +262,25 @@ impl Cli {
 /// deciding what a path may be.
 fn named() -> clap::builder::NonEmptyStringValueParser {
     clap::builder::NonEmptyStringValueParser::new()
+}
+
+/// Accept a step budget, rejecting the one number a turn cannot be run under.
+///
+/// A budget is spent by taking a step and checked afterwards, so a turn always
+/// takes at least one: `--max-steps 0` asks for a run that cannot happen, and
+/// the engine answers it with one step and `step budget spent`, which is a
+/// flag saying one thing while the journal records another. Refused at the
+/// flag instead, the way `--speed 0` is - both are a number the work cannot
+/// be done with, and §4.5 gives a bad argument exit 2.
+///
+/// Only zero is refused. A budget of one is a real request - one step, no
+/// tool call answered - and the ceiling is `u32`'s, which no turn reaches.
+fn step_budget(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(0) => Err("expected a number greater than zero: a turn takes at least one step".into()),
+        Ok(steps) => Ok(steps),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Accept a playback speed, rejecting the values the arithmetic cannot use.

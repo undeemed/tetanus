@@ -66,7 +66,7 @@ pub struct ChatArgs {
     )]
     pub session: PathBuf,
     /// Step budget for each turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
+    #[arg(long, value_name = "N", default_value_t = 8, value_parser = crate::step_budget)]
     pub max_steps: u32,
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
