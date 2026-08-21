@@ -8,9 +8,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{
-    capability, method, AgentPromptParams, AgentStatusPush, ApprovalSetParams, Engine, EventSink,
-    HelloParams, PeerInfo, SessionCreateParams, SessionEventPush, SessionEventsParams,
-    SessionForkParams, SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
+    capability, method, AgentPromptParams, AgentStatusPush, AgentSteerParams, ApprovalSetParams,
+    Engine, EventSink, HelloParams, PeerInfo, SessionCreateParams, SessionEventPush,
+    SessionEventsParams, SessionForkParams, SessionRef, SessionSubscribeParams,
+    SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::types::ApprovalPolicy;
@@ -168,14 +169,16 @@ async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
         .await
         .expect("session.create");
 
-    assert!(
-        !capabilities.contains(&capability::APPROVAL_SET.to_string()),
-        "a reserved call must not be advertised: {capabilities:?}"
-    );
+    for reserved in [capability::APPROVAL_SET, capability::AGENT_STEER] {
+        assert!(
+            !capabilities.contains(&reserved.to_string()),
+            "a reserved call must not be advertised: {capabilities:?}"
+        );
+    }
 
     let error = engine
         .approval_set(ApprovalSetParams {
-            session_id: info.session_id,
+            session_id: info.session_id.clone(),
             policy: ApprovalPolicy::Never,
         })
         .await
@@ -184,5 +187,18 @@ async fn a_reserved_call_answers_not_implemented_and_is_not_advertised() {
     assert_eq!(
         error.data.expect("data")["method"],
         serde_json::json!(method::APPROVAL_SET)
+    );
+
+    let error = engine
+        .agent_steer(AgentSteerParams {
+            session_id: info.session_id,
+            content: "mid-turn".into(),
+        })
+        .await
+        .expect_err("agent.steer is reserved");
+    assert_eq!(error.kind(), Some(ErrorCode::NotImplemented));
+    assert_eq!(
+        error.data.expect("data")["method"],
+        serde_json::json!(method::AGENT_STEER)
     );
 }

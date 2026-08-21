@@ -378,6 +378,23 @@ async fn a_reserved_method_is_routed_rather_than_unknown() {
         "{answer}"
     );
     assert_eq!(answer["error"]["data"]["method"], method::APPROVAL_SET);
+
+    let answer = send(
+        &codec,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": method::AGENT_STEER,
+            "params": { "session_id": "s1", "content": "mid-turn" }
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["id"], 5);
+    assert_eq!(
+        answer["error"]["code"],
+        ErrorCode::NotImplemented as i32,
+        "{answer}"
+    );
+    assert_eq!(answer["error"]["data"]["method"], method::AGENT_STEER);
 }
 
 /// TC-RPC-6: contract section 4.5. Params that do not fit the call are refused

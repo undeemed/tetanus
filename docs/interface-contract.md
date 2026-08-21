@@ -97,6 +97,7 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `catalog.models` | none | `ModelCatalogResult` | always | Served |
 | `config.dump` | none | `ConfigDumpResult` | always | Served |
 | `approval.set` | `ApprovalSetParams` | `Ack` | `approval.set` | Reserved |
+| `agent.steer` | `AgentSteerParams` | `AgentSteerResult` | `agent.steer` | Reserved |
 
 A call with no params accepts an absent `params`, or `{}`, and treats them alike.
 
@@ -177,6 +178,7 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | `approval/decided` | `id`, `outcome` |
 | `approval/policy` | `policy` |
 | `context/snapshot` | `turn`, `parts` (each `name` and `text`) |
+| `user/steer` | `content`, `turn`, `taken` |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
@@ -279,7 +281,7 @@ The pushed order inside a turn is the engine's documented turn flow, which `docs
 This contract does not restate it, so the two cannot drift.
 
 A second `agent.prompt` while a turn is in flight is answered `SessionBusy` (`-32003`).
-Queueing a follow-up into the running turn's inbox is a later addition, and will arrive as a new call rather than a change to this one.
+That is still true, and §4.4.10 is the promised separate call for a caller that wants the follow-up taken rather than refused.
 
 `agent.interrupt` stops the turn at the next step boundary.
 It does not abort an in-flight provider call in contract 1.0.
@@ -588,6 +590,47 @@ Adding these is a minor change on the wire, and it happens also to be a safe one
 That is worth stating rather than assuming, because §5's rule is about types the other lane *constructs*, and the next addition to this payload has to check again rather than inherit the conclusion.
 
 None of this adds a call, and none of it appears on `SessionInfo`, for the reason §4.4.6 gives: a field added to a type the other lane builds is not the free addition it looks like, and lineage is read from the journal line.
+#### 4.4.10 Saying something while a turn is running
+
+`agent.prompt` refuses a second prompt with `SessionBusy`, and that is right for a caller that meant to start a turn.
+It is wrong for the commonest thing a person actually does, which is to notice something mid-answer and say so.
+`agent.steer` is that: a message handed to the turn already running.
+
+```text
+client -> agent.steer { session_id, content }
+server -> AgentSteerResult { turn, taken_at_step }
+
+  server -> session/event user/steer
+```
+
+**It joins the running turn; it does not start one.**
+The message is put in the turn's inbox and claimed at the next step boundary, so the model reads it as part of the conversation it is already having.
+A turn that has no further step - one already answering - cannot take it, and the call says so rather than silently dropping it or holding it for a turn that may never come.
+
+**A step boundary, not sooner.**
+A turn in the middle of a provider call cannot be given a message: the request has gone, and the answer coming back was formed without it.
+Nothing here interrupts a step, for the same reason §4.4.2 gives about `agent.interrupt`, and `taken_at_step` says which step actually read it so a surface can show the message landing where it landed rather than where it was typed.
+
+**It is durable before it is answered.**
+`user/steer` is on the journal whether or not a step ever reads it, carrying `taken` to say which happened.
+A message the caller was told was accepted, and which then vanished from the history because the turn ended first, would be the worst outcome available: the person believes they have said something and the transcript disagrees.
+
+**It is not a `user/message`.**
+The two derive to the same role, and a reader replaying the journal must still be able to tell a message that opened a turn from one that arrived during it - they answer different questions about how a conversation went, and only one of them can be refused for arriving too late.
+
+**Refusals.**
+
+| Refused | Code | `data` |
+| --- | --- | --- |
+| the session is not one this server can open | `SessionNotFound` | `{ session_id }` |
+| no turn is running | `SessionBusy` | `{ session_id, turn: null }` |
+| the running turn will take no further step | `SessionBusy` | `{ session_id, turn }` |
+| `content` is empty | `InvalidParams` | `{ field: "content" }` |
+
+The idle case is `SessionBusy` with a null turn rather than a code of its own, and the wording is worth reading twice: a session that is *not* busy is exactly what makes steering impossible, so the code names the condition the caller must fix - there is no turn to join - and the null says which way round it is.
+A caller that meant to start a turn calls `agent.prompt`, which is the call that does.
+
+No new error code, and no change to `agent.prompt`.
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -838,6 +881,9 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.5 `next_seq` and `eof` page a journal to its end | TC-PAGE-2, TC-PAGE-4 |
 | §4.4.5 `last_seq` is the boundary replay and live delivery join at | TC-SUB-1, TC-SUB-2 |
 | §4.4.5 a push reaches only its own session's subscriptions | TC-SUB-7 |
+| §4.4.10 a steer names the turn and the step that read it | TC-PROTO-35 |
+| §4.4.10 a steer that was never read is still on the journal | TC-PROTO-36 |
+| §4.4.10 an idle session refuses with a null turn | TC-PROTO-37 |
 | §4.6 `agent/status` is pushed on both transitions | TC-AGENT-3 |
 | §4.6 `agent.status` reads the live state a missed push lost | TC-AGENT-5 |
 | §4.7 naming a path opens that journal, under the id the journal carries | TC-PATH-1, TC-ID-1 |
@@ -926,3 +972,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Serves `session.fork` (§4.2, §4.4.6), and advertises the capability that promises it. The engine copies the prefix, writes the child's header over the parent's line 0 and opens the child through the ordinary create path, so a forked session is listed, paged, titled and prompted like any other and its first turn is numbered after the turns it inherited - a fork is a resume of a prefix. `session/start` now carries `parent_session` and `fork_seq` where one applies. TC-ENG-3 grows the row this change serves. TC-ENG-4 and TC-RPC-12 asserted the not-yet answer of that row and now assert it of `approval.set` instead: the two cases belong to whichever calls are reserved at the time, not to the first one that ever was, so serving a call moves them rather than retiring them. `Reserved` and its default trait body stay documented in §4.2 for the call that still needs them. |
 | 1.0 | Publishes `context/snapshot` (§4.3.2, §4.4.8): what a turn told the model about the world outside the conversation - the date, the working directory, the branch - recorded once per turn. It is carried as a user message after the retained history rather than in the system prompt, and that placement is the design rather than a detail: a provider caches a prompt by its longest stable prefix, and a sentence saying what time it is would invalidate that prefix on every request of every session. Only the newest snapshot derives to a message; earlier ones stay on the journal, because it records what happened, but do not travel again - yesterday's date is worse than no date. The record carries the parts and §4.4.8 fixes the joining rule, which is the rule §4.3 already gives prompt sections, so the rendering is reproducible and a surface can still show which provider contributed what. No type changes, no new call and no capability: a runtime context is contributed inside the engine and only the record of it crosses this boundary. `type` is a free string by §4.3, so the staged type is not a `KnownEvent` variant and §4.3.2's two-step rule applies as it did for `llm/retry`. The engine slice that writes it lands separately. |
 | 1.0 | States what a journal says about where it came from (§4.3.1, §4.4.9): `cwd`, `spawned_by` and `depth` join `parent_session` and `fork_seq` on `session/start`, all optional so every journal written before this parses unchanged. `spawned_by` is deliberately not `parent_session`: a fork is a copy that begins holding another journal's history, a subagent is a different conversation that another one asked for, and a reader that cannot tell them apart cannot answer either question lineage exists for. A session can be both, which rules out one field with a kind beside it. `depth` is durable rather than held in memory because the bound on delegation has to survive a resume - a subagent whose harness restarted must not come back believing it is a root session. `cwd` is where the session was opened and not where it is now, because a tool may change directory and the header is not rewritten. A fork inherits the origin facts it is a copy of and writes its own `parent_session`. Minor on the wire, and safe in Rust here because the presentation lane matches this payload with a rest pattern - stated rather than assumed, since §5's rule is about types the other lane constructs and the next addition must check again. No call is added and nothing appears on `SessionInfo`, for §4.4.6's reason. The engine slice that writes the fields lands separately. |
+| 1.0 | Reserves `agent.steer` (§4.2, §4.4.10), the separate call §4.4.2 promised for a follow-up sent while a turn is running. `agent.prompt` still refuses with `SessionBusy`, which is right for a caller that meant to start a turn and wrong for the commonest thing a person does - notice something mid-answer and say so. The message joins the running turn's inbox and is claimed at the next step boundary, never sooner: a turn inside a provider call cannot be given anything, since the request has gone and the answer was formed without it. `user/steer` joins §4.3.2 and is written whether or not a step ever reads it, carrying `taken` to say which - a message the caller was told was accepted and which then vanished from the history is the worst outcome available, because the person believes they have said something and the transcript disagrees. It is deliberately not a `user/message`: both derive to the same role, and a reader must still be able to tell a message that opened a turn from one that arrived during it. No error code is added; an idle session is `SessionBusy` with a null turn, because a session that is not busy is exactly what makes steering impossible and the code should name the condition to fix. The engine slice that serves the call takes the `Served` row and the capability with it. |
