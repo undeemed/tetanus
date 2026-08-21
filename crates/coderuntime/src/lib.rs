@@ -41,6 +41,7 @@
 pub mod local;
 pub mod remote;
 pub mod reserved;
+pub mod settings;
 pub mod tool;
 pub mod types;
 
