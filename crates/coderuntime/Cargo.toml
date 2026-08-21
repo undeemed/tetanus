@@ -1,0 +1,21 @@
+[package]
+name = "tetanus-coderuntime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tetanus code runtime: one seam for evaluating a model-written program, a local worker backend, and a remote one."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+tempfile = { workspace = true }
