@@ -16,6 +16,7 @@
 //! - [`goal`] is the standing objective the session works toward.
 //! - [`plan`] is the mode in which the model works out what it would do.
 //! - [`feedback`] is what a run reports back to the operator.
+//! - [`skill`] is the instructions a project or a person keeps on disk.
 //!
 //! Parity: upstream `packages/todo`, `goal`, `plan`, `feedback`, `attachment`,
 //! `workspace` and `skill`, restated against the tetanus seams that carry the
@@ -24,4 +25,5 @@
 pub mod feedback;
 pub mod goal;
 pub mod plan;
+pub mod skill;
 pub mod todo;
