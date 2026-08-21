@@ -235,6 +235,9 @@ pub struct Run {
     abort: Abort,
     /// Steps since the clock was last read.
     since_clock: u64,
+    /// Which property each member's failure carries its name under, from the
+    /// namespace that declared an error shape.
+    error_properties: BTreeMap<String, String>,
     /// Where a call to a host-answered member goes. `None` when the caller
     /// wired no bridge, which makes such a member a failure rather than a
     /// wait nobody will answer.
@@ -253,8 +256,14 @@ impl Run {
         bindings: &[Namespace],
         host: Option<std::sync::mpsc::Sender<HostCall>>,
     ) -> Self {
+        let mut error_properties: BTreeMap<String, String> = BTreeMap::new();
         let mut root: BTreeMap<String, Val> = BTreeMap::new();
         for namespace in bindings {
+            if let Some(shape) = &namespace.error_shape {
+                for member in namespace.functions.keys() {
+                    error_properties.insert(member.clone(), shape.member_property.clone());
+                }
+            }
             root.insert(
                 namespace.global.clone(),
                 Val::Namespace {
@@ -275,6 +284,7 @@ impl Run {
             budget,
             abort,
             since_clock: 0,
+            error_properties,
             host,
         }
     }
@@ -348,6 +358,34 @@ impl Run {
         Err(Stop::Failed(format!(
             "{name:?} is not defined; declare it with `let` before assigning to it"
         )))
+    }
+
+    /// The value a `catch` binds.
+    ///
+    /// Always an object carrying the message, plus the failed member's name
+    /// under whatever property the namespace declared - which is upstream's
+    /// `CodeBindingErrorClass.memberNameProperty`, and the reason
+    /// [`crate::reserved::RESERVED_ERROR_MEMBERS`] exists. A program branches
+    /// on the member rather than reading a message somebody may reword.
+    fn caught_value(&self, why: &str) -> Val {
+        let mut fields = BTreeMap::from([
+            ("message".to_string(), Val::Str(why.to_string())),
+            ("kind".to_string(), Val::Str("exception".to_string())),
+        ]);
+        // The member is the first word of the message this evaluator writes
+        // for a failed call: `read failed: ...`. Only a call has one.
+        if let Some((member, _)) = why.split_once(" failed: ") {
+            if let Some(property) = self.member_property(member) {
+                fields.insert(property, Val::Str(member.to_string()));
+            }
+        }
+        Val::Map(fields)
+    }
+
+    /// The property a namespace declared for the failed member's name, when
+    /// the member belongs to a namespace that declared one.
+    fn member_property(&self, member: &str) -> Option<String> {
+        self.error_properties.get(member).cloned()
     }
 
     /// Hand a call to the host and wait for the answer.
@@ -441,6 +479,11 @@ fn run_statement(statement: &Stmt, state: &mut Run) -> Result<(), Stop> {
             assign_to(target, value, state)
         }
         Stmt::If { test, then, other } => run_if(test, then, other, state),
+        Stmt::Try {
+            body,
+            caught,
+            handler,
+        } => run_try(body, caught, handler, state),
         Stmt::While { test, body } => run_while(test, body, state),
         Stmt::Return(value) => {
             let value = match value {
@@ -463,6 +506,29 @@ fn run_if(test: &Expr, then: &[Stmt], other: &[Stmt], state: &mut Run) -> Result
     };
     state.pop_scope();
     outcome
+}
+
+/// Run a body, and hand a failure in it to the handler.
+///
+/// **Only [`Stop::Failed`] is catchable.** A budget that ran out, an abort and
+/// a full output ledger are the runtime's answers, not the program's news: a
+/// program that could catch its own timeout could sit in
+/// `while (true) { try { } catch (e) { } }` and never end, which is the whole
+/// containment story undone by two keywords. They pass straight through.
+fn run_try(body: &[Stmt], caught: &str, handler: &[Stmt], state: &mut Run) -> Result<(), Stop> {
+    state.push_scope();
+    let outcome = block(body, state);
+    state.pop_scope();
+
+    let Err(Stop::Failed(why)) = outcome else {
+        return outcome;
+    };
+    state.push_scope();
+    let failure = state.caught_value(&why);
+    state.declare(caught.to_string(), failure);
+    let handled = block(handler, state);
+    state.pop_scope();
+    handled
 }
 
 fn run_while(test: &Expr, body: &[Stmt], state: &mut Run) -> Result<(), Stop> {

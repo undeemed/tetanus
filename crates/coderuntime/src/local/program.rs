@@ -49,6 +49,8 @@ pub enum Tok {
     Else,
     While,
     Return,
+    Try,
+    Catch,
     /// One of `( ) { } [ ] , : ; . + - * / % ! = == != < <= > >= && ||`
     Sym(&'static str),
     End,
@@ -201,6 +203,8 @@ fn scan_word(source: &str, from: usize) -> (Token, usize) {
         "else" => Tok::Else,
         "while" => Tok::While,
         "return" => Tok::Return,
+        "try" => Tok::Try,
+        "catch" => Tok::Catch,
         name => Tok::Name(name.to_string()),
     };
     (Token { at: from, kind }, at)
@@ -247,6 +251,13 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     Return(Option<Expr>),
+    /// `try { ... } catch (name) { ... }`: run the body, and if a call in it
+    /// failed, bind the failure to `name` and run the handler.
+    Try {
+        body: Vec<Stmt>,
+        caught: String,
+        handler: Vec<Stmt>,
+    },
     Eval(Expr),
 }
 
@@ -347,6 +358,7 @@ impl Parser {
             Tok::If => self.if_statement(),
             Tok::While => self.while_statement(),
             Tok::Return => self.return_statement(),
+            Tok::Try => self.try_statement(),
             _ => self.expression_statement(),
         }
     }
@@ -402,6 +414,31 @@ impl Parser {
         let value = self.expression()?;
         self.expect(";")?;
         Ok(Stmt::Return(Some(value)))
+    }
+
+    fn try_statement(&mut self) -> Result<Stmt, String> {
+        self.next();
+        let body = self.block()?;
+        if !matches!(self.peek(), Tok::Catch) {
+            // A `try` with no `catch` would swallow a failure and carry on,
+            // which is the one thing this statement must never be usable for.
+            return Err(format!(
+                "`try` needs a `catch (name) {{ }}` after it, at offset {}",
+                self.here()
+            ));
+        }
+        self.next();
+        self.expect("(")?;
+        let Tok::Name(caught) = self.next() else {
+            return Err(format!("`catch` needs a name at offset {}", self.here()));
+        };
+        self.expect(")")?;
+        let handler = self.block()?;
+        Ok(Stmt::Try {
+            body,
+            caught,
+            handler,
+        })
     }
 
     /// An expression, and then either `= value;` - which makes it an

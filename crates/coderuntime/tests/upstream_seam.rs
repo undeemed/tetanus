@@ -565,3 +565,164 @@ fn the_seams_own_check_is_shared_by_every_backend() {
     assert_eq!(namespace.functions.len(), 1);
     assert_eq!(counted.load(std::sync::atomic::Ordering::Acquire), 0);
 }
+
+/// TC-PORT-CODERT-32: a program can survive one call failing, and cannot
+/// survive its own budget.
+///
+/// Upstream: its typed rejection contract - "materializes a typed rejection
+/// from a generic namespace descriptor", "rejects the program-side call on a
+/// host rejection". A rejection nothing can catch is a rejection a program
+/// cannot act on, which is why this and the error shape landed together.
+///
+/// The second half is the one with teeth: a program that could catch its own
+/// timeout could write `while (true) { try { } catch (e) { } }` and never
+/// end, which is the containment story undone by two keywords. Only a
+/// program-level failure is catchable; a budget, an abort and a full ledger
+/// pass straight through.
+///
+/// Input: a program that catches a failing binding and carries on; then one
+/// that tries to catch its own compute budget.
+/// Expected: the first completes, with the caught value carrying the message
+/// and the failed member's name under the declared property; the second still
+/// fails with `timeout`.
+#[tokio::test]
+async fn a_program_survives_a_failed_call_and_never_its_own_budget() {
+    let runtime = runtime();
+    let tools = Namespace::new("tools")
+        .with("read", |_| Err("no such file".to_string()))
+        .with("write", |_| Ok(json!(true)))
+        .failing_as("ToolError", "member");
+
+    let caught = runtime
+        .run(
+            RunRequest::new(
+                r#"let outcome = "not reached";
+                   try {
+                     tools.read({ path: "/nowhere" });
+                   } catch (e) {
+                     outcome = { message: e.message, failed: e.member, kind: e.kind };
+                   }
+                   tools.write({ done: true });
+                   return outcome;"#,
+            )
+            .binding(tools),
+        )
+        .await
+        .expect("ran");
+
+    assert_eq!(caught.error, None, "{:?}", caught.error);
+    let value = caught.value.expect("a value");
+    assert_eq!(
+        value.get("failed"),
+        Some(&json!("read")),
+        "the failed member is carried under the declared property: {value}"
+    );
+    assert_eq!(value.get("kind"), Some(&json!("exception")));
+    assert!(
+        value["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no such file")),
+        "the host's own words survive: {value}"
+    );
+
+    // And the budget is not the program's to catch.
+    let starved = LocalRuntime::new(Budget {
+        fuel: 5_000,
+        ..runtime.budget()
+    });
+    let result = starved
+        .run(RunRequest::new(
+            "while (true) { try { let x = 1; } catch (e) { let y = 2; } }",
+        ))
+        .await
+        .expect("ran");
+    assert_eq!(
+        result.kind(),
+        Some(FailureKind::Timeout),
+        "a program caught its own budget: {:?}",
+        result.error
+    );
+}
+
+/// TC-PORT-CODERT-33: an error shape no backend could serve is misuse.
+///
+/// Upstream: "rejects malformed or colliding binding error-class
+/// declarations", and the `RESERVED_ERROR_MEMBERS` set that says which names
+/// those are.
+///
+/// This is what that set was implemented for. Until the error shape existed it
+/// was tested and unused; now a namespace that declares `message` as its
+/// member property - which would overwrite the message - or a dunder-form
+/// name, or a reserved word as its failure name, is refused before a program
+/// runs.
+///
+/// Input: namespaces declaring `message`, `__init__`, `with_traceback` and a
+/// failure name that is a reserved word.
+/// Expected: `SeamError::BadNamespace` for each, naming the namespace and
+/// saying which rule it broke.
+#[tokio::test]
+async fn an_error_shape_no_backend_could_serve_is_misuse() {
+    let runtime = runtime();
+
+    for (property, expected) in [
+        ("message", "error protocol"),
+        ("__init__", "dunder-form"),
+        ("with_traceback", "error protocol"),
+        ("", "needs a name"),
+    ] {
+        let refused = runtime
+            .run(
+                RunRequest::new("return 1;").binding(
+                    Namespace::new("tools")
+                        .with("read", |v| Ok(v.clone()))
+                        .failing_as("ToolError", property),
+                ),
+            )
+            .await
+            .expect_err("this shape cannot be served");
+        let SeamError::BadNamespace { global, why } = &refused else {
+            panic!("expected a bad namespace for {property:?}, got {refused:?}");
+        };
+        assert_eq!(global, "tools");
+        assert!(why.contains(expected), "{property:?}: {why}");
+    }
+
+    let bad_name = runtime
+        .run(
+            RunRequest::new("return 1;").binding(
+                Namespace::new("tools")
+                    .with("read", |v| Ok(v.clone()))
+                    .failing_as("lambda", "member"),
+            ),
+        )
+        .await
+        .expect_err("a reserved word cannot name a failure");
+    assert!(bad_name.to_string().contains("reserved word"), "{bad_name}");
+}
+
+/// TC-PORT-CODERT-34: a `try` with no `catch` is refused where it is written.
+///
+/// No upstream equivalent - its language is TypeScript and the grammar is
+/// Node's. The rule is this language's, and it exists because the one thing
+/// `try` must never be usable for is swallowing a failure silently: a body
+/// whose failure went nowhere would leave a program running on values it
+/// never got.
+///
+/// Input: a program with a bare `try { }`.
+/// Expected: an `exception` at parse time, saying what is missing.
+#[tokio::test]
+async fn a_try_with_no_catch_is_refused_where_it_is_written() {
+    let result = runtime()
+        .run(RunRequest::new("try { tools.read(1); } return 1;"))
+        .await
+        .expect("ran");
+    assert_eq!(result.kind(), Some(FailureKind::Exception));
+    assert!(
+        result
+            .error
+            .as_ref()
+            .is_some_and(|failure| failure.message.contains("catch")),
+        "{:?}",
+        result.error
+    );
+}

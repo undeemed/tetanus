@@ -43,6 +43,24 @@ pub enum Member {
     Host(AsyncBinding),
 }
 
+/// What a program sees when one of a namespace's members fails.
+///
+/// Upstream materializes a real error constructor per namespace and makes
+/// rejected member calls its instances, so a program can tell one namespace's
+/// failure from another's and read which member it was. This language has no
+/// classes, so what is restated is the part a program can act on: the caught
+/// value carries the failed member's name under the property declared here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorShape {
+    /// The name of the failure, for a program that wants to say which
+    /// namespace refused it.
+    pub name: String,
+    /// The property the failed member's name is carried under. Checked
+    /// against [`crate::reserved::check_error_member`], so a request valid for
+    /// one backend is valid for every backend.
+    pub member_property: String,
+}
+
 /// A named group of bindings, exposed to the program as one global object.
 #[derive(Clone, Default)]
 pub struct Namespace {
@@ -52,6 +70,8 @@ pub struct Namespace {
     pub global: String,
     /// The callable members, by the exact name the program writes.
     pub functions: std::collections::BTreeMap<String, Member>,
+    /// What a failure of one of these members looks like to the program.
+    pub error_shape: Option<ErrorShape>,
 }
 
 impl std::fmt::Debug for Namespace {
@@ -68,7 +88,21 @@ impl Namespace {
         Self {
             global: global.into(),
             functions: std::collections::BTreeMap::new(),
+            error_shape: None,
         }
+    }
+
+    /// Declare what a failure of this namespace's members looks like.
+    pub fn failing_as(
+        mut self,
+        name: impl Into<String>,
+        member_property: impl Into<String>,
+    ) -> Self {
+        self.error_shape = Some(ErrorShape {
+            name: name.into(),
+            member_property: member_property.into(),
+        });
+        self
     }
 
     /// A member the worker answers itself.
@@ -349,6 +383,23 @@ pub fn check_bindings(bindings: &[Namespace]) -> Result<(), SeamError> {
         }
         if !seen.insert(namespace.global.as_str()) {
             return Err(SeamError::DuplicateNamespace(namespace.global.clone()));
+        }
+        // The error shape is checked here for the same reason the global is:
+        // one shared rule, so a namespace valid for the local runtime is
+        // valid for the remote one.
+        if let Some(shape) = &namespace.error_shape {
+            if let Err(why) = crate::reserved::check_global(&shape.name) {
+                return Err(SeamError::BadNamespace {
+                    global: namespace.global.clone(),
+                    why: format!("its failure name {:?} cannot be used: {why}", shape.name),
+                });
+            }
+            if let Err(why) = crate::reserved::check_error_member(&shape.member_property) {
+                return Err(SeamError::BadNamespace {
+                    global: namespace.global.clone(),
+                    why,
+                });
+            }
         }
     }
     Ok(())
