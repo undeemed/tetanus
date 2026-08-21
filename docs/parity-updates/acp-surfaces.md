@@ -68,6 +68,23 @@ These are places the restatement deliberately differs, rather than places it fal
    engine-side approval seam for the bridge to hang it on; `Engine` exposes none today, and
    adding one is a contract change rather than a lane change.
 
+## A hunk this branch carries deliberately
+
+`crates/ui/tests/killed.rs` carries a one-line change plus its comment, copied **verbatim** from
+`fm/tetanus-p2-mcp` at `779ae80`, where the mcp lane fixed it first. It is byte-identical to that
+commit's version - same blob, `3e2784b..480d093`.
+
+The duplication is intended, not an accident of two lanes racing. Both branches must be
+independently green under the fleet's `RUST_TEST_THREADS=1`, and TC-UI-TERM-5 fails under that
+cap for a reason neither lane caused: with one test thread libtest writes `test <name> ... `
+with no trailing newline before the case runs, so the child's `armed` marker lands on the end of
+that line and the parent's exact-equality match never fires. Because the two hunks are
+identical, the fold reads them as one change and resolves without a conflict; had this lane
+written its own wording for the same fix, the fold would have had to adjudicate two spellings of
+one decision.
+
+Whichever branch lands second contributes nothing here. That is the intended outcome.
+
 ## Related proposals
 
 - `docs/contract-updates/acp-gateway.md` - `method::ALL` omits `agent.steer`, which is
