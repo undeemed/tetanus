@@ -138,9 +138,16 @@ fn span(text: &[&str]) -> usize {
 /// So an escape sequence is taken out whole - it was a command that drew
 /// nothing, and nothing is what it should leave - and a stray control
 /// character becomes a space, so that a byte between two words cannot join
-/// them. Tabs become a space for the same reason and one of their own: a tab's
-/// width is a property of the terminal's stops, which no renderer here can
-/// know, so a tab drawn as a tab is a column count nothing can predict.
+/// them. A tab becomes the spaces that reach the next stop, counted from the
+/// start of its own line: a tab drawn as a tab is a column count nothing here
+/// can predict, because the stops belong to the terminal, and one drawn as a
+/// single space is a column count that is predictably wrong - a Makefile, a
+/// Go file and a stack trace are all indented with tabs, and squashing each
+/// to one column throws away the nesting they are read by. Expanded here, the
+/// terminal never sees a tab and the width is exact.
+///
+/// [`STOP`] columns apart, which is every terminal's default and what the
+/// tools that write tabs assume.
 ///
 /// Newlines survive. They are what [`wrap`] folds a paragraph on, and a tool
 /// that wrote lines meant lines.
@@ -153,19 +160,38 @@ fn span(text: &[&str]) -> usize {
 pub fn tame(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
+    // Where the current line has got to, so a tab knows which stop is next.
+    let mut column = 0;
     while let Some(char) = chars.next() {
         match char {
-            '\n' => out.push('\n'),
-            '\t' => out.push(' '),
+            '\n' => {
+                out.push('\n');
+                column = 0;
+            }
+            '\t' => {
+                let reach = STOP - column % STOP;
+                out.extend(std::iter::repeat_n(' ', reach));
+                column += reach;
+            }
             '\u{1b}' => skip(&mut chars),
             // C0 and DEL. Everything above them is text, including the C1
             // range, which a terminal reading UTF-8 does not act on.
-            char if char.is_control() => out.push(' '),
-            char => out.push(char),
+            char if char.is_control() => {
+                out.push(' ');
+                column += 1;
+            }
+            char => {
+                out.push(char);
+                column += columns(char);
+            }
         }
     }
     out
 }
+
+/// Columns between tab stops. Eight is the terminal default everywhere this
+/// binary runs, and what the tools that indent with tabs are written against.
+const STOP: usize = 8;
 
 /// Make text the harness did not write safe to draw on one row.
 ///
