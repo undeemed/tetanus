@@ -1513,6 +1513,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tetanus-engine",
+ "tetanus-protocol",
+ "tetanus-rpc",
+ "tetanus-turn",
+ "tokio",
+]
+
+[[package]]
 name = "tetanus-config"
 version = "0.1.0"
 dependencies = [

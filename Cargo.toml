@@ -22,6 +22,7 @@ members = [
   "crates/subagent",
   "crates/query",
   "crates/sdk",
+  "crates/acp",
 ]
 
 [workspace.package]

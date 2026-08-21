@@ -6,6 +6,7 @@ license.workspace = true
 description = "The tetanus JSON-RPC codec and its carriers: one frame in, one frame out, over the Engine trait."
 
 [dependencies]
+async-trait.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

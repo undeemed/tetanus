@@ -32,6 +32,38 @@ use tetanus_protocol::rpc::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Where a handler writes a frame nobody asked for: a push, or a request this
+/// side is making of its peer.
+///
+/// The carriers already do this - it is what [`Frames`] is - but only for the
+/// contract codec, whose pushes are typed. A handler speaking another protocol
+/// over the same line framing has its own frames to write and no `EventSink`
+/// to write them through, so this is the untyped half underneath.
+pub trait FrameSink: Send + Sync {
+    fn send_frame(&self, frame: String);
+}
+
+/// Anything that answers one frame with at most one frame.
+///
+/// [`Codec`] is the implementation this workspace's contract needs; the
+/// Agent Client Protocol bridge in `crates/acp` is another. The point of the
+/// trait is that a carrier moves strings and should not care which protocol
+/// the strings are in: line framing, concurrent dispatch, the writer task and
+/// the ordering promise that a push written during a call reaches the peer
+/// before that call's answer are all properties of the carrier, and writing
+/// them twice would be two places for them to stop agreeing.
+///
+/// `None` from [`FrameHandler::frame`] means "write nothing", which is the
+/// right answer to a frame that asked no question.
+#[async_trait::async_trait]
+pub trait FrameHandler: Send + Sync {
+    async fn frame(&self, raw: &str, out: &Arc<dyn FrameSink>) -> Option<String>;
+
+    /// Release what this connection left open. Called once, when the peer is
+    /// gone.
+    async fn close(&self) {}
+}
+
 /// One connection's codec.
 ///
 /// Per connection, not per process: the handshake is connection state.
@@ -228,6 +260,54 @@ impl Frames {
 }
 
 impl EventSink for Frames {
+    fn session_event(&self, event: SessionEventPush) {
+        self.notify(push::SESSION_EVENT, event);
+    }
+
+    fn agent_status(&self, status: AgentStatusPush) {
+        self.notify(push::AGENT_STATUS, status);
+    }
+}
+
+impl FrameSink for Frames {
+    fn send_frame(&self, frame: String) {
+        let _ = self.0.send(Some(frame));
+    }
+}
+
+/// The contract codec, driven as a [`FrameHandler`].
+///
+/// The codec's pushes are typed, so the untyped sink is wrapped back into a
+/// typed one here. That wrapping is the whole adapter: [`Codec::frame`] is
+/// unchanged, and so is what `stdio::serve` does with it.
+#[async_trait::async_trait]
+impl FrameHandler for Codec {
+    async fn frame(&self, raw: &str, out: &Arc<dyn FrameSink>) -> Option<String> {
+        let sink: Arc<dyn EventSink> = Arc::new(Pushes(Arc::clone(out)));
+        Codec::frame(self, raw, sink).await
+    }
+
+    async fn close(&self) {
+        Codec::close(self).await;
+    }
+}
+
+/// A [`FrameSink`] seen as the typed [`EventSink`] the codec wants.
+struct Pushes(Arc<dyn FrameSink>);
+
+impl Pushes {
+    fn notify<T: serde::Serialize>(&self, method: &str, params: T) {
+        let frame = Notification {
+            jsonrpc: V2,
+            method: method.to_string(),
+            params: Some(serde_json::to_value(params).expect("a push serializes")),
+        };
+        self.0
+            .send_frame(serde_json::to_string(&frame).expect("a frame serializes"));
+    }
+}
+
+impl EventSink for Pushes {
     fn session_event(&self, event: SessionEventPush) {
         self.notify(push::SESSION_EVENT, event);
     }

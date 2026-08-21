@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinSet;
 
-use crate::{Codec, Frames};
+use crate::{Codec, FrameHandler, FrameSink, Frames};
 
 /// Serve one connection until its peer stops writing.
 ///
@@ -45,6 +45,63 @@ where
     // rather than left waiting for the channel to close on its own.
     let _ = frames.send(None);
     writer.await.expect("the writer task does not panic")?;
+    read
+}
+
+/// Serve one connection whose frames are answered by something other than the
+/// contract codec.
+///
+/// Same framing, same concurrency, same writer, same ordering promise: this is
+/// [`serve`] with the handler left open, so a bridge speaking another protocol
+/// (the Agent Client Protocol adapter in `crates/acp`) gets the carrier it
+/// already has rather than a second one written beside it.
+pub async fn serve_handler<R, W>(
+    handler: Arc<dyn FrameHandler>,
+    input: R,
+    output: W,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (frames, queued) = mpsc::unbounded_channel();
+    let writer = tokio::spawn(write_frames(output, queued));
+    let out: Arc<dyn FrameSink> = Arc::new(Frames(frames.clone()));
+
+    let read = read_handled(&handler, &out, &frames, input).await;
+
+    handler.close().await;
+    let _ = frames.send(None);
+    writer.await.expect("the writer task does not panic")?;
+    read
+}
+
+async fn read_handled<R: AsyncRead + Unpin>(
+    handler: &Arc<dyn FrameHandler>,
+    out: &Arc<dyn FrameSink>,
+    frames: &UnboundedSender<Option<String>>,
+    input: R,
+) -> io::Result<()> {
+    let mut lines = BufReader::new(input).lines();
+    let mut inflight = JoinSet::new();
+
+    let read = loop {
+        match lines.next_line().await {
+            Ok(Some(line)) if line.trim().is_empty() => continue,
+            Ok(Some(line)) => {
+                let (handler, out, frames) = (handler.clone(), out.clone(), frames.clone());
+                inflight.spawn(async move {
+                    if let Some(answer) = handler.frame(&line, &out).await {
+                        let _ = frames.send(Some(answer));
+                    }
+                });
+            }
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        }
+    };
+
+    while inflight.join_next().await.is_some() {}
     read
 }
 
