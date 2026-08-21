@@ -40,6 +40,19 @@ pub mod push {
     pub const UI_APPROVE: &str = "ui/approve";
 }
 
+/// The largest page `session.events` will return, however large a `limit` asks
+/// for.
+///
+/// Contract section 4.4.5. A surface reads this rather than spelling the
+/// number, for the reason section 5 gives `PROTOCOL_VERSION` and one more: a
+/// literal in a consuming lane is a claim about a server it may not be talking
+/// to, and it fails *silently*, because a `limit` above the maximum is clamped
+/// rather than refused.
+///
+/// A caller paging with `next_seq` and `eof` never needs it. It is here for
+/// the one that wants a single round trip.
+pub const MAX_PAGE_SIZE: u32 = 500;
+
 /// Capability strings a server advertises in [`HelloResult`]. A surface checks
 /// one before it uses an optional call.
 pub mod capability {
