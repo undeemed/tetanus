@@ -23,6 +23,8 @@
 //! - [`questions`] asks the user something a tool cannot decide alone.
 //! - [`repair`] writes the closers an interrupted journal is missing.
 //! - [`instructions`] reads the conventions a project keeps in its repository.
+//! - [`lsp`] runs a language server over stdio and answers the precise
+//!   navigation questions textual search cannot.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
 //! - [`schema`] checks a call's arguments against the schema its tool published.
@@ -43,6 +45,7 @@ pub mod instructions;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
+pub mod lsp;
 pub mod projections;
 pub mod prompt;
 pub mod prune;
