@@ -323,6 +323,15 @@ still reading it. A resize is not the stream rewriting anything, it is the reade
 shape at the moment they ask - the same reading [`browse`](crates/cli/src/render/browse.rs) makes
 of the same rule.
 
+Looking through what was said is `/find word`, and it is a command rather than a key for the same
+reason `?` is not the key card here: `/` is a character in the line being typed, and a view that
+took it is one where a reader cannot ask about a path.
+The matches are marked where they are drawn, walked with ctrl-n and ctrl-p - two of the keys the
+editor does not answer - and counted on the footer, which is also where a word no line holds is
+said in words rather than as `0 of 0`.
+They are kept as line numbers and found again after a rewrap, because a resize moves every line and
+a reader who widened their terminal did not ask to lose their search.
+
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.

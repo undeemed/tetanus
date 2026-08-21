@@ -49,6 +49,15 @@
 //! a new shape, at the moment they ask - which is the same reading
 //! [`browse`](super::browse) makes of the same rule.
 //!
+//! # Why a search is a command and not a key
+//!
+//! Every other full-screen view in this binary opens its search with `/`,
+//! because `/` is a key there. Here it is a character in the line being typed,
+//! and a view that took it is a view where a reader cannot ask about a path.
+//! So the search is `/find word` - a command, in the vocabulary this chat
+//! already has - and the keys that walk the matches are two the editor does
+//! not answer: ctrl-n for the next, ctrl-p for the one before.
+//!
 //! # Why the editor answers first
 //!
 //! Every printable key belongs to the line being typed - including `?` and
@@ -65,7 +74,9 @@ use std::time::Duration;
 
 use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::SessionEvent;
-use tetanus_ui::{bar, tame_line, visible_width, Frame, Key, Line, Role, Theme, Typed};
+use tetanus_ui::{
+    bar, light, plain, tame_line, visible_width, Frame, Key, Line, Role, Theme, Typed,
+};
 
 use super::live::Live;
 
@@ -142,6 +153,13 @@ pub struct Fire {
     /// What the block says the turn is waiting on, kept so that a composer
     /// built again after a resize opens on the phase the last one was in.
     phase: String,
+    /// The word the reader is looking for, lower-cased, when they are.
+    wanted: Option<String>,
+    /// Which lines hold it, oldest first, and which of those the reader is on.
+    /// Line numbers rather than marked strings, because a resize composes
+    /// every line again and the numbers are what a rewrap can be redone from.
+    hits: Vec<usize>,
+    at: usize,
 }
 
 impl Fire {
@@ -165,6 +183,9 @@ impl Fire {
             width,
             think,
             phase: String::new(),
+            wanted: None,
+            hits: Vec::new(),
+            at: 0,
         }
     }
 
@@ -180,8 +201,80 @@ impl Fire {
         if self.back > 0 {
             self.back += lines.len();
         }
+        let from = self.lines.len();
         self.lines.extend(lines);
         self.said.push(said);
+        self.mark(from);
+    }
+
+    /// Look for `word` in what has been said, or - given nothing - stop
+    /// looking.
+    ///
+    /// The window goes to the newest match, because a conversation is read
+    /// from its foot and the match a reader means is almost always the last
+    /// one. The others are behind ctrl-p.
+    pub fn find(&mut self, word: &str) {
+        self.wanted = match word.trim().is_empty() {
+            true => None,
+            false => Some(word.trim().to_lowercase()),
+        };
+        // Composed again rather than marked in place: a mark is escapes
+        // written into a line, and a line that already carries one cannot be
+        // marked for a different word without being built again.
+        self.fill(self.width);
+        self.at = self.hits.len().saturating_sub(1);
+        self.land();
+    }
+
+    /// Walk to the next match, or the one before it.
+    fn walk(&mut self, forward: bool) {
+        if self.hits.is_empty() {
+            return;
+        }
+        // Round rather than stopping: a reader who reaches the last match and
+        // asks for another is asking to go round, not to be told they cannot.
+        self.at = match forward {
+            true => (self.at + 1) % self.hits.len(),
+            false => (self.at + self.hits.len() - 1) % self.hits.len(),
+        };
+        self.land();
+    }
+
+    /// Put the window where the match the reader is on can be read.
+    fn land(&mut self) {
+        let Some(line) = self.hits.get(self.at).copied() else {
+            return;
+        };
+        // The match at the foot of the body, not the top of it: what was said
+        // before a match is the context a reader wants with it, and what comes
+        // after is what they are about to scroll to anyway.
+        let room = self.body.max(1);
+        self.back = self.lines.len().saturating_sub(line + 1);
+        self.back = self
+            .back
+            .min(self.lines.len().saturating_sub(room.min(self.lines.len())));
+    }
+
+    /// Mark the lines from `from` on, and remember which of them hold the
+    /// word.
+    ///
+    /// With colour off there is nothing to mark with - `--color never` is a
+    /// promise about the bytes - so the lines are found and not painted, and
+    /// the walk still works.
+    fn mark(&mut self, from: usize) {
+        let Some(word) = self.wanted.clone() else {
+            return;
+        };
+        let painted = self.theme.color();
+        for at in from..self.lines.len() {
+            if !plain(&self.lines[at]).to_lowercase().contains(&word) {
+                continue;
+            }
+            self.hits.push(at);
+            if painted {
+                self.lines[at] = light(&self.lines[at], &word);
+            }
+        }
     }
 
     /// The card `/help` prints, on the conversation.
@@ -229,6 +322,7 @@ impl Fire {
         let back = self.back;
         let said = std::mem::take(&mut self.said);
         self.lines.clear();
+        self.hits.clear();
         self.back = 0;
         self.live = Live::new(self.theme, cols, &self.phase, self.think);
         for one in &said {
@@ -241,6 +335,7 @@ impl Fire {
             self.live.finish();
         }
         self.said = said;
+        self.mark(0);
         self.back = back;
         self.width = cols;
     }
@@ -328,7 +423,14 @@ impl Fire {
             Key::Down => self.scroll(-1),
             Key::PageUp => self.scroll(screenful as isize),
             Key::PageDown => self.scroll(-(screenful as isize)),
-            Key::Esc => self.follow(),
+            Key::Ctrl('n') => self.walk(true),
+            Key::Ctrl('p') => self.walk(false),
+            // Back to the foot, and out of a search: both are the reader
+            // saying they are done looking at what they were looking at.
+            Key::Esc => {
+                self.find("");
+                self.follow();
+            }
             _ => {}
         }
         Act::Go
@@ -395,19 +497,32 @@ impl Fire {
     /// The keys on the left, where the reader is on the right.
     fn footer(&self, cols: usize) -> String {
         let dot = self.theme.glyph("·", "-");
-        let full = format!(
-            "enter ask {dot} {} scroll {dot} /help {dot} ctrl-c leave",
-            self.theme.glyph("↑↓", "up/dn")
-        );
-        let keys = super::keys::hint(cols, &full, &format!("enter ask {dot} ctrl-c leave"));
-        let here = match (self.back, self.working) {
-            (0, true) => "working".to_string(),
-            (0, false) => "end".to_string(),
-            (back, _) => format!("{back} back"),
+        let full = match self.wanted.is_some() {
+            // The keys that matter while a search is up are the ones that walk
+            // it, and they are not on the footer the rest of the time.
+            true => format!("ctrl-n next {dot} ctrl-p back {dot} esc done {dot} ctrl-c leave"),
+            false => format!(
+                "enter ask {dot} {} scroll {dot} /help {dot} /find {dot} ctrl-c leave",
+                self.theme.glyph("↑↓", "up/dn")
+            ),
         };
-        let role = match self.working {
-            true => Role::Accent,
-            false => Role::Muted,
+        let keys = super::keys::hint(cols, &full, &format!("enter ask {dot} ctrl-c leave"));
+        let here = match (&self.wanted, self.back, self.working) {
+            // A search is what the reader is doing, so it has the corner the
+            // position would have had. `0 of 0` is not a place: a word no line
+            // holds is said in words.
+            (Some(word), _, _) => match self.hits.is_empty() {
+                true => format!("no line holds {}", tame_line(word)),
+                false => format!("{} of {}", self.at + 1, self.hits.len()),
+            },
+            (None, 0, true) => "working".to_string(),
+            (None, 0, false) => "end".to_string(),
+            (None, back, _) => format!("{back} back"),
+        };
+        let role = match (self.working, self.wanted.is_some() && self.hits.is_empty()) {
+            (_, true) => Role::Warn,
+            (true, _) => Role::Accent,
+            (false, _) => Role::Muted,
         };
         bar(
             cols,
@@ -420,12 +535,14 @@ impl Fire {
 /// Test Design Specification: the conversation as one screen.
 ///
 /// Features tested: the arrangement of a frame and where the cursor lands on
-/// it; that every printable key belongs to the line being typed and the keys
+/// it; that `/find` counts its matches, lands on the newest and says when
+/// there are none, and that ctrl-n and ctrl-p walk them and go round; that every printable key belongs to the line being typed and the keys
 /// the editor does not answer move the window; that Enter asks and an empty
 /// line does not; that a line typed while a turn is running is held rather
 /// than sent; that Ctrl-C and Ctrl-D are told apart; that arriving lines do
-/// not move a window a reader has scrolled back; and that a line longer than
-/// the row keeps the cursor on the row.
+/// not move a window a reader has scrolled back; that a resize composes the
+/// conversation again and a search open at the time survives it; and that a
+/// line longer than the row keeps the cursor on the row.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -696,6 +813,93 @@ mod tests {
 
         let again = rows_at(&mut view, 90, ROWS + 6);
         assert_eq!(wide, again, "widening did not undo the cut");
+    }
+
+    /// TC-CLI-FIRE-9: `/find` on a conversation that holds the word twice, and
+    /// on one that does not hold it at all.
+    /// Expected: the footer counts the matches and says which one the reader
+    /// is on, the window lands on the newest of them, and a word no line holds
+    /// is said in words rather than counted as `0 of 0`.
+    #[test]
+    fn find_counts_the_matches_and_lands_on_the_newest() {
+        let mut view = fire();
+        for n in 1..=30 {
+            view.note(&format!("line {n}"));
+        }
+        view.note("the word is alpha");
+        for n in 31..=50 {
+            view.note(&format!("line {n}"));
+        }
+        view.note("alpha again, at the foot");
+        rows(&mut view, ROWS);
+
+        view.find("alpha");
+        let found = rows(&mut view, ROWS);
+        assert!(found[ROWS - 1].contains("2 of 2"), "{found:?}");
+        assert!(
+            found.iter().any(|row| row.contains("alpha again")),
+            "the window did not land on the newest match: {found:?}"
+        );
+
+        view.find("zzz");
+        let none = rows(&mut view, ROWS);
+        assert!(none[ROWS - 1].contains("no line holds zzz"), "{none:?}");
+    }
+
+    /// TC-CLI-FIRE-10: the keys that walk the matches.
+    /// Expected: ctrl-n and ctrl-p move one match at a time and round at both
+    /// ends - a reader who reaches the last match and asks for another is
+    /// asking to go round, not to be told they cannot - and Escape ends the
+    /// search and puts the window back at the foot.
+    #[test]
+    fn the_matches_are_walked_and_the_walk_goes_round() {
+        let mut view = fire();
+        for n in 1..=3 {
+            view.note(&format!("alpha {n}"));
+        }
+        view.find("alpha");
+        assert!(rows(&mut view, ROWS)[ROWS - 1].contains("3 of 3"));
+
+        assert_eq!(view.key(Key::Ctrl('n')), Act::Go);
+        assert!(
+            rows(&mut view, ROWS)[ROWS - 1].contains("1 of 3"),
+            "no round"
+        );
+        assert_eq!(view.key(Key::Ctrl('p')), Act::Go);
+        assert!(
+            rows(&mut view, ROWS)[ROWS - 1].contains("3 of 3"),
+            "no round back"
+        );
+
+        assert_eq!(view.key(Key::Esc), Act::Go);
+        assert!(
+            rows(&mut view, ROWS)[ROWS - 1].contains("end"),
+            "still searching"
+        );
+    }
+
+    /// TC-CLI-FIRE-11: a search open when the terminal changes size.
+    /// Expected: it survives. A rewrap moves every line, so the matches are
+    /// found again on the lines that hold them now rather than kept as the
+    /// numbers of lines that have moved - and a reader who widened their
+    /// terminal did not ask to lose their search.
+    #[test]
+    fn a_search_survives_a_resize() {
+        let mut view = Fire::new(theme(), 90, "mock-echo-1", false);
+        view.push(&said_by("you", &"alpha ".repeat(24)));
+        view.find("alpha");
+
+        let wide = rows_at(&mut view, 90, ROWS);
+        assert!(wide[ROWS - 1].contains(" of "), "{wide:?}");
+
+        let narrow = rows_at(&mut view, 40, ROWS);
+        assert!(
+            narrow[ROWS - 1].contains(" of "),
+            "the search was lost in the rewrap: {narrow:?}"
+        );
+        for row in &narrow {
+            assert!(visible_width(row) <= 40, "`{row}` overruns 40");
+        }
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.

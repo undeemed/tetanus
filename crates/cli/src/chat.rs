@@ -92,6 +92,10 @@ pub enum Input<'a> {
     Leave,
     /// Print the commands.
     Help,
+    /// Look for a word in what has already been said. Only the full-screen
+    /// chat can answer it: the ordinary one hands each line to the terminal's
+    /// own scrollback, where the reader's own pager already searches.
+    Find(&'a str),
     /// A slash command this build does not have, as it was typed.
     Unknown(&'a str),
 }
@@ -109,6 +113,13 @@ pub fn parse(line: &str) -> Input<'_> {
             "/" => Input::Blank,
             asked => Input::Ask(asked),
         };
+    }
+    if let Some(word) = said.strip_prefix("/find") {
+        // `/find` with nothing after it takes the marks off, which is what a
+        // reader who has found what they were looking for wants next.
+        if word.is_empty() || word.starts_with(' ') {
+            return Input::Find(word.trim());
+        }
     }
     match said {
         "" => Input::Blank,
@@ -268,6 +279,15 @@ pub async fn chat<W: Write>(
                     .ok();
                 continue;
             }
+            // Nothing to search: every line this chat has printed is in the
+            // reader's own scrollback, where their pager already looks.
+            Input::Find(_) => {
+                policy
+                    .stderr()
+                    .note("/find is for `tetanus chat --ui`; this chat's lines are in your scrollback")
+                    .ok();
+                continue;
+            }
             Input::Ask(asked) => {
                 // Where this turn starts on the journal. The view draws what
                 // is appended from here, so a resumed session's history stays
@@ -419,6 +439,7 @@ impl Session<'_> {
                 Input::Blank => continue,
                 Input::Leave => return Leaving::Ended,
                 Input::Help => self.view.card(),
+                Input::Find(word) => self.view.find(word),
                 Input::Unknown(command) => self.said(&format!(
                     "{} is not a command; /help lists them",
                     tame_line(command)
@@ -652,9 +673,10 @@ async fn piped() -> std::io::Result<Typed> {
 
 /// Test Design Specification: what a typed line means.
 ///
-/// Features tested: every command the chat answers and each spelling of it, a
-/// message, the escape that sends a message opening with a slash, what an
-/// empty line does, and a command this build does not have.
+/// Features tested: every command the chat answers and each spelling of it,
+/// the word a search is given and what giving none means, a message, the
+/// escape that sends a message opening with a slash, what an empty line does,
+/// and a command this build does not have.
 ///
 /// Features NOT tested here: the loop itself and every way out of it (end to
 /// end, in `tests/chat.rs`, where a real binary reads a real pipe), and the
@@ -734,5 +756,17 @@ mod tests {
     fn an_unknown_command_is_not_a_question() {
         assert_eq!(parse("/reset\n"), Input::Unknown("/reset"));
         assert_eq!(parse("/model deepseek-chat\n"), Input::Unknown("/model"));
+    }
+
+    /// TC-CLI-CHAT-IN-7: the search command, with a word and without one.
+    /// Expected: the word, trimmed; and nothing, which is how a reader stops
+    /// looking. `/finder` is not `/find`, because a command is the whole first
+    /// word and a prefix that swallowed the rest would answer a typo.
+    #[test]
+    fn find_takes_a_word_and_giving_none_stops_looking() {
+        assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
+        assert_eq!(parse("/find  two words \n"), Input::Find("two words"));
+        assert_eq!(parse("/find\n"), Input::Find(""));
+        assert_eq!(parse("/finder\n"), Input::Unknown("/finder"));
     }
 }
