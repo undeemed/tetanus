@@ -1,0 +1,28 @@
+[package]
+name = "tetanus-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tetanus web tools: fetching a page and searching, each behind a seam a test can drive offline."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+# Already in the tree under `reqwest`; named here because origin comparison
+# and credential detection are exactly the things a hand-rolled URL parser
+# gets wrong, and both are security-relevant here.
+url.workspace = true
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+tempfile = { workspace = true }

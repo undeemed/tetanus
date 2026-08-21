@@ -1685,6 +1685,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tetanus-core",
+ "tetanus-session",
+ "tetanus-turn",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

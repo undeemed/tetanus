@@ -15,6 +15,7 @@ members = [
   "crates/host",
   "crates/fs",
   "crates/mcp",
+  "crates/web",
 ]
 
 [workspace.package]
@@ -37,6 +38,10 @@ tracing = "0.1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Already in the tree under `reqwest`. Named as a workspace dependency because
+# `crates/web` compares origins and refuses credentials in a URL, and a
+# hand-rolled parser is wrong exactly where those two matter.
+url = "2"
 tempfile = "3"
 # Upstream pins some contracts with fast-check property suites; this is the
 # Rust equivalent, and never more than a dev-dependency.
