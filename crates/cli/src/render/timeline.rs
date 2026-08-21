@@ -218,6 +218,15 @@ impl Reader {
             KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
         }
     }
+    /// What the turn has spent so far, over every step of it.
+    ///
+    /// `None` until a message carries usage: a build that does not measure
+    /// tokens says nothing about them rather than saying nothing was spent.
+    pub fn spent(&self) -> Option<u64> {
+        self.spent
+            .as_ref()
+            .map(|spent| spent.prompt_tokens + spent.completion_tokens)
+    }
 }
 
 /// Wall clock, as a person reads it: tenths under a minute, minutes above.
@@ -238,7 +247,7 @@ pub(super) fn duration(elapsed: Duration) -> String {
 /// A token count the way upstream's conversation UI writes one: `517`,
 /// `12.2K`, `1.2M`. One decimal until the figure reaches three digits, then
 /// whole numbers - a turn's cost is read at a glance, not audited.
-fn tokens(count: u64) -> String {
+pub(super) fn tokens(count: u64) -> String {
     let scaled = |value: f64| match value >= 100.0 {
         true => format!("{}", value.round()),
         false => format!("{}", (value * 10.0).round() / 10.0),

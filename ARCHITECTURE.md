@@ -284,6 +284,14 @@ identified there by the contract calls it makes rather than by what it prints. S
 `Reader` in [crates/cli/src/render/timeline.rs](crates/cli/src/render/timeline.rs), so a turn watched
 live reads like the same turn replayed tomorrow.
 The default is a block under the shell prompt, redrawn in place by `Screen`.
+That block says what the turn is waiting on, how long it has been waiting, and what it has spent so
+far ([crates/cli/src/render/live.rs](crates/cli/src/render/live.rs)): a reader watching a turn is
+watching it spend money, and a figure that arrives only once the turn is over tells them
+afterwards.
+The count moves a step at a time, because a step is billed when its message settles, and it is the
+same running total - and the same wording - the closing line reports; a build whose messages carry
+no usage says nothing rather than saying nothing was spent.
+The browser panel draws the same figure on its turn card, from the same events.
 `--ui` takes the whole terminal instead and composes each frame with `Page`
 ([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
 still running.
