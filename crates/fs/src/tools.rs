@@ -27,7 +27,9 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tetanus_turn::tools::{Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema};
+use tetanus_turn::tools::{
+    Permission, Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema,
+};
 
 use crate::error::FsError;
 use crate::observation::{Observation, ObservedState};
@@ -591,6 +593,27 @@ impl Tool for DeleteTool {
                 "required": ["path"],
             }),
         }
+    }
+
+    /// Deleting is the one thing in this suite a session cannot take back.
+    ///
+    /// A write is recoverable in the sense that matters - the content it
+    /// replaced is on the outcome, the fence keeps it inside the workspace, and
+    /// the observation policy already refuses to overwrite what was not read.
+    /// A delete leaves nothing to recover from, and a recursive one leaves a
+    /// subtree missing. So this is where the gate goes, and the reason is
+    /// written for the person answering rather than for a log: they need to
+    /// know what disappears if they say yes.
+    fn permission(&self, arguments: &Value) -> Permission {
+        let path = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("an unnamed path");
+        Permission::ask(if flag(arguments, "recursive") {
+            format!("delete {path} and everything under it; this cannot be undone")
+        } else {
+            format!("delete {path}; this cannot be undone")
+        })
     }
 
     async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {

@@ -10,6 +10,7 @@ use tetanus_config::ConfigError;
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as wire;
 use tetanus_session::SessionError;
+use tetanus_turn::approval::ApprovalError;
 use tetanus_turn::llm::LlmError;
 use tetanus_turn::TurnError;
 
@@ -114,6 +115,13 @@ pub fn turn_error(
         // nothing for the reader to do but report it - which is exactly what
         // `Internal` tells a surface.
         TurnError::Plugin(fault) => internal(format!("a plugin listener panicked: {fault}")),
+        // The decision seam failed, which is not a denial: a denial is an
+        // outcome the model reads as a `tool/result` (§4.4.7) and never reaches
+        // this table. A journal that refused the audit pair is the journal
+        // failing, and reads as one; the other two are this build asking a
+        // question it had no right to ask, which §4.4.7 says is `Internal`.
+        TurnError::Approval(ApprovalError::Log(e)) => journal_error(session_id, journal, e),
+        TurnError::Approval(e) => internal(format!("a tool-call decision failed: {e}")),
         TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
             RpcError::new(
                 ErrorCode::MissingCredential,

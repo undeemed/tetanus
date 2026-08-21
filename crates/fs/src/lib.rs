@@ -11,6 +11,7 @@
 //! - [`observation`] is the read-before-write policy: what a session has seen,
 //!   and what that lets it change.
 //! - [`glob`] is the pattern language the search tool accepts.
+//! - [`preset`] names the two permission knobs as one choice a person makes.
 //! - [`tools`] registers the model-facing tools over all of it.
 //!
 //! **Nothing here is a security boundary**, and the distinction is the same one
@@ -26,6 +27,7 @@ pub mod error;
 pub mod glob;
 pub mod local;
 pub mod observation;
+pub mod preset;
 pub mod sandbox;
 pub mod service;
 pub mod tools;
@@ -34,6 +36,7 @@ pub use access::{backend, FsMode};
 pub use error::{FsError, FsErrorCode};
 pub use local::LocalFs;
 pub use observation::{Observation, ObservedState};
+pub use preset::{Preset, DEFAULT_PRESET, PRESETS};
 pub use sandbox::SandboxedFs;
 pub use service::{
     Deleted, DirEntry, EditOutcome, EditRequest, FileKind, FileSystem, FsInfo, FsTarget, FsVersion,

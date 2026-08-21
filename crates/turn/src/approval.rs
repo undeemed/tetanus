@@ -80,6 +80,37 @@ impl ApprovalOutcome {
         }
     }
 
+    /// What the model is told about a call this outcome did not permit, or
+    /// `None` for the one outcome that permits it.
+    ///
+    /// An `Option` rather than a total function, so a caller cannot render a
+    /// refusal for a call that was in fact granted: the grant has no refusal
+    /// text, and the type says so.
+    ///
+    /// The three denials read differently because the model's next move
+    /// differs. A rejection is somebody's decision, so the useful response is
+    /// to say what it would have done and go on. A withdrawal means the turn is
+    /// stopping, so there is no next move at all. Nobody answering is the
+    /// unattended case, and the model is told that plainly rather than being
+    /// left to infer a refusal it could argue with.
+    pub fn refusal(self, tool_name: &str) -> Option<String> {
+        let why = match self {
+            Self::AllowedOnce => return None,
+            Self::Rejected => {
+                "it was refused. Do not retry it: say what you would have done and continue with \
+                 what you can do without it"
+            }
+            Self::Cancelled => {
+                "the question was withdrawn before it was answered, because the turn is stopping"
+            }
+            Self::Unavailable => {
+                "nobody was available to answer, so it was denied. This session is running \
+                 unattended: do not retry, and prefer a way of finishing that needs no approval"
+            }
+        };
+        Some(format!("The `{tool_name}` call was not permitted: {why}."))
+    }
+
     /// Read an outcome that came from outside this build.
     ///
     /// A word this build does not know reads as [`Unavailable`](Self::Unavailable)
@@ -129,6 +160,14 @@ impl ApprovalPolicy {
         }
     }
 }
+
+/// The `tool/result.code` of a call a decision refused before it ran.
+///
+/// Contract section 4.3.2: a `code` is present only on a result nobody ran,
+/// and this joins crash repair's two. A surface that does not know the word
+/// reads it as "not run, for a reason this build does not know", which is what
+/// that section promises of the growing vocabulary.
+pub const TOOL_NOT_PERMITTED: &str = "TOOL_NOT_PERMITTED";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApprovalError {
