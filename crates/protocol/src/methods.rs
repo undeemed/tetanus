@@ -29,6 +29,34 @@ pub mod method {
     pub const CATALOG_MODELS: &str = "catalog.models";
     pub const CONFIG_DUMP: &str = "config.dump";
     pub const APPROVAL_SET: &str = "approval.set";
+
+    /// Every client-to-server method this contract defines, served or
+    /// reserved.
+    ///
+    /// The list exists so completeness can be checked by a machine rather than
+    /// remembered by a person. A routing arm is written by hand, so the one
+    /// that gets forgotten is the one no case names - and a case that names
+    /// the methods one by one has the same hole one level up. A conformance
+    /// case iterates this instead, so a method wired nowhere fails at once.
+    ///
+    /// Adding a constant above and not adding it here is the single mistake
+    /// this cannot catch, which is why the two sit together.
+    pub const ALL: &[&str] = &[
+        HELLO,
+        SESSION_CREATE,
+        SESSION_LIST,
+        SESSION_EVENTS,
+        SESSION_FORK,
+        SESSION_SUBSCRIBE,
+        SESSION_UNSUBSCRIBE,
+        AGENT_PROMPT,
+        AGENT_STATUS,
+        AGENT_INTERRUPT,
+        CATALOG_TOOLS,
+        CATALOG_MODELS,
+        CONFIG_DUMP,
+        APPROVAL_SET,
+    ];
 }
 
 /// Server-to-client frames. The two notifications are one-way; `UI_ASK` and
