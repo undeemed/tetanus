@@ -11,8 +11,12 @@
 //! - [`fs`] decides whether a path the model chose is inside its workspace.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
-//! - [`process`] runs one external command, bounded in output and in time.
 //! - [`prompt`] is the named section registry the assembly starts from.
+//!
+//! Running an external command is `tetanus-exec`, which sits above this crate:
+//! it is a consumer of [`tools`] rather than a part of the loop, and keeping
+//! it out of here is what lets a subprocess seam depend on the tool vocabulary
+//! instead of the other way round.
 //! - [`prune`] shrinks a tool result that is too long to keep whole.
 //! - [`questions`] asks the user something a tool cannot decide alone.
 //! - [`repair`] writes the closers an interrupted journal is missing.
@@ -34,7 +38,6 @@ pub mod instructions;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
-pub mod process;
 pub mod projections;
 pub mod prompt;
 pub mod prune;

@@ -8,6 +8,7 @@ members = [
   "crates/protocol",
   "crates/ui",
   "crates/engine",
+  "crates/exec",
   "crates/rpc",
   "crates/turn",
   "crates/fs",
@@ -50,3 +51,7 @@ crossterm = { version = "0.29", default-features = false, features = ["events", 
 # Already in the tree under `crossterm`; named here because `crates/ui` asks
 # it for the watch that gives the terminal back when the process is killed.
 signal-hook = "0.3"
+# `crates/exec` signals a process *group*, which the standard library will not
+# do. One `killpg` is why a grandchild cannot outlive the command that started
+# it; nothing else in the workspace calls libc directly.
+libc = "0.2"
