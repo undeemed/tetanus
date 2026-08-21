@@ -176,6 +176,8 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | `approval/asked` | `id`, `tool_name`, plus `call_id` and `reason` when the asker had them |
 | `approval/decided` | `id`, `outcome` |
 | `approval/policy` | `policy` |
+| `question/asked` | `id`, `questions` |
+| `question/answered` | `id`, `answers`, `answered` |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
@@ -319,6 +321,32 @@ client -> AskResult { answers }
 The ask is a server-to-client request because the engine blocks on it: a tool cannot proceed until the human decides.
 A client that advertises no `ui.ask` capability is never asked, and the engine denies the underlying action instead of hanging.
 A client that advertises the capability and then fails to answer must answer with an error; the engine treats any error as a denial.
+
+The rest of this section is what an implementation has to decide, settled here rather than found out.
+The call is reserved, so nothing has been built against it yet and this costs nothing now; it would cost two lanes a rewrite later.
+
+**An answer covers every question, or it is not an answer.**
+A tool that asked three things needs three; given two it is in a state its author never wrote code for.
+An `AskResult` that leaves a question unanswered is treated as no answer at all - the same outcome as a client that errored - so a tool meets one of exactly two cases rather than a partial third.
+An answer naming a question that was not asked is ignored: the questions are the contract, and a client that answered more has not answered less.
+
+**An answer outside a closed list is not an answer.**
+`QuestionOption.label` is both the text and the value (§4.3), so a question that offers options accepts those labels and nothing else.
+A question with no options is free text and accepts anything.
+A single-select question given several labels is unanswered, not first-wins: a tool acting on a guess about which one the user meant is worse than a tool told it has no answer.
+
+**The pair is durable, and turn-enclosed.**
+`question/asked` and `question/answered` go on the journal (§4.3.2), one pair per ask, sharing an `id`.
+A tool acted on what the user said, and a transcript that shows the action without the question cannot explain it - the same reason §4.4.7 gives for the approval pair, and the same enclosure rule, because the turn is what §4.4.4's repair closes and a question outside one could never be closed.
+An ask a crash caught mid-question is closed on reopen the way an approval is.
+
+**An interrupt withdraws the question.**
+`agent.interrupt` settles an outstanding ask as unanswered at once, rather than waiting for an answer a stopped turn would not use, and a late answer is discarded.
+This is §4.4.7's rule and it is the same rule for the same reason.
+
+**Nothing else bounds the wait.**
+There is no timeout: a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault.
+The interrupt is the way out, which is why the previous rule is not optional.
 
 #### 4.4.4 Reopening a journal a crash left open
 
@@ -734,6 +762,9 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.2 the reason is the turn's, and does not carry into the next | TC-PORT-CAP-2 |
 | §4.4.2 the cut-off step's message carries no call | TC-PORT-CAP-4 |
 | §4.4.3 a reserved call's capability is not advertised | TC-SUB-5 |
+| §4.4.3 a partial answer is no answer | TC-PROTO-55 |
+| §4.4.3 an answer outside a closed list is no answer | TC-PROTO-56 |
+| §4.4.3 the pair is durable in both outcomes | TC-PROTO-57 |
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
@@ -828,3 +859,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Settles §4.4.3, which reserved `ui/ask` and then said almost nothing about it. The call is still reserved, so nothing has been built against it and this costs nothing now; the same decisions found out later cost two lanes a rewrite. An answer covers every question or it is no answer, so a tool meets one of exactly two cases rather than a partial third its author never wrote code for; an answer naming a question nobody asked is ignored, because the questions are the contract. A question offering options accepts those labels and nothing else, and a single-select question given several is unanswered rather than first-wins - a tool acting on a guess about which the user meant is worse than a tool told it has none. `question/asked` and `question/answered` join §4.3.2 as a durable pair sharing an `id`, turn-enclosed and closed by repair, for §4.4.7's reasons: a transcript that shows what a tool did but not what the user was asked cannot explain it. An interrupt withdraws an outstanding ask and a late answer is discarded, as it does for an approval. Nothing else bounds the wait, deliberately - a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault - which is why the interrupt rule is not optional. No type changes and no new code. |

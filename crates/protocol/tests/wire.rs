@@ -5,14 +5,15 @@
 //! round trips through the same code that produced them.
 
 use serde_json::json;
+use tetanus_protocol::methods::AskResult;
 use tetanus_protocol::methods::{
     capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
     SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
-    AgentState, ApprovalOutcome, ApprovalPolicy, Chunk, ConfigEntry, ConfigLayer, KnownEvent,
-    SessionEvent, StopReason, TurnSummary, Usage, REDACTED,
+    AgentState, Answer, ApprovalOutcome, ApprovalPolicy, Chunk, ConfigEntry, ConfigLayer,
+    KnownEvent, Question, QuestionOption, SessionEvent, StopReason, TurnSummary, Usage, REDACTED,
 };
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
@@ -801,4 +802,161 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-55: contract section 4.4.3. An answer covers every question or it
+/// is no answer, and an answer to a question nobody asked is ignored.
+///
+/// A tool that asked three things needs three. Given two it is in a state its
+/// author never wrote code for, so the boundary collapses that into the case
+/// the author did handle: no answer, exactly as a client that errored. The
+/// extra-answer rule points the other way because it can - the questions are
+/// the contract, and a client that answered more has not answered less.
+#[test]
+fn a_partial_answer_is_no_answer() {
+    let asked = ["shell", "editor", "branch"];
+
+    let covers =
+        |answers: &[&str]| -> bool { asked.iter().all(|q| answers.iter().any(|given| given == q)) };
+
+    assert!(covers(&["shell", "editor", "branch"]), "all three");
+    assert!(
+        covers(&["branch", "shell", "editor"]),
+        "order is not coverage: an answer echoes its question id"
+    );
+    assert!(
+        covers(&["shell", "editor", "branch", "unasked"]),
+        "an extra answer does not make it incomplete"
+    );
+
+    assert!(!covers(&["shell", "editor"]), "one short is no answer");
+    assert!(!covers(&[]), "and none is no answer");
+
+    // The shape a complete answer travels in.
+    let result = AskResult {
+        answers: asked
+            .iter()
+            .map(|id| Answer {
+                id: (*id).to_string(),
+                labels: vec!["yes".into()],
+            })
+            .collect(),
+    };
+    assert_eq!(result.answers.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&result.answers[0]).expect("serialize"),
+        json!({ "id": "shell", "labels": ["yes"] })
+    );
+}
+
+/// TC-PROTO-56: contract section 4.4.3. A closed list is closed, and a
+/// single-select question given several labels is unanswered.
+///
+/// `QuestionOption.label` is both the text and the value, so the offered
+/// labels are the whole vocabulary. The multi-select rule is the one worth
+/// stating: first-wins would let a tool act on a guess about which option the
+/// user meant, and a tool told it has no answer is in a better position than a
+/// tool confidently doing the wrong thing.
+#[test]
+fn an_answer_outside_a_closed_list_is_no_answer() {
+    let closed = Question {
+        id: "shell".into(),
+        question: "Which shell?".into(),
+        detail: None,
+        options: vec![option("bash"), option("zsh")],
+        multi_select: false,
+    };
+    let free = Question {
+        id: "branch".into(),
+        question: "Which branch?".into(),
+        detail: None,
+        options: Vec::new(),
+        multi_select: false,
+    };
+
+    let accepts = |q: &Question, labels: &[&str]| -> bool {
+        if labels.is_empty() {
+            return false;
+        }
+        if !q.multi_select && labels.len() > 1 {
+            return false;
+        }
+        q.options.is_empty()
+            || labels
+                .iter()
+                .all(|given| q.options.iter().any(|o| o.label == *given))
+    };
+
+    assert!(accepts(&closed, &["bash"]));
+    assert!(!accepts(&closed, &["fish"]), "not on the list");
+    assert!(
+        !accepts(&closed, &["bash", "zsh"]),
+        "single-select given two is unanswered, never first-wins"
+    );
+    assert!(!accepts(&closed, &[]), "no label is no answer");
+
+    assert!(accepts(&free, &["anything at all"]), "free text");
+    assert!(!accepts(&free, &["a", "b"]), "still single-select");
+
+    let multi = Question {
+        multi_select: true,
+        ..closed.clone()
+    };
+    assert!(accepts(&multi, &["bash", "zsh"]), "asked for several");
+    assert!(!accepts(&multi, &["bash", "fish"]), "still a closed list");
+}
+
+/// TC-PROTO-57: contract section 4.4.3. The pair is on the journal in both
+/// outcomes.
+///
+/// A tool acted on what the user said, and a transcript showing the action
+/// without the question cannot explain it - section 4.4.7's reason for the
+/// approval pair, and the same one here. `answered` says which outcome
+/// happened, so an ask nobody answered is a fact rather than an absence, and
+/// crash repair has something to close.
+#[test]
+fn the_ask_pair_is_durable_in_both_outcomes() {
+    let asked = SessionEvent {
+        ty: "question/asked".into(),
+        seq: 4,
+        time: 0,
+        data: json!({
+            "id": "q-1",
+            "questions": [{ "id": "shell", "question": "Which shell?" }],
+        }),
+        source_event_seqs: None,
+    };
+    let answered = SessionEvent {
+        ty: "question/answered".into(),
+        seq: 5,
+        time: 0,
+        data: json!({
+            "id": "q-1",
+            "answers": [{ "id": "shell", "labels": ["bash"] }],
+            "answered": true,
+        }),
+        source_event_seqs: None,
+    };
+    let withdrawn = SessionEvent {
+        data: json!({ "id": "q-1", "answers": [], "answered": false }),
+        ..answered.clone()
+    };
+
+    for event in [&asked, &answered, &withdrawn] {
+        assert!(event.parse().is_none(), "staged, like the other new types");
+    }
+    assert_eq!(asked.data["id"], answered.data["id"], "paired by id");
+    assert_eq!(answered.data["answered"], json!(true));
+    assert_eq!(
+        withdrawn.data["answered"],
+        json!(false),
+        "an ask nobody answered is recorded, not absent"
+    );
+}
+
+fn option(label: &str) -> QuestionOption {
+    QuestionOption {
+        label: label.to_string(),
+        description: None,
+    }
 }
