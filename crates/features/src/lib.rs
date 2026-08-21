@@ -13,9 +13,11 @@
 //! would be a feature whose replay could lie.
 //!
 //! - [`todo`] is the task list the model maintains across steps.
+//! - [`goal`] is the standing objective the session works toward.
 //!
 //! Parity: upstream `packages/todo`, `goal`, `plan`, `feedback`, `attachment`,
 //! `workspace` and `skill`, restated against the tetanus seams that carry the
 //! same decisions.
 
+pub mod goal;
 pub mod todo;
