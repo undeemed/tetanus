@@ -129,12 +129,17 @@ fn a_bounded_policy_may_allow_no_retries_at_all() {
 ///
 /// Input: one document per rule upstream states - an unknown mode, a negative
 /// retry count, an empty code list, a repeated code, a code that is not text,
-/// a wait of zero, a wait that is not a number, a spread above one, and an
-/// initial wait longer than the ceiling.
+/// a wait of zero, a spread above one, and an initial wait longer than the
+/// ceiling.
 /// Expected: each is `ConfigError::BadValue` naming the stated key, so the
 /// published mapping reports the line the reader has to edit. A rule that
 /// refused nothing would let a document configure a policy the engine does not
 /// run.
+///
+/// A wait written as text is not in this list any more: `llm.retry.backoff.*`
+/// is declared a whole number, so the shape is refused as the document is read
+/// and never reaches the policy. TC-RETRY-4b holds that half. Everything here
+/// is the right shape and the wrong value, which only this reader can know.
 #[test]
 fn every_refused_value_names_its_own_key() {
     let refused = [
@@ -144,7 +149,6 @@ fn every_refused_value_names_its_own_key() {
         ("retryable_codes: [SERVER, SERVER]", key::RETRYABLE_CODES),
         ("retryable_codes: [SERVER, 7]", key::RETRYABLE_CODES),
         ("backoff: {initial_delay_ms: 0}", key::INITIAL_DELAY_MS),
-        ("backoff: {max_delay_ms: soon}", key::MAX_DELAY_MS),
         ("backoff: {jitter_ratio: 1.5}", key::JITTER_RATIO),
         (
             "backoff: {initial_delay_ms: 900, max_delay_ms: 100}",
@@ -155,6 +159,31 @@ fn every_refused_value_names_its_own_key() {
     for (setting, expected) in refused {
         let (_dir, settings) = document(&format!("llm:\n  retry:\n    {setting}"));
         let Err(ConfigError::BadValue { key, .. }) = retry::policy(&settings) else {
+            panic!("{setting} was accepted");
+        };
+        assert_eq!(key, expected, "{setting}");
+    }
+}
+
+/// TC-RETRY-4b: a wait of the wrong shape is refused as the document is read.
+///
+/// Input: a wait written as text, and a spread written as text.
+/// Expected: `BadValue` naming the key, from `boot::document` rather than from
+/// `retry::policy`. The two stages answer different questions - is this the
+/// kind of thing the key takes, and is this value usable - and this case says
+/// which one catches a shape, so a reader knows where to look when a document
+/// is refused before an engine exists.
+#[test]
+fn a_wait_of_the_wrong_shape_is_refused_as_the_document_is_read() {
+    for (setting, expected) in [
+        ("backoff: {max_delay_ms: soon}", key::MAX_DELAY_MS),
+        ("backoff: {jitter_ratio: a lot}", key::JITTER_RATIO),
+    ] {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("settings.yaml");
+        std::fs::write(&path, format!("llm:\n  retry:\n    {setting}")).expect("write");
+
+        let Err(ConfigError::BadValue { key, .. }) = boot::document(&path) else {
             panic!("{setting} was accepted");
         };
         assert_eq!(key, expected, "{setting}");
