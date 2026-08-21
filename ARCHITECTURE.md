@@ -323,14 +323,20 @@ still reading it. A resize is not the stream rewriting anything, it is the reade
 shape at the moment they ask - the same reading [`browse`](crates/cli/src/render/browse.rs) makes
 of the same rule.
 
-Looking through what was said is `/find word`, and it is a command rather than a key for the same
-reason `?` is not the key card here: `/` is a character in the line being typed, and a view that
+What each key does is `/keys`, and looking through what was said is `/find word`.
+Both are commands rather than keys for the same reason `?` is not the key card here: `/` is a character in the line being typed, and a view that
 took it is one where a reader cannot ask about a path.
 The matches are marked where they are drawn, walked with ctrl-n and ctrl-p - two of the keys the
 editor does not answer - and counted on the footer, which is also where a word no line holds is
 said in words rather than as `0 of 0`.
 They are kept as line numbers and found again after a rewrap, because a resize moves every line and
 a reader who widened their terminal did not ask to lose their search.
+
+The keys card lands on the conversation rather than over it, which is the other difference from
+every full-screen view that opens one with `?`: a reader who asks what a key does while reading
+something should still be reading it afterwards.
+It names the editing keys as well, because those are the ones nothing else on the screen says - the
+footer says Enter asks, and nothing says alt-b walks back a word.
 
 Tab and Shift-Tab walk the turns, which is this terminal's answer to the message list the web panel
 puts beside a conversation: there is no list to put there and no pointer to click it with, and what

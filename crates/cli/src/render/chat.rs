@@ -99,8 +99,12 @@ pub fn space<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
 /// One list, read by the page a chat prints and by the card the full-screen
 /// view settles onto its transcript. Two lists would be two answers to
 /// `/help`, and the one a reader met would depend on which chat they were in.
-pub const COMMANDS: [(&str, &str); 4] = [
+pub const COMMANDS: [(&str, &str); 5] = [
     ("/help", "this card; `/?` does the same"),
+    (
+        "/keys",
+        "on a screen of its own: every key it answers, editing keys included",
+    ),
     (
         "/exit",
         "leave the chat; `/quit`, `/q` and ctrl-d do the same",
