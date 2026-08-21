@@ -371,6 +371,15 @@ editor does not answer - and counted on the footer, which is also where a word n
 said in words rather than as `0 of 0`.
 They are kept as line numbers and found again after a rewrap, because a resize moves every line and
 a reader who widened their terminal did not ask to lose their search.
+
+Tab and Shift-Tab walk the turns, which is this terminal's answer to the message list the web panel
+puts beside a conversation: there is no list to put there and no pointer to click it with, and what
+a reader reaches for is the start of a turn three or thirty back.
+A turn's opening line goes to the top of the body, because what follows it is the turn.
+Walking past the last turn lands on the foot of the conversation and walking before the first lands
+on its top: a reader going one way or the other is heading for that end, and neither is a refusal
+to move.
+The turn's own line numbers are kept beside the search's, and found again for the same reason.
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
