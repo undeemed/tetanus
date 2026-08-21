@@ -313,3 +313,72 @@ async fn settled(engine: &Fake, call: &str) {
         engine.called()
     );
 }
+
+/// TC-WS-8: a peer that hangs up leaves *nothing* open, not merely something.
+///
+/// Section 4.2 says a carrier that drops a connection unsubscribes its sinks,
+/// plural, and TC-WS-4 checks one subscription. One is the case a bug is least
+/// likely to reach: a `close` that handled only the first, or stopped at the
+/// first failure, would pass it while leaking every other subscription on the
+/// connection - and a leaked subscription is the engine pushing into a socket
+/// nobody reads, for the life of the process.
+///
+/// It also exercises the bookkeeping as a pair. The codec forgets an id when
+/// the peer unsubscribes it and forgets the rest when the peer hangs up, so a
+/// case with both shows the two halves agreeing rather than each alone.
+///
+/// Input: three subscriptions, one closed by the peer, then a hangup.
+/// Expected: all three are unsubscribed exactly once - the one the peer
+/// closed, and the two the hangup closed - and none is closed twice.
+#[tokio::test]
+async fn hanging_up_closes_every_subscription_the_connection_holds() {
+    let engine = Arc::new(Fake::default());
+    let address = host(engine.clone()).await;
+    let mut peer = greeted(&address).await;
+
+    for id in 1..=3 {
+        peer.send(
+            json!({ "jsonrpc": "2.0", "id": id, "method": method::SESSION_SUBSCRIBE,
+                          "params": { "session_id": "s1" } }),
+        )
+        .await;
+        peer.frame().await;
+    }
+
+    // The peer closes one itself, so the hangup has to close the others and
+    // must not close this one again.
+    peer.send(
+        json!({ "jsonrpc": "2.0", "id": 4, "method": method::SESSION_UNSUBSCRIBE,
+                      "params": { "subscription_id": "sub-2" } }),
+    )
+    .await;
+    peer.frame().await;
+
+    peer.hangup().await;
+
+    settled(&engine, "session.unsubscribe sub-1").await;
+    settled(&engine, "session.unsubscribe sub-3").await;
+
+    let closes: Vec<String> = engine
+        .called()
+        .into_iter()
+        .filter(|call| call.starts_with("session.unsubscribe"))
+        .collect();
+    let mut unique = closes.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique,
+        vec![
+            "session.unsubscribe sub-1".to_string(),
+            "session.unsubscribe sub-2".to_string(),
+            "session.unsubscribe sub-3".to_string(),
+        ],
+        "every subscription the connection held is closed"
+    );
+    assert_eq!(
+        closes.len(),
+        unique.len(),
+        "and none is closed twice: {closes:?}"
+    );
+}
