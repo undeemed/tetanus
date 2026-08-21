@@ -189,6 +189,8 @@ impl Codec {
             method::CATALOG_TOOLS => encode(engine.catalog_tools().await?),
             method::CATALOG_MODELS => encode(engine.catalog_models().await?),
             method::CONFIG_DUMP => encode(engine.config_dump().await?),
+            // Reserved, and routed for the same reason `session.fork` is.
+            method::APPROVAL_SET => encode(engine.approval_set(typed(params)?).await?),
             unknown => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
                 format!("no method `{unknown}`"),

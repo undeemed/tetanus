@@ -370,6 +370,25 @@ async fn a_reserved_method_is_routed_rather_than_unknown() {
         "{answer}"
     );
     assert_eq!(answer["error"]["data"]["method"], method::SESSION_FORK);
+
+    // Every reserved call, not just the first one written: a routing arm is
+    // added by hand, so the one that is forgotten is the one no case names.
+    let answer = send(
+        &codec,
+        json!({
+            "jsonrpc": "2.0", "id": 4, "method": method::APPROVAL_SET,
+            "params": { "session_id": "s1", "policy": "never" }
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["id"], 4);
+    assert_eq!(
+        answer["error"]["code"],
+        ErrorCode::NotImplemented as i32,
+        "{answer}"
+    );
+    assert_eq!(answer["error"]["data"]["method"], method::APPROVAL_SET);
 }
 
 /// TC-RPC-6: contract section 4.5. Params that do not fit the call are refused

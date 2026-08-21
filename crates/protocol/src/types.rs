@@ -187,6 +187,66 @@ pub struct Answer {
     pub labels: Vec<String>,
 }
 
+/// How one approval question settled.
+///
+/// Contract section 4.4.7. [`AllowedOnce`](Self::AllowedOnce) is the only
+/// grant, and it grants the one call it was asked about: it is not a rule, not
+/// a session setting, and the next call of the same tool asks again.
+///
+/// [`Other`](Self::Other) is section 7.5's fallback, and this is the first
+/// growable enum whose fallback the engine *reads* rather than renders, so
+/// what reading it means is fixed rather than left to a caller: a word the
+/// engine cannot interpret is not a grant, so it denies exactly as
+/// [`Unavailable`](Self::Unavailable) does. That keeps an added variant a
+/// minor change without letting an unknown one open a gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOutcome {
+    /// Run this call, and only this call.
+    AllowedOnce,
+    /// A decision not to run it.
+    Rejected,
+    /// The question was withdrawn before it was answered.
+    Cancelled,
+    /// Nobody could answer it. The fail-closed outcome.
+    Unavailable,
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl ApprovalOutcome {
+    /// Whether this outcome lets the call run.
+    ///
+    /// Only [`AllowedOnce`](Self::AllowedOnce) does. Every other value denies,
+    /// [`Other`](Self::Other) included, which is the fail-closed rule as one
+    /// function rather than as a match every caller writes for itself.
+    pub fn grants(&self) -> bool {
+        matches!(self, Self::AllowedOnce)
+    }
+}
+
+/// What happens to an approval question before any client sees it.
+///
+/// Contract section 4.4.7. The session's policy is the last `approval/policy`
+/// on its journal, and the deployment's `approval.policy` setting when the
+/// journal holds none, so a resumed session is under the policy it was under
+/// with nothing to replay but the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalPolicy {
+    /// Put the question to the client.
+    Ask,
+    /// Put it to nobody: every ask settles [`ApprovalOutcome::Rejected`]. The
+    /// unattended stance, whose point is that the answer is knowable without a
+    /// human, so a run in CI neither hangs nor waits on a client.
+    Never,
+    /// A word this build does not know. Unlike [`ApprovalOutcome::Other`] this
+    /// one is never acted on: a policy is set by a caller that could have
+    /// named one of the two, so the engine answers `InvalidParams`.
+    #[serde(untagged)]
+    Other(String),
+}
+
 /// One tool call as the model asked for it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
