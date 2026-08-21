@@ -332,6 +332,14 @@ said in words rather than as `0 of 0`.
 They are kept as line numbers and found again after a rewrap, because a resize moves every line and
 a reader who widened their terminal did not ask to lose their search.
 
+The up and down keys walk what this reader has asked, because that is what they do at every other
+prompt a person has used and a chat is a prompt; the page keys scroll, which is what scrolls a page
+everywhere else.
+A half-written line is kept when the walk starts and comes back at the end of it - a reader who
+pressed up to check what they asked last time has not thrown away the question they were writing -
+and a question asked twice in a row is kept once, because pressing up means the question before
+this one.
+
 The keys card lands on the conversation rather than over it, which is the other difference from
 every full-screen view that opens one with `?`: a reader who asks what a key does while reading
 something should still be reading it afterwards.

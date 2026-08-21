@@ -65,6 +65,16 @@
 //! already has - and the keys that walk the matches are two the editor does
 //! not answer: ctrl-n for the next, ctrl-p for the one before.
 //!
+//! # Why the up and down keys walk the history
+//!
+//! Because that is what they do at every other prompt a person has used, and
+//! a chat is a prompt. The transcript keeps the page keys, which is what
+//! scrolls a page everywhere else.
+//!
+//! What is half-typed when the walk starts is kept and comes back at the end
+//! of it: a reader who pressed up to check what they asked last time has not
+//! thrown away the question they were writing.
+//!
 //! # Why Tab walks the turns
 //!
 //! The web panel upstream puts every message in a list you can click. A
@@ -194,6 +204,11 @@ pub struct Fire {
     /// the same reason as the matches: a rewrap moves them, and they are what
     /// Tab walks.
     turns: Vec<usize>,
+    /// Every question this reader has asked, oldest first.
+    history: Vec<String>,
+    /// How far back through it they are, and what they were writing when they
+    /// started walking. `None` is not walking, and the line is their own.
+    walking: Option<(usize, String)>,
 }
 
 impl Fire {
@@ -221,6 +236,8 @@ impl Fire {
             hits: Vec::new(),
             at: 0,
             turns: Vec::new(),
+            history: Vec::new(),
+            walking: None,
         }
     }
 
@@ -384,9 +401,12 @@ impl Fire {
             ("enter", "ask what is on the line"),
             (
                 self.theme.glyph("↑ ↓", "up dn"),
-                "one line back through the conversation, one line on",
+                "the question before this one, and the one after",
             ),
-            ("pgup pgdn", "a screenful either way"),
+            (
+                "pgup pgdn",
+                "a screenful back through the conversation, and on",
+            ),
             ("tab shift-tab", "the next turn, and the turn before"),
             (
                 "ctrl-n ctrl-p",
@@ -539,7 +559,10 @@ impl Fire {
             // says the same about one typed at a shell prompt.
             Typed::Asked(said) => match said.trim().is_empty() {
                 true => Act::Go,
-                false => Act::Asked(said),
+                false => {
+                    self.remember(&said);
+                    Act::Asked(said)
+                }
             },
             Typed::Ignored => self.moved(key),
             _ => Act::Go,
@@ -551,8 +574,8 @@ impl Fire {
     fn moved(&mut self, key: Key) -> Act {
         let screenful = self.body.saturating_sub(1).max(1);
         match key {
-            Key::Up => self.scroll(1),
-            Key::Down => self.scroll(-1),
+            Key::Up => self.recall(true),
+            Key::Down => self.recall(false),
             Key::PageUp => self.scroll(screenful as isize),
             Key::PageDown => self.scroll(-(screenful as isize)),
             Key::Ctrl('n') => self.walk(true),
@@ -568,6 +591,46 @@ impl Fire {
             _ => {}
         }
         Act::Go
+    }
+
+    /// Keep a question, for the walk.
+    ///
+    /// The same question asked twice in a row is kept once: a reader pressing
+    /// up expects the question before this one, not the same one again. The
+    /// walk itself ends here too, because the line they were writing has just
+    /// been sent and there is nothing of it to come back to.
+    fn remember(&mut self, said: &str) {
+        self.walking = None;
+        if self.history.last().map(String::as_str) == Some(said) {
+            return;
+        }
+        self.history.push(said.to_string());
+    }
+
+    /// Walk back through what this reader has asked, or forward again.
+    ///
+    /// Forward past the newest question puts back whatever was on the line
+    /// when the walk started, which is the draft they had not finished.
+    fn recall(&mut self, back: bool) {
+        if self.history.is_empty() {
+            return;
+        }
+        let (at, draft) = match self.walking.take() {
+            Some((at, draft)) => (at, draft),
+            None => (self.history.len(), self.line.text()),
+        };
+        let at = match back {
+            true => at.saturating_sub(1),
+            false => at + 1,
+        };
+        match self.history.get(at) {
+            Some(said) => {
+                self.line.put(said);
+                self.walking = Some((at, draft));
+            }
+            // Past the newest: the reader is back at their own line.
+            None => self.line.put(&draft),
+        }
     }
 
     /// Move the window back through the transcript, or forward towards its
@@ -659,7 +722,7 @@ impl Fire {
             // it, and they are not on the footer the rest of the time.
             true => format!("ctrl-n next {dot} ctrl-p back {dot} esc done {dot} ctrl-c leave"),
             false => format!(
-                "enter ask {dot} {} scroll {dot} tab turn {dot} /help {dot} ctrl-c leave",
+                "enter ask {dot} {} history {dot} pgup back {dot} tab turn {dot} ctrl-c leave",
                 self.theme.glyph("↑↓", "up/dn")
             ),
         };
@@ -704,7 +767,8 @@ impl Fire {
 /// carries a rule between what was said and what is being typed, and a
 /// heading that counts the turns; and that `/keys` names every key the screen
 /// answers, the editing ones included, on the conversation rather than over
-/// it.
+/// it; and that the up and down keys walk what this reader has asked, keep
+/// the draft they were writing, and keep a repeated question once.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -893,10 +957,11 @@ mod tests {
         }
         rows(&mut view, ROWS);
 
-        assert_eq!(view.key(Key::Up), Act::Go);
-        assert_eq!(view.key(Key::Up), Act::Go);
+        // The page keys are what scrolls: the arrows walk the history, the
+        // way they do at every other prompt.
+        assert_eq!(view.key(Key::PageUp), Act::Go);
         let back = rows(&mut view, ROWS);
-        assert!(back[ROWS - 1].contains("2 back"), "{back:?}");
+        assert!(back[ROWS - 1].contains(" back"), "{back:?}");
 
         view.note("line 41");
         let after = rows(&mut view, ROWS);
@@ -1212,6 +1277,66 @@ mod tests {
             after.iter().any(|row| row.contains("said before the card")),
             "{after:?}"
         );
+    }
+
+    /// TC-CLI-FIRE-17: the up and down keys, over three questions and a draft.
+    /// Expected: up walks back through what this reader asked, down walks
+    /// forward again, and forward past the newest puts back the half-written
+    /// line the walk started from. A reader who pressed up to check what they
+    /// asked last time has not thrown away the question they were writing.
+    #[test]
+    fn the_arrows_walk_the_history_and_give_the_draft_back() {
+        let mut view = fire();
+        for said in ["first", "second", "third"] {
+            typing(&mut view, said);
+            assert_eq!(view.key(Key::Enter), Act::Asked(said.into()));
+        }
+        typing(&mut view, "half a th");
+
+        let on_the_row = |view: &mut Fire| rows(view, ROWS)[ROWS - 2].clone();
+
+        view.key(Key::Up);
+        assert_eq!(on_the_row(&mut view), "> third");
+        view.key(Key::Up);
+        view.key(Key::Up);
+        assert_eq!(on_the_row(&mut view), "> first");
+        // The oldest is the oldest: pressing up again does not walk off it.
+        view.key(Key::Up);
+        assert_eq!(on_the_row(&mut view), "> first");
+
+        view.key(Key::Down);
+        assert_eq!(on_the_row(&mut view), "> second");
+        view.key(Key::Down);
+        view.key(Key::Down);
+        assert_eq!(on_the_row(&mut view), "> half a th", "the draft was lost");
+    }
+
+    /// TC-CLI-FIRE-18: a recalled question, edited and asked again, and the
+    /// same question asked twice.
+    /// Expected: the edited one is what is sent and what the history keeps,
+    /// and a question repeated is kept once - a reader pressing up expects the
+    /// question before this one, not the same one again.
+    #[test]
+    fn the_history_keeps_what_was_asked_and_not_what_was_recalled() {
+        let mut view = fire();
+        typing(&mut view, "count the files");
+        view.key(Key::Enter);
+
+        view.key(Key::Up);
+        typing(&mut view, " twice");
+        assert_eq!(
+            view.key(Key::Enter),
+            Act::Asked("count the files twice".into())
+        );
+
+        view.key(Key::Up);
+        assert_eq!(rows(&mut view, ROWS)[ROWS - 2], "> count the files twice");
+
+        // Asked again, unchanged: one entry, not two.
+        view.key(Key::Enter);
+        view.key(Key::Up);
+        view.key(Key::Up);
+        assert_eq!(rows(&mut view, ROWS)[ROWS - 2], "> count the files");
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
