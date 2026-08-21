@@ -397,6 +397,15 @@ It is one of the things that were said rather than a case in the frame, so it re
 everything else - and the first turn takes it away rather than leaving it further up the transcript,
 because what it says stops being true the moment one exists.
 
+`/think` and `/more` open what is already on the page: the model's thinking, folded to its first
+line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
+to off the screen.
+Both are toggles and both compose the conversation again, which is what makes them a reader
+changing their mind rather than a flag they had to know about before they started - `--think` is
+the flag, and a screen that can rewrite what it drew does not need one.
+The browser panel opens the same card by clicking it; a terminal has a command instead, and the
+ordinary chat, whose page is the reader's own scrollback, answers both by naming the flag.
+
 The keys card lands on the conversation rather than over it, which is the other difference from
 every full-screen view that opens one with `?`: a reader who asks what a key does while reading
 something should still be reading it afterwards.
