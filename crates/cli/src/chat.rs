@@ -380,7 +380,8 @@ async fn fire<W: Write>(
 
     let theme = *out.theme();
     let (cols, rows) = tetanus_ui::size();
-    let mut view = render::fire::Fire::new(theme, cols, model, think);
+    let mut view =
+        render::fire::Fire::new(theme, cols, model, &log.path().display().to_string(), think);
     let events = log.events();
     view.history(&events.iter().map(crate::crossing).collect::<Vec<_>>());
     let mut session = Session {

@@ -101,7 +101,8 @@ use std::time::Duration;
 use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::SessionEvent;
 use tetanus_ui::{
-    bar, light, plain, tame_line, truncate, visible_width, Frame, Key, Line, Role, Theme, Typed,
+    bar, light, plain, tame_line, truncate, visible_width, wrap, Frame, Key, Line, Role, Theme,
+    Typed,
 };
 
 use super::live::Live;
@@ -156,6 +157,8 @@ enum Said {
     Card,
     /// The card `/keys` prints.
     Keys,
+    /// The page a conversation with nothing asked in it yet opens on.
+    Opening,
     /// One line of this build's own words - a command it does not have, a
     /// flush that did not work.
     Note(String),
@@ -167,6 +170,10 @@ pub struct Fire {
     theme: Theme,
     /// What the heading says on the right: the model this chat is on.
     title: String,
+    /// The journal every turn is appended to, for the opening page. It is the
+    /// one fact a reader needs to replay this conversation or resume it, and
+    /// the ordinary chat prints it before the first question for that reason.
+    journal: String,
     /// The conversation, as what was said rather than as what was drawn.
     /// Nothing is dropped: the alternate screen has no scrollback, so a view
     /// that let a line go has lost it.
@@ -213,15 +220,16 @@ pub struct Fire {
 
 impl Fire {
     /// A view over a conversation that has not started yet.
-    pub fn new(theme: Theme, width: usize, model: &str, think: bool) -> Self {
+    pub fn new(theme: Theme, width: usize, model: &str, journal: &str, think: bool) -> Self {
         // The composer opens finished: a conversation nobody has asked
         // anything in yet is not waiting on a turn, and the block that says
         // what a turn is waiting on has nothing to say until one starts.
         let mut live = Live::new(theme, width, "", think);
         live.finish();
-        Self {
+        let mut view = Self {
             theme,
             title: format!("chat on {}", tame_line(model)),
+            journal: tame_line(journal),
             said: Vec::new(),
             lines: Vec::new(),
             back: 0,
@@ -238,7 +246,9 @@ impl Fire {
             turns: Vec::new(),
             history: Vec::new(),
             walking: None,
-        }
+        };
+        view.say(Said::Opening);
+        view
     }
 
     /// Say one thing: put it on the conversation, and on the page.
@@ -249,6 +259,15 @@ impl Fire {
     /// reason: the alternative drags the page out from under them, one row per
     /// arriving line.
     fn say(&mut self, said: Said) {
+        // A turn answers the opening page, and what it says - nothing asked
+        // yet - stops being true the moment one exists. It goes rather than
+        // scrolling away: a page that lies further up a transcript is worse
+        // than one that was never there. However the turn arrived, including
+        // off a journal this conversation is resuming.
+        if opens_a_turn(&said) && self.said.iter().any(|said| matches!(said, Said::Opening)) {
+            self.said.retain(|said| !matches!(said, Said::Opening));
+            self.fill(self.width);
+        }
         let lines = self.compose(&said, self.width);
         if self.back > 0 {
             self.back += lines.len();
@@ -452,6 +471,7 @@ impl Fire {
             Said::Event(event) => self.live.push(event),
             Said::Card => super::chat::card(&self.theme, cols),
             Said::Keys => self.keys(cols),
+            Said::Opening => self.opening(cols),
             Said::Note(text) => {
                 vec![self.theme.paint(Role::Warn, text).to_string()]
             }
@@ -696,6 +716,46 @@ impl Fire {
         &self.lines[end.saturating_sub(room)..end]
     }
 
+    /// The page a conversation with nothing on it yet shows.
+    ///
+    /// A blank screen with a prompt on it is a screen that might be broken.
+    /// The browser panel says `Nothing said yet. Ask something below.` for the
+    /// same reason, and a terminal has the room to say the rest of what a
+    /// reader needs: where the journal is, and that the commands exist.
+    ///
+    /// It is not on the transcript. Nothing was said, so there is nothing to
+    /// scroll back to, and the first thing that is said takes the rows.
+    fn opening(&self, cols: usize) -> Vec<String> {
+        let said = [
+            self.theme
+                .paint(Role::Muted, "Nothing asked yet. Type a question below.")
+                .to_string(),
+            String::new(),
+            format!(
+                "{}  {}",
+                self.theme.paint(Role::Muted, "journal"),
+                truncate(&self.journal, cols.saturating_sub(11), self.theme.charset())
+            ),
+            format!(
+                "{}  {}",
+                self.theme.paint(Role::Muted, "keys   "),
+                self.theme
+                    .paint(Role::Muted, "/help for the commands, /keys for the keys")
+            ),
+        ];
+        said.into_iter()
+            .flat_map(|line| match visible_width(&line) + 2 > cols {
+                // Only the last row can be too wide, and only on a terminal
+                // narrow enough that the sentence has to fold. A path is the
+                // one thing here that is cut instead: half a path is not a
+                // path, and it has a column of its own to be cut to.
+                true => wrap(&plain(&line), cols.saturating_sub(2)),
+                false => vec![line],
+            })
+            .map(|line| format!("  {line}"))
+            .collect()
+    }
+
     /// What the heading says on the right: the model, and how much
     /// conversation there is.
     ///
@@ -768,7 +828,9 @@ impl Fire {
 /// heading that counts the turns; and that `/keys` names every key the screen
 /// answers, the editing ones included, on the conversation rather than over
 /// it; and that the up and down keys walk what this reader has asked, keep
-/// the draft they were writing, and keep a repeated question once.
+/// the draft they were writing, and keep a repeated question once; and that a
+/// conversation with nothing in it says so and names its journal, until the
+/// first turn answers it.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -792,7 +854,7 @@ mod tests {
     }
 
     fn fire() -> Fire {
-        Fire::new(theme(), COLS, "mock-echo-1", false)
+        Fire::new(theme(), COLS, "mock-echo-1", "sessions/chat.jsonl", false)
     }
 
     /// One frame, as rows of text, with the terminal's own control codes gone.
@@ -987,7 +1049,7 @@ mod tests {
     /// the tail of the old fold reads as a sentence of its own.
     #[test]
     fn a_resize_composes_the_conversation_again() {
-        let mut view = Fire::new(theme(), 100, "mock-echo-1", false);
+        let mut view = Fire::new(theme(), 100, "mock-echo-1", "sessions/chat.jsonl", false);
         view.push(&said_by(
             "you",
             &"a question long enough to fold ".repeat(3),
@@ -1030,7 +1092,7 @@ mod tests {
     #[test]
     fn everything_on_the_page_is_composed_again() {
         let whole = "a sentence about a file long enough that a narrow window has to cut it";
-        let mut view = Fire::new(theme(), 90, "mock-echo-1", false);
+        let mut view = Fire::new(theme(), 90, "mock-echo-1", "sessions/chat.jsonl", false);
         view.card();
         view.fault(&RpcError::new(tetanus_protocol::rpc::ErrorCode::Io, whole));
 
@@ -1123,7 +1185,7 @@ mod tests {
     /// terminal did not ask to lose their search.
     #[test]
     fn a_search_survives_a_resize() {
-        let mut view = Fire::new(theme(), 90, "mock-echo-1", false);
+        let mut view = Fire::new(theme(), 90, "mock-echo-1", "sessions/chat.jsonl", false);
         view.push(&said_by("you", &"alpha ".repeat(24)));
         view.find("alpha");
 
@@ -1221,7 +1283,13 @@ mod tests {
         assert_eq!(drawn[ROWS - 2], "> half a question", "{drawn:?}");
 
         // A terminal that cannot draw the line gets the one it can.
-        let mut plain = Fire::new(Theme::new(false, Charset::Ascii), COLS, "m", false);
+        let mut plain = Fire::new(
+            Theme::new(false, Charset::Ascii),
+            COLS,
+            "m",
+            "j.jsonl",
+            false,
+        );
         plain.note("something said");
         let drawn = rows_at(&mut plain, COLS, ROWS);
         assert_eq!(drawn[ROWS - 3], "-".repeat(COLS), "{drawn:?}");
@@ -1337,6 +1405,54 @@ mod tests {
         view.key(Key::Up);
         view.key(Key::Up);
         assert_eq!(rows(&mut view, ROWS)[ROWS - 2], "> count the files");
+    }
+
+    /// TC-CLI-FIRE-19: the page a conversation with nothing in it opens on,
+    /// and what becomes of it.
+    /// Expected: it says nothing has been asked, names the journal and the two
+    /// commands, and it is gone the moment a turn exists - a blank screen with
+    /// a prompt on it is a screen that might be broken, and a page still
+    /// saying "nothing asked yet" above an answer is worse than one that was
+    /// never there.
+    #[test]
+    fn a_conversation_with_nothing_in_it_says_where_it_is() {
+        let mut view = fire();
+        let opened = rows(&mut view, ROWS);
+        assert!(
+            opened.iter().any(|row| row.contains("Nothing asked yet")),
+            "{opened:?}"
+        );
+        assert!(
+            opened.iter().any(|row| row.contains("sessions/chat.jsonl")),
+            "the journal is not named: {opened:?}"
+        );
+        assert!(opened.iter().any(|row| row.contains("/keys")), "{opened:?}");
+
+        view.push(&turn_start(1));
+        let asked = rows(&mut view, ROWS);
+        assert!(
+            !asked.iter().any(|row| row.contains("Nothing asked yet")),
+            "the opening page outlived the first turn: {asked:?}"
+        );
+    }
+
+    /// TC-CLI-FIRE-20: the opening page on a window too narrow for it.
+    /// Expected: it folds rather than overrunning, and the journal - the one
+    /// thing on it that is a value rather than a sentence - is cut to its own
+    /// column instead, because half a path is not a path.
+    #[test]
+    fn the_opening_page_folds_where_the_window_is_narrow() {
+        let mut view = Fire::new(
+            theme(),
+            34,
+            "mock-echo-1",
+            "sessions/a/very/long/chat.jsonl",
+            false,
+        );
+
+        for row in rows_at(&mut view, 34, ROWS + 4) {
+            assert!(visible_width(&row) <= 34, "`{row}` overruns 34");
+        }
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.

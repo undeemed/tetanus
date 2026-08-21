@@ -380,6 +380,15 @@ pressed up to check what they asked last time has not thrown away the question t
 and a question asked twice in a row is kept once, because pressing up means the question before
 this one.
 
+A conversation with nothing asked in it opens on a page that says so, names the journal every turn
+will be appended to, and points at the two commands.
+A blank screen with a prompt on it is a screen that might be broken; the browser panel says
+`Nothing said yet. Ask something below.` for the same reason, and a terminal has the room to say
+the rest of what a reader needs.
+It is one of the things that were said rather than a case in the frame, so it rewraps with
+everything else - and the first turn takes it away rather than leaving it further up the transcript,
+because what it says stops being true the moment one exists.
+
 The keys card lands on the conversation rather than over it, which is the other difference from
 every full-screen view that opens one with `?`: a reader who asks what a key does while reading
 something should still be reading it afterwards.
