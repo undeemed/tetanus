@@ -96,6 +96,10 @@ pub enum Input<'a> {
     /// chat can answer it: the ordinary one hands each line to the terminal's
     /// own scrollback, where the reader's own pager already searches.
     Find(&'a str),
+    /// Every key the full-screen chat answers. The ordinary one has no keys
+    /// of its own: its prompt is a line editor and its scrollback is the
+    /// terminal's.
+    Keys,
     /// A slash command this build does not have, as it was typed.
     Unknown(&'a str),
 }
@@ -125,6 +129,7 @@ pub fn parse(line: &str) -> Input<'_> {
         "" => Input::Blank,
         "/exit" | "/quit" | "/q" => Input::Leave,
         "/help" | "/?" => Input::Help,
+        "/keys" => Input::Keys,
         // The command is the first word: `/reset now` is not a message, and
         // saying which command is missing is what tells the user it is not.
         _ => match said.starts_with('/') {
@@ -276,6 +281,15 @@ pub async fn chat<W: Write>(
                         "{} is not a command; /help lists them",
                         tame_line(command)
                     ))
+                    .ok();
+                continue;
+            }
+            // No keys of its own: the prompt is a line editor, which `/help`
+            // has never listed either, and the scrollback is the terminal's.
+            Input::Keys => {
+                policy
+                    .stderr()
+                    .note("/keys is for `tetanus chat --ui`; this chat answers your shell's keys")
                     .ok();
                 continue;
             }
@@ -435,22 +449,43 @@ impl Session<'_> {
                 render::fire::Act::Stopped => return Leaving::Stopped,
                 render::fire::Act::Go => continue,
             };
-            match parse(&asked) {
-                Input::Blank => continue,
-                Input::Leave => return Leaving::Ended,
-                Input::Help => self.view.card(),
-                Input::Find(word) => self.view.find(word),
-                Input::Unknown(command) => self.said(&format!(
-                    "{} is not a command; /help lists them",
-                    tame_line(command)
-                )),
-                Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
-                    Some(Ok(())) => {}
-                    Some(Err(fault)) => return Leaving::Failed(fault),
-                    None => return Leaving::Stopped,
-                },
+            if let Some(leaving) = self.answer(out, engine, tty, phase, &asked).await {
+                return leaving;
             }
         }
+    }
+
+    /// What one finished line does. `Some` is the reader leaving, and why.
+    ///
+    /// Split from [`Session::hold`] because the two are different questions -
+    /// what a keystroke did, and what a line means - and one function
+    /// answering both was one match too many for anybody reading it, the
+    /// structural gate included.
+    async fn answer<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+        asked: &str,
+    ) -> Option<Leaving> {
+        match parse(asked) {
+            Input::Blank => {}
+            Input::Leave => return Some(Leaving::Ended),
+            Input::Help => self.view.card(),
+            Input::Keys => self.view.card_of_keys(),
+            Input::Find(word) => self.view.find(word),
+            Input::Unknown(command) => self.said(&format!(
+                "{} is not a command; /help lists them",
+                tame_line(command)
+            )),
+            Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
+                Some(Ok(())) => {}
+                Some(Err(fault)) => return Some(Leaving::Failed(fault)),
+                None => return Some(Leaving::Stopped),
+            },
+        }
+        None
     }
 
     /// Wait for the reader to finish a line, painting while they type.
@@ -674,7 +709,8 @@ async fn piped() -> std::io::Result<Typed> {
 /// Test Design Specification: what a typed line means.
 ///
 /// Features tested: every command the chat answers and each spelling of it,
-/// the word a search is given and what giving none means, a message, the
+/// including the two only the full-screen chat acts on, the word a search is
+/// given and what giving none means, a message, the
 /// escape that sends a message opening with a slash, what an empty line does,
 /// and a command this build does not have.
 ///
@@ -768,5 +804,16 @@ mod tests {
         assert_eq!(parse("/find  two words \n"), Input::Find("two words"));
         assert_eq!(parse("/find\n"), Input::Find(""));
         assert_eq!(parse("/finder\n"), Input::Unknown("/finder"));
+    }
+
+    /// TC-CLI-CHAT-IN-8: the commands only the full-screen chat acts on.
+    /// Expected: both parse, in both chats. The ordinary one answers them by
+    /// saying where they live; a command it dropped on the floor would read as
+    /// a typo this build did not recognise, which is what `Unknown` is for.
+    #[test]
+    fn the_screens_own_commands_are_read_by_both_chats() {
+        assert_eq!(parse("/keys\n"), Input::Keys);
+        assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
+        assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
     }
 }

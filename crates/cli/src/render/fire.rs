@@ -91,7 +91,7 @@ use std::time::Duration;
 use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::SessionEvent;
 use tetanus_ui::{
-    bar, light, plain, tame_line, visible_width, Frame, Key, Line, Role, Theme, Typed,
+    bar, light, plain, tame_line, truncate, visible_width, Frame, Key, Line, Role, Theme, Typed,
 };
 
 use super::live::Live;
@@ -144,6 +144,8 @@ enum Said {
     Event(Box<SessionEvent>),
     /// The card `/help` prints.
     Card,
+    /// The card `/keys` prints.
+    Keys,
     /// One line of this build's own words - a command it does not have, a
     /// flush that did not work.
     Note(String),
@@ -351,6 +353,11 @@ impl Fire {
         self.say(Said::Card);
     }
 
+    /// The card `/keys` prints, on the conversation.
+    pub fn card_of_keys(&mut self) {
+        self.say(Said::Keys);
+    }
+
     /// One line of this build's own words.
     pub fn note(&mut self, said: &str) {
         self.say(Said::Note(said.to_string()));
@@ -359,6 +366,60 @@ impl Fire {
     /// A turn that failed, worded the way every other surface words it.
     pub fn fault(&mut self, error: &RpcError) {
         self.say(Said::Fault(Box::new(error.clone())));
+    }
+
+    /// Every key this screen answers, as rows to settle.
+    ///
+    /// A card on the transcript rather than a screen of its own, which is what
+    /// `?` opens in every other full-screen view here: `?` is a character in
+    /// the line being typed, so the way in is `/keys`, and a card that
+    /// replaced the screen would take the conversation away from a reader who
+    /// asked what a key does while reading it.
+    ///
+    /// The editing keys are on it because they are the ones nothing else says.
+    /// A reader can see that Enter asks - the footer says so - and cannot see
+    /// that alt-b walks back a word.
+    fn keys(&self, cols: usize) -> Vec<String> {
+        let rows: [super::keys::Row; 9] = [
+            ("enter", "ask what is on the line"),
+            (
+                self.theme.glyph("↑ ↓", "up dn"),
+                "one line back through the conversation, one line on",
+            ),
+            ("pgup pgdn", "a screenful either way"),
+            ("tab shift-tab", "the next turn, and the turn before"),
+            (
+                "ctrl-n ctrl-p",
+                "the next match of /find, and the one before",
+            ),
+            ("esc", "back to the foot, and out of a search"),
+            (
+                "left right home end",
+                "move along the line; alt-b and alt-f by word",
+            ),
+            (
+                "ctrl-w ctrl-u ctrl-k",
+                "take out a word, the line before the cursor, the line after",
+            ),
+            ("ctrl-c ctrl-d", "leave; ctrl-d only on an empty line"),
+        ];
+        let label = rows
+            .iter()
+            .map(|(keys, _)| visible_width(keys))
+            .max()
+            .unwrap_or(0);
+
+        let mut lines = vec![self.theme.paint(Role::Heading, "keys").to_string()];
+        lines.extend(rows.iter().map(|(keys, does)| {
+            let pad = " ".repeat(label - visible_width(keys) + 2);
+            let does = truncate(does, cols.saturating_sub(label + 4), self.theme.charset());
+            format!(
+                "  {}{pad}{}",
+                self.theme.paint(Role::Accent, keys),
+                self.theme.paint(Role::Muted, &does)
+            )
+        }));
+        lines
     }
 
     /// The rows one thing said makes at `cols`.
@@ -370,6 +431,7 @@ impl Fire {
         match said {
             Said::Event(event) => self.live.push(event),
             Said::Card => super::chat::card(&self.theme, cols),
+            Said::Keys => self.keys(cols),
             Said::Note(text) => {
                 vec![self.theme.paint(Role::Warn, text).to_string()]
             }
@@ -640,7 +702,9 @@ impl Fire {
 /// conversation again and a search open at the time survives it; and that a
 /// line longer than the row keeps the cursor on the row; and that the screen
 /// carries a rule between what was said and what is being typed, and a
-/// heading that counts the turns.
+/// heading that counts the turns; and that `/keys` names every key the screen
+/// answers, the editing ones included, on the conversation rather than over
+/// it.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -1116,6 +1180,38 @@ mod tests {
         view.push(&turn_start(2));
         view.push(&turn_start(3));
         assert!(rows(&mut view, ROWS)[0].ends_with("mock-echo-1 · 3 turns"));
+    }
+
+    /// TC-CLI-FIRE-16: the card `/keys` prints.
+    /// Expected: a heading, one row per key, the descriptions in a column of
+    /// their own, and nothing over the window - and the editing keys among
+    /// them, because those are the ones nothing else on the screen says. The
+    /// footer says Enter asks; nothing says alt-b walks back a word.
+    #[test]
+    fn the_keys_card_names_the_editing_keys_too() {
+        let mut view = fire();
+        view.card_of_keys();
+
+        let drawn = rows(&mut view, ROWS + 8);
+        for row in &drawn {
+            assert!(visible_width(row) <= COLS, "`{row}` overruns {COLS}");
+        }
+        assert!(drawn.iter().any(|row| row.trim() == "keys"), "{drawn:?}");
+        for key in ["enter", "tab shift-tab", "ctrl-n ctrl-p", "alt-b", "ctrl-w"] {
+            assert!(
+                drawn.iter().any(|row| row.contains(key)),
+                "`{key}` is on no row: {drawn:?}"
+            );
+        }
+
+        // The card is on the conversation, not over it: the reader asked what
+        // a key does while reading something, and it is still there.
+        view.note("said before the card");
+        let after = rows(&mut view, ROWS + 8);
+        assert!(
+            after.iter().any(|row| row.contains("said before the card")),
+            "{after:?}"
+        );
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
