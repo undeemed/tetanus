@@ -11,6 +11,21 @@
 //! width it needs and the title - the one column that is only ever read -
 //! takes whatever the terminal has left.
 //!
+//! # Why a narrow window stacks the row instead
+//!
+//! An id long enough to leave no room for a title leaves no room for the
+//! counters either, and a printed row wider than the window is folded by the
+//! terminal at column zero, where the second half reads as another session.
+//! So a window that cannot hold the table gets the id on a line of its own
+//! and the rest indented under it: the same bargain the help page's examples
+//! make, and for the same reason - two lines that say which is which beat one
+//! line folded into nonsense.
+//!
+//! The picker does not stack. Its rows are a cursor's rows, one session each,
+//! and its frame cuts what overruns rather than folding it; a row that became
+//! two there would be a cursor that selects the journal above the one it is
+//! pointing at.
+//!
 //! # Why the newest is first
 //!
 //! `session.list` answers in the engine's own order, which is by id. That is
@@ -67,7 +82,7 @@ pub fn rows(theme: &Theme, cols: usize, sessions: &[&SessionInfo]) -> Vec<String
     // An id is a file's name and a state is a word the engine chose, so both
     // are tamed once and then measured, drawn and padded as what they became.
     let ids: Vec<String> = sessions.iter().map(|row| tame(&row.session_id)).collect();
-    let states: Vec<String> = sessions.iter().map(|row| named(row)).collect();
+    let states: Vec<String> = sessions.iter().map(|row| named_state(row)).collect();
     let id = width(ids.iter().map(|cell| visible_width(cell)));
     let digits = width(sessions.iter().map(|row| count(row).to_string().len()));
     let size = width(
@@ -117,12 +132,75 @@ pub fn render<W: Write>(ui: &mut Ui<W>, list: &SessionListResult, root: &str) ->
         return ui.line(&empty);
     }
 
-    let composed = rows(ui.theme(), ui.width(), &ordered(list));
+    let composed = page(ui.theme(), ui.width(), &ordered(list));
     for row in composed {
         ui.line(&row)?;
     }
     Ok(())
 }
+
+/// The list as a page prints it: the table where the window holds it, and the
+/// stacked form where it does not.
+///
+/// Only the printed page chooses. The picker composes [`rows`] itself, and
+/// wants one row per session whatever the width.
+pub fn page(theme: &Theme, cols: usize, sessions: &[&SessionInfo]) -> Vec<String> {
+    match beside(cols, sessions) < LEAST {
+        true => stacked(theme, cols, sessions),
+        false => rows(theme, cols, sessions),
+    }
+}
+
+/// The columns a title would have beside the fixed ones.
+fn beside(cols: usize, sessions: &[&SessionInfo]) -> usize {
+    let ids = sessions
+        .iter()
+        .map(|row| visible_width(&tame(&row.session_id)));
+    let digits = width(sessions.iter().map(|row| count(row).to_string().len()));
+    let size = width(
+        sessions
+            .iter()
+            .map(|row| visible_width(&measure(row, digits))),
+    );
+    let state = width(sessions.iter().map(|row| visible_width(&named_state(row))));
+    cols.saturating_sub(width(ids) + size + state + GAP * 3)
+}
+
+/// Two lines per session: the id whole, and everything else under it.
+fn stacked(theme: &Theme, cols: usize, sessions: &[&SessionInfo]) -> Vec<String> {
+    let charset = theme.charset();
+    let digits = width(sessions.iter().map(|row| count(row).to_string().len()));
+    let room = cols.saturating_sub(STACK).max(1);
+    let gap = " ".repeat(GAP);
+
+    sessions
+        .iter()
+        .flat_map(|row| {
+            let taken = measure(row, digits);
+            let named = tame(&row.session_id);
+            [
+                theme.paint(Role::Accent, &named).to_string(),
+                format!(
+                    "{}{}{gap}{}{gap}{}",
+                    " ".repeat(STACK),
+                    theme.paint(Role::Muted, &taken),
+                    theme.paint(role(row), &named_state(row)),
+                    title(theme, row, room, charset),
+                ),
+            ]
+        })
+        .collect()
+}
+
+/// The narrowest title worth a column of its own. Under this the page stacks:
+/// a title cut to two characters says nothing a reader can use, and the row it
+/// is on has already overrun the window.
+const LEAST: usize = 12;
+
+/// How far the second line of a stacked row is indented. Deep enough to tell
+/// the two lines apart, and the same indent the help page's examples use when
+/// they stack.
+const STACK: usize = 6;
 
 /// How many events the journal holds. `last_seq` is `-1` for an empty log, so
 /// a session created and never prompted honestly reads `0 events`.
@@ -139,7 +217,7 @@ fn measure(row: &SessionInfo, digits: usize) -> String {
 }
 
 /// What the session is doing, in the contract's own word for it.
-fn named(row: &SessionInfo) -> String {
+fn named_state(row: &SessionInfo) -> String {
     match &row.state {
         AgentState::Idle => "idle".to_string(),
         AgentState::Running => "running".to_string(),
@@ -179,9 +257,10 @@ fn width(cells: impl Iterator<Item = usize>) -> usize {
 /// session is first and a tie is still settled; that an empty journal reads
 /// `0 events` and a one-event journal is singular; that a session with no
 /// prompt yet says so; that a title too long for the terminal is cut while
-/// the id is not; the empty list, which carries the root like the full page
-/// does; an id and a state that carry escape sequences; and an id a terminal
-/// draws twice as wide.
+/// the id is not, and that a window too narrow for the table stacks the row
+/// instead while the picker's rows stay one per session; the empty list, which
+/// carries the root like the full page does; an id and a state that carry
+/// escape sequences; and an id a terminal draws twice as wide.
 ///
 /// Features NOT tested here: which sessions this build finds and which root it
 /// looked in (owned by `tetanus-engine` and the binary, and asserted end to
@@ -301,6 +380,78 @@ mod tests {
         }
         assert!(out.contains(&id), "the id was cut:\n{out}");
         assert!(out.contains('…'), "the title was not cut:\n{out}");
+    }
+
+    /// TC-CLI-SESS-9: an id long enough to leave a title no room.
+    /// Expected: the page stacks - the id whole on a line of its own, the
+    /// counters, the state and the title indented under it - and no line
+    /// overruns the window. Printed as a table, that row is folded by the
+    /// terminal at column zero, and the half that lands there reads as
+    /// another session.
+    #[test]
+    fn a_window_too_narrow_for_the_table_stacks_the_row() {
+        let id = "s".repeat(40);
+        let out = shown(vec![session(&id, 1, 3, Some("fix the parser"))], 50);
+        let lines: Vec<&str> = out.lines().collect();
+
+        for row in &lines {
+            assert!(visible_width(row) <= 50, "`{row}` overruns 50");
+        }
+        assert!(
+            lines.iter().any(|row| row.trim() == id),
+            "the id is not on a line of its own:\n{out}"
+        );
+        let under = lines
+            .iter()
+            .find(|row| row.contains("fix the parser"))
+            .unwrap_or_else(|| panic!("the title is on no line:\n{out}"));
+        assert!(under.starts_with("      "), "not indented: `{under}`");
+        assert!(under.contains("4 events"), "no counters: `{under}`");
+        assert!(under.contains("idle"), "no state: `{under}`");
+    }
+
+    /// TC-CLI-SESS-10: the same list in a window that holds the table.
+    /// Expected: one line per session, the columns as TC-CLI-SESS-1 has them.
+    /// The stacked form is for the window that cannot hold a table, and a
+    /// reader who widened their terminal gets their columns back.
+    #[test]
+    fn a_window_that_holds_the_table_still_gets_one() {
+        let out = shown(
+            vec![
+                session("first", 2, 3, Some("fix the parser")),
+                session("second", 1, 1, Some("read the log")),
+            ],
+            100,
+        );
+
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|row| row.contains("events") || row.contains("event "))
+            .collect();
+        assert_eq!(rows.len(), 2, "not one line per session:\n{out}");
+        assert!(
+            rows[0].starts_with("first"),
+            "not a table row: `{}`",
+            rows[0]
+        );
+    }
+
+    /// TC-CLI-SESS-11: what the picker composes, at the width that stacks.
+    /// Expected: still one row per session. The picker moves a cursor down
+    /// these rows and opens the journal under it, so a row that became two
+    /// would be a cursor pointing at one journal and opening another; its
+    /// frame cuts what overruns instead of folding it.
+    #[test]
+    fn the_picker_gets_one_row_per_session_at_any_width() {
+        let list = SessionListResult {
+            sessions: vec![
+                session(&"s".repeat(40), 2, 3, Some("fix the parser")),
+                session(&"t".repeat(40), 1, 1, Some("read the log")),
+            ],
+        };
+        let composed = rows(&Theme::new(false, Charset::Unicode), 50, &ordered(&list));
+
+        assert_eq!(composed.len(), 2, "the picker's rows: {composed:?}");
     }
 
     /// TC-CLI-SESS-7: an id and a state that carry escape sequences.
