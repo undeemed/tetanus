@@ -506,6 +506,42 @@ A surface learns it from the ask.
 `ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
 The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
 
+#### 4.4.12 Retrying a call
+
+A carrier drops a connection, or an answer is lost on the way back, and the client does not know whether the call ran.
+Every RPC contract meets this, and the ones that do not say so leave each integrator to guess.
+
+**Reads may be repeated freely.**
+`rpc.hello`, `session.list`, `session.events`, `agent.status`, `catalog.tools`, `catalog.models` and `config.dump` change nothing, so a client repeats them without thinking.
+A second `rpc.hello` on one connection is accepted and settles the handshake again with the peer information it carried; the handshake is connection state (§4.4.1), and a client that re-greets has told the server the same thing twice rather than done something new.
+
+**These are safe because repeating them lands in the same place.**
+`session.create` reopens the id it is given, which is what makes a session resumable (§4.7), so a retry with the same id answers the same session rather than making a second one.
+`agent.interrupt` asks a turn to stop, and a turn asked twice is a turn asked once.
+`approval.set` writes nothing when the session already holds the policy (§4.4.7).
+`session.unsubscribe` answers `ok: false` for a subscription that is already gone, which is a fact and not a failure.
+
+**Three are not safe, and the contract owes a client the reason and the alternative.**
+
+| Call | What a blind retry does | What to do instead |
+| --- | --- | --- |
+| `agent.prompt` | runs the prompt a second time | read `agent.status`, or the journal from the seq you last saw |
+| `agent.steer` | delivers the message twice | read the journal for a `user/steer` carrying it |
+| `session.subscribe` | leaks the first subscription | unsubscribe the id you got, or drop the connection |
+
+`agent.prompt` is the one that costs money.
+A retry after the first call *completed* starts a genuine second turn - `SessionBusy` only protects the window where the first is still running, which is precisely the window a client that gave up waiting has already left.
+So a client that loses an answer asks what happened rather than asking again: `agent.status` says whether a turn is running, and `session.events` from the last seq the client saw says whether one ran and what it produced.
+That is always available, because the journal is the record of what happened and not a second copy of it (§7.2).
+
+**No idempotency key, and this is where it would go.**
+A key on `agent.prompt` would let the engine deduplicate and remove the whole problem.
+It is not added here because `AgentPromptParams` is a type the presentation lane constructs, so by §5 the field is a change both lanes land together - and because the read-then-decide route above is available today, needs nothing, and is what a client should do anyway before repeating work a user paid for.
+When it lands it goes here, and this paragraph is what it replaces.
+
+**A dropped connection unsubscribes.**
+§4.2 already says a carrier that loses a peer drops its sinks, so the leak above is bounded by the connection: a client that reconnects starts clean rather than accumulating deliveries for a socket nobody is reading.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -727,6 +763,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.7 the two policies, and a third word that stays readable | TC-PROTO-23 |
 | §4.3.2 the three `approval/*` types stage like the other two | TC-PROTO-24 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
+| §4.4.12 which calls a client may repeat | TC-PROTO-70 |
+| §4.4.12 unsubscribing twice is a fact, not a failure | TC-PROTO-71 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
 | §4.4.2 a turn the output cap cut off ends `max-tokens`, on the call and on the journal | TC-CAP-1 |
@@ -828,3 +866,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Says which calls a client may repeat (§4.4.12). A carrier drops a connection or an answer is lost, and the client cannot tell whether the call ran - every RPC contract meets this, and one that does not say so leaves each integrator to guess. The reads are free; `session.create`, `agent.interrupt`, `approval.set` and `session.unsubscribe` are safe because repeating them lands in the same place, which is stated per call rather than asserted in general. Three are not safe and now carry the reason and the alternative: `agent.prompt` runs a second turn, `agent.steer` delivers twice, `session.subscribe` leaks the first subscription. `agent.prompt` is the one that costs money, and the sharp edge is worth spelling out - `SessionBusy` only guards the window where the first call is still running, which is exactly the window a client that gave up waiting has already left, so a retry after completion starts a genuine second turn. The alternative needs nothing new: `agent.status` and `session.events` from the last seq seen say whether a turn ran and what it produced, because the journal is the record rather than a copy of it (§7.2). An idempotency key would remove the problem and is deliberately not added - `AgentPromptParams` is a type the presentation lane constructs, so by §5 it is a change both lanes land together, and the read-then-decide route is what a client should do anyway before repeating work a user paid for. A second `rpc.hello` on one connection is settled too: accepted, because the handshake is connection state and re-greeting says the same thing twice. No type changes. |

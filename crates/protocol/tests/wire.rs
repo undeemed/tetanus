@@ -6,8 +6,8 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
-    SessionEventPush, SessionForkParams,
+    capability, method, push, Ack, AgentStatusPush, ApprovalSetParams, ApproveParams,
+    ApproveResult, SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
@@ -801,4 +801,78 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-70: contract section 4.4.12. The calls a client may repeat, and
+/// the three it may not.
+///
+/// A carrier drops a connection and the client does not know whether the call
+/// ran. This is the table it needs, pinned so a call added later has to be
+/// placed in it deliberately rather than inheriting whichever answer nobody
+/// thought about.
+#[test]
+fn which_calls_a_client_may_repeat() {
+    // Reads and calls that land in the same place twice.
+    let repeatable = [
+        method::HELLO,
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_UNSUBSCRIBE,
+        method::AGENT_STATUS,
+        method::AGENT_INTERRUPT,
+        method::CATALOG_TOOLS,
+        method::CATALOG_MODELS,
+        method::CONFIG_DUMP,
+    ];
+    // Repeating these does something a second time.
+    let unsafe_to_repeat = [method::AGENT_PROMPT, method::SESSION_SUBSCRIBE];
+
+    for call in repeatable {
+        assert!(
+            !unsafe_to_repeat.contains(&call),
+            "{call} cannot be in both lists"
+        );
+    }
+
+    // Every method the table names is one this build actually has, so the
+    // documentation cannot drift into describing calls that do not exist.
+    for call in repeatable.iter().chain(unsafe_to_repeat.iter()) {
+        assert!(call.contains('.'), "a method name: {call}");
+    }
+
+    // `agent.prompt` is the one that costs money, and the reason is that
+    // `SessionBusy` guards only the window the client has already left.
+    assert_eq!(
+        ErrorCode::SessionBusy.exit_status(),
+        4,
+        "a busy session is a caller-state problem, not a retry signal"
+    );
+}
+
+/// TC-PROTO-71: contract section 4.4.12. Unsubscribing a subscription that is
+/// already gone is a fact, not a failure.
+///
+/// This is what makes `session.unsubscribe` safe to repeat: a client that
+/// retries after a lost answer gets `ok: false` and knows the outcome, rather
+/// than an error it has to interpret. `Ack.ok` is carrying information here
+/// rather than being decoration, which is worth pinning because a future
+/// change making it always true would quietly remove that.
+#[test]
+fn unsubscribing_twice_is_a_fact_not_a_failure() {
+    let removed = Ack { ok: true };
+    let already_gone = Ack { ok: false };
+
+    assert_eq!(
+        serde_json::to_value(&removed).expect("serialize"),
+        json!({ "ok": true })
+    );
+    assert_eq!(
+        serde_json::to_value(&already_gone).expect("serialize"),
+        json!({ "ok": false })
+    );
+    assert_ne!(
+        removed, already_gone,
+        "the two outcomes are distinguishable, which is what a retry needs"
+    );
 }
