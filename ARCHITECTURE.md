@@ -435,7 +435,11 @@ A terminal no columns wide draws nothing and is pointed at with nothing; termina
 width while they are being resized, and a view that fell over there would take the conversation
 with it.
 
-The other two full-screen views hold at those sizes as well, and each has a case that sweeps them:
+Every arrangement in the binary is swept at those sizes now, and each has a case of its own:
+[`Page`](crates/ui/src/page.rs), which every view over a stream is built from, and the key card
+([`keys`](crates/cli/src/render/keys.rs)), which spends four rows on furniture and counts the keys
+it could not show.
+The other two full-screen views hold as well:
 the journal ([`browse`](crates/cli/src/render/browse.rs)), which refills on every width change, and
 the picker ([`pick`](crates/cli/src/render/pick.rs)), which composes its own frame so that the
 window can follow the cursor.
