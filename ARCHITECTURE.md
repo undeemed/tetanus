@@ -354,6 +354,11 @@ under `--color never`, which the surface promises will write none.
 An escape sequence is therefore taken out whole - it drew nothing, so nothing is what it leaves -
 and a stray control character becomes a space, which keeps two words from being joined by a byte
 between them; newlines survive, because they are what a paragraph is folded on.
+A tab becomes the spaces that reach the next eight-column stop, counted from the start of its own
+line: a tab left alone is a width the terminal decides and no renderer here can predict, and a tab
+squashed to one space is a width that is predictably wrong - a Makefile, a Go file and a stack
+trace are all indented with tabs, and one column per level throws away the nesting they are read
+by.
 It is done inside [`truncate`](crates/ui/src/text.rs) and [`wrap`](crates/ui/src/text.rs) rather
 than at each renderer, because those two are exactly the functions that size foreign text, and a
 sequence taken out after it was measured would already have been paid for in columns the reader

@@ -298,13 +298,13 @@ fn a_sequence_a_tool_wrote_is_taken_out_whole() {
 /// TC-UI-TEXT-18: control characters that are not part of a sequence.
 /// Expected: each becomes one space, so a byte between two words cannot join
 /// them; newlines survive, because they are what a paragraph is folded on and
-/// a tool that wrote lines meant lines.
+/// a tool that wrote lines meant lines. A tab is the one control with a width
+/// of its own, and TC-UI-TEXT-30 has it.
 #[test]
 fn a_stray_control_becomes_a_space_and_a_newline_survives() {
     assert_eq!(tame("one\rtwo"), "one two");
     assert_eq!(tame("ring\u{7}ing"), "ring ing");
     assert_eq!(tame("a\u{0}b\u{7f}c"), "a b c");
-    assert_eq!(tame("one\ttwo"), "one two");
     assert_eq!(tame("first\n\nsecond"), "first\n\nsecond");
     assert_eq!(tame("plain text"), "plain text");
 }
@@ -363,5 +363,44 @@ fn a_value_that_draws_nothing_is_given_a_word() {
     assert_eq!(
         or_empty(&tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}")),
         "(empty)"
+    );
+}
+
+/// TC-UI-TEXT-30: a tab, at each of the places a line can hold one.
+/// Expected: the spaces that reach the next stop, counted from the start of
+/// the line the tab is on - so a tab at column three is five spaces, a tab at
+/// a stop is a whole eight, and the count starts again after a newline. One
+/// space each would be a column count that is predictably wrong, and a tab
+/// left alone is one nothing here can predict.
+#[test]
+fn a_tab_reaches_the_next_stop() {
+    assert_eq!(tame("one\ttwo"), "one     two");
+    assert_eq!(tame("\tone"), "        one");
+    assert_eq!(tame("12345678\tx"), "12345678        x");
+    assert_eq!(tame("\t\tx"), "                x");
+    // Counted from the start of each line, not of the text.
+    assert_eq!(tame("longer\n\tx"), "longer\n        x");
+    // In columns, so a character that draws two spends two of them.
+    assert_eq!(tame("한글\tx"), "한글    x");
+}
+
+/// TC-UI-TEXT-31: tab-indented code, as a model sends it.
+/// Expected: the nesting is still readable - each level is a stop further in,
+/// and the closing brace is back where the `if` was. A Makefile, a Go file and
+/// a stack trace are all indented this way, and one column per tab throws the
+/// nesting away.
+#[test]
+fn tab_indented_code_keeps_its_nesting() {
+    let said = "func main() {\n\tif ok {\n\t\tfmt.Println(\"hi\")\n\t}\n}";
+
+    assert_eq!(
+        tame(said).lines().collect::<Vec<_>>(),
+        vec![
+            "func main() {",
+            "        if ok {",
+            "                fmt.Println(\"hi\")",
+            "        }",
+            "}",
+        ]
     );
 }
