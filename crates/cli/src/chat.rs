@@ -65,7 +65,7 @@ pub struct ChatArgs {
     pub session: Option<PathBuf>,
     /// Step budget for each turn. Defaults to `agent.max_steps` in the
     /// settings document
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = crate::step_budget)]
     pub max_steps: Option<u32>,
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]

@@ -588,6 +588,14 @@ fails TC-CLI-HELP-8. Several codes share a status, so a row says what they have 
 than naming a code a reader of a help page has never met. Only `--help` carries the block; `-h` is
 the summary a person skims for a flag, and a status is for the script around them.
 
+A flag whose value the work cannot be done with is refused at the flag.
+`--speed 0` makes a duration nothing can wait for; `--max-steps 0` asks for a turn that cannot
+happen, because a budget is spent by taking a step and checked afterwards, so every turn takes at
+least one - accepted, it writes a journal recording the step the command line said it could not
+have and closes it `step budget spent`.
+Both are §4.5's exit 2, refused by a `value_parser` before any work starts, which is also what puts
+the sentence beside the flag that carries the mistake.
+
 A status the caller reads has to be the same status for the same mistake.
 Every flag that takes a path takes a `PathBuf`, and clap refuses an empty one before this build is
 reached; the three values that stay text (`run --model`, the journal `replay` reads, and the address
