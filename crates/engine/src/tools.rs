@@ -15,6 +15,7 @@
 //! prompt.
 
 use serde_json::Value;
+use tetanus_config::schema::{Field, Kind, Schema};
 use tetanus_config::{Config, ConfigError, Document};
 use tetanus_turn::tools::{ToolOrder, ToolRegistry, TOOL_ORDER_REST};
 
@@ -23,6 +24,11 @@ use crate::boot::bad;
 /// The key a document names an order with.
 pub mod key {
     pub const ORDER: &str = "tools.order";
+}
+
+/// What the tools block claims about its own key.
+pub fn declare(schema: &mut Schema) {
+    schema.declare(key::ORDER, Field::new(Kind::List));
 }
 
 /// The compiled default as a layer document: no order at all.

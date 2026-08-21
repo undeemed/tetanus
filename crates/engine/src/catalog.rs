@@ -163,8 +163,13 @@ impl Catalogs {
             });
         }
         entries.sort_by(|a, b| a.key.cmp(&b.key));
+        // The schema decides, and the key's name is the fallback for a key no
+        // namespace declared. A declaration is not a guess: it hides
+        // `llm.providers.x.auth`, which no name rule would catch, and it stops
+        // hiding `deploy.token_count`, which the name rule would.
+        let schema = crate::boot::schema();
         for entry in &mut entries {
-            if tetanus_config::secret::names_a_secret(&entry.key) {
+            if schema.is_secret(&entry.key) {
                 entry.value = serde_json::Value::String(REDACTED.to_string());
             }
         }

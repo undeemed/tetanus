@@ -15,6 +15,7 @@ pub mod file;
 pub mod home;
 pub mod preset;
 pub mod recompose;
+pub mod schema;
 pub mod secret;
 pub mod watch;
 
@@ -52,6 +53,30 @@ pub enum ConfigError {
         expected: String,
         found: String,
     },
+
+    /// A scalar was written where a section belongs. Refused rather than
+    /// ignored, which is what a per-namespace schema made possible: without
+    /// one, nothing knew that `llm` is a section, so the write contributed a
+    /// key no reader claims and every key under it went on resolving from the
+    /// layer below - a user who thought they had turned something off had
+    /// changed nothing, and nothing said so.
+    #[error(
+        "{key}: is a section with keys under it, so it cannot be set to {found}. Write the keys inside it instead"
+    )]
+    SectionExpected { key: String, found: String },
+
+    /// Several things are wrong with one document. Carried together so a user
+    /// fixing a settings file does not need one run of the harness per
+    /// mistake.
+    #[error("{first} (and {}: {})", plural(others), others.join("; "))]
+    Rejected { first: String, others: Vec<String> },
+}
+
+fn plural(others: &[String]) -> String {
+    match others.len() {
+        1 => "one more problem".to_string(),
+        n => format!("{n} more problems"),
+    }
 }
 
 /// Where a resolved value came from.
