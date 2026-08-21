@@ -413,6 +413,7 @@ async fn fire<W: Write>(
         view,
         painted: None,
         seen: events.len(),
+        length: 0,
         size: (cols, rows),
         frames: tokio::time::interval(FRAME),
     };
@@ -454,6 +455,13 @@ struct Session<'a> {
     painted: Option<tetanus_ui::Frame>,
     /// How much of the journal is on the page.
     seen: usize,
+    /// How long the journal's file was when it was last read.
+    ///
+    /// A journal is append-only, so a file that has not grown holds nothing
+    /// this view has not seen. Asking the filesystem for its length costs one
+    /// syscall; asking the log for its events copies every event it holds, and
+    /// this loop asks twelve times a second.
+    length: u64,
     size: (usize, usize),
     frames: tokio::time::Interval,
 }
@@ -645,7 +653,18 @@ impl Session<'_> {
     }
 
     /// Commit whatever the journal has grown by.
+    ///
+    /// The events this process wrote, which is what a conversation on one
+    /// journal is: a second writer's lines are on the file and not in this
+    /// log's memory, and reading the file back is `tetanus replay`'s job.
     fn settle(&mut self) {
+        // Nothing appended, nothing to copy. On a journal of six thousand
+        // events, copying them every frame is a sixth of a core spent on a
+        // conversation nobody is having.
+        let Some(length) = appended(self.log.path(), self.length) else {
+            return;
+        };
+        self.length = length;
         let events = self.log.events();
         for event in events.iter().skip(self.seen) {
             self.view.push(&crate::crossing(event));
@@ -666,6 +685,19 @@ impl Session<'_> {
         frame.paint(out).ok();
         self.painted = Some(frame);
     }
+}
+
+/// How long the journal is now, when that is not how long it was.
+///
+/// A journal is append-only, so a file that has not grown holds nothing a
+/// reader of it has not seen. `None` is "nothing new"; a file the filesystem
+/// will not answer for reads as new every time, which is the behaviour this
+/// replaced and the safe way to be wrong.
+fn appended(journal: &std::path::Path, seen: u64) -> Option<u64> {
+    let length = std::fs::metadata(journal)
+        .map(|file| file.len())
+        .unwrap_or(u64::MAX);
+    (length != seen).then_some(length)
 }
 
 /// How often a frame is composed while the view is up. The same interval every
@@ -869,5 +901,32 @@ mod tests {
         assert_eq!(parse("/think\n"), Input::Think);
         assert_eq!(parse("/more\n"), Input::More);
         assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
+    }
+
+    /// TC-CLI-CHAT-IN-9: whether a journal has anything new in it.
+    /// Expected: its length the first time, nothing while it is unchanged, its
+    /// new length once something is appended, and - for a file that cannot be
+    /// read - something every time, which is the behaviour this replaced and
+    /// the safe way to be wrong.
+    ///
+    /// The view asks this twelve times a second. Asking the log instead copies
+    /// every event it holds: on a journal of six thousand, that was a sixth of
+    /// a core spent on a conversation nobody was having.
+    #[test]
+    fn a_journal_that_has_not_grown_is_not_read_again() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let journal = dir.path().join("c.jsonl");
+        std::fs::write(&journal, "one line\n").expect("write");
+
+        let first = appended(&journal, 0).expect("a length");
+        assert_eq!(first, 9);
+        assert_eq!(appended(&journal, first), None, "read again unchanged");
+
+        std::fs::write(&journal, "one line\ntwo lines\n").expect("append");
+        let second = appended(&journal, first).expect("a new length");
+        assert_eq!(second, 19);
+
+        // A journal that is not there reads as new, every time.
+        assert!(appended(&dir.path().join("gone.jsonl"), 0).is_some());
     }
 }
