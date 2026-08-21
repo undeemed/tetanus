@@ -18,6 +18,7 @@ use crate::agent::Providers;
 /// The config keys the engine settles for itself, whatever a caller resolved.
 pub mod key {
     pub const SESSIONS_ROOT: &str = "sessions.root";
+    pub const SESSIONS_BACKEND: &str = "sessions.backend";
     pub const PROVIDER: &str = "provider.default";
     pub const MODEL: &str = "model.default";
     pub const MAX_STEPS: &str = "agent.max_steps";
@@ -48,6 +49,10 @@ impl Catalogs {
                 (
                     key::SESSIONS_ROOT,
                     serde_json::json!(config.sessions_root.display().to_string()),
+                ),
+                (
+                    key::SESSIONS_BACKEND,
+                    serde_json::json!(config.sessions_backend.name()),
                 ),
                 (key::PROVIDER, serde_json::json!(config.default_provider)),
                 (key::MODEL, serde_json::json!(config.default_model)),

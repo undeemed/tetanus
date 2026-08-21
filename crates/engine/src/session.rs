@@ -17,6 +17,7 @@ use tetanus_core::EventBus;
 use tetanus_protocol::methods::{SessionCreateParams, SessionEventsResult, SessionForkParams};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, SessionInfo};
+use tetanus_session::sqlite::SqliteSessionStore;
 use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
 
 use crate::convert::{session_error, session_event, session_not_found};
@@ -57,12 +58,79 @@ pub struct SessionHeader {
     pub fork_seq: Option<u64>,
 }
 
+/// The artifact a deployment keeps its journals in.
+///
+/// The choice is the deployment's, not the engine's, which is what the
+/// `SessionLog` trait is for: every call below reads a `dyn SessionLog` and
+/// cannot tell which backend answered. `Jsonl` is the default because a text
+/// journal is readable with `cat` during an incident, and that is worth more
+/// to a single-user harness than the one artifact a database gives.
+///
+/// The two are not two halves of one store: a root holds either journals or a
+/// database, and `tetanus_session::sqlite::{import_jsonl, export_jsonl}` moves
+/// a session between them.
+#[derive(Clone, Default)]
+pub enum SessionBackend {
+    /// One JSONL journal per session, under the store's root.
+    #[default]
+    Jsonl,
+    /// One SQLite database under the store's root, holding every session.
+    Sqlite(Arc<SqliteSessionStore>),
+}
+
+/// The database file a SQLite-backed store keeps under its root.
+pub const SQLITE_FILE: &str = "sessions.db";
+
+/// The name `sessions.backend` takes for the JSONL journals.
+pub const BACKEND_JSONL: &str = "jsonl";
+/// The name `sessions.backend` takes for the SQLite database.
+pub const BACKEND_SQLITE: &str = "sqlite";
+
+impl SessionBackend {
+    /// The name a document writes, and the name `config.dump` reports.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SessionBackend::Jsonl => BACKEND_JSONL,
+            SessionBackend::Sqlite(_) => BACKEND_SQLITE,
+        }
+    }
+
+    /// Resolve a backend named in the settings document, opening the database
+    /// when the name asks for one.
+    ///
+    /// The database is opened here, while the engine is still being composed,
+    /// rather than on the first `session.create`. A store this build cannot
+    /// read is a deployment fault, and a deployment fault that waits for the
+    /// first turn to report itself is one nobody sees until a user does.
+    pub fn named(name: &str, root: &Path) -> Result<Self, String> {
+        match name {
+            BACKEND_JSONL => Ok(SessionBackend::Jsonl),
+            BACKEND_SQLITE => SqliteSessionStore::open(root.join(SQLITE_FILE))
+                .map(SessionBackend::Sqlite)
+                .map_err(|error| error.to_string()),
+            other => Err(format!(
+                "{other:?} is not a session backend: this build serves \
+                 {BACKEND_JSONL:?} and {BACKEND_SQLITE:?}"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// One session held open in memory. Slice-scoped: the turn runtime attaches
 /// its own state to this handle.
 pub struct LiveSession {
     pub header: SessionHeader,
+    /// Where this session's durable facts live: the journal file under the
+    /// JSONL backend, and the database under the SQLite one. It is what
+    /// `SessionInfo.path` reports, so it names an artifact a reader can open.
     pub path: PathBuf,
-    pub log: Arc<JsonlSessionLog>,
+    pub log: Arc<dyn SessionLog>,
     /// One bus per session, so a push carries the session it belongs to
     /// without the hub having to demultiplex a shared stream.
     pub bus: EventBus,
@@ -79,18 +147,59 @@ pub struct SessionDefaults {
 pub struct SessionStore {
     root: PathBuf,
     defaults: SessionDefaults,
+    backend: SessionBackend,
     live: Mutex<BTreeMap<String, Arc<LiveSession>>>,
     counter: AtomicU64,
 }
 
 impl SessionStore {
     pub fn new(root: impl Into<PathBuf>, defaults: SessionDefaults) -> Self {
+        Self::with_backend(root, defaults, SessionBackend::Jsonl)
+    }
+
+    pub fn with_backend(
+        root: impl Into<PathBuf>,
+        defaults: SessionDefaults,
+        backend: SessionBackend,
+    ) -> Self {
         Self {
             root: root.into(),
             defaults,
+            backend,
             live: Mutex::new(BTreeMap::new()),
             counter: AtomicU64::new(0),
         }
+    }
+
+    /// Which artifact this store keeps its journals in.
+    pub fn backend(&self) -> &SessionBackend {
+        &self.backend
+    }
+
+    /// Open one session's log on this store's backend.
+    fn open_log(
+        &self,
+        id: &str,
+        path: &Path,
+        bus: EventBus,
+    ) -> Result<Arc<dyn SessionLog>, RpcError> {
+        match &self.backend {
+            SessionBackend::Jsonl => Ok(JsonlSessionLog::create(id, path, bus)
+                .map_err(|e| session_error(id, e))?
+                as Arc<dyn SessionLog>),
+            SessionBackend::Sqlite(store) => {
+                Ok(store.log(id, bus).map_err(|e| session_error(id, e))? as Arc<dyn SessionLog>)
+            }
+        }
+    }
+
+    /// Lay a whole journal down at once, seqs and times kept, for a fork.
+    fn seed_log(&self, id: &str, path: &Path, events: &[SessionEvent]) -> Result<(), RpcError> {
+        match &self.backend {
+            SessionBackend::Jsonl => tetanus_session::seed(path, events),
+            SessionBackend::Sqlite(store) => store.seed(id, events),
+        }
+        .map_err(|e| session_error(id, e))
     }
 
     /// Open a session, creating its journal when the id is new. An id that
@@ -98,7 +207,17 @@ impl SessionStore {
     pub fn create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
         // A named path is opened where it is. Its id then comes from its own
         // `session/start` line, which is how a path becomes an id for every
-        // other call.
+        // other call. It names a journal file, so it is a JSONL request: a
+        // session inside a database is named by its id, and answering a path
+        // with some other session's log would be worse than refusing it.
+        if params.path.is_some() && matches!(self.backend, SessionBackend::Sqlite(_)) {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "this store keeps its sessions in a database, where a session is named by its id \
+                 rather than by a file path",
+            )
+            .with_data(serde_json::json!({ "field": "path" })));
+        }
         let named = params.path.as_deref().map(PathBuf::from);
         let carried = match &named {
             Some(path) => header_of(&tetanus_session::replay(path).map_err(|e| {
@@ -122,11 +241,10 @@ impl SessionStore {
         let path = named
             .or_else(|| self.resolve(&id))
             .unwrap_or_else(|| self.path_of(&id));
-        let existing = tetanus_session::replay(&path).map_err(|e| session_error(&id, e))?;
+        let existing = self.stored(&id, &path)?;
 
         let bus = EventBus::new();
-        let log =
-            JsonlSessionLog::create(&id, &path, bus.clone()).map_err(|e| session_error(&id, e))?;
+        let log = self.open_log(&id, &path, bus.clone())?;
 
         // A turn a crash left open is closed before anything derives history
         // from this journal: a dangling tool call is not a history a provider
@@ -238,7 +356,7 @@ impl SessionStore {
         seed.extend(events[1..=boundary as usize].iter().cloned());
 
         let path = self.path_of(&child_id);
-        tetanus_session::seed(&path, &seed).map_err(|e| session_error(&child_id, e))?;
+        self.seed_log(&child_id, &path, &seed)?;
 
         // Opened through the ordinary path, so a forked session is live and
         // listed on exactly the terms every other session is.
@@ -257,11 +375,7 @@ impl SessionStore {
             .map(|s| (s.header.session_id.clone(), self.info(s)))
             .collect();
 
-        for path in self.journals()? {
-            // A journal that cannot be read is skipped rather than failing
-            // the whole listing: one damaged session must not hide the
-            // others.
-            let events = tetanus_session::replay(&path).unwrap_or_default();
+        for (path, events) in self.cold()? {
             let Some(header) = header_of(&events) else {
                 continue;
             };
@@ -349,7 +463,52 @@ impl SessionStore {
         let Some(path) = self.resolve(session_id) else {
             return Err(session_not_found(session_id));
         };
-        tetanus_session::replay(&path).map_err(|e| session_error(session_id, e))
+        self.stored(session_id, &path)
+    }
+
+    /// What the backend already holds for one session, whether or not this
+    /// process has ever opened it. Empty for an id it does not hold.
+    fn stored(&self, session_id: &str, path: &Path) -> Result<Vec<SessionEvent>, RpcError> {
+        match &self.backend {
+            SessionBackend::Jsonl => tetanus_session::replay(path),
+            SessionBackend::Sqlite(store) => store.replay(session_id),
+        }
+        .map_err(|e| session_error(session_id, e))
+    }
+
+    /// Every session the backend holds on disk, with the artifact it lives in.
+    ///
+    /// One that cannot be read is skipped rather than failing the whole
+    /// listing: one damaged session must not hide the others.
+    fn cold(&self) -> Result<Vec<(PathBuf, Vec<SessionEvent>)>, RpcError> {
+        match &self.backend {
+            SessionBackend::Jsonl => Ok(self
+                .journals()?
+                .into_iter()
+                .map(|path| {
+                    let events = tetanus_session::replay(&path).unwrap_or_default();
+                    (path, events)
+                })
+                .collect()),
+            SessionBackend::Sqlite(store) => {
+                let path = self.database();
+                let ids = store
+                    .session_ids()
+                    .map_err(|e| crate::convert::internal(e.to_string()))?;
+                Ok(ids
+                    .into_iter()
+                    .map(|id| {
+                        let events = store.replay(&id).unwrap_or_default();
+                        (path.clone(), events)
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    /// The database a SQLite-backed store keeps under its root.
+    fn database(&self) -> PathBuf {
+        self.root.join(SQLITE_FILE)
     }
 
     fn info(&self, live: &LiveSession) -> SessionInfo {
@@ -402,7 +561,13 @@ impl SessionStore {
     }
 
     fn path_of(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.jsonl"))
+        match self.backend {
+            SessionBackend::Jsonl => self.root.join(format!("{id}.jsonl")),
+            // Every session shares one artifact, so an id does not pick a
+            // file: the id is a column, and the database is the path a reader
+            // opens.
+            SessionBackend::Sqlite(_) => self.database(),
+        }
     }
 
     /// The journal an id names, or `None` if this store holds none.
@@ -415,6 +580,15 @@ impl SessionStore {
     fn resolve(&self, id: &str) -> Option<PathBuf> {
         if let Some(live) = self.live(id) {
             return Some(live.path.clone());
+        }
+        if let SessionBackend::Sqlite(store) = &self.backend {
+            // No search: the database answers whether it holds the id, which
+            // is the whole reason a store keyed by id rather than by file name
+            // is worth having.
+            return store
+                .contains(id)
+                .ok()
+                .and_then(|held| held.then(|| self.database()));
         }
         let direct = self.path_of(id);
         if direct.exists() {

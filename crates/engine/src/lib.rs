@@ -35,7 +35,7 @@ use tetanus_turn::tools::{EchoTool, ToolRegistry};
 
 use crate::agent::{MockProviders, Providers, Runtime};
 use crate::catalog::Catalogs;
-use crate::session::{SessionDefaults, SessionStore};
+use crate::session::{SessionBackend, SessionDefaults, SessionStore};
 use crate::subscribe::Hub;
 
 /// Where journals land when no caller names a directory.
@@ -49,8 +49,12 @@ pub const DEFAULT_SESSIONS_ROOT: &str = "sessions";
 /// Everything the engine needs that is not a call.
 #[derive(Clone)]
 pub struct EngineConfig {
-    /// Directory holding one JSONL journal per session.
+    /// Directory holding this deployment's journals.
     pub sessions_root: PathBuf,
+    /// The artifact those journals live in. Resolved from `sessions.backend`
+    /// by [`crate::boot`], which opens a database before the engine is built
+    /// so an unreadable store is a boot fault and not a first-turn surprise.
+    pub sessions_backend: SessionBackend,
     /// Provider a `session.create` with no override resolves to.
     pub default_provider: String,
     /// Model a `session.create` with no override resolves to.
@@ -84,6 +88,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             sessions_root: PathBuf::from(DEFAULT_SESSIONS_ROOT),
+            sessions_backend: SessionBackend::Jsonl,
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
@@ -110,13 +115,14 @@ pub struct HarnessEngine {
 impl HarnessEngine {
     pub fn new(config: EngineConfig) -> Self {
         Self {
-            sessions: Arc::new(SessionStore::new(
+            sessions: Arc::new(SessionStore::with_backend(
                 config.sessions_root.clone(),
                 SessionDefaults {
                     provider: config.default_provider.clone(),
                     model: config.default_model.clone(),
                     max_steps: config.max_steps,
                 },
+                config.sessions_backend.clone(),
             )),
             hub: Arc::new(Hub::new()),
             runtime: Arc::new(Runtime::new(

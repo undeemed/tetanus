@@ -39,6 +39,10 @@ tempfile = "3"
 proptest = "1"
 anstyle = "1"
 terminal_size = "0.4"
+# The second session-persistence backend. `bundled` vendors the amalgamation
+# rather than linking whatever the host happens to ship, so a build needs no
+# system library and every deployment reads the same SQLite.
+rusqlite = { version = "0.40", features = ["bundled"] }
 # A terminal draws a CJK character in two columns and a combining mark in
 # none, so every width this workspace measures is asked of this crate.
 unicode-width = "0.2"

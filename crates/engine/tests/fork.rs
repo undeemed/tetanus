@@ -16,7 +16,7 @@ use tetanus_protocol::methods::{
     AgentPromptParams, Engine, SessionCreateParams, SessionEventsParams, SessionForkParams,
 };
 use tetanus_protocol::rpc::ErrorCode;
-use tetanus_session::{SessionEvent, SessionLog};
+use tetanus_session::SessionEvent;
 
 fn engine() -> (HarnessEngine, TempDir) {
     let dir = TempDir::new().expect("temp dir");

@@ -17,7 +17,6 @@ use tetanus_protocol::methods::{
 };
 use tetanus_protocol::rpc::ErrorCode;
 use tetanus_protocol::PROTOCOL_VERSION;
-use tetanus_session::SessionLog;
 
 #[derive(Default)]
 struct Recorder {

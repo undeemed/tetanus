@@ -15,7 +15,7 @@ use tetanus_protocol::methods::{
     SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::RpcError;
-use tetanus_session::{SessionEvent, SessionEventDispatch, SessionLog};
+use tetanus_session::{SessionEvent, SessionEventDispatch};
 
 use crate::convert::session_event;
 use crate::session::LiveSession;
