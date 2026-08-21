@@ -588,3 +588,62 @@ async fn closing_a_connection_ends_its_subscriptions() {
         "a second close has nothing left to end"
     );
 }
+
+/// TC-RPC-13: every method the contract defines is routed.
+///
+/// Section 4.2 promises two things about routing: a served call answers, and a
+/// reserved one answers `NotImplemented` rather than `MethodNotFound`, because
+/// those are a whole decision apart for a caller. Both were checked by naming
+/// methods one at a time - TC-ENG-3 for the served ones, TC-RPC-12 for the
+/// reserved ones - which is a completeness claim resting on a hand-maintained
+/// list.
+///
+/// A routing arm is written by hand, so the arm that gets forgotten is the one
+/// no case names; a case that names them one by one has exactly the same hole
+/// one level up. This iterates `method::ALL` instead, so a method added to the
+/// contract and wired into the codec's match nowhere fails here immediately,
+/// without anyone remembering to extend a test.
+///
+/// Expected: no method in the contract answers `MethodNotFound`, and a method
+/// that is not in it does.
+#[tokio::test]
+async fn every_method_the_contract_defines_is_routed() {
+    let (codec, _engine) = greeted().await;
+
+    for (n, name) in method::ALL.iter().enumerate() {
+        // Params are deliberately empty: a routed call may well answer
+        // `InvalidParams`, and that is a pass here. What must not happen is
+        // the codec failing to recognise the method at all.
+        let answer = send(
+            &codec,
+            json!({ "jsonrpc": "2.0", "id": n + 100, "method": name, "params": {} }),
+        )
+        .await;
+
+        let code = answer["error"]["code"].as_i64();
+        assert_ne!(
+            code,
+            Some(ErrorCode::MethodNotFound as i32 as i64),
+            "`{name}` is in the contract and the codec does not route it: {answer}"
+        );
+    }
+
+    // The complement, so the case is measuring something: a method the
+    // contract does not define is still unknown.
+    let answer = send(
+        &codec,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "session.destroy", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        answer["error"]["code"].as_i64(),
+        Some(ErrorCode::MethodNotFound as i32 as i64),
+        "a method nobody defined is unknown: {answer}"
+    );
+
+    // And the list is the whole surface rather than a sample of it.
+    assert!(
+        method::ALL.contains(&method::HELLO) && method::ALL.len() >= 13,
+        "`method::ALL` is the contract's table, not a subset"
+    );
+}
