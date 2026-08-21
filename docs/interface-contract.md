@@ -186,7 +186,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
-| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6), plus `cwd`, `spawned_by` and `depth` where they apply (§4.4.9) |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `format` (§4.3.3), plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6), plus `cwd`, `spawned_by` and `depth` where they apply (§4.4.9) |
 | `turn/start` | `turn` |
 | `step/start` | `turn`, `step` |
 | `user/message` | `content` |
@@ -196,6 +196,32 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
+
+#### 4.3.3 The journal's envelope has a version, and the vocabulary does not need one
+
+§4.3.2 says how the durable *vocabulary* grows: a new `type` is a free string, a surface renders what it does not know, and the `KnownEvent` variant follows later.
+That covers everything said *inside* an event and nothing about the shape around it.
+
+The envelope - `type`, `seq`, `time`, `data`, `sourceEventSeqs` - has no such story, and the two are different problems.
+An unknown `type` is a line a reader can skip and still understand the rest of the journal.
+A changed envelope is a journal a reader cannot parse at all, or worse, can parse into something that means something else.
+
+**So the header carries `format`.**
+`session/start.format` is an integer naming the envelope its journal was written under.
+It is absent on every journal written before this, which reads as format 1, so nothing already on disk becomes unreadable for lacking it.
+
+**On the header, not on every line.**
+A journal is the largest file this harness writes and its lines are its bulk, so a per-event version would cost bytes forever to answer a question once.
+The header is read first by every path that opens a journal - listing, paging, forking, repairing - so it is where the answer already has to be looked up.
+
+**A format a reader does not know is refused, not guessed at.**
+Guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not.
+The refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one: it says "this journal cannot be read", and the message says why.
+
+**Four codes are now deferred for the same reason, and they should land together.**
+This one, "another process holds the journal" (§4.4.13), "the server is stopping" (§4.4.11), and a redaction flag's neighbour (§4.3).
+Each is deferred because a surface's `ErrorCode` match is exhaustive, so any one of them breaks the presentation lane's build - and four separate breaks is four times the disruption of one.
+When the lanes coordinate, they land as a single change, and a reader meeting `LogCorrupt` for a foreign format until then is being told the truth coarsely rather than a lie precisely.
 
 #### 4.3.2 Types that are durable but not yet parsed
 
@@ -1095,6 +1121,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.9 every origin fact is optional, and absent means absent | TC-PROTO-30 |
 | §4.4.9 a copy and a delegation are told apart | TC-PROTO-31 |
 | §4.4.9 depth counts levels and survives a round trip | TC-PROTO-32 |
+| §4.3.3 a journal with no `format` reads as the first one | TC-PROTO-105 |
+| §4.3.3 an envelope change is a different problem from a new type | TC-PROTO-106 |
 | §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
 | §4.4.7 an ask names its audit line, its tool and its call | TC-PROTO-20 |
 | §4.4.7 the four outcomes, and only one of them grants | TC-PROTO-21 |
@@ -1246,3 +1274,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Corrects what this document said about time (§4.3). It claimed "elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once", and both halves were wrong. `time` is wall clock from the writing machine and nothing makes it monotonic within a journal: a clock correction moves it backwards mid-session, a journal read elsewhere was stamped by a clock that never agreed, and - the case that is not hypothetical - **every forked journal is non-monotonic by construction**, because §4.4.6 copies the parent's events as they stand while seq 0 is the child's own header, written later. So a surface orders, bisects and pages by `seq`, and `time` is for telling a reader when something happened and for nothing that has to be correct. `duration_ms` is measured on a monotonic clock rather than derived, which makes it the answer to how long a turn took and the difference of two stamps merely an estimate that is usually close and occasionally negative. No type changes and no behaviour change: this describes what the engine has always done and withdraws a claim the document should not have made. |
 | 1.0 | Says what an empty prompt is (§4.4.2): `InvalidParams` naming `content`, refused before anything is spent. Today nothing checks it, so `agent.prompt` with an empty string opens a turn, writes a `user/message` saying nothing to the journal for ever, and spends a provider call to be told the obvious. Whitespace counts as empty, which is not pedantry but the same defect the credential rule already fixed once: a value of nothing but spaces reads as present to every check that does not trim, and then buys a real request in order to be refused by somebody else. The section also draws a line this contract had left implicit, because the two cases look alike from outside. A *parameter* that is wrong is refused at the boundary and leaves no trace - the request never became work. A *decision* taken once a turn is under way is recorded even when it ends the turn at once, which is why a listener rejecting the first claim still closes a durable turn that spent no step: something happened, and the journal is the record of what happened. No new code, no type changes; the engine slice that adds the check lands separately. |
 | 1.0 | Bounds a frame (§4.1), and publishes the bound as `methods::MAX_FRAME_BYTES`. The carriers disagreed under the same abuse and nothing said they should not: a WebSocket library refuses an over-long message by default, while the stdio line reader grows its buffer until the process dies, so "one contract, three carriers" was untrue for a peer that sends bytes and no newline. Inbound, an over-long frame is refused with `ParseError` and `id: null` - the answer §4.1 already gives a frame it cannot make sense of, and a frame nobody finished sending is one of those. Outbound, `session.events` stops filling a page when the next event would cross the bound, which makes explicit something that was already true of the page-maximum clamp and now has a second cause: **`eof` says whether a caller is done and a short page never does**. A pager that stopped on a short page would silently truncate a transcript, and only for the sessions with the most in them. The write side is what keeps the bound from ever binding: the engine does not write a durable event larger than a frame, so a journal never holds something the wire cannot carry, and a page of one event always fits - bounding a tool's output where it is captured has an obvious answer, while finding out at delivery time that a journal contains an unsendable event has none. One added constant; no type changes; the carrier and engine slices that enforce it land separately. |
+| 1.0 | Versions the journal's envelope (§4.3.1, §4.3.3). §4.3.2 already says how the durable *vocabulary* grows - a new `type` is a free string and a surface renders what it does not know - and that covers everything said inside an event and nothing about the shape around it. The two are different problems: an unknown type is a line a reader skips and still understands the rest of the journal, while a changed envelope is a journal it cannot parse at all, or worse can parse into something that means something else. `session/start.format` now names the envelope, absent reading as format 1 so nothing on disk becomes unreadable for lacking it. It is on the header rather than on every line because a journal is the largest file this harness writes and a per-event version would cost bytes forever to answer a question once, while every path that opens a journal reads the header first anyway. A format a reader does not know is refused rather than guessed at, because guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not; the refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one. The section also records that four codes are now deferred for one reason - an exhaustive `ErrorCode` match in the presentation lane - and that they should land as a single change rather than four separate breaks of that lane's build. No type changes here; the engine slice that writes `format` lands separately. |
