@@ -10,6 +10,7 @@ members = [
   "crates/engine",
   "crates/rpc",
   "crates/turn",
+  "crates/fs",
 ]
 
 [workspace.package]
