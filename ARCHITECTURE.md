@@ -284,6 +284,15 @@ the pace it happened (`--live`), or on a page of its own (`--ui`,
 [crates/cli/src/render/browse.rs](crates/cli/src/render/browse.rs)).
 Its full-screen view is driven by `tetanus_ui::show` rather than by a loop of its own, which is what
 a view over something already finished can do and a view over a turn in flight cannot.
+The printed list keeps every id whole, because an id is the one thing on that page a reader retypes,
+and stacks the row where the window has no room left for a title
+([crates/cli/src/render/sessions.rs](crates/cli/src/render/sessions.rs)): the id on a line of its
+own and the counters, the state and the title indented under it.
+A table folded by the terminal at column zero reads as another session; two lines that say which is
+which do not.
+The picker does not stack - its rows are a cursor's rows, one session each, and its frame cuts what
+overruns.
+
 `tetanus sessions --ui` ([crates/cli/src/render/pick.rs](crates/cli/src/render/pick.rs)) puts a
 cursor on the list that `tetanus sessions` prints, so a directory holding more journals than the
 screen is read a screenful at a time rather than scrolled back through once it has all gone past.
