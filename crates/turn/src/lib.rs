@@ -29,6 +29,8 @@
 //! - [`tools`] is the model-facing capability registry.
 //! - [`boot`] composes them through the typed service registry.
 //! - [`trace`] reads back the ordered event sequence of a run.
+//! - [`workflow`] runs multi-step work that outlives the turn that asked for
+//!   it, recording every boundary so a restart can continue it.
 
 pub mod approval;
 pub mod boot;
@@ -50,6 +52,7 @@ pub mod schema;
 pub mod tokens;
 pub mod tools;
 pub mod trace;
+pub mod workflow;
 
 pub use engine::{TurnConfig, TurnEngine, TurnError, TurnOutcome};
 pub use events::{StopReason, FAILED_STOP_REASON};
