@@ -40,9 +40,11 @@
 
 pub mod local;
 pub mod reserved;
+pub mod tool;
 pub mod types;
 
 pub use local::{Budget, LocalRuntime};
+pub use tool::CodeTool;
 pub use types::{
     Binding, CodeRuntime, FailureKind, Namespace, RunFailure, RunRequest, RunResult, SeamError,
 };

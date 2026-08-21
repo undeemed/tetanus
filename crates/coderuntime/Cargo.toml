@@ -19,3 +19,4 @@ tokio = { workspace = true }
 tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
 tempfile = { workspace = true }
+tetanus-turn = { path = "../turn" }
