@@ -3,6 +3,7 @@ import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
 import { approvalRow, askCard } from "./questions.js";
 import { trace, trajectory } from "./trajectory.js";
+import { panel } from "./features.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -670,6 +671,10 @@ const traceBody = document.getElementById("trace-body");
 
 document.getElementById("trace-open").onclick = () => {
   traceDialog.showModal();
+  // What the run is working toward sits above what it did: a goal is the
+  // reason for the path, and reading the path first is reading the answer
+  // before the question.
+  panel(document.getElementById("standing"), seen);
   trace(traceBody, trajectory(seen));
 };
 document.getElementById("trace-close").onclick = () => traceDialog.close();
