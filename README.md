@@ -61,7 +61,8 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports |
 | Tools | `echo`, `shell`, and the four persistent-shell tools through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order; a call a tool declares irreversible is decided before it runs, and a refused call never runs | MCP client; cancellation inside a step |
 | Filesystem | A filesystem service with a local and a sandboxed backend behind one trait - read, write, edit, list, glob, stat, delete - each failing in a named class rather than an `io::Error` string; seven model-facing tools over it; the read-before-write policy that refuses to overwrite what a session has not read | Read windows over bytes, a search tool, the kernel sandbox backends |
-| Process execution | One command through a resolved shell backend (bash, or PowerShell where a host has it), argv without a shell re-split, an environment the caller listed, output bounded to its tail and streamable while it runs, and a timeout that kills the whole process group; persistent shells that keep `cd` and exported variables between tool calls and report a death rather than restarting under the caller | A PTY and its terminal tools, background jobs, spill files, sandboxing |
+| Process execution | One command through a resolved shell backend (bash, or PowerShell where a host has it), argv without a shell re-split, an environment the caller listed, output bounded to its tail and streamable while it runs, and a timeout that kills the whole process group; persistent shells that keep `cd` and exported variables between tool calls and report a death rather than restarting under the caller | A PTY and its terminal tools, background jobs, spill files |
+| Sandboxing | Upstream's mode vocabulary as one policy value, and a Linux boundary that enforces it: Landlock applied to a spawned command between `fork` and `exec`, and to a persistent shell once for every command it will run; a denial told to the model as policy rather than as a bug in its command; a host that cannot enforce what was asked refusing at composition rather than pretending | The same policy inside the file tools, the approved-escalation retry, a Windows ACL backend, a settings key |
 | Permissions | A tool call gated on a decision, audited on the journal as one `approval/asked`/`approval/decided` pair; user questions with the same durable pair; presets bundling the filesystem mode and the approval policy under one name | Serving the decision over the boundary (`approval.set`, `ui/approve`, `ui/ask`) |
 | Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, re-reading it at run time, and resolving the engine's own settings out of it - which no subcommand wires yet | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
@@ -231,7 +232,7 @@ That server has no end of file to stop it, so Ctrl-C is the shutdown and it exit
 
 ## Workspace layout
 
-A Cargo workspace of ten crates.
+A Cargo workspace of twelve crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
@@ -243,6 +244,7 @@ A Cargo workspace of ten crates.
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
 | `tetanus-exec` | [crates/exec](crates/exec) | Process execution: the subprocess seam and its process-group termination, the shell backends, persistent shells, and the model-facing shell tools |
+| `tetanus-sandbox` | [crates/sandbox](crates/sandbox) | The sandbox policy every surface applies, and the Landlock backend that enforces it |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
 | `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, the whole-screen frame and the scrollable page on it, held terminal and loop a full-screen view runs in |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |

@@ -60,6 +60,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
   -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells, shell tools
+       -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
                                        full-screen view loop
@@ -651,6 +652,36 @@ the loop. A composition supplies that switch through `boot_with`
 ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)); the engine mints one per session, because one
 switch shared across sessions would let an interrupt in one stop another.
 
+### 4.10 Interface view - the sandbox
+
+`tetanus_turn::fs` fences a *path* this process was asked to open, which is a complete answer while
+the code doing the opening is ours. A command a model wrote is not: it is arbitrary code, and only
+the kernel can tell it no. `crates/sandbox` is that boundary, and the two are complementary.
+
+`policy::Policy` ([crates/sandbox/src/policy.rs](crates/sandbox/src/policy.rs)) is upstream's mode
+vocabulary - `read-only`, `workspace-write`, `danger-full-access` - resolved once where a call
+enters and handed down whole. It carries the workspace root, the roots the mode makes writable
+(including the temp areas a build actually uses, derived here so two layers cannot disagree), a
+network decision, and whether partial enforcement is acceptable.
+
+`landlock` ([crates/sandbox/src/landlock.rs](crates/sandbox/src/landlock.rs)) is the Linux backend.
+The three system calls are made by hand because of the fork/exec split: the ruleset is built in the
+parent, where opening directories and allocating is safe, and the child's half between `fork` and
+`exec` is `prctl` plus two syscalls with no library code - after a fork in a threaded process, a
+child that allocates can deadlock on a lock another thread held. Deny-by-default is the ABI's own
+shape: the handled set is every right the running kernel knows, so anything no rule grants is
+denied, which is why creating, removing and renaming are governed and not only writing.
+
+Enforcement runs through `crates/exec`: `Command::confined` for one command, and one boundary per
+persistent shell, inherited by every command that shell later runs. A denial is rendered with
+upstream's marker naming the mode, so a model reads policy rather than a bug in its own command.
+
+A host that cannot honour a policy refuses: `Unavailable` for a kernel without Landlock, `Degraded`
+for an ABI that cannot govern what was asked, and a compile-time refusal naming the missing backend
+on a platform that has none ([crates/sandbox/src/unsupported.rs](crates/sandbox/src/unsupported.rs)).
+There is no path where asking for confinement and getting none is a success; the one way to run
+unconfined is to write `danger-full-access`.
+
 ## 5. Verification - the conformance approach
 
 Parity with upstream is asserted, not asserted about.
@@ -700,8 +731,10 @@ not protocol-level.
 ## 7. Not built yet
 
 A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
-kernel sandboxing, a PTY and the terminal tools that need one, background jobs, the web UI, and the
-WASM plugin host.
+a PTY and the terminal tools that need one, background jobs, the web UI, and the WASM plugin host.
+Kernel sandboxing exists for processes (§4.10); applying the same policy inside the file tools, and
+the approved-escalation retry, are the two named follow-ups in
+[docs/parity-updates/sandbox-policy-and-landlock.md](docs/parity-updates/sandbox-policy-and-landlock.md).
 The file tools exist and are composed by whoever builds a registry
 ([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
 is the presentation lane's wiring, per §4.7's ownership table in
