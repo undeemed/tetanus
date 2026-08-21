@@ -537,6 +537,9 @@ fn session_start_lineage_is_optional_and_absent_means_no_parent() {
             max_steps: 8,
             parent_session: None,
             fork_seq: None,
+            cwd: None,
+            spawned_by: None,
+            depth: None,
         }
     );
 
@@ -556,6 +559,9 @@ fn session_start_lineage_is_optional_and_absent_means_no_parent() {
             max_steps: 8,
             parent_session: Some("s1".into()),
             fork_seq: Some(6),
+            cwd: None,
+            spawned_by: None,
+            depth: None,
         }
     );
 
@@ -801,4 +807,140 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-30: contract section 4.4.9. Every origin fact is optional in both
+/// directions, and absent means absent.
+///
+/// A journal written before these existed must parse, and one that carries
+/// none of them must not serialize three nulls into every header - a reader
+/// cannot tell `"cwd": null` from a session opened nowhere, and there is no
+/// such thing.
+#[test]
+fn every_origin_fact_is_optional_and_absent_means_absent() {
+    let bare = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        source_event_seqs: None,
+    };
+    assert_eq!(
+        bare.parse()
+            .expect("a header written before this still parses"),
+        KnownEvent::SessionStart {
+            session_id: "s1".into(),
+            provider: "mock".into(),
+            model: "m".into(),
+            max_steps: 8,
+            parent_session: None,
+            fork_seq: None,
+            cwd: None,
+            spawned_by: None,
+            depth: None,
+        }
+    );
+
+    let wire = serde_json::to_value(bare.parse().expect("parse")).expect("serialize");
+    for absent in ["cwd", "spawned_by", "depth"] {
+        assert_eq!(wire.get(absent), None, "`{absent}` is absent, not null");
+    }
+}
+
+/// TC-PROTO-31: contract section 4.4.9. A copy and a delegation are told
+/// apart, and one session may be both.
+///
+/// This is the case the two fields exist for. A fork begins holding another
+/// journal's history; a subagent is a different conversation another one asked
+/// for. Merging them would leave a reader unable to answer either "what else
+/// came out of this conversation" or "why does this session exist", and a fork
+/// of a subagent's journal is both at once - which is what rules out one field
+/// with a kind beside it.
+#[test]
+fn a_copy_and_a_delegation_are_told_apart() {
+    let both = header(json!({
+        "session_id": "s3", "provider": "mock", "model": "m", "max_steps": 8,
+        "parent_session": "s2", "fork_seq": 12,
+        "spawned_by": "s1", "depth": 1,
+        "cwd": "/srv/app"
+    }));
+
+    match both.parse().expect("parse") {
+        KnownEvent::SessionStart {
+            parent_session,
+            fork_seq,
+            spawned_by,
+            depth,
+            cwd,
+            ..
+        } => {
+            assert_eq!(parent_session.as_deref(), Some("s2"), "copied from");
+            assert_eq!(fork_seq, Some(12));
+            assert_eq!(spawned_by.as_deref(), Some("s1"), "started by");
+            assert_ne!(
+                parent_session, spawned_by,
+                "the two answer different questions and are not one field"
+            );
+            assert_eq!(depth, Some(1));
+            assert_eq!(cwd.as_deref(), Some("/srv/app"));
+        }
+        other => panic!("expected a header, got {other:?}"),
+    }
+
+    // Each may appear without the other: a plain fork delegates nothing, and a
+    // subagent's own first journal was copied from nothing.
+    let forked = header(json!({
+        "session_id": "s2", "provider": "mock", "model": "m", "max_steps": 8,
+        "parent_session": "s1", "fork_seq": 4
+    }));
+    let delegated = header(json!({
+        "session_id": "s4", "provider": "mock", "model": "m", "max_steps": 8,
+        "spawned_by": "s1", "depth": 1
+    }));
+    assert!(forked.parse().is_some() && delegated.parse().is_some());
+}
+
+/// TC-PROTO-32: contract section 4.4.9. Depth counts levels, and survives the
+/// round trip that a resume depends on.
+///
+/// The number is durable precisely so a restarted subagent does not come back
+/// believing it is a root session and free to delegate again. That only holds
+/// if it reads back as what was written, including the zero a root would write
+/// if it wrote one at all.
+#[test]
+fn depth_counts_levels_and_survives_a_round_trip() {
+    for level in [0u32, 1, 2, 7] {
+        let event = header(json!({
+            "session_id": "s", "provider": "mock", "model": "m", "max_steps": 8,
+            "spawned_by": "parent", "depth": level
+        }));
+        let parsed = event.parse().expect("parse");
+        match &parsed {
+            KnownEvent::SessionStart { depth, .. } => assert_eq!(*depth, Some(level)),
+            other => panic!("expected a header, got {other:?}"),
+        }
+        let wire = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(wire["depth"], json!(level), "a written level reads back");
+    }
+
+    // Absent is a root session, and is not the same as a written zero: one was
+    // never delegated, the other says so.
+    let root = header(json!({
+        "session_id": "s", "provider": "mock", "model": "m", "max_steps": 8
+    }));
+    match root.parse().expect("parse") {
+        KnownEvent::SessionStart { depth, .. } => assert_eq!(depth, None),
+        other => panic!("expected a header, got {other:?}"),
+    }
+}
+
+/// A `session/start` event carrying `data`.
+fn header(data: serde_json::Value) -> SessionEvent {
+    SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data,
+        source_event_seqs: None,
+    }
 }

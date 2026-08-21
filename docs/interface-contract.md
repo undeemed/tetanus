@@ -151,7 +151,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
-| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6) |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6), plus `cwd`, `spawned_by` and `depth` where they apply (§4.4.9) |
 | `turn/start` | `turn` |
 | `step/start` | `turn`, `step` |
 | `user/message` | `content` |
@@ -506,6 +506,44 @@ A surface learns it from the ask.
 `ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
 The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
 
+#### 4.4.9 What a journal says about where it came from
+
+A journal is read long after the process that wrote it, often on another machine.
+Four facts about its origin are worth writing down once, on `session/start`, rather than inferring later or losing.
+
+| Field | Says |
+| --- | --- |
+| `cwd` | the working directory the session was opened in |
+| `parent_session` | the session this journal's history was **copied from** (§4.4.6) |
+| `spawned_by` | the session that **started** this one as a subagent |
+| `depth` | how many levels of delegation deep this session is; absent means none |
+
+All four are optional, so every journal written before this parses unchanged.
+
+**`spawned_by` is not `parent_session`, and merging them would lose the distinction that matters.**
+A fork is a copy: the child begins holding the parent's history and is a second way of continuing one conversation.
+A subagent is a different conversation that another one asked for: it shares no history, and the two run at the same time.
+A reader that cannot tell them apart cannot answer either "what else came out of this conversation" or "why does this session exist", and those are the two questions lineage is for.
+A session can carry both - a fork of a subagent's journal is still a subagent's work - which is the case that rules out one field with a kind beside it.
+
+**`depth` counts delegation, and it is what bounds it.**
+A root session has none. A subagent it starts is at one, and one that subagent starts is at two.
+It is durable rather than held in memory because the bound has to survive a resume: a subagent whose harness restarted must not come back believing it is a root session and free to delegate again.
+What the limit is, and what happens at it, is a deployment's business and not this contract's; what is fixed here is that the number is on the journal and counts levels rather than siblings.
+
+**`cwd` is where the session was opened, not where it is now.**
+A tool may change directory; the header is not rewritten, and a reader must not take it for the current state.
+It is here because a journal full of relative paths is unreadable without it, and because "it worked on my machine" is usually a question about this field.
+
+**A fork inherits the origin facts it is a copy of.**
+§4.4.6 says the child's `session/start` replaces the parent's line for line, so the child writes its own header - and into it go the parent's `spawned_by`, `depth` and `cwd`, because a fork is the same work taken a second way and not a new piece of work.
+Its `parent_session` and `fork_seq` are its own, naming the journal it was copied from.
+
+Adding these is a minor change on the wire, and it happens also to be a safe one in Rust: the presentation lane matches `KnownEvent::SessionStart` with a rest pattern, so the added fields do not break its build.
+That is worth stating rather than assuming, because §5's rule is about types the other lane *constructs*, and the next addition to this payload has to check again rather than inherit the conclusion.
+
+None of this adds a call, and none of it appears on `SessionInfo`, for the reason §4.4.6 gives: a field added to a type the other lane builds is not the free addition it looks like, and lineage is read from the journal line.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -720,6 +758,9 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.2 a reserved call answers `NotImplemented`, and is not advertised | TC-ENG-4 |
 | §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
 | §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
+| §4.4.9 every origin fact is optional, and absent means absent | TC-PROTO-30 |
+| §4.4.9 a copy and a delegation are told apart | TC-PROTO-31 |
+| §4.4.9 depth counts levels and survives a round trip | TC-PROTO-32 |
 | §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
 | §4.4.7 an ask names its audit line, its tool and its call | TC-PROTO-20 |
 | §4.4.7 the four outcomes, and only one of them grants | TC-PROTO-21 |
@@ -828,3 +869,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | States what a journal says about where it came from (§4.3.1, §4.4.9): `cwd`, `spawned_by` and `depth` join `parent_session` and `fork_seq` on `session/start`, all optional so every journal written before this parses unchanged. `spawned_by` is deliberately not `parent_session`: a fork is a copy that begins holding another journal's history, a subagent is a different conversation that another one asked for, and a reader that cannot tell them apart cannot answer either question lineage exists for. A session can be both, which rules out one field with a kind beside it. `depth` is durable rather than held in memory because the bound on delegation has to survive a resume - a subagent whose harness restarted must not come back believing it is a root session. `cwd` is where the session was opened and not where it is now, because a tool may change directory and the header is not rewritten. A fork inherits the origin facts it is a copy of and writes its own `parent_session`. Minor on the wire, and safe in Rust here because the presentation lane matches this payload with a rest pattern - stated rather than assumed, since §5's rule is about types the other lane constructs and the next addition must check again. No call is added and nothing appears on `SessionInfo`, for §4.4.6's reason. The engine slice that writes the fields lands separately. |
