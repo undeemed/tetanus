@@ -9,9 +9,16 @@
 // Unknown event types are drawn, never dropped: the contract says the durable
 // vocabulary grows, and a panel that hid what it did not recognise would hide
 // the newest half of a turn.
+//
+// A dropped connection loses nothing a reader typed: the question goes back in
+// the box, and the hint line counts down to the next dial rather than saying
+// only that something failed.
 
 const CLIENT = { name: "tetanus-web-chat", version: "0.1.0" };
 const PROTOCOL = "1.0";
+/** The first wait between dials, and the longest one, in milliseconds. */
+const FIRST_WAIT = 1000;
+const LONGEST_WAIT = 15000;
 
 const at = (id) => document.getElementById(id);
 const view = {
@@ -32,6 +39,12 @@ let socket = null;
 let pending = new Map();
 let nextId = 1;
 let busy = false;
+// How long to wait before dialling again, doubling up to a cap. A panel left
+// open on a server that has gone home should not dial it twice a minute all
+// afternoon, and a server that comes back should be found in seconds.
+let waiting = FIRST_WAIT;
+// The countdown on the hint line, cleared whenever the panel stops waiting.
+let counting = null;
 
 /* ---------------------------------------------------------------- transport */
 
@@ -84,13 +97,17 @@ function connect() {
     for (const { reject } of pending.values()) reject(new Error("connection closed"));
     pending.clear();
     ready(false);
-    settle("gone", "Connection closed. Retrying…");
-    setTimeout(connect, 2000);
+    dialling(waiting);
+    setTimeout(connect, waiting);
+    waiting = Math.min(waiting * 2, LONGEST_WAIT);
   };
 }
 
 async function boot() {
   await call("rpc.hello", { protocol_version: PROTOCOL, client: CLIENT });
+  // Connected and talking: the next drop starts its waiting from the bottom
+  // again, because a server that answered once is worth dialling quickly.
+  waiting = FIRST_WAIT;
   const info = await call("session.create", session ? { session_id: session } : {});
   session = info.session_id;
   // So a reload continues this conversation rather than starting another.
@@ -105,6 +122,7 @@ async function boot() {
   // A fresh subscription from seq 0 is the whole transcript and every event
   // after it, on one ordered channel. Reading history separately would race
   // the first live push.
+  clearInterval(counting);
   view.turns.innerHTML = "";
   card = null;
   await call("session.subscribe", { session_id: session, from_seq: 0 });
@@ -258,6 +276,30 @@ function reported(status) {
 
 /* -------------------------------------------------------------------- chrome */
 
+// Count the wait down rather than announcing it once.
+//
+// "Retrying…" is a panel saying it has not given up; it is not an answer to
+// the question a reader actually has, which is whether to keep watching or go
+// and restart the server. A number that moves answers it, and answers it again
+// every second: at `0s` the dial is happening, and if the next line still says
+// a wait then that dial failed too.
+function dialling(wait) {
+  clearInterval(counting);
+  let left = Math.round(wait / 1000);
+  const say = () => {
+    settle(
+      "gone",
+      left > 0
+        ? `Connection closed. Trying again in ${left}s.`
+        : "Connection closed. Trying again now.",
+    );
+    left -= 1;
+    if (left < 0) clearInterval(counting);
+  };
+  say();
+  counting = setInterval(say, 1000);
+}
+
 function strong(text) {
   const el = document.createElement("b");
   el.textContent = text;
@@ -293,12 +335,20 @@ function toBottom() {
 
 function gave(failure) {
   const code = failure.code !== undefined ? ` (code ${failure.code})` : "";
+  // The failure goes on the transcript in any case: it is part of the record
+  // of the conversation, and it is what a reader scrolls back to.
+  row("fault", null, failure.message + code, "!");
+  // The hint line is one line, and while the panel is offline the useful half
+  // is the countdown `onclose` has just started there. A call that failed
+  // because the socket went away has said what it has to say on the row above.
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
   // A failure before there is a session is a failure to open the conversation
   // at all, and the reader is holding an address that will fail again. Say the
   // way out, because there is no session here for them to type into.
   const out = journal ? "" : " · reload without ?session= to start a new one";
-  settle(socket && socket.readyState === WebSocket.OPEN ? "live" : "gone", failure.message + code + out, true);
-  row("fault", null, failure.message + code, "!");
+  settle("live", failure.message + code + out, true);
 }
 
 async function ask(said) {
@@ -311,6 +361,12 @@ async function ask(said) {
     resting();
   } catch (failure) {
     gave(failure);
+    // The question goes back where it was typed. A prompt that never reached
+    // the engine is a question the reader still has, and a panel that ate it
+    // is one they have to remember what they were asking - after watching the
+    // connection drop, which is when nobody remembers anything.
+    view.asked.value = said;
+    grow();
   } finally {
     busy = false;
     if (socket && socket.readyState === WebSocket.OPEN) ready(true);
