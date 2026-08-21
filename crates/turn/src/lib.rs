@@ -7,6 +7,7 @@
 //!   history from it.
 //! - [`prompt`] is the named section registry the assembly starts from.
 //! - [`repair`] writes the closers an interrupted journal is missing.
+//! - [`instructions`] reads the conventions a project keeps in its repository.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
 //! - [`tools`] is the model-facing capability registry.
@@ -16,6 +17,7 @@
 pub mod boot;
 pub mod engine;
 pub mod events;
+pub mod instructions;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
