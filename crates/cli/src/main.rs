@@ -349,8 +349,8 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // Answered before the directory is read, for the reason `run` and
             // `replay` answer it before a journal is opened: a flag the
             // terminal cannot honour is wrong at the moment it is read.
-            if ui && !policy.stdout_is_terminal {
-                return Err(fail(policy, &nowhere_to_draw()));
+            if ui && !policy.stdout_is_screen {
+                return Err(fail(policy, &nowhere_to_draw(policy)));
             }
             // A listing is the store's own view of a directory: what ids it
             // holds, and which of them a turn is running on. No surface can
@@ -410,8 +410,8 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // Before the path is even looked at, for the reason `run` answers
             // it before the journal is opened: a flag the terminal cannot
             // honour is wrong at the moment it is read.
-            if ui && !policy.stdout_is_terminal {
-                return Err(fail(policy, &nowhere_to_draw()));
+            if ui && !policy.stdout_is_screen {
+                return Err(fail(policy, &nowhere_to_draw(policy)));
             }
             // A path that is not there is a typo, and reading it as an
             // empty session is how a typo becomes a blank page and a zero
@@ -853,12 +853,20 @@ fn missing_journal(path: &std::path::Path) -> RpcError {
 
 /// `--ui` where there is no screen to draw on.
 ///
-/// Both views that take the flag answer it the same way, at the point the flag
-/// was read: it is a bad argument, not a failure of the work the command was
-/// asked to do, and §4.5 gives that exit 2.
-fn nowhere_to_draw() -> RpcError {
-    RpcError::new(ErrorCode::InvalidParams, "--ui needs a terminal to draw on")
-        .with_data(serde_json::json!({ "field": "ui" }))
+/// Every view that takes the flag answers it the same way, at the point the
+/// flag was read: it is a bad argument, not a failure of the work the command
+/// was asked to do, and §4.5 gives that exit 2.
+///
+/// Two ways to have no screen, and a reader can only act on the one they are
+/// in. A redirected stdout is a pipe to undo; a terminal that cannot address
+/// its cursor is a `TERM` to set, and saying "needs a terminal" to somebody
+/// sitting at one is the kind of answer that gets read as a bug.
+fn nowhere_to_draw(policy: &Policy) -> RpcError {
+    let said = match policy.stdout_is_terminal {
+        true => "--ui needs a terminal that can draw one, and TERM does not say this one can",
+        false => "--ui needs a terminal to draw on",
+    };
+    RpcError::new(ErrorCode::InvalidParams, said).with_data(serde_json::json!({ "field": "ui" }))
 }
 
 /// Read a journal as text, one line at a time.
@@ -1434,8 +1442,8 @@ async fn run<W: std::io::Write>(
     // Before anything is opened. A view needs a screen to draw on, and a run
     // that cannot have one should say so at the point the flag was read rather
     // than after it has written a journal nobody will get to see.
-    if args.ui && !policy.stdout_is_terminal {
-        return Err(fail(policy, &nowhere_to_draw()));
+    if args.ui && !policy.stdout_is_screen {
+        return Err(fail(policy, &nowhere_to_draw(policy)));
     }
 
     // Then, before the journal exists: a prompt this build will not send is

@@ -259,6 +259,13 @@ The default is a block under the shell prompt, redrawn in place by `Screen`.
 ([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
 still running.
 `--json` prints the contract's own result types and draws nothing.
+
+A `--ui` is refused where there is no screen to hold it, at the moment the flag is read: a
+redirected stdout, and a terminal whose `TERM` says it cannot address a cursor - `dumb`, or unset.
+Both are §4.5's exit 2, because a flag the terminal cannot honour is a bad argument rather than a
+failed command, and the two are worded apart: a pipe is something the reader undoes, `TERM` is
+something they set, and telling somebody sitting at a terminal that this needs one reads as a bug
+in the binary.
 All three read their events from the session log the engine is writing rather than from the bus: the
 journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
 Which is also why the `--ui` view has to be told when the turn is over: a turn that fails writes no

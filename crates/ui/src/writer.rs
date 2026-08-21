@@ -150,6 +150,11 @@ pub struct Policy {
     /// The same question for stdout, which the live view repaints on. The two
     /// are asked separately because they are redirected separately.
     pub stdout_is_terminal: bool,
+    /// Whether stdout can hold a full-screen view: a terminal, and one that
+    /// answers the cursor moves a screen is drawn with. A `--ui` flag is
+    /// refused where this is false, because a page repainted at a terminal
+    /// that cannot address its cursor arrives as the escapes themselves.
+    pub stdout_is_screen: bool,
 }
 
 impl Policy {
@@ -172,6 +177,7 @@ impl Policy {
             width: color::width(env, terminal_width),
             stderr_is_terminal,
             stdout_is_terminal,
+            stdout_is_screen: stdout_is_terminal && color::addressable(env),
         }
     }
 

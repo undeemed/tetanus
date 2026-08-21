@@ -2,7 +2,8 @@
 //!
 //! Features tested: the documented precedence between `--color`, `NO_COLOR`,
 //! `CLICOLOR_FORCE`, `TERM=dumb`, `CLICOLOR=0` and terminal detection; the
-//! charset choice; the width resolution and its clamp.
+//! charset choice; whether a terminal can hold a full-screen view; the width
+//! resolution and its clamp.
 //!
 //! Features NOT tested here: how a resolved theme renders (see `writer.rs`),
 //! and the process-environment read itself - `Env::from_process` is the one
@@ -13,7 +14,7 @@
 //!
 //! Environmental needs: none.
 
-use tetanus_ui::color::{charset, color_enabled, width, Charset, ColorChoice, Env};
+use tetanus_ui::color::{addressable, charset, color_enabled, width, Charset, ColorChoice, Env};
 
 fn env(pairs: &[(&str, &str)]) -> Env {
     let mut env = Env::default();
@@ -143,4 +144,21 @@ fn width_prefers_columns_then_the_terminal_then_eighty() {
     assert_eq!(width(&env(&[("COLUMNS", "10")]), None), 40);
     assert_eq!(width(&Env::default(), Some(400)), 120);
     assert_eq!(width(&env(&[("COLUMNS", "0")]), None), 80);
+}
+
+/// TC-UI-COLOR-10: whether a terminal can hold a full-screen view.
+/// Expected: no for `TERM=dumb`, no for a `TERM` that is unset or empty, yes
+/// for any name a terminal actually reports. A screen is written with cursor
+/// moves rather than characters, and a terminal that has not said it answers
+/// them is asking for the pages this binary prints.
+#[test]
+fn a_screen_needs_a_terminal_that_says_it_can_draw_one() {
+    assert!(!addressable(&env(&[("TERM", "dumb")])));
+    assert!(!addressable(&Env::default()));
+    assert!(!addressable(&env(&[("TERM", "")])));
+    assert!(addressable(&env(&[("TERM", "xterm-256color")])));
+    assert!(addressable(&env(&[("TERM", "screen")])));
+    // Colour and cursor addressing are separate answers about one variable:
+    // a terminal told to show no colour can still hold a screen.
+    assert!(addressable(&env(&[("TERM", "xterm"), ("NO_COLOR", "1")])));
 }
