@@ -17,16 +17,23 @@
 //! # Composition
 //!
 //! ```text
-//! tetanus                                   chat on mock-echo-1   heading
-//!                                                                 blank
-//! turn 1                                                       |
-//!   you   run one full turn                                    |  transcript
-//!   ai    the answer as the chunks assemble it                 |
-//!   ⠹ streaming the answer · 1.2s                              |  block
-//!                                                                 blank
-//! > what happens if I ask this                                    prompt
-//! enter ask · pgup/pgdn back · ctrl-c leave           2 back      footer
+//! tetanus                        chat on mock-echo-1 · 2 turns   heading
+//!                                                                blank
+//! turn 1                                                      |
+//!   you   run one full turn                                   |  transcript
+//!   ai    the answer as the chunks assemble it                |
+//!   ⠹ streaming the answer · 1.2s                             |  block
+//! ────────────────────────────────────────────────────────────   rule
+//! > what happens if I ask this                                   prompt
+//! enter ask · ↑↓ scroll · tab turn · /help · ctrl-c leave  2 back footer
 //! ```
+//!
+//! The rule is the one row on the screen that says nothing. It is there
+//! because the row under it is not part of the conversation: what a reader
+//! types has not been said yet, and without a line between them a
+//! half-written question reads as the newest thing on the transcript. The web
+//! panel draws the same line for the same reason, and gets it from a border
+//! rather than from a row.
 //!
 //! # What this module does not do
 //!
@@ -90,7 +97,7 @@ use tetanus_ui::{
 use super::live::Live;
 
 /// Rows the arrangement spends on furniture: the heading, the blank under it,
-/// the blank over the prompt, the prompt itself, and the footer.
+/// the rule over the prompt, the prompt itself, and the footer.
 const CHROME: usize = 5;
 
 /// The marker the prompt row opens with, and what it costs in columns.
@@ -528,7 +535,7 @@ impl Fire {
         frame.row(bar(
             cols,
             &self.theme.paint(Role::Heading, "tetanus").to_string(),
-            &self.theme.paint(Role::Muted, &self.title).to_string(),
+            &self.theme.paint(Role::Muted, &self.heading()).to_string(),
         ));
         frame.blank();
         for line in self.window(body - block.len()) {
@@ -537,11 +544,16 @@ impl Fire {
         for line in block {
             frame.row(line);
         }
-        // What is left goes above the prompt, so a conversation that has just
+        // What is left goes above the rule, so a conversation that has just
         // started sits at the top of the screen rather than the middle.
-        while frame.free() > 2 {
+        while frame.free() > 3 {
             frame.blank();
         }
+        frame.row(
+            self.theme
+                .paint(Role::Muted, &self.theme.glyph("─", "-").repeat(cols))
+                .to_string(),
+        );
 
         let label = visible_width(MARKER);
         let (typed, cursor) = self.line.shown(cols.saturating_sub(label));
@@ -557,6 +569,24 @@ impl Fire {
         self.back = self.back.min(self.lines.len().saturating_sub(room));
         let end = self.lines.len() - self.back;
         &self.lines[end.saturating_sub(room)..end]
+    }
+
+    /// What the heading says on the right: the model, and how much
+    /// conversation there is.
+    ///
+    /// The count is the one fact about a resumed chat that is nowhere else on
+    /// the screen once its opening has scrolled away, and it is what tells a
+    /// reader whether the journal they named is the one they meant.
+    fn heading(&self) -> String {
+        match self.turns.len() {
+            0 => self.title.clone(),
+            1 => format!("{} {} 1 turn", self.title, self.theme.glyph("·", "-")),
+            turns => format!(
+                "{} {} {turns} turns",
+                self.title,
+                self.theme.glyph("·", "-")
+            ),
+        }
     }
 
     /// The keys on the left, where the reader is on the right.
@@ -608,7 +638,9 @@ impl Fire {
 /// than sent; that Ctrl-C and Ctrl-D are told apart; that arriving lines do
 /// not move a window a reader has scrolled back; that a resize composes the
 /// conversation again and a search open at the time survives it; and that a
-/// line longer than the row keeps the cursor on the row.
+/// line longer than the row keeps the cursor on the row; and that the screen
+/// carries a rule between what was said and what is being typed, and a
+/// heading that counts the turns.
 ///
 /// Features NOT tested here: what a turn's lines say (owned by
 /// `render::timeline` and `render::live`), what the editor does with a key
@@ -1042,6 +1074,48 @@ mod tests {
             top.iter().any(|row| row.contains("turn 1")),
             "back did not reach the first turn: {top:?}"
         );
+    }
+
+    /// TC-CLI-FIRE-14: the rule between the conversation and the composer.
+    /// Expected: one row of the charset's own line, the full width, directly
+    /// above the prompt. What a reader is typing has not been said yet, and
+    /// without a line between them a half-written question reads as the newest
+    /// thing on the transcript.
+    #[test]
+    fn a_rule_separates_what_was_said_from_what_is_being_typed() {
+        let mut view = fire();
+        view.note("something said");
+        typing(&mut view, "half a question");
+
+        let drawn = rows(&mut view, ROWS);
+        assert_eq!(drawn[ROWS - 3], "─".repeat(COLS), "no rule: {drawn:?}");
+        assert_eq!(drawn[ROWS - 2], "> half a question", "{drawn:?}");
+
+        // A terminal that cannot draw the line gets the one it can.
+        let mut plain = Fire::new(Theme::new(false, Charset::Ascii), COLS, "m", false);
+        plain.note("something said");
+        let drawn = rows_at(&mut plain, COLS, ROWS);
+        assert_eq!(drawn[ROWS - 3], "-".repeat(COLS), "{drawn:?}");
+    }
+
+    /// TC-CLI-FIRE-15: the heading, on a conversation of none, one and three
+    /// turns.
+    /// Expected: the model alone, then the model and the count, singular and
+    /// plural. Once the opening page has scrolled away the count is the one
+    /// fact about a resumed journal that is nowhere else on the screen, and it
+    /// is what tells a reader whether the journal they named is the one they
+    /// meant.
+    #[test]
+    fn the_heading_says_how_much_conversation_there_is() {
+        let mut view = fire();
+        assert!(rows(&mut view, ROWS)[0].ends_with("chat on mock-echo-1"));
+
+        view.push(&turn_start(1));
+        assert!(rows(&mut view, ROWS)[0].ends_with("mock-echo-1 · 1 turn"));
+
+        view.push(&turn_start(2));
+        view.push(&turn_start(3));
+        assert!(rows(&mut view, ROWS)[0].ends_with("mock-echo-1 · 3 turns"));
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.

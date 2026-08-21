@@ -380,6 +380,13 @@ Walking past the last turn lands on the foot of the conversation and walking bef
 on its top: a reader going one way or the other is heading for that end, and neither is a refusal
 to move.
 The turn's own line numbers are kept beside the search's, and found again for the same reason.
+
+One row of the screen says nothing: the rule between the conversation and the row being typed on.
+What a reader is typing has not been said yet, and without a line between them a half-written
+question reads as the newest thing on the transcript - the web panel draws the same separation and
+gets it from a border where a terminal has to spend a row.
+The heading carries the model and how many turns are on the journal, which is the one fact about a
+resumed conversation that is nowhere else on the screen once its opening page has scrolled away.
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
