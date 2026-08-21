@@ -188,59 +188,74 @@ pub fn admit(batch: &[Incoming], limits: &Limits) -> Result<Vec<Attachment>, Adm
         });
     }
 
-    let mut admitted = Vec::with_capacity(batch.len());
-    for item in batch {
-        let name = item.name.trim().to_string();
-        if name.is_empty() {
-            return Err(AdmissionError::Unnamed {
-                name: item.name.clone(),
-            });
-        }
-        if item.bytes.is_empty() {
-            return Err(AdmissionError::Empty { name });
-        }
-        if item.bytes.len() > limits.max_item_bytes {
-            return Err(AdmissionError::ItemTooLarge {
-                name,
-                bytes: item.bytes.len(),
-                limit: limits.max_item_bytes,
-            });
-        }
-        if !limits.admits(&item.media_type) {
-            return Err(AdmissionError::MediaType {
-                name,
-                media_type: item.media_type.clone(),
-            });
-        }
+    batch.iter().map(|item| judge(item, limits)).collect()
+}
 
-        let dimensions = if item.media_type.starts_with("image/") {
-            let measured = measure(&item.bytes).ok_or_else(|| AdmissionError::Malformed {
-                name: name.clone(),
-                media_type: item.media_type.clone(),
-            })?;
-            if measured.pixels() > limits.max_pixels {
-                return Err(AdmissionError::TooManyPixels {
-                    name,
-                    width: measured.width,
-                    height: measured.height,
-                    pixels: measured.pixels(),
-                    limit: limits.max_pixels,
-                });
-            }
-            Some(measured)
-        } else {
-            None
-        };
-
-        admitted.push(Attachment {
-            id: address(&item.bytes),
-            name,
-            media_type: item.media_type.clone(),
-            bytes: item.bytes.len(),
-            dimensions,
+/// Judge one member of a batch the batch-wide limits have already passed.
+///
+/// Separate from [`admit`] so each function answers one question: that one is
+/// about the batch, this one is about an item, and neither has to be read to
+/// understand the other.
+fn judge(item: &Incoming, limits: &Limits) -> Result<Attachment, AdmissionError> {
+    let name = item.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AdmissionError::Unnamed {
+            name: item.name.clone(),
         });
     }
-    Ok(admitted)
+    if item.bytes.is_empty() {
+        return Err(AdmissionError::Empty { name });
+    }
+    if item.bytes.len() > limits.max_item_bytes {
+        return Err(AdmissionError::ItemTooLarge {
+            name,
+            bytes: item.bytes.len(),
+            limit: limits.max_item_bytes,
+        });
+    }
+    if !limits.admits(&item.media_type) {
+        return Err(AdmissionError::MediaType {
+            name,
+            media_type: item.media_type.clone(),
+        });
+    }
+    Ok(Attachment {
+        id: address(&item.bytes),
+        dimensions: picture(item, &name, limits)?,
+        name,
+        media_type: item.media_type.clone(),
+        bytes: item.bytes.len(),
+    })
+}
+
+/// The dimensions of an item that declares itself a picture, or `None` for one
+/// that does not.
+///
+/// This is where the pixel limit is applied, and it is applied to what the
+/// header declares rather than to anything decoded - which is the whole reason
+/// the measurement is a header read.
+fn picture(
+    item: &Incoming,
+    name: &str,
+    limits: &Limits,
+) -> Result<Option<Dimensions>, AdmissionError> {
+    if !item.media_type.starts_with("image/") {
+        return Ok(None);
+    }
+    let measured = measure(&item.bytes).ok_or_else(|| AdmissionError::Malformed {
+        name: name.to_string(),
+        media_type: item.media_type.clone(),
+    })?;
+    if measured.pixels() > limits.max_pixels {
+        return Err(AdmissionError::TooManyPixels {
+            name: name.to_string(),
+            width: measured.width,
+            height: measured.height,
+            pixels: measured.pixels(),
+            limit: limits.max_pixels,
+        });
+    }
+    Ok(Some(measured))
 }
 
 /// Admit a batch, store its objects, and record them on the journal.

@@ -270,40 +270,12 @@ pub fn read_skill(path: &Path, fallback_name: &str, source: Source) -> Result<Sk
     let text = std::fs::read_to_string(path).map_err(|e| format!("it could not be read: {e}"))?;
     let (frontmatter, body) = split(&text);
 
-    let mut name = fallback_name.trim().to_string();
-    let mut description = String::new();
-    let mut model_invocable = true;
-
-    for (key, value) in frontmatter {
-        match key.as_str() {
-            "name" => {
-                if !value.trim().is_empty() {
-                    name = value.trim().to_string();
-                }
-            }
-            "description" => description = value.trim().to_string(),
-            "disable-model-invocation" => {
-                model_invocable = !boolean(&value).ok_or_else(|| {
-                    format!(
-                        "`disable-model-invocation` must be true or false, not {value:?}. A \
-                         spelling this build cannot read would silently offer a skill a person \
-                         meant to keep back"
-                    )
-                })?;
-            }
-            // A legacy or misspelled invocation key is refused rather than
-            // ignored, because ignoring it fails open: the skill stays in the
-            // model's catalogue, which is exactly what the key was written to
-            // prevent.
-            "disableModelInvocation" | "model-invocable" | "modelInvocable" => {
-                return Err(format!(
-                    "{key:?} is not a key this build reads; write \
-                     `disable-model-invocation: true`"
-                ))
-            }
-            _ => {}
-        }
-    }
+    let declared = read_frontmatter(frontmatter)?;
+    let name = declared
+        .name
+        .unwrap_or_else(|| fallback_name.trim().to_string());
+    let description = declared.description;
+    let model_invocable = declared.model_invocable;
 
     if name.is_empty() {
         return Err("it has no name, and its file name gave none either".into());
@@ -321,6 +293,52 @@ pub fn read_skill(path: &Path, fallback_name: &str, source: Source) -> Result<Sk
         path: path.to_path_buf(),
         model_invocable,
     })
+}
+
+/// What a skill file's frontmatter declared.
+#[derive(Debug, Default)]
+struct Declared {
+    /// `None` when the file named none, so the caller's fallback stands.
+    name: Option<String>,
+    description: String,
+    model_invocable: bool,
+}
+
+/// Read the keys this build knows out of a frontmatter block.
+///
+/// A key it does not know is ignored, so a file carrying metadata for another
+/// tool still loads here. The exception is a *misspelling of a key this build
+/// does know*: those are refused, because ignoring one fails open - the skill
+/// stays in the model's catalogue, which is exactly what the key was written to
+/// prevent.
+fn read_frontmatter(pairs: Vec<(String, String)>) -> Result<Declared, String> {
+    let mut declared = Declared {
+        model_invocable: true,
+        ..Declared::default()
+    };
+    for (key, value) in pairs {
+        match key.as_str() {
+            "name" => declared.name = Some(value.trim().to_string()).filter(|n| !n.is_empty()),
+            "description" => declared.description = value.trim().to_string(),
+            "disable-model-invocation" => {
+                declared.model_invocable = !boolean(&value).ok_or_else(|| {
+                    format!(
+                        "`disable-model-invocation` must be true or false, not {value:?}. A \
+                         spelling this build cannot read would silently offer a skill a person \
+                         meant to keep back"
+                    )
+                })?;
+            }
+            "disableModelInvocation" | "model-invocable" | "modelInvocable" => {
+                return Err(format!(
+                    "{key:?} is not a key this build reads; write \
+                     `disable-model-invocation: true`"
+                ))
+            }
+            _ => {}
+        }
+    }
+    Ok(declared)
 }
 
 /// The boolean spellings a frontmatter value may use.
