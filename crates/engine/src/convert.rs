@@ -108,6 +108,12 @@ pub fn turn_error(
         // the one every internal fault asks for: report it. Retrying sends the
         // same sections through the same registry.
         TurnError::Prompt(e) => internal(format!("the system prompt could not be assembled: {e}")),
+        // A listener with a bug is this build's fault, not the caller's and not
+        // the provider's, so it takes the code every internal fault takes.
+        // Retrying would run the same listener over the same input, so there is
+        // nothing for the reader to do but report it - which is exactly what
+        // `Internal` tells a surface.
+        TurnError::Plugin(fault) => internal(format!("a plugin listener panicked: {fault}")),
         TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
             RpcError::new(
                 ErrorCode::MissingCredential,

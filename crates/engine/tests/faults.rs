@@ -163,6 +163,7 @@ fn every_shape_a_turn_can_fail_in_has_a_known_code() {
             name: "modle".to_string(),
             registered: vec!["model".to_string()],
         }),
+        TurnError::Plugin("a listener with a bug".to_string()),
     ];
 
     for shape in shapes {
@@ -170,6 +171,29 @@ fn every_shape_a_turn_can_fail_in_has_a_known_code() {
         assert!(fault.kind().is_some(), "{fault:?}");
         assert!(!fault.message.is_empty(), "{fault:?}");
     }
+}
+
+/// TC-FAULT-10: a contained plugin panic is this build's fault, and says so.
+///
+/// A listener with a bug is not the caller's mistake and not the provider's,
+/// and retrying would run the same listener over the same input, so the
+/// reader's only move is to report it - which is what `Internal` means in
+/// section 4.5, and what its exit status of 1 tells a script.
+///
+/// Input: the failure a contained decision-listener panic produces.
+/// Expected: `Internal`, exit 1, carrying the panic's own words so the report
+/// names the bug rather than only its category.
+#[test]
+fn a_contained_plugin_panic_is_internal_and_carries_its_message() {
+    let fault = mapped(TurnError::Plugin("assembling went wrong".to_string()));
+
+    assert_eq!(fault.kind(), Some(ErrorCode::Internal));
+    assert_eq!(ErrorCode::Internal.exit_status(), 1);
+    assert!(
+        fault.message.contains("assembling went wrong"),
+        "the panic's own words reach the report: {}",
+        fault.message
+    );
 }
 
 /// TC-FAULT-8: a settings document that cannot be booted on names its path.
