@@ -76,8 +76,15 @@ pub struct EngineConfig {
     pub provider_retry: BTreeMap<String, tetanus_turn::llm::retry::RetryPolicy>,
     /// The adapter behind each provider a session may name.
     pub providers: Arc<dyn Providers>,
-    /// The tools every turn on this engine can call.
+    /// The tools every turn on this engine can call, and the list
+    /// `catalog.tools` advertises.
     pub tools: Arc<ToolRegistry>,
+    /// Builds one session's own tools against that session's interrupt, for a
+    /// composition whose tools hold work outside the process - a shell command
+    /// is the case it exists for. `None` shares [`EngineConfig::tools`] with
+    /// every session, which is right for tools that touch nothing an interrupt
+    /// would have to reach.
+    pub session_tools: Option<crate::agent::SessionTools>,
     /// The layered config the caller resolved. The engine does not read it to
     /// configure itself - the fields above are already resolved - it reports
     /// its provenance, so `config.dump` can say where a value came from.
@@ -100,6 +107,9 @@ impl Default for EngineConfig {
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
             tools: Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
+            // The library composes no tool that leaves the process; the
+            // binary does, and sets this when it does.
+            session_tools: None,
             resolved: Arc::new(tetanus_config::Config::default()),
         }
     }
@@ -132,6 +142,7 @@ impl HarnessEngine {
                 config.provider_retry.clone(),
                 config.tool_order.clone(),
                 config.max_parallel_tool_calls,
+                config.session_tools.clone(),
             )),
             catalogs: Catalogs::new(&config),
         }

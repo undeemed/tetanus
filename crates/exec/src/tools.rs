@@ -100,6 +100,30 @@ impl ShellTools {
         registry
     }
 
+    /// Register the tools, or - on a host whose shell is missing - register one
+    /// `shell` tool that answers every call with the refusal.
+    ///
+    /// A composition that dropped the tools silently would leave the model
+    /// with no shell and no way to find out why: it would look like a build
+    /// that never had one. A binary that refused to start would be worse,
+    /// because every other tool still works. So the refusal becomes the tool's
+    /// answer, once per call, in the words [`BackendError`] uses.
+    pub fn register_or_explain(
+        registry: &mut ToolRegistry,
+        backend: Arc<dyn ShellBackend>,
+        config: ShellConfig,
+        session_config: SessionConfig,
+        interrupt: Arc<Interrupt>,
+    ) {
+        match Self::new(backend, config, session_config, interrupt) {
+            Ok(tools) => tools.register(registry),
+            Err(refused) => {
+                tracing::warn!(%refused, "the shell tools are unavailable on this host");
+                registry.register(Arc::new(MissingShell(refused.to_string())));
+            }
+        }
+    }
+
     /// Send incremental output here while a command runs.
     pub fn watch(&self, sink: Arc<dyn OutputSink>) {
         *self.watching.lock().expect("no panic holds this lock") = Some(sink);
@@ -418,6 +442,39 @@ impl Tool for ShellListTool {
             })
             .collect();
         Ok(ToolOutcome::ok(rows.join("\n")))
+    }
+}
+
+/// The `shell` tool on a host that has no shell to run.
+///
+/// It advertises itself so the model can see that a shell exists as a concept
+/// here, and answers every call with the deployment fault that stopped it -
+/// which is something a model can report to a human, unlike a tool that was
+/// never registered.
+struct MissingShell(String);
+
+#[async_trait::async_trait]
+impl Tool for MissingShell {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: SHELL.into(),
+            description: format!(
+                "Unavailable in this deployment: {}. Calling it reports the same thing.",
+                self.0
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The command line that would have run." },
+                },
+                "required": ["command"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    async fn execute(&self, _arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        Err(ToolError::Failed(SHELL.into(), self.0.clone()))
     }
 }
 

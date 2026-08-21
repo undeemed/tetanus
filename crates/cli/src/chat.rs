@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::boot_with;
 use tetanus_turn::log::topic;
 use tetanus_turn::{TurnConfig, TurnEngine};
 use tetanus_ui::{tame_line, Policy, Ui};
@@ -147,8 +147,17 @@ pub async fn chat<W: Write>(
     let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
         .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &args.session)))?;
 
-    let ctx = boot(bus, adapter, Arc::new(crate::registry()), log.clone())
-        .map_err(|err| crate::report(policy, &err.to_string(), None))?;
+    // The tools and the loop share one stop switch, so Ctrl-C reaches a
+    // command a turn started rather than only the step boundary.
+    let interrupt = tetanus_turn::interrupt::Interrupt::new();
+    let ctx = boot_with(
+        bus,
+        adapter,
+        Arc::new(crate::registry(&interrupt)),
+        log.clone(),
+        Arc::clone(&interrupt),
+    )
+    .map_err(|err| crate::report(policy, &err.to_string(), None))?;
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {

@@ -100,6 +100,9 @@ impl EngineConfig {
             provider_retry: crate::retry::provider_policies(&settings)?,
             providers: base.providers,
             tools: base.tools,
+            // A document names no tools, so a composer's own factory is
+            // carried through settings resolution untouched.
+            session_tools: base.session_tools,
             resolved: Arc::new(settings),
         })
     }

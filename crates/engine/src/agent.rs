@@ -18,7 +18,8 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, TurnSummary, Usage};
 use tetanus_session::{SessionEvent, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::boot_with;
+use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::llm::retry::{self, RetryPolicy};
 use tetanus_turn::llm::{mock, LlmAdapter};
 use tetanus_turn::log::topic;
@@ -44,6 +45,21 @@ pub trait Providers: Send + Sync {
             .find(|adapter| adapter.provider() == provider)
     }
 }
+
+/// Tools built for one session, against the interrupt that session's turns run
+/// under.
+///
+/// A tool that starts a child process needs the same stop switch the loop
+/// reads, and every session has a switch of its own: one registry shared
+/// across sessions would mean interrupting one session killed another's
+/// commands. A composition that has such tools supplies this; a composition
+/// whose tools touch nothing outside the process leaves it unset and every
+/// session shares [`EngineConfig::tools`](crate::EngineConfig::tools).
+///
+/// The registry it builds must hold the same tool names as `tools`, which is
+/// what a catalog advertises and what a configured tool order was read
+/// against.
+pub type SessionTools = Arc<dyn Fn(&Arc<Interrupt>) -> Arc<ToolRegistry> + Send + Sync>;
 
 /// The offline default: the deterministic mock adapter and nothing else, so a
 /// build with no configuration still runs a full turn with no key.
@@ -97,6 +113,9 @@ pub struct Runtime {
     /// How many parallel-safe tool calls of one step every turn on this engine
     /// may have in flight at once.
     max_parallel_tool_calls: NonZeroUsize,
+    /// Builds this session's own tools when the composition has tools that
+    /// need the session's interrupt; `None` shares `tools` with every session.
+    session_tools: Option<SessionTools>,
     agents: Mutex<BTreeMap<String, Arc<SessionAgent>>>,
 }
 
@@ -108,6 +127,7 @@ impl Runtime {
         provider_retry: BTreeMap<String, RetryPolicy>,
         tool_order: Option<ToolOrder>,
         max_parallel_tool_calls: NonZeroUsize,
+        session_tools: Option<SessionTools>,
     ) -> Self {
         Self {
             providers,
@@ -116,6 +136,7 @@ impl Runtime {
             provider_retry,
             tool_order,
             max_parallel_tool_calls,
+            session_tools,
             agents: Mutex::new(BTreeMap::new()),
         }
     }
@@ -255,11 +276,20 @@ impl Runtime {
             .providers
             .adapter(&session.header.provider)
             .ok_or_else(|| unknown_provider(&session.header.provider))?;
-        let ctx = boot(
+        // One switch per session, shared by the loop and by any tool holding
+        // work outside the process, so `agent.interrupt` on one session stops
+        // that session's commands and nobody else's.
+        let interrupt = Interrupt::new();
+        let tools = match &self.session_tools {
+            Some(build) => build(&interrupt),
+            None => Arc::clone(&self.tools),
+        };
+        let ctx = boot_with(
             session.bus.clone(),
             adapter,
-            Arc::clone(&self.tools),
+            tools,
             Arc::clone(&session.log) as Arc<dyn SessionLog>,
+            interrupt,
         )
         .map_err(internal)?;
         // The executor is scoped to the route the session named, which is
