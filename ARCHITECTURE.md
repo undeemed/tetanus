@@ -418,6 +418,14 @@ It is done inside [`truncate`](crates/ui/src/text.rs) and [`wrap`](crates/ui/src
 than at each renderer, because those two are exactly the functions that size foreign text, and a
 sequence taken out after it was measured would already have been paid for in columns the reader
 never sees.
+
+A fold keeps the column each line was written in, and lays what folds out of a line under it.
+Not every line a model writes is prose: a fenced block, a diff, a stack trace and a table carry
+meaning in their leading spaces, so a fold that dropped them would be changing the answer rather
+than laying it out - `    println!()` inside a function came back flush with the `fn` above it,
+which is a different program to read.
+The indent is put back only on a row that has something after it, because an indent alone is
+trailing space that draws nothing and still spends columns.
 `fit`, `light`, `plain` and `visible_width` keep the sequences they read, because those are the
 theme's own.
 A tool's colour is dropped rather than honoured: upstream's terminal card parses ANSI and draws the
