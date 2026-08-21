@@ -1146,3 +1146,81 @@ fn an_idle_session_refuses_with_a_null_turn() {
         "and a turn that is finishing names itself"
     );
 }
+
+/// TC-PROTO-40: contract section 4.4.2. A turn a guard stopped names which
+/// guard, and is a summary rather than an error.
+///
+/// The two reasons are separate because they need opposite answers. Running
+/// out of time usually means a bigger budget or a smaller task; looping means
+/// a bigger budget makes it strictly worse. One reason for both would leave a
+/// reader unable to tell "this needs longer" from "longer will not help",
+/// which is the only decision the reason is for.
+#[test]
+fn a_guarded_turn_names_which_guard_stopped_it() {
+    let out_of_time = summary("timed-out");
+    let looping = summary("repeated");
+
+    assert_eq!(
+        out_of_time.stop_reason,
+        StopReason::Other("timed-out".into())
+    );
+    assert_eq!(looping.stop_reason, StopReason::Other("repeated".into()));
+    assert_ne!(
+        out_of_time.stop_reason, looping.stop_reason,
+        "a reader must be able to tell them apart"
+    );
+
+    // Both are summaries: the turn produced whatever it produced, and the
+    // reason says why it stopped short rather than that it failed.
+    for stopped in [&out_of_time, &looping] {
+        assert_eq!(stopped.steps, 3);
+        assert_eq!(stopped.content, "as far as I got");
+        assert!(stopped.stop_veto.is_none());
+    }
+}
+
+/// TC-PROTO-41: contract section 4.4.2 and section 7.5. A guard reason is a
+/// value of the growable enum, not a new variant.
+///
+/// That is what makes this a minor change: an older surface renders it through
+/// the fallback it already has, exactly as it does `"interrupted"` and
+/// `"max-tokens"`. A case is worth having because the property is invisible in
+/// the type - `Other` looks like a parse failure until you know it is the
+/// mechanism.
+#[test]
+fn a_guard_reason_is_a_value_not_a_variant() {
+    for word in ["timed-out", "repeated"] {
+        let parsed: StopReason =
+            serde_json::from_value(json!(word)).expect("an unknown reason is not a parse failure");
+        assert_eq!(parsed, StopReason::Other(word.into()));
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("serialize"),
+            json!(word),
+            "and it travels back out as the word it arrived as"
+        );
+    }
+
+    // The named variants are untouched, so nothing an older build already knew
+    // has changed meaning.
+    assert_eq!(
+        serde_json::from_value::<StopReason>(json!("natural")).expect("parse"),
+        StopReason::Natural
+    );
+    assert_eq!(
+        serde_json::from_value::<StopReason>(json!("max-steps")).expect("parse"),
+        StopReason::MaxSteps
+    );
+}
+
+/// A closing summary carrying `reason`.
+fn summary(reason: &str) -> TurnSummary {
+    TurnSummary {
+        turn: 1,
+        steps: 3,
+        stop_reason: serde_json::from_value(json!(reason)).expect("a reason"),
+        stop_veto: None,
+        content: "as far as I got".into(),
+        duration_ms: None,
+        usage: None,
+    }
+}
