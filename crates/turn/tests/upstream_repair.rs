@@ -19,7 +19,7 @@ use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionEvent, SessionLog};
 use tetanus_turn::log::topic;
 use tetanus_turn::repair::{
-    interrupted_turn_closers, repair, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN,
+    interrupted_turn_closers, repair, Closer, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN,
 };
 
 /// TC-PORT-REPAIR-1: a healthy journal needs nothing.
@@ -320,8 +320,132 @@ fn applying_the_closers_leaves_one_contiguous_journal() {
     );
 }
 
-fn types(closers: &[tetanus_turn::repair::Closer]) -> Vec<&str> {
+fn types(closers: &[Closer]) -> Vec<&str> {
     closers.iter().map(|c| c.ty).collect()
+}
+
+/// TC-PORT-REPAIR-11: a question the crash caught mid-flight is closed, and a
+/// question that was already answered is not touched.
+///
+/// Contract section 4.4.7 requires an open turn to ask precisely so that this
+/// closer can exist: the turn is the unit repair balances, so a question
+/// written outside one could never be reached. This is the case that makes
+/// that requirement pay.
+///
+/// The outcome is `cancelled` and not `unavailable`: nobody was found to be
+/// missing, the process holding the question died. Both deny, so telling them
+/// apart costs nothing and keeps the transcript honest about which happened.
+///
+/// Input: an open turn holding one decided question and two undecided ones.
+/// Expected: one closer per undecided question, in the order they were asked,
+/// each naming its own id and carrying `cancelled`; nothing for the one already
+/// decided.
+#[test]
+fn an_undecided_question_is_closed_and_a_decided_one_is_left_alone() {
+    let events = vec![
+        event(0, topic::TURN_START, json!({ "turn": 1 })),
+        event(
+            1,
+            topic::APPROVAL_ASKED,
+            json!({ "id": "ask-1", "tool_name": "shell" }),
+        ),
+        event(
+            2,
+            topic::APPROVAL_DECIDED,
+            json!({ "id": "ask-1", "outcome": "rejected" }),
+        ),
+        event(
+            3,
+            topic::APPROVAL_ASKED,
+            json!({ "id": "ask-2", "tool_name": "shell" }),
+        ),
+        event(
+            4,
+            topic::APPROVAL_ASKED,
+            json!({ "id": "ask-3", "tool_name": "write" }),
+        ),
+    ];
+
+    let closers = interrupted_turn_closers(&events);
+    let decided: Vec<&Closer> = closers
+        .iter()
+        .filter(|c| c.ty == topic::APPROVAL_DECIDED)
+        .collect();
+
+    assert_eq!(decided.len(), 2, "one closer per undecided question");
+    assert_eq!(decided[0].data["id"], json!("ask-2"));
+    assert_eq!(decided[1].data["id"], json!("ask-3"));
+    for closer in decided {
+        assert_eq!(closer.data["outcome"], json!("cancelled"));
+        assert_eq!(closer.sources, None, "a decision cites nothing");
+    }
+}
+
+/// TC-PORT-REPAIR-12: the decision comes before the result of the call it was
+/// about.
+///
+/// A live turn decides and then dispatches, so a repaired journal that put the
+/// synthesized `tool/result` first would read as a call that ran before anyone
+/// allowed it - which is exactly the thing this seam exists to make impossible
+/// to say.
+///
+/// Input: an open turn and step with one undecided question and one unanswered
+/// tool call.
+/// Expected: the closers are `approval/decided`, then `tool/result`, then
+/// `step/end`, then `turn/end`.
+#[test]
+fn the_decision_closer_precedes_the_call_it_was_about() {
+    let events = vec![
+        event(0, topic::TURN_START, json!({ "turn": 1 })),
+        event(1, topic::STEP_START, json!({ "turn": 1, "step": 1 })),
+        event(2, topic::ASSISTANT_MESSAGE, asked("call-1")),
+        event(
+            3,
+            topic::APPROVAL_ASKED,
+            json!({ "id": "ask-1", "tool_name": "echo" }),
+        ),
+    ];
+
+    assert_eq!(
+        types(&interrupted_turn_closers(&events)),
+        [
+            topic::APPROVAL_DECIDED,
+            topic::TOOL_RESULT,
+            topic::STEP_END,
+            topic::TURN_END
+        ]
+    );
+}
+
+/// TC-PORT-REPAIR-13: a balanced journal that held questions still needs
+/// nothing.
+///
+/// The rule is about the *open* turn. A turn that closed decided everything it
+/// asked, because `request` appends the decision before it returns and the turn
+/// could not have ended inside it - so a closed turn with a dangling question
+/// is not a state the writer can produce, and repair must not invent closers
+/// for a journal that is already whole.
+///
+/// Input: a closed turn holding a complete audit pair.
+/// Expected: no closers at all.
+#[test]
+fn a_closed_turn_that_asked_and_decided_needs_no_closers() {
+    let events = vec![
+        event(0, topic::TURN_START, json!({ "turn": 1 })),
+        event(
+            1,
+            topic::APPROVAL_ASKED,
+            json!({ "id": "ask-1", "tool_name": "shell" }),
+        ),
+        event(
+            2,
+            topic::APPROVAL_DECIDED,
+            json!({ "id": "ask-1", "outcome": "allowed-once" }),
+        ),
+        event(3, topic::TURN_END, json!({ "turn": 1, "steps": 0 })),
+    ];
+
+    assert!(interrupted_turn_closers(&events).is_empty());
 }
 
 /// An `assistant/message` asking for one tool call.

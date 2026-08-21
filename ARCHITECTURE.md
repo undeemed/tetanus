@@ -170,6 +170,21 @@ copy of the log that produced it.
 Model history is *derived* from the log by `derive_messages`
 ([crates/turn/src/log.rs](crates/turn/src/log.rs)), never stored beside it.
 Model-visible means logged.
+The converse is not true, and the `approval/*` events are the case that shows it: they are durable
+and replayable and derive to nothing, because what the model learns about a denial is the
+`tool/result` it gets, not the audit of how that was decided.
+
+That audit is the decision seam ([crates/turn/src/approval.rs](crates/turn/src/approval.rs)), which
+decides whether one tool call may run.
+It is worth reading for one structural reason: the session's policy is a *fold over its own journal*
+rather than a field anywhere, so a resumed session is under the policy it was under with nothing to
+replay but the log.
+The seam fails closed - a grant is one specific word from an answerer that ran and returned, and
+every other path denies - and the `never` policy is applied by `request` itself rather than by a
+listener, because a listener registered later could be ordered ahead of a gate listener and answer
+first.
+It is also the one place `waterfall` is contained rather than loud: a question that cannot be
+answered has a defined answer, so a panicking answerer denies its call instead of failing the turn.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
 
