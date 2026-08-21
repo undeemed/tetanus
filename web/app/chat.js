@@ -5,6 +5,7 @@ import { approvalRow, askCard } from "./questions.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
+import { models, tools } from "./catalogue.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -58,6 +59,9 @@ const token = query.get("token") || manifest.token || "";
 // would be refused halfway through its own work.
 /** Every event this page has seen, in order, for the trace to fold. */
 const seen = [];
+
+/** The model this conversation is on, so the catalogue can mark it. */
+let running = null;
 
 let greeted = null;
 const post = async (method, params) => {
@@ -159,7 +163,7 @@ function connect() {
     settle("gone", "No server address. Open this page from `tetanus serve --frontend`, or add `?ws=ws://host:port`.");
     return;
   }
-  view.where.innerHTML = "";
+  view.where.replaceChildren();
   view.where.append("carrier ", strong(address));
   settle("", "Connecting…");
 
@@ -189,7 +193,8 @@ async function boot() {
   url.searchParams.set("session", session);
   history.replaceState(null, "", url);
 
-  view.who.innerHTML = "";
+  view.who.replaceChildren();
+  running = info.model;
   view.who.append("session ", strong(session), " · model ", strong(info.model));
   journal = info.path;
 
@@ -197,7 +202,7 @@ async function boot() {
   // after it, on one ordered channel. Reading history separately would race
   // the first live push.
   clearInterval(counting);
-  view.turns.innerHTML = "";
+  view.turns.replaceChildren();
   card = null;
   await call("session.subscribe", { session_id: session, from_seq: 0 });
   if (!view.turns.firstElementChild) empty();
@@ -684,3 +689,42 @@ document.getElementById("trace-open").onclick = () => {
   trace(traceBody, trajectory(seen));
 };
 document.getElementById("trace-close").onclick = () => traceDialog.close();
+
+// ---------------------------------------------------------------------------
+// What this deployment can run.
+// ---------------------------------------------------------------------------
+
+const catalogueDialog = document.getElementById("catalogue");
+
+document.getElementById("catalogue-open").onclick = async () => {
+  catalogueDialog.showModal();
+  const shown = document.getElementById("catalogue-models");
+  const listed = document.getElementById("catalogue-tools");
+  try {
+    const [providers, toolset] = await Promise.all([
+      window.TETANUS_CALL("catalog.models", {}),
+      window.TETANUS_CALL("catalog.tools", {}),
+    ]);
+    models(shown, providers.providers || [], {
+      current: running,
+      onStart: (provider, chosen) => {
+        // A new conversation, because that is what this contract offers:
+        // `session.create` takes a route and a model, and nothing moves a
+        // running session onto another one.
+        const url = new URL(location.href);
+        url.searchParams.delete("session");
+        url.searchParams.set("provider", provider);
+        url.searchParams.set("model", chosen);
+        location.href = url.toString();
+      },
+    });
+    tools(listed, toolset.tools || []);
+  } catch (err) {
+    shown.replaceChildren();
+    const said = document.createElement("p");
+    said.className = "list-empty";
+    said.textContent = err.message;
+    shown.append(said);
+  }
+};
+document.getElementById("catalogue-close").onclick = () => catalogueDialog.close();
