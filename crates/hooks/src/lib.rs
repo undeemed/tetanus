@@ -13,6 +13,7 @@
 
 pub mod claude_code;
 pub mod codec;
+pub mod codex;
 pub mod detached;
 pub mod events;
 pub mod invariant;
@@ -23,6 +24,7 @@ pub mod types;
 
 pub use claude_code::{parse_claude_code_config, MatcherGroup};
 pub use codec::parse_hook_output;
+pub use codex::parse_codex_config;
 pub use detached::{CancelSignal, DetachedRuns};
 pub use events::{append_hook_invoked, append_hook_result, summarize_stderr, HookDialect};
 pub use invariant::hook_stream_faults;
