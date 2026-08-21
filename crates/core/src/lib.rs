@@ -6,6 +6,7 @@
 pub mod context;
 pub mod effects;
 pub mod events;
+pub mod jobs;
 pub mod registry;
 pub mod services;
 pub mod spill;
