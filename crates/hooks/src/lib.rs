@@ -13,6 +13,7 @@
 
 pub mod codec;
 pub mod events;
+pub mod invariant;
 pub mod matcher;
 pub mod merge;
 pub mod runner;
@@ -20,6 +21,7 @@ pub mod types;
 
 pub use codec::parse_hook_output;
 pub use events::{append_hook_invoked, append_hook_result, summarize_stderr, HookDialect};
+pub use invariant::hook_stream_faults;
 pub use matcher::{matcher_diagnostic, matches_matcher, MatcherMode};
 pub use merge::merge_hook_outputs;
 pub use runner::{run_hook, CommandHook, HookExecutor, DEFAULT_HOOK_TIMEOUT_MS};
