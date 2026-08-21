@@ -35,6 +35,20 @@
 //! frame and what the reader asked for. That is what makes every case below a
 //! function of its inputs rather than a session driven through a pty.
 //!
+//! # Why a resize composes the conversation again
+//!
+//! A line was folded for the width it was written at, and a terminal that
+//! changes size makes that width a lie. Cut to a narrower frame it loses its
+//! tail; left alone on a wider one it keeps folds the window no longer needs,
+//! and the row that carried the tail of a fold reads as a sentence of its own.
+//!
+//! So this view keeps what was said rather than the rows it drew, and composes
+//! the rows again whenever the width changes. `Page` does not, and says why: a
+//! live view must not rewrite history under a reader who is still reading it.
+//! A resize is not the stream rewriting anything - it is the reader asking for
+//! a new shape, at the moment they ask - which is the same reading
+//! [`browse`](super::browse) makes of the same rule.
+//!
 //! # Why the editor answers first
 //!
 //! Every printable key belongs to the line being typed - including `?` and
@@ -49,6 +63,7 @@
 
 use std::time::Duration;
 
+use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::SessionEvent;
 use tetanus_ui::{bar, tame_line, visible_width, Frame, Key, Line, Role, Theme, Typed};
 
@@ -79,21 +94,44 @@ pub enum Act {
 }
 
 /// The conversation, as one screen.
+/// One thing that was said, in the form it was said in.
+///
+/// The rows a frame draws are composed from these and thrown away; these are
+/// kept. A width is a property of the terminal at the moment of drawing, and
+/// anything stored already folded is stored wrong the moment the window
+/// changes size.
+enum Said {
+    /// An event off the journal: the model's, the reader's, or a tool's.
+    Event(Box<SessionEvent>),
+    /// The card `/help` prints.
+    Card,
+    /// One line of this build's own words - a command it does not have, a
+    /// flush that did not work.
+    Note(String),
+    /// A turn that failed, worded the way every other surface words it.
+    Fault(Box<RpcError>),
+}
+
 pub struct Fire {
     theme: Theme,
     /// What the heading says on the right: the model this chat is on.
     title: String,
-    /// Every settled line of the conversation so far. Nothing is dropped: the
-    /// alternate screen has no scrollback, so a page that let a line go has
-    /// lost it.
+    /// The conversation, as what was said rather than as what was drawn.
+    /// Nothing is dropped: the alternate screen has no scrollback, so a view
+    /// that let a line go has lost it.
+    said: Vec<Said>,
+    /// The rows those make at the width the last frame was built for.
     lines: Vec<String>,
     /// How far back through the transcript the reader has scrolled, in rows.
     /// Zero is the foot of it, which is where an arriving line lands.
     back: usize,
     /// The line being typed, and where its cursor is.
     line: Line,
-    /// The composer for the turn that is running, when one is.
-    live: Option<Live>,
+    /// The composer every line goes through: the settled ones, and the block
+    /// that says what a running turn is waiting on. Always there, because a
+    /// resize composes the whole conversation again and a composer that only
+    /// existed while a turn ran would have nothing to compose it with.
+    live: Live,
     /// Whether the line the reader typed is still being answered.
     working: bool,
     /// The last size a frame was built for, so a scroll by a screenful knows
@@ -101,46 +139,110 @@ pub struct Fire {
     body: usize,
     width: usize,
     think: bool,
+    /// What the block says the turn is waiting on, kept so that a composer
+    /// built again after a resize opens on the phase the last one was in.
+    phase: String,
 }
 
 impl Fire {
     /// A view over a conversation that has not started yet.
     pub fn new(theme: Theme, width: usize, model: &str, think: bool) -> Self {
+        // The composer opens finished: a conversation nobody has asked
+        // anything in yet is not waiting on a turn, and the block that says
+        // what a turn is waiting on has nothing to say until one starts.
+        let mut live = Live::new(theme, width, "", think);
+        live.finish();
         Self {
             theme,
             title: format!("chat on {}", tame_line(model)),
+            said: Vec::new(),
             lines: Vec::new(),
             back: 0,
             line: Line::new(),
-            live: None,
+            live,
             working: false,
             body: 0,
             width,
             think,
+            phase: String::new(),
         }
     }
 
-    /// Put lines on the transcript, above the block.
+    /// Say one thing: put it on the conversation, and on the page.
     ///
-    /// The window does not move for them. A reader who has scrolled back keeps
+    /// The window does not move for it. A reader who has scrolled back keeps
     /// what is under their eye while the answer settles underneath, which is
     /// the same promise [`Page`](tetanus_ui::Page) makes and for the same
     /// reason: the alternative drags the page out from under them, one row per
     /// arriving line.
-    pub fn settle(&mut self, lines: Vec<String>) {
-        // A window that is back stays over the same lines, so it moves back by
-        // as many as arrived. Left alone, the transcript would slide one row
-        // under the reader's eye per line the turn writes.
+    fn say(&mut self, said: Said) {
+        let lines = self.compose(&said, self.width);
         if self.back > 0 {
             self.back += lines.len();
         }
         self.lines.extend(lines);
+        self.said.push(said);
     }
 
-    /// The theme this view paints with, for a caller composing a line to
-    /// settle onto its transcript.
-    pub fn theme(&self) -> &Theme {
-        &self.theme
+    /// The card `/help` prints, on the conversation.
+    pub fn card(&mut self) {
+        self.say(Said::Card);
+    }
+
+    /// One line of this build's own words.
+    pub fn note(&mut self, said: &str) {
+        self.say(Said::Note(said.to_string()));
+    }
+
+    /// A turn that failed, worded the way every other surface words it.
+    pub fn fault(&mut self, error: &RpcError) {
+        self.say(Said::Fault(Box::new(error.clone())));
+    }
+
+    /// The rows one thing said makes at `cols`.
+    ///
+    /// Every kind of thing on this page composes here, so a resize has one
+    /// place to go through and no kind of line can be the one that was left
+    /// folded for the old width.
+    fn compose(&mut self, said: &Said, cols: usize) -> Vec<String> {
+        match said {
+            Said::Event(event) => self.live.push(event),
+            Said::Card => super::chat::card(&self.theme, cols),
+            Said::Note(text) => {
+                vec![self.theme.paint(Role::Warn, text).to_string()]
+            }
+            Said::Fault(error) => super::fault::lines(&self.theme, cols, error),
+        }
+    }
+
+    /// Compose the whole conversation again, for a terminal that changed size.
+    ///
+    /// The composer is built again with it, because a block folded for the old
+    /// width is as wrong as a settled line folded for it, and the phase it was
+    /// in is what it opens on.
+    ///
+    /// How far back the reader had scrolled is kept, in rows. A rewrap moves
+    /// every line, so a row count means something slightly different
+    /// afterwards; that is the price of the alternative, which is a page that
+    /// is visibly wrong until the reader scrolls it.
+    fn fill(&mut self, cols: usize) {
+        let back = self.back;
+        let said = std::mem::take(&mut self.said);
+        self.lines.clear();
+        self.back = 0;
+        self.live = Live::new(self.theme, cols, &self.phase, self.think);
+        for one in &said {
+            let lines = self.compose(one, cols);
+            self.lines.extend(lines);
+        }
+        // A view with no turn running has no block, and says so the way the
+        // turn ending said it.
+        if !self.working {
+            self.live.finish();
+        }
+        self.said = said;
+        self.back = back;
+        self.width = cols;
     }
 
     /// The model this conversation is on, as the heading says it.
@@ -156,16 +258,15 @@ impl Fire {
     /// as ordinary lines: nothing about them is live, and the block that says
     /// what a turn is waiting on has nothing to say about a turn that ended.
     pub fn history(&mut self, events: &[SessionEvent]) {
-        let mut past = Live::new(self.theme, self.width, "", self.think);
         for event in events {
-            let settled = past.push(event);
-            self.settle(settled);
+            self.say(Said::Event(Box::new(event.clone())));
         }
     }
 
     /// A turn has begun: what arrives from here is drawn as it arrives.
     pub fn started(&mut self, phase: &str) {
-        self.live = Some(Live::new(self.theme, self.width, phase, self.think));
+        self.phase = phase.to_string();
+        self.live = Live::new(self.theme, self.width, phase, self.think);
         self.working = true;
         // The reader asked for this turn, so they are shown it: a question
         // sent from three screens back would otherwise be answered off-screen.
@@ -174,30 +275,18 @@ impl Fire {
 
     /// One event off the journal, while a turn is running.
     pub fn push(&mut self, event: &SessionEvent) {
-        let settled = match &mut self.live {
-            Some(live) => live.push(event),
-            // A journal can grow when no turn of this view's is running - a
-            // resumed conversation is read the same way - and those lines are
-            // as settled as any other.
-            None => return,
-        };
-        self.settle(settled);
+        self.say(Said::Event(Box::new(event.clone())));
     }
 
     /// The turn is over, however it ended.
     pub fn finished(&mut self) {
-        if let Some(live) = &mut self.live {
-            live.finish();
-        }
-        self.live = None;
+        self.live.finish();
         self.working = false;
     }
 
     /// Advance the spinner. The caller's clock, not this module's.
     pub fn tick(&mut self) {
-        if let Some(live) = &mut self.live {
-            live.tick();
-        }
+        self.live.tick();
     }
 
     /// Read one keystroke.
@@ -260,11 +349,10 @@ impl Fire {
 
     /// The whole screen as of now, for a turn that has been running `spent`.
     pub fn frame(&mut self, cols: usize, rows: usize, spent: Duration) -> Frame {
-        self.resize(cols);
-        let block = match &self.live {
-            Some(live) => live.block(spent),
-            None => Vec::new(),
-        };
+        if cols != self.width {
+            self.fill(cols);
+        }
+        let block = self.live.block(spent);
         let body = rows.saturating_sub(CHROME);
         self.body = body;
         let block = &block[block.len().saturating_sub(body)..];
@@ -295,17 +383,6 @@ impl Fire {
         // The one row on this screen the terminal's own cursor belongs on.
         frame.cursor(rows.saturating_sub(2), label + cursor);
         frame
-    }
-
-    /// Compose at a new width, after the terminal was resized under the view.
-    fn resize(&mut self, cols: usize) {
-        if cols == self.width {
-            return;
-        }
-        self.width = cols;
-        if let Some(live) = &mut self.live {
-            live.resize(cols);
-        }
     }
 
     /// The slice of the transcript this frame shows, `room` rows of it.
@@ -412,6 +489,35 @@ mod tests {
         )
     }
 
+    /// One frame at a stated width, as rows of text.
+    fn rows_at(view: &mut Fire, cols: usize, rows: usize) -> Vec<String> {
+        let frame = view.frame(cols, rows, Duration::ZERO);
+        let mut ui = buffered(theme(), cols);
+        frame.paint(&mut ui).expect("paint");
+        ui.contents()
+            .trim_start_matches("\x1b[H")
+            .split("\r\n")
+            .map(|row| {
+                row.split('\x1b')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A journal event carrying one message.
+    fn said_by(who: &str, text: &str) -> SessionEvent {
+        SessionEvent {
+            ty: format!("{who}/message").replace("you/", "user/"),
+            seq: 1,
+            time: 0,
+            data: serde_json::json!({ "content": text, "turn": 1 }),
+            source_event_seqs: None,
+        }
+    }
+
     fn typing(view: &mut Fire, text: &str) {
         for char in text.chars() {
             assert_eq!(view.key(Key::Char(char)), Act::Go);
@@ -428,7 +534,8 @@ mod tests {
     #[test]
     fn the_prompt_is_the_second_to_last_row_and_the_cursor_is_on_it() {
         let mut view = fire();
-        view.settle(vec!["turn 1".into(), "  you   hello".into()]);
+        view.note("turn 1");
+        view.note("  you   hello");
         typing(&mut view, "next");
 
         let rows = rows(&mut view, ROWS);
@@ -491,7 +598,9 @@ mod tests {
     #[test]
     fn the_window_moves_only_when_the_reader_moves_it() {
         let mut view = fire();
-        view.settle((1..=40).map(|n| format!("line {n}")).collect());
+        for n in 1..=40 {
+            view.note(&format!("line {n}"));
+        }
         rows(&mut view, ROWS);
 
         assert_eq!(view.key(Key::Up), Act::Go);
@@ -499,7 +608,7 @@ mod tests {
         let back = rows(&mut view, ROWS);
         assert!(back[ROWS - 1].contains("2 back"), "{back:?}");
 
-        view.settle(vec!["line 41".into()]);
+        view.note("line 41");
         let after = rows(&mut view, ROWS);
         assert_eq!(
             back[2], after[2],
@@ -513,6 +622,80 @@ mod tests {
             end.iter().any(|row| row.contains("line 41")),
             "the foot is not the newest line: {end:?}"
         );
+    }
+
+    /// TC-CLI-FIRE-7: the same conversation at two widths.
+    /// Expected: the rows are composed again for the width the frame is built
+    /// at - nothing is cut with an ellipsis, and no fold from the old width
+    /// survives into the new one. A line folded for a hundred columns and then
+    /// drawn on forty-six loses its tail to the cut, and the row that carried
+    /// the tail of the old fold reads as a sentence of its own.
+    #[test]
+    fn a_resize_composes_the_conversation_again() {
+        let mut view = Fire::new(theme(), 100, "mock-echo-1", false);
+        view.push(&said_by(
+            "you",
+            &"a question long enough to fold ".repeat(3),
+        ));
+
+        let wide = rows_at(&mut view, 100, ROWS);
+        assert!(
+            wide.iter()
+                .any(|row| row.contains("a question long enough")),
+            "{wide:?}"
+        );
+
+        let narrow = rows_at(&mut view, 46, ROWS);
+        for row in &narrow {
+            assert!(visible_width(row) <= 46, "`{row}` overruns 46");
+        }
+        assert!(
+            !narrow.iter().any(|row| row.contains('\u{2026}')),
+            "a row was cut instead of composed again: {narrow:?}"
+        );
+        // Every word survives the rewrap, which a cut does not allow.
+        let said: String = narrow.join(" ");
+        assert!(
+            said.contains("a question long enough to fold"),
+            "{narrow:?}"
+        );
+
+        // And back again: the wide frame is the wide frame, not the narrow
+        // one with the folds still in it.
+        let again = rows_at(&mut view, 100, ROWS);
+        assert_eq!(wide, again, "widening did not undo the fold");
+    }
+
+    /// TC-CLI-FIRE-8: a card and a fault, narrowed and then widened again.
+    /// Expected: every row fits the window it is drawn in, and the sentence
+    /// the narrow window had to cut is whole again on the wide one. This build
+    /// words those two rows itself, and a page where the model's lines are
+    /// composed for the terminal and this build's are still composed for the
+    /// terminal before it is a page with two rules.
+    #[test]
+    fn everything_on_the_page_is_composed_again() {
+        let whole = "a sentence about a file long enough that a narrow window has to cut it";
+        let mut view = Fire::new(theme(), 90, "mock-echo-1", false);
+        view.card();
+        view.fault(&RpcError::new(tetanus_protocol::rpc::ErrorCode::Io, whole));
+
+        let wide = rows_at(&mut view, 90, ROWS + 6);
+        assert!(
+            wide.iter().any(|row| row.contains(whole)),
+            "the fault is not whole at 90: {wide:?}"
+        );
+
+        let narrow = rows_at(&mut view, 44, ROWS + 6);
+        for row in &narrow {
+            assert!(visible_width(row) <= 44, "`{row}` overruns 44");
+        }
+        assert!(
+            narrow.iter().any(|row| row.contains("/exit")),
+            "the card is not on the narrow page: {narrow:?}"
+        );
+
+        let again = rows_at(&mut view, 90, ROWS + 6);
+        assert_eq!(wide, again, "widening did not undo the cut");
     }
 
     /// TC-CLI-FIRE-5: the two ways out, told apart.
