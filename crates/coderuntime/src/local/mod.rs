@@ -31,7 +31,7 @@ pub mod program;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::types::{
     check_bindings, Abort, CodeRuntime, FailureKind, RunRequest, RunResult, SeamError,
@@ -46,15 +46,6 @@ pub const LANGUAGE: &str = "tetanus-script";
 
 /// The substrate, as [`CodeRuntime::isolation`] reports it.
 pub const ISOLATION: &str = "worker-thread";
-
-/// How long a worker gets to notice the stop flag before the runtime gives up
-/// waiting for it.
-///
-/// It is a diagnostic bound, not a containment one: the evaluator checks the
-/// flag every step, so the only way to reach it is a host binding that has
-/// blocked for ever - and the message says so rather than reporting a timeout
-/// the program caused.
-const REAP_GRACE: Duration = Duration::from_secs(5);
 
 /// Runs programs on worker threads in this process.
 pub struct LocalRuntime {
@@ -163,7 +154,12 @@ impl CodeRuntime for LocalRuntime {
         // The wall-clock ceiling is enforced from out here as well as inside
         // the evaluator, because a host binding that never returns is not
         // something the evaluator can interrupt: it is not running.
-        let ceiling = budget.wall + REAP_GRACE;
+        let ceiling = budget.wall + budget.reap_grace;
+        // Whether the worker is known to have finished. A thread that has
+        // answered can be joined at once; one that has not is inside a host
+        // binding, and joining it would make this call wait exactly as long as
+        // the binding does - which is the thing the ceiling exists to prevent.
+        let mut finished = true;
         let settled = match tokio::time::timeout(ceiling, wait).await {
             Ok(Ok(mut result)) => {
                 result.duration = started.elapsed();
@@ -180,6 +176,7 @@ impl CodeRuntime for LocalRuntime {
             },
             Err(_) => {
                 abort.stop();
+                finished = false;
                 RunResult {
                     duration: started.elapsed(),
                     ..RunResult::failed(
@@ -187,19 +184,31 @@ impl CodeRuntime for LocalRuntime {
                         format!(
                             "the run did not end within {}ms of its ceiling; a host binding is \
                              not returning",
-                            REAP_GRACE.as_millis()
+                            budget.reap_grace.as_millis()
                         ),
                     )
                 }
             }
         };
 
-        // Reclaim the thread rather than detaching it. It has already
-        // finished in every path but the one above, where the stop flag has
-        // just been set and the join is what proves it was noticed.
-        let reaped = tokio::task::spawn_blocking(move || worker.join()).await;
-        if matches!(reaped, Ok(Err(_))) {
-            tracing::error!("a code worker panicked; the run is reported as worker-exit");
+        if finished {
+            // It has answered, so joining it costs nothing and reclaims the
+            // thread here, where a caller can see that it happened.
+            let reaped = tokio::task::spawn_blocking(move || worker.join()).await;
+            if matches!(reaped, Ok(Err(_))) {
+                tracing::error!("a code worker panicked; the run is reported as worker-exit");
+            }
+        } else {
+            // Stuck in a host binding. It is counted as live for as long as
+            // that lasts - `live_workers` tells the truth rather than a
+            // comfortable number - and this reaps it whenever the binding
+            // finally returns, so the thread is not leaked either.
+            std::thread::Builder::new()
+                .name("tetanus-code-reaper".to_string())
+                .spawn(move || {
+                    let _ = worker.join();
+                })
+                .ok();
         }
         Ok(settled)
     }

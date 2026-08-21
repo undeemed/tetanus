@@ -184,11 +184,23 @@ pub struct Budget {
     /// binding the host is running takes its time, which is upstream's rule -
     /// a program is charged for what it does, not for what it waits on.
     pub fuel: u64,
-    /// Wall clock for the whole run, binding time included. The backstop for a
-    /// program that spends its life inside one slow binding.
+    /// Wall clock for the whole run, binding time included. The compute
+    /// budget above is fuel, and a host binding spends none of it - which is
+    /// upstream's split exactly: a program is charged for what it does, and
+    /// this ceiling is what still bounds one that mostly waits.
     pub wall: Duration,
     /// Logs and completion value together, in bytes.
     pub max_output_bytes: usize,
+    /// How long past [`Budget::wall`] the runtime waits for a worker that has
+    /// not come back.
+    ///
+    /// The evaluator reads the stop flag every step, so the only way to reach
+    /// this is a host binding that has blocked for ever: the worker is not
+    /// running the program, it is inside the caller's own code, and nothing
+    /// this crate can do will interrupt it. Reaching this bound is reported
+    /// as a timeout that names the binding as the reason rather than blaming
+    /// the program.
+    pub reap_grace: Duration,
 }
 
 impl Default for Budget {
@@ -199,6 +211,7 @@ impl Default for Budget {
             fuel: 5_000_000,
             wall: Duration::from_secs(30),
             max_output_bytes: 1024 * 1024,
+            reap_grace: Duration::from_secs(5),
         }
     }
 }
@@ -215,9 +228,6 @@ pub struct Run {
     abort: Abort,
     /// Steps since the clock was last read.
     since_clock: u64,
-    /// Time spent inside host bindings, which the compute budget does not
-    /// charge for.
-    binding_time: Duration,
 }
 
 impl Run {
@@ -241,7 +251,6 @@ impl Run {
             budget,
             abort,
             since_clock: 0,
-            binding_time: Duration::ZERO,
         }
     }
 
@@ -265,9 +274,7 @@ impl Run {
         self.since_clock += 1;
         if self.since_clock >= CLOCK_EVERY {
             self.since_clock = 0;
-            // Binding time is the caller's, not the program's, so it comes
-            // back off the clock before the ceiling is judged.
-            if self.started.elapsed().saturating_sub(self.binding_time) > self.budget.wall {
+            if self.started.elapsed() > self.budget.wall {
                 return Err(Stop::Budget(format!(
                     "the program ran past its wall-clock ceiling of {}ms",
                     self.budget.wall.as_millis()
@@ -275,6 +282,16 @@ impl Run {
             }
         }
         Ok(())
+    }
+
+    /// Read the clock at the next step, whatever the step count says.
+    ///
+    /// Called when something just took an unknown amount of time - a host
+    /// binding - because the periodic check is counted in steps, and a loop
+    /// that spends 20ms per iteration inside the host would otherwise run for
+    /// hundreds of iterations before the ceiling was even looked at.
+    fn clock_next_step(&mut self) {
+        self.since_clock = CLOCK_EVERY;
     }
 
     fn push_scope(&mut self) {
@@ -590,11 +607,11 @@ fn call(target: Val, args: Vec<Val>, state: &mut Run) -> Result<Val, Stop> {
                     )))
                 }
             };
-            // The clock stops for the host: a binding that takes a second is
-            // the caller's second, not the program's compute budget.
-            let started = Instant::now();
+            // No fuel is spent while the host runs: the compute budget counts
+            // steps, so a slow binding costs the wall clock and nothing else.
             let answer = body(&argument);
-            state.binding_time += started.elapsed();
+            // Time passed out there, and how much is unknown from in here.
+            state.clock_next_step();
             match answer {
                 Ok(value) => Ok(Val::from_json(&value)),
                 Err(why) => Err(Stop::Failed(format!("{name} failed: {why}"))),

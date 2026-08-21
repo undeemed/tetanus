@@ -41,6 +41,7 @@ fn runtime() -> LocalRuntime {
         fuel: 200_000,
         wall: std::time::Duration::from_secs(2),
         max_output_bytes: 4096,
+        reap_grace: std::time::Duration::from_millis(200),
     })
 }
 
