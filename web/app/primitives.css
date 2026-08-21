@@ -138,3 +138,19 @@
 /* Answered, and kept on the page: what was decided is part of the transcript. */
 .ask-done { border-color:var(--line); opacity:.75; }
 .ask-decided { margin:var(--gap-tight) 0; }
+
+/* --- the run's path --------------------------------------------------- */
+
+.trace-turn { border-bottom:1px solid var(--line); padding:var(--gap) var(--gap-wide); }
+.trace-head { display:flex; flex-wrap:wrap; gap:var(--gap); align-items:baseline;
+  font:var(--size-body)/1.5 var(--font-prose); color:var(--text-bright); }
+.trace-step { display:flex; flex-wrap:wrap; gap:var(--gap); align-items:baseline;
+  padding-left:var(--gap-wide); font:var(--size-small)/1.7 var(--font-code);
+  color:var(--text-muted); }
+.trace-name { color:var(--text); }
+.trace-took { color:var(--text-muted); }
+.trace-tool { color:var(--accent); }
+.trace-ok { color:var(--state-ok); }
+.trace-bad { color:var(--state-bad); }
+.trace-note { display:block; padding-left:var(--gap-wide);
+  font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }

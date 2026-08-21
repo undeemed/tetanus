@@ -2,6 +2,7 @@ import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
 import { approvalRow, askCard } from "./questions.js";
+import { trace, trajectory } from "./trajectory.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -53,6 +54,9 @@ const token = query.get("token") || manifest.token || "";
 // The same secret on the other door. The bridge admits a caller exactly as the
 // socket does, so a page that dialled with a token and posted without one
 // would be refused halfway through its own work.
+/** Every event this page has seen, in order, for the trace to fold. */
+const seen = [];
+
 let greeted = null;
 const post = async (method, params) => {
   const url = "/api/" + method + (token ? "?token=" + encodeURIComponent(token) : "");
@@ -271,6 +275,9 @@ function streaming(kind, who, delta) {
 }
 
 function drawn(event) {
+  // Kept whole. The trace is a fold over the journal, not a second stream to
+  // maintain, so a fact that reaches the page reaches it too.
+  seen.push(event);
   const data = event.data || {};
   switch (event.type) {
     case "session/start":
@@ -653,3 +660,16 @@ async function showSessions() {
 
 document.getElementById("sessions-open").onclick = showSessions;
 document.getElementById("sessions-close").onclick = () => sessionsDialog.close();
+
+// ---------------------------------------------------------------------------
+// The run's path.
+// ---------------------------------------------------------------------------
+
+const traceDialog = document.getElementById("trace");
+const traceBody = document.getElementById("trace-body");
+
+document.getElementById("trace-open").onclick = () => {
+  traceDialog.showModal();
+  trace(traceBody, trajectory(seen));
+};
+document.getElementById("trace-close").onclick = () => traceDialog.close();

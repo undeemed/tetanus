@@ -136,6 +136,9 @@
   <h1>tetanus chat</h1>
   <span class="meta" id="where">connecting…</span>
   <span class="meta" id="who"></span>
+  <button id="trace-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+    trace…
+  </button>
   <button id="sessions-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
     sessions…
   </button>
@@ -144,6 +147,12 @@
   </button>
   <span class="state" id="state">offline</span>
 </header>
+
+<dialog id="trace" class="modal">
+  <div class="modal-head"><h2 class="modal-title">What this run did</h2></div>
+  <div class="modal-body"><div id="trace-body" class="list"></div></div>
+  <div class="modal-foot"><button type="button" id="trace-close">Close</button></div>
+</dialog>
 
 <dialog id="sessions" class="modal">
   <div class="modal-head"><h2 class="modal-title">Conversations</h2></div>
