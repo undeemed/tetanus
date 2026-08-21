@@ -247,3 +247,145 @@ async fn a_call_with_nothing_to_run_is_refused_before_a_worker_exists() {
     }
     assert_eq!(runtime.live_workers(), 0);
 }
+
+/// TC-PORT-CODERT-29: a program calls the harness's own tools, and the turn
+/// spends one step on all of them.
+///
+/// Upstream: Code Mode itself - its bindings are async because a program
+/// calling a tool is the thing the seam exists for, and its worker awaits
+/// across a port to do it.
+///
+/// This is the gap the first pass named and left open: bindings were
+/// synchronous, so nothing could wire the tool registry in, and `run_code`
+/// could only call closures a composer wrote by hand.
+///
+/// Input: a registry holding `echo`, a `tools` namespace built from it, and a
+/// program that calls `echo` three times in a loop and returns what came back.
+/// Expected: one successful `tool/result` for the whole program; the three
+/// results inside its value; and the turn still one turn - three tool calls
+/// that cost one step rather than three.
+#[tokio::test]
+async fn a_program_calls_the_harnesss_own_tools_in_one_step() {
+    let registry = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
+    let namespace = tetanus_coderuntime::tool::tools_namespace(
+        "tools",
+        Arc::clone(&registry),
+        &["echo".to_string()],
+    )
+    .expect("echo is registered");
+
+    let outer = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(CodeTool::new(runtime()).binding(namespace)));
+
+    let turn = TurnFixture::new(
+        "code-tools",
+        outer,
+        Arc::new(ModelAsking {
+            tool: CodeTool::NAME.to_string(),
+            arguments: json!({
+                "program": r#"let out = [];
+                              let i = 0;
+                              while (i < 3) {
+                                let said = tools.echo({ text: "line " + i });
+                                out = push(out, said.content);
+                                i = i + 1;
+                              }
+                              return out;"#,
+            }),
+        }),
+    );
+
+    let outcome = turn.engine.run_turn("echo three lines").await.expect("ran");
+    assert_eq!(outcome.reason, StopReason::Natural);
+
+    let results = turn.tool_results();
+    assert_eq!(
+        results.len(),
+        1,
+        "three tool calls inside one program are one call to the turn: {results:?}"
+    );
+    let (name, ok, content) = &results[0];
+    assert_eq!(name, CodeTool::NAME);
+    assert!(ok, "{content}");
+    for line in ["line 0", "line 1", "line 2"] {
+        assert!(content.contains(line), "{line} is missing from {content}");
+    }
+}
+
+/// TC-PORT-CODERT-30: a tool that says no is a value the program reads, and a
+/// tool that cannot run is the program's failure.
+///
+/// Upstream: "bridges binding calls both ways and rejects the program-side
+/// call on a host rejection" - with the distinction this crate adds, because
+/// a tetanus tool has two ways of not working and a program should branch on
+/// one and stop on the other.
+///
+/// Input: a program calling `echo` with no `text` - which the tool refuses as
+/// invalid arguments - and one calling a member the namespace does not carry.
+/// Expected: the first ends the program with the tool's own words; the second
+/// names the member. Both are failures the model reads, and neither ends the
+/// turn.
+#[tokio::test]
+async fn a_tool_that_says_no_and_one_that_cannot_run_are_told_apart() {
+    let registry = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
+    let namespace =
+        tetanus_coderuntime::tool::tools_namespace("tools", registry, &["echo".to_string()])
+            .expect("echo is registered");
+    let tool = CodeTool::new(runtime()).binding(namespace);
+
+    let refused = tool
+        .execute(&json!({ "program": "return tools.echo({ wrong: 1 });" }))
+        .await
+        .expect_err("the tool refused the arguments");
+    assert!(
+        refused.to_string().contains("missing `text`"),
+        "the tool's own words reach the model: {refused}"
+    );
+
+    let absent = tool
+        .execute(&json!({ "program": "return tools.write({ text: 1 });" }))
+        .await
+        .expect_err("no such member");
+    assert!(
+        absent.to_string().contains("write"),
+        "the member is named: {absent}"
+    );
+}
+
+/// TC-PORT-CODERT-31: the tool that runs programs is not offered to them.
+///
+/// No upstream equivalent: its Code Mode composes the binding list from a
+/// tool set that never contains the code runtime itself, so the question does
+/// not arise there. It arises here because the namespace is built from this
+/// harness's own registry, and a program that can call `run_code` can nest
+/// runs until the machine gives - each one holding a worker thread while it
+/// waits for the next.
+///
+/// Input: a namespace asked to offer `run_code`, and one asked for a tool
+/// nobody registered.
+/// Expected: both refused, before any program exists, each saying why.
+#[test]
+fn the_tool_that_runs_programs_is_not_offered_to_them() {
+    let registry = Arc::new(ToolRegistry::new().with(Arc::new(EchoTool)));
+
+    let nested = tetanus_coderuntime::tool::tools_namespace(
+        "tools",
+        Arc::clone(&registry),
+        &[CodeTool::NAME.to_string()],
+    )
+    .expect_err("a program cannot be given the tool running it");
+    assert!(
+        nested.to_string().contains("nest runs"),
+        "the refusal says why: {nested}"
+    );
+
+    let missing =
+        tetanus_coderuntime::tool::tools_namespace("tools", registry, &["ghost".to_string()])
+            .expect_err("no such tool");
+    assert!(missing.to_string().contains("ghost"), "{missing}");
+    assert!(
+        missing.to_string().contains("echo"),
+        "the refusal lists what there is: {missing}"
+    );
+}

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::types::{Abort, Binding, FailureKind, Namespace};
+use crate::types::{Abort, FailureKind, HostCall, Member, Namespace};
 
 use super::program::{Expr, Stmt};
 
@@ -39,8 +39,15 @@ pub enum Val {
     Str(String),
     List(Vec<Val>),
     Map(BTreeMap<String, Val>),
-    Namespace(Arc<BTreeMap<String, Binding>>),
-    Function { name: String, body: Binding },
+    Namespace {
+        global: Arc<str>,
+        members: Arc<BTreeMap<String, Member>>,
+    },
+    Function {
+        namespace: Arc<str>,
+        name: String,
+        body: Member,
+    },
     Builtin(&'static str),
 }
 
@@ -54,7 +61,7 @@ impl Val {
             Val::Str(_) => "a string",
             Val::List(_) => "a list",
             Val::Map(_) => "an object",
-            Val::Namespace(_) => "a binding namespace",
+            Val::Namespace { .. } => "a binding namespace",
             Val::Function { .. } | Val::Builtin(_) => "a function",
         }
     }
@@ -101,7 +108,7 @@ impl Val {
                 .map(|(key, value)| value.to_json().map(|value| (key.clone(), value)))
                 .collect::<Result<serde_json::Map<String, Value>, String>>()
                 .map(Value::Object),
-            Val::Namespace(_) | Val::Function { .. } | Val::Builtin(_) => Err(format!(
+            Val::Namespace { .. } | Val::Function { .. } | Val::Builtin(_) => Err(format!(
                 "{} is not a value a program can return",
                 self.kind()
             )),
@@ -228,15 +235,32 @@ pub struct Run {
     abort: Abort,
     /// Steps since the clock was last read.
     since_clock: u64,
+    /// Where a call to a host-answered member goes. `None` when the caller
+    /// wired no bridge, which makes such a member a failure rather than a
+    /// wait nobody will answer.
+    host: Option<std::sync::mpsc::Sender<HostCall>>,
 }
 
 impl Run {
     pub fn new(budget: Budget, abort: Abort, bindings: &[Namespace]) -> Self {
+        Self::bridged(budget, abort, bindings, None)
+    }
+
+    /// The same, with a bridge to the host for the members it answers.
+    pub fn bridged(
+        budget: Budget,
+        abort: Abort,
+        bindings: &[Namespace],
+        host: Option<std::sync::mpsc::Sender<HostCall>>,
+    ) -> Self {
         let mut root: BTreeMap<String, Val> = BTreeMap::new();
         for namespace in bindings {
             root.insert(
                 namespace.global.clone(),
-                Val::Namespace(Arc::new(namespace.functions.clone())),
+                Val::Namespace {
+                    global: Arc::from(namespace.global.as_str()),
+                    members: Arc::new(namespace.functions.clone()),
+                },
             );
         }
         for builtin in BUILTINS {
@@ -251,6 +275,7 @@ impl Run {
             budget,
             abort,
             since_clock: 0,
+            host,
         }
     }
 
@@ -323,6 +348,37 @@ impl Run {
         Err(Stop::Failed(format!(
             "{name:?} is not defined; declare it with `let` before assigning to it"
         )))
+    }
+
+    /// Hand a call to the host and wait for the answer.
+    ///
+    /// The worker blocks here, which is exactly what it should do: the host is
+    /// awaiting a future on the runtime, and the program has nothing to run
+    /// until the answer arrives. The wait is bounded from outside, by the same
+    /// ceiling that bounds a synchronous binding that never returns, so a host
+    /// that stops answering does not hang the run for ever.
+    fn ask_host(
+        &mut self,
+        namespace: &str,
+        member: &str,
+        argument: Value,
+    ) -> Result<Result<Value, String>, Stop> {
+        let Some(host) = self.host.as_ref() else {
+            return Err(Stop::Failed(format!(
+                "{member:?} is answered by the host, and this run has no bridge to one"
+            )));
+        };
+        let (reply, answer) = std::sync::mpsc::channel();
+        host.send(HostCall {
+            namespace: namespace.to_string(),
+            member: member.to_string(),
+            argument,
+            reply,
+        })
+        .map_err(|_| Stop::Failed("the host stopped answering binding calls".to_string()))?;
+        answer
+            .recv()
+            .map_err(|_| Stop::Failed(format!("the host did not answer {member:?}")))
     }
 
     /// Add one log line, metered.
@@ -582,20 +638,17 @@ fn member(holder: &Val, name: &str) -> Result<Val, Stop> {
     match holder {
         // A name a namespace does not have is the program's mistake, and the
         // message lists what there is: the model can correct itself from it.
-        Val::Namespace(functions) => functions
+        Val::Namespace { global, members } => members
             .get(name)
             .map(|body| Val::Function {
+                namespace: Arc::clone(global),
                 name: name.to_string(),
-                body: Arc::clone(body),
+                body: body.clone(),
             })
             .ok_or_else(|| {
                 Stop::Failed(format!(
                     "this namespace has no {name:?}; it has: {}",
-                    functions
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<String>>()
-                        .join(", ")
+                    members.keys().cloned().collect::<Vec<String>>().join(", ")
                 ))
             }),
         // An absent key is null rather than a failure, so a program can test
@@ -612,24 +665,19 @@ fn member(holder: &Val, name: &str) -> Result<Val, Stop> {
 /// Call a binding or a builtin.
 fn call(target: Val, args: Vec<Val>, state: &mut Run) -> Result<Val, Stop> {
     match target {
-        Val::Function { name, body } => {
-            let argument = match args.len() {
-                0 => Value::Null,
-                1 => args[0].to_json().map_err(|why| {
-                    Stop::Failed(format!(
-                        "the argument to {name:?} is not lossless JSON: {why}"
-                    ))
-                })?,
-                _ => {
-                    return Err(Stop::Failed(format!(
-                        "{name:?} takes one argument; it was given {}",
-                        args.len()
-                    )))
-                }
+        Val::Function {
+            namespace,
+            name,
+            body,
+        } => {
+            let argument = one_argument(&name, &args)?;
+            // No fuel is spent while the host answers: the compute budget
+            // counts steps, so a slow member costs the wall clock and nothing
+            // else.
+            let answer = match &body {
+                Member::Here(body) => body(&argument),
+                Member::Host(_) => state.ask_host(&namespace, &name, argument)?,
             };
-            // No fuel is spent while the host runs: the compute budget counts
-            // steps, so a slow binding costs the wall clock and nothing else.
-            let answer = body(&argument);
             // Time passed out there, and how much is unknown from in here.
             state.clock_next_step();
             match answer {
@@ -639,6 +687,21 @@ fn call(target: Val, args: Vec<Val>, state: &mut Run) -> Result<Val, Stop> {
         }
         Val::Builtin(name) => builtin(name, args, state),
         other => Err(Stop::Failed(format!("{} is not callable", other.kind()))),
+    }
+}
+
+/// The one argument a member takes, as lossless JSON.
+fn one_argument(name: &str, args: &[Val]) -> Result<Value, Stop> {
+    match args.len() {
+        0 => Ok(Value::Null),
+        1 => args[0].to_json().map_err(|why| {
+            Stop::Failed(format!(
+                "the argument to {name:?} is not lossless JSON: {why}"
+            ))
+        }),
+        given => Err(Stop::Failed(format!(
+            "{name:?} takes one argument; it was given {given}"
+        ))),
     }
 }
 

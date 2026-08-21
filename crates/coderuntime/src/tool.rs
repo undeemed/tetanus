@@ -20,7 +20,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tetanus_turn::tools::{Tool, ToolError, ToolMode, ToolOutcome, ToolSchema};
 
-use crate::types::{CodeRuntime, Namespace, RunRequest, RunResult};
+use tetanus_turn::tools::{ToolCall, ToolRegistry};
+
+use crate::types::{CodeRuntime, Namespace, RunRequest, RunResult, SeamError};
 
 /// Run a program on a code runtime, as a tool.
 pub struct CodeTool {
@@ -143,6 +145,81 @@ impl Tool for CodeTool {
             )),
         }
     }
+}
+
+/// A namespace whose members are the harness's own tools.
+///
+/// This is what the seam was for. A model that has to spend one step per tool
+/// call spends five steps on a loop over five files; a program that can call
+/// them spends one, and the harness still decides which tools exist.
+///
+/// **The tools are named by the composer, never by the program.** A namespace
+/// built from the whole registry would grow a member every time a plugin
+/// registered one, including ones a deployment never meant a program to reach.
+///
+/// **`run_code` cannot be one of them.** A program that could call the tool
+/// that is running it is a program that can nest runs until something gives,
+/// and each nested run holds a worker thread while it waits.
+pub fn tools_namespace(
+    global: &str,
+    registry: Arc<ToolRegistry>,
+    offered: &[String],
+) -> Result<Namespace, SeamError> {
+    let mut namespace = Namespace::new(global);
+    for name in offered {
+        if name == CodeTool::NAME {
+            return Err(SeamError::Unsupported {
+                runtime: CodeTool::NAME.to_string(),
+                why: format!(
+                    "{} cannot be offered to the programs it runs: a program that can call it \
+                     can nest runs without end",
+                    CodeTool::NAME
+                ),
+            });
+        }
+        if registry.get(name).is_none() {
+            return Err(SeamError::Unsupported {
+                runtime: CodeTool::NAME.to_string(),
+                why: format!(
+                    "no tool called {name:?} to offer a program; registered: {}",
+                    registry
+                        .names()
+                        .cloned()
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ),
+            });
+        }
+        let held = Arc::clone(&registry);
+        let called = name.clone();
+        namespace = namespace.with_async(name.clone(), move |argument| {
+            let held = Arc::clone(&held);
+            let called = called.clone();
+            async move {
+                let call = ToolCall {
+                    // The program is one call's worth of a turn, so the id
+                    // says where it came from rather than pretending to be a
+                    // model-issued call.
+                    id: format!("program:{called}"),
+                    name: called.clone(),
+                    arguments: argument,
+                };
+                match held.execute(&call).await {
+                    // A tool that ran and said no is a value the program can
+                    // read, not a failure that ends it: `ok` is the field a
+                    // program branches on.
+                    Ok(outcome) => Ok(serde_json::json!({
+                        "ok": outcome.ok,
+                        "content": outcome.content,
+                    })),
+                    // A tool that could not run at all is the program's
+                    // failure, with the tool's own words.
+                    Err(refused) => Err(refused.to_string()),
+                }
+            }
+        });
+    }
+    Ok(namespace)
 }
 
 /// One run, as the model reads it.

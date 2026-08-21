@@ -11,14 +11,37 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// One host function the program may call.
+/// One host function the program may call, answered on the worker itself.
 ///
-/// It takes one JSON value and answers one, or a message the program sees as
-/// its own failure. Synchronous, and called on the worker: upstream's bindings
-/// are async because a Node worker can await across a port, and this crate has
-/// no such bridge yet - `docs/parity.md` carries the difference rather than a
-/// signature that pretends otherwise.
+/// Use this for work that is pure computation or a cheap lookup. Anything that
+/// awaits - a tool, a request, a file - is an [`AsyncBinding`], because a
+/// worker thread that blocks on a future is a worker thread nothing can drive.
 pub type Binding = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+
+/// One host function the program may call that the *host* answers.
+///
+/// This is upstream's shape: its bindings are async because a Node worker
+/// awaits across a port, and the same bridge is what lets a program here call
+/// a tool. The worker sends the call to the host and blocks on the reply; the
+/// host awaits the future on the runtime, where futures can actually be
+/// driven, and sends the answer back.
+pub type AsyncBinding = Arc<
+    dyn Fn(
+            Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A namespace member: answered here, or answered by the host.
+#[derive(Clone)]
+pub enum Member {
+    /// Runs on the worker. No fuel is spent while it does.
+    Here(Binding),
+    /// Runs on the host, over the bridge. The worker waits.
+    Host(AsyncBinding),
+}
 
 /// A named group of bindings, exposed to the program as one global object.
 #[derive(Clone, Default)]
@@ -28,7 +51,7 @@ pub struct Namespace {
     /// target language, and no slot a backend owns.
     pub global: String,
     /// The callable members, by the exact name the program writes.
-    pub functions: std::collections::BTreeMap<String, Binding>,
+    pub functions: std::collections::BTreeMap<String, Member>,
 }
 
 impl std::fmt::Debug for Namespace {
@@ -48,14 +71,41 @@ impl Namespace {
         }
     }
 
+    /// A member the worker answers itself.
     pub fn with(
         mut self,
         name: impl Into<String>,
         body: impl Fn(&Value) -> Result<Value, String> + Send + Sync + 'static,
     ) -> Self {
-        self.functions.insert(name.into(), Arc::new(body));
+        self.functions
+            .insert(name.into(), Member::Here(Arc::new(body)));
         self
     }
+
+    /// A member the host answers, over the bridge.
+    ///
+    /// The future is built per call and must be `Send`: it is awaited on the
+    /// runtime, not on the worker, which is the whole point.
+    pub fn with_async<F, Fut>(mut self, name: impl Into<String>, body: F) -> Self
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Value, String>> + Send + 'static,
+    {
+        let bridged: AsyncBinding = Arc::new(move |argument| Box::pin(body(argument)));
+        self.functions.insert(name.into(), Member::Host(bridged));
+        self
+    }
+}
+
+/// One call from a program to a host-answered member, in flight.
+///
+/// The worker builds it, the host serves it. `reply` is a plain channel rather
+/// than a oneshot because the waiting side is a thread, not a task.
+pub struct HostCall {
+    pub namespace: String,
+    pub member: String,
+    pub argument: Value,
+    pub reply: std::sync::mpsc::Sender<Result<Value, String>>,
 }
 
 /// Ask the run to stop. Shared with the caller, read by the evaluator on every

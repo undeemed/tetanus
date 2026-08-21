@@ -33,8 +33,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::collections::BTreeMap;
+use std::sync::mpsc;
+
 use crate::types::{
-    check_bindings, Abort, CodeRuntime, FailureKind, RunRequest, RunResult, SeamError,
+    check_bindings, Abort, AsyncBinding, CodeRuntime, FailureKind, HostCall, Member, Namespace,
+    RunRequest, RunResult, SeamError,
 };
 
 pub use eval::Budget;
@@ -135,13 +139,17 @@ impl CodeRuntime for LocalRuntime {
         let closing = self.closing.clone();
         let abort = request.abort.clone();
         let (answer, wait) = tokio::sync::oneshot::channel();
+        // The bridge: the worker sends host-answered calls down this, and the
+        // wait below serves them while the program is blocked on the reply.
+        let (calls, asked) = tokio::sync::mpsc::unbounded_channel::<HostCall>();
+        let members = host_members(&request.bindings);
 
         let started = Instant::now();
         let worker = std::thread::Builder::new()
             .name("tetanus-code-worker".to_string())
             .spawn(move || {
                 let _census = Census::open(&live);
-                let outcome = evaluate(&request, budget, &closing);
+                let outcome = evaluate(&request, budget, &closing, calls);
                 // The receiver is gone when the caller stopped waiting; the
                 // work is done either way and there is nobody to tell.
                 let _ = answer.send(outcome);
@@ -154,7 +162,15 @@ impl CodeRuntime for LocalRuntime {
         // The wall-clock ceiling is enforced from out here as well as inside
         // the evaluator, because a host binding that never returns is not
         // something the evaluator can interrupt: it is not running.
-        let (settled, finished) = settle(wait, budget, started, &abort).await;
+        let (settled, finished) = settle(Waiting {
+            answer: wait,
+            asked,
+            members,
+            budget,
+            started,
+            abort: &abort,
+        })
+        .await;
         reap(worker, finished);
         Ok(settled)
     }
@@ -164,53 +180,115 @@ impl CodeRuntime for LocalRuntime {
     }
 }
 
-/// Wait for the worker's answer, or stop waiting.
+/// What one wait needs: the worker's answer, its host calls, and the bounds.
+struct Waiting<'a> {
+    answer: tokio::sync::oneshot::Receiver<RunResult>,
+    asked: tokio::sync::mpsc::UnboundedReceiver<HostCall>,
+    /// The host-answered members, by namespace and name.
+    members: BTreeMap<(String, String), AsyncBinding>,
+    budget: Budget,
+    started: Instant,
+    abort: &'a Abort,
+}
+
+/// Wait for the worker's answer, serving its host calls, or stop waiting.
 ///
 /// Answers what to report and whether the worker is known to have finished -
 /// a thread that has answered can be joined at once, and one that has not is
-/// inside a host binding, where joining would make this call wait exactly as
-/// long as the binding does.
-async fn settle(
-    wait: tokio::sync::oneshot::Receiver<RunResult>,
-    budget: Budget,
-    started: Instant,
-    abort: &Abort,
-) -> (RunResult, bool) {
-    match tokio::time::timeout(budget.wall + budget.reap_grace, wait).await {
-        Ok(Ok(mut result)) => {
-            result.duration = started.elapsed();
-            (result, true)
-        }
-        // The worker dropped its side without sending: it panicked, which is
-        // this substrate's version of a worker that died.
-        Ok(Err(_)) => (
-            RunResult {
-                duration: started.elapsed(),
-                ..RunResult::failed(
-                    FailureKind::WorkerExit,
-                    "the worker running this program stopped without answering",
-                )
+/// blocked on something, where joining would make this call wait exactly as
+/// long as that does.
+async fn settle(waiting: Waiting<'_>) -> (RunResult, bool) {
+    let Waiting {
+        mut answer,
+        mut asked,
+        members,
+        budget,
+        started,
+        abort,
+    } = waiting;
+    let ceiling = tokio::time::sleep(budget.wall + budget.reap_grace);
+    tokio::pin!(ceiling);
+
+    loop {
+        tokio::select! {
+            // A host-answered member. The program is blocked on the reply, so
+            // this is the only thing that will move it along.
+            Some(call) = asked.recv() => serve(&members, call).await,
+            settled = &mut answer => return match settled {
+                Ok(mut result) => {
+                    result.duration = started.elapsed();
+                    (result, true)
+                }
+                // The worker dropped its side without sending: it panicked,
+                // which is this substrate's version of a worker that died.
+                Err(_) => (
+                    RunResult {
+                        duration: started.elapsed(),
+                        ..RunResult::failed(
+                            FailureKind::WorkerExit,
+                            "the worker running this program stopped without answering",
+                        )
+                    },
+                    true,
+                ),
             },
-            true,
-        ),
-        Err(_) => {
-            abort.stop();
-            (
-                RunResult {
-                    duration: started.elapsed(),
-                    ..RunResult::failed(
-                        FailureKind::Timeout,
-                        format!(
-                            "the run did not end within {}ms of its ceiling; a host binding is \
-                             not returning",
-                            budget.reap_grace.as_millis()
-                        ),
-                    )
-                },
-                false,
-            )
+            () = &mut ceiling => {
+                abort.stop();
+                return (
+                    RunResult {
+                        duration: started.elapsed(),
+                        ..RunResult::failed(
+                            FailureKind::Timeout,
+                            format!(
+                                "the run did not end within {}ms of its ceiling; a host binding \
+                                 is not returning",
+                                budget.reap_grace.as_millis()
+                            ),
+                        )
+                    },
+                    false,
+                );
+            }
         }
     }
+}
+
+/// Answer one call from the program.
+///
+/// A member the request never declared is answered as a failure rather than
+/// left hanging: the worker is blocked on this reply, and silence would turn a
+/// wiring mistake into a run that only the ceiling ends.
+async fn serve(members: &BTreeMap<(String, String), AsyncBinding>, call: HostCall) {
+    let key = (call.namespace.clone(), call.member.clone());
+    let answer = match members.get(&key) {
+        Some(body) => body(call.argument).await,
+        None => Err(format!(
+            "{}.{} is not a member this run was given",
+            call.namespace, call.member
+        )),
+    };
+    // The worker is gone when the run has already been given up on; the
+    // answer has nowhere to go and nothing is owed.
+    let _ = call.reply.send(answer);
+}
+
+/// The host-answered members of a request, flattened to what [`serve`] looks
+/// up.
+fn host_members(bindings: &[Namespace]) -> BTreeMap<(String, String), AsyncBinding> {
+    bindings
+        .iter()
+        .flat_map(|namespace| {
+            namespace
+                .functions
+                .iter()
+                .filter_map(|(name, member)| match member {
+                    Member::Host(body) => {
+                        Some(((namespace.global.clone(), name.clone()), Arc::clone(body)))
+                    }
+                    Member::Here(_) => None,
+                })
+        })
+        .collect()
 }
 
 /// Reclaim the worker thread.
@@ -240,7 +318,12 @@ fn reap(worker: std::thread::JoinHandle<()>, finished: bool) {
 /// A panic in here is contained and reported as `worker-exit`: the evaluator
 /// is this crate's code, so a panic is a bug in it, and the caller learns that
 /// the substrate died rather than losing the turn to an unwind.
-fn evaluate(request: &RunRequest, budget: Budget, closing: &Abort) -> RunResult {
+fn evaluate(
+    request: &RunRequest,
+    budget: Budget,
+    closing: &Abort,
+    calls: tokio::sync::mpsc::UnboundedSender<HostCall>,
+) -> RunResult {
     // One flag for the two things that stop a run: the caller's abort, and
     // the runtime shutting down under it.
     let stop = request.abort.and(closing);
@@ -256,7 +339,12 @@ fn evaluate(request: &RunRequest, budget: Budget, closing: &Abort) -> RunResult 
                 )
             }
         };
-        let mut state = eval::Run::new(budget, stop.clone(), &request.bindings);
+        let mut state = eval::Run::bridged(
+            budget,
+            stop.clone(),
+            &request.bindings,
+            Some(bridge(calls.clone())),
+        );
         match eval::run(&parsed, &mut state) {
             Ok(value) => {
                 let logs = std::mem::take(&mut state.logs);
@@ -321,6 +409,27 @@ fn over_cap(result: &RunResult, budget: Budget) -> Option<RunResult> {
             ),
         )
     })
+}
+
+/// Turn the async side's channel into the synchronous one the evaluator
+/// sends on.
+///
+/// The evaluator is a thread and knows nothing about tokio; the host side is a
+/// task. One forwarding thread per run with host-answered members bridges the
+/// two, and ends when the run does, because the sender it holds is dropped.
+fn bridge(calls: tokio::sync::mpsc::UnboundedSender<HostCall>) -> mpsc::Sender<HostCall> {
+    let (worker_side, from_worker) = mpsc::channel::<HostCall>();
+    std::thread::Builder::new()
+        .name("tetanus-code-bridge".to_string())
+        .spawn(move || {
+            while let Ok(call) = from_worker.recv() {
+                if calls.send(call).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok();
+    worker_side
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
