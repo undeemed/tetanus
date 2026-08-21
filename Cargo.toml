@@ -17,6 +17,7 @@ members = [
   "crates/fs",
   "crates/mcp",
   "crates/web",
+  "crates/hooks",
 ]
 
 [workspace.package]
@@ -51,6 +52,9 @@ proptest = "1"
 # rather than by hand: a hand-rolled parser is where a carrier grows its
 # security bugs.
 httparse = "1"
+# The hook matcher compiles a configured pattern. Rust regexes are not
+# JavaScript regexes; `crates/hooks/src/matcher.rs` says where that shows.
+regex = "1"
 anstyle = "1"
 terminal_size = "0.4"
 # The second session-persistence backend. `bundled` vendors the amalgamation
