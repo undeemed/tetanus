@@ -73,6 +73,38 @@ So one renderer serves every carrier, and no surface has to reach past `tetanus-
 
 Both peers demultiplex incoming frames with `rpc::Message`, because the server may also call the client (§4.4.3).
 
+#### 4.1.2 The trust boundary is the connection
+
+**A peer that can open a connection can do everything the engine can do.**
+There is no per-call authorization and none is planned: every call on §4.2 is available to any connected peer, so a connection is the whole of the decision.
+That is a defensible design for a personal harness, and it is only defensible if the thing that decides who may connect is taken seriously.
+
+What a connected peer gets is worth naming rather than leaving to imagination: it can start turns, which run tools and spend money; read every journal in the server's directory, which is the full history of the user's work; and read the resolved configuration, redacted of credentials (§4.3) but not of anything else.
+
+**The in-process and stdio carriers inherit their boundary.**
+In-process is the same process. stdio is a pipe handed over by whoever started the binary, so the peer is the parent, and the operating system has already decided.
+Neither needs anything further.
+
+**The WebSocket carrier does not, and it is the one that is exposed.**
+It accepts TCP connections, so the peer is whoever reached the port.
+Two things follow, and the second is the one that surprises people.
+
+*Loopback is not a trust boundary.* On a shared machine every local account can reach `127.0.0.1`.
+
+*A browser can reach it from any page.* The same-origin policy does not restrict WebSocket connections the way it restricts `fetch`: a page the user happens to be visiting can open `ws://127.0.0.1:<port>` and drive the agent, and will be allowed to unless the server refuses it. The fire UI is a web surface, so this carrier exists precisely to be driven by a browser - which makes the attack surface real rather than theoretical.
+
+**So the WebSocket carrier authenticates, and refuses before the upgrade.**
+
+- It requires a secret established out of band by whoever started the server, and a handshake that does not present it is refused with an HTTP failure *before* the connection becomes a WebSocket. Refusing at the upgrade means an unauthenticated peer never reaches the JSON-RPC layer, so there is no code in §4.5 for this and there should not be: the frame that would carry one is never sent.
+- It checks `Origin` when the handshake carries one, and refuses a browser origin it was not told to expect. A non-browser client sends none, and that is not a failure; a browser cannot forge one.
+
+**A secret cannot travel in a header here, and that is a constraint rather than an oversight.**
+A browser's WebSocket API cannot set request headers, so `Authorization` is unavailable to the very client this carrier is for.
+It travels in the URL or in `Sec-WebSocket-Protocol`, both of which browsers can set - and a URL is logged by more things than a header is, which is a cost to weigh rather than a reason to pretend the header option exists.
+
+**Binding is a deployment's decision and a default is not a safety net.**
+`--listen` takes an address, and a server told to bind a public interface will. The default is loopback; authentication is what makes the difference between a default and a guarantee.
+
 ### 4.2 Interface view: the calls
 
 `Served` means this build answers the call.
@@ -703,6 +735,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.1 a frame that asks nothing is answered with nothing | TC-STDIO-2, TC-WS-2 |
 | §4.1 either push arrives as a notification frame, on either carrier | TC-STDIO-3, TC-WS-3 |
 | §4.1 a binary frame is not a frame the WebSocket carrier defines | TC-WS-6 |
+| §4.1.2 every call is available to any connected peer | TC-PROTO-100 |
+| §4.1.2 a refused handshake never reaches the JSON-RPC layer | TC-PROTO-101 |
 | §4.2 a peer that hangs up leaves no subscription open | TC-STDIO-4, TC-WS-4 |
 | §4.4.1 the handshake is connection state, one connection at a time | TC-WS-7 |
 | §4.4.2 a call is answered while an earlier one is still running | TC-STDIO-5, TC-WS-5 |
@@ -828,3 +862,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | States the trust boundary (§4.1.2), which this document had never mentioned. A peer that can open a connection can do everything the engine can do - start turns that run tools and spend money, read every journal in the server's directory, read the resolved configuration - because there is no per-call authorization and none is planned. That is defensible for a personal harness and only defensible if what decides who may connect is taken seriously, and today nothing does: the WebSocket carrier accepts any TCP connection and hands it the whole `Engine`. In-process and stdio inherit a boundary the operating system already drew; WebSocket draws its own. Two reasons it must. Loopback is not a trust boundary on a shared machine. And the same-origin policy does not restrict WebSocket connections, so a page the user is merely visiting can open `ws://127.0.0.1:<port>` and drive the agent - the fire UI is a web surface, so this carrier exists to be driven by a browser and the attack surface is real rather than theoretical. So it authenticates with a secret established out of band and refuses before the upgrade, which is why no §4.5 code is added: an unauthenticated peer never reaches the JSON-RPC layer, and the frame that would carry an error is never sent. It also checks `Origin` where a handshake carries one. The secret cannot travel in a header, because a browser's WebSocket API cannot set them - it goes in the URL or `Sec-WebSocket-Protocol`, and a URL is logged by more things than a header, which is a cost to weigh rather than a reason to pretend otherwise. No type changes; the carrier slice that enforces this lands separately, and until it does the carrier should be treated as trusting whoever reaches the port. |

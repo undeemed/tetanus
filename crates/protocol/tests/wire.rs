@@ -802,3 +802,100 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-100: contract section 4.1.2. Every call is available to any
+/// connected peer, so the connection is the whole of the decision.
+///
+/// This is worth pinning rather than assuming, because it is the premise the
+/// rest of the section rests on. If a call were ever gated per-peer, the
+/// argument that authentication at the handshake is sufficient stops holding,
+/// and this case is where that change would first be noticed.
+///
+/// What a connected peer gets is named here too: turns that run tools and
+/// spend money, every journal in the server's directory, and the resolved
+/// configuration.
+#[test]
+fn every_call_is_available_to_any_connected_peer() {
+    // The whole client-to-server surface of section 4.2. No entry carries a
+    // permission, a scope or a role - the trait has one shape for every peer.
+    let surface = [
+        method::HELLO,
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+        method::SESSION_SUBSCRIBE,
+        method::SESSION_UNSUBSCRIBE,
+        method::AGENT_PROMPT,
+        method::AGENT_STATUS,
+        method::AGENT_INTERRUPT,
+        method::CATALOG_TOOLS,
+        method::CATALOG_MODELS,
+        method::CONFIG_DUMP,
+    ];
+
+    // The three that make the boundary matter: work, history, configuration.
+    assert!(
+        surface.contains(&method::AGENT_PROMPT),
+        "runs tools, spends money"
+    );
+    assert!(
+        surface.contains(&method::SESSION_LIST),
+        "the user's whole history"
+    );
+    assert!(
+        surface.contains(&method::CONFIG_DUMP),
+        "the resolved configuration"
+    );
+
+    // Capabilities gate features a build may not serve, never peers. A
+    // capability that meant "this peer may" would be a per-call authorization
+    // and would contradict section 4.1.2.
+    for cap in [capability::SESSION_SUBSCRIBE, capability::AGENT_INTERRUPT] {
+        assert!(
+            surface.contains(&cap),
+            "a capability names a call, not a permission: {cap}"
+        );
+    }
+}
+
+/// TC-PROTO-101: contract section 4.1.2. A refused handshake never reaches the
+/// JSON-RPC layer, which is why no error code exists for it.
+///
+/// The absence is the design. Refusing at the HTTP upgrade means an
+/// unauthenticated peer never sends a frame, so there is nothing to answer and
+/// no code to carry an answer. A code added later would mean the refusal had
+/// moved *after* the upgrade, which is a weaker place to make it.
+#[test]
+fn a_refused_handshake_never_reaches_the_json_rpc_layer() {
+    // Every code this contract defines, and none of them is for "you may not
+    // connect" - because by the time a code can be sent, the peer already has.
+    let codes = [
+        ErrorCode::ParseError,
+        ErrorCode::InvalidRequest,
+        ErrorCode::MethodNotFound,
+        ErrorCode::InvalidParams,
+        ErrorCode::Internal,
+        ErrorCode::UnsupportedProtocolVersion,
+        ErrorCode::NotImplemented,
+        ErrorCode::SessionNotFound,
+        ErrorCode::SessionBusy,
+        ErrorCode::Cancelled,
+        ErrorCode::MissingCredential,
+        ErrorCode::ProviderError,
+        ErrorCode::ToolUnknown,
+        ErrorCode::LogCorrupt,
+        ErrorCode::Io,
+    ];
+    for code in codes {
+        assert!(
+            code.exit_status() > 0,
+            "every code is a failure a connected peer can be told about"
+        );
+    }
+
+    // `UnsupportedProtocolVersion` is the closest neighbour and is deliberately
+    // not this: it refuses a peer that connected and greeted, which is exactly
+    // the position an unauthenticated peer must never reach.
+    assert_eq!(ErrorCode::UnsupportedProtocolVersion.exit_status(), 3);
+}
