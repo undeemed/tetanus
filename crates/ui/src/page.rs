@@ -336,6 +336,33 @@ mod tests {
         assert!(told[11].ends_with("8 back"), "{:?}", told[11]);
     }
 
+    /// TC-UI-PAGE-7: every size a terminal can be, with a block and without.
+    /// Expected: a frame of exactly the height asked for, and no row wider
+    /// than the width - at no columns by no rows as much as at twenty-four by
+    /// eight. A terminal reports zero columns while it is being resized, and
+    /// this arrangement subtracts furniture from the height and the block from
+    /// what is left: two subtractions that have to hold when there is nothing
+    /// to subtract from.
+    #[test]
+    fn the_page_holds_at_every_size() {
+        let block = vec!["arriving".to_string(), "working".to_string()];
+        for high in 0..=8 {
+            for wide in 0..=24 {
+                for arriving in [None, Some(&block)] {
+                    let mut page = page(20);
+                    let frame = page.frame(wide, high, arriving.map_or(&[], |b| b), KEYS);
+                    assert_eq!(frame.rows(), high, "{wide}x{high}");
+                    for row in rows(&frame) {
+                        assert!(
+                            visible_width(&row) <= wide.max(1),
+                            "`{row}` overruns {wide} at {wide}x{high}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// TC-UI-PAGE-6: a window dragged down to nothing.
     /// Expected: a frame of the size asked for, and no panic. The arithmetic
     /// takes the furniture off the height and the block off what is left, and
