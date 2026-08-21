@@ -91,7 +91,37 @@ A pager that stopped on a short page would silently truncate a transcript, and w
 The engine does not write a durable event larger than the frame bound, so a journal never holds something the wire cannot carry.
 That is the right place for the limit: bounding a tool's captured output when it is captured is a decision with an obvious answer, while discovering at delivery time that a journal contains an event nobody can be sent is a decision with none.
 A page of one event therefore always fits, which is what makes paging total rather than merely usual.
+#### 4.1.2 The trust boundary is the connection
 
+**A peer that can open a connection can do everything the engine can do.**
+There is no per-call authorization and none is planned: every call on §4.2 is available to any connected peer, so a connection is the whole of the decision.
+That is a defensible design for a personal harness, and it is only defensible if the thing that decides who may connect is taken seriously.
+
+What a connected peer gets is worth naming rather than leaving to imagination: it can start turns, which run tools and spend money; read every journal in the server's directory, which is the full history of the user's work; and read the resolved configuration, redacted of credentials (§4.3) but not of anything else.
+
+**The in-process and stdio carriers inherit their boundary.**
+In-process is the same process. stdio is a pipe handed over by whoever started the binary, so the peer is the parent, and the operating system has already decided.
+Neither needs anything further.
+
+**The WebSocket carrier does not, and it is the one that is exposed.**
+It accepts TCP connections, so the peer is whoever reached the port.
+Two things follow, and the second is the one that surprises people.
+
+*Loopback is not a trust boundary.* On a shared machine every local account can reach `127.0.0.1`.
+
+*A browser can reach it from any page.* The same-origin policy does not restrict WebSocket connections the way it restricts `fetch`: a page the user happens to be visiting can open `ws://127.0.0.1:<port>` and drive the agent, and will be allowed to unless the server refuses it. The fire UI is a web surface, so this carrier exists precisely to be driven by a browser - which makes the attack surface real rather than theoretical.
+
+**So the WebSocket carrier authenticates, and refuses before the upgrade.**
+
+- It requires a secret established out of band by whoever started the server, and a handshake that does not present it is refused with an HTTP failure *before* the connection becomes a WebSocket. Refusing at the upgrade means an unauthenticated peer never reaches the JSON-RPC layer, so there is no code in §4.5 for this and there should not be: the frame that would carry one is never sent.
+- It checks `Origin` when the handshake carries one, and refuses a browser origin it was not told to expect. A non-browser client sends none, and that is not a failure; a browser cannot forge one.
+
+**A secret cannot travel in a header here, and that is a constraint rather than an oversight.**
+A browser's WebSocket API cannot set request headers, so `Authorization` is unavailable to the very client this carrier is for.
+It travels in the URL or in `Sec-WebSocket-Protocol`, both of which browsers can set - and a URL is logged by more things than a header is, which is a cost to weigh rather than a reason to pretend the header option exists.
+
+**Binding is a deployment's decision and a default is not a safety net.**
+`--listen` takes an address, and a server told to bind a public interface will. The default is loopback; authentication is what makes the difference between a default and a guarantee.
 ### 4.2 Interface view: the calls
 
 `Served` means this build answers the call.
@@ -1162,6 +1192,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.1 a binary frame is not a frame the WebSocket carrier defines | TC-WS-6 |
 | §4.1 the frame bound is published, and is one bound for every carrier | TC-PROTO-95 |
 | §4.1 a short page is not the end; `eof` is | TC-PROTO-96 |
+| §4.1.2 every call is available to any connected peer | TC-PROTO-100 |
+| §4.1.2 a refused handshake never reaches the JSON-RPC layer | TC-PROTO-101 |
 | §4.2 a peer that hangs up leaves no subscription open | TC-STDIO-4, TC-WS-4 |
 | §4.2 and leaves *no* subscription open, not merely one | TC-WS-8 |
 | §4.4.1 the handshake is connection state, one connection at a time | TC-WS-7 |
@@ -1363,3 +1395,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Publishes `methods::ALL` (§4.2), the method table as a value, and makes §4.2's completeness claims checkable by a machine. Both promises in that section are about *every* call - a served one answers, a reserved one answers `NotImplemented` rather than `MethodNotFound` - and both were held by cases that name methods one at a time: TC-ENG-3 for the served ones, TC-RPC-12 for the reserved ones. A routing arm is written by hand, so the arm that gets forgotten is the one no case names, and a hand-written case has exactly the same hole one level up. TC-RPC-13 iterates the list instead: a method added to the contract and wired into the codec's match nowhere now fails at once, naming itself, where previously every suite stayed green. That is not hypothetical - two methods have been added to this contract recently and each needed a routing arm written by hand. The single mistake this cannot catch is adding a constant without adding it to `ALL`, which is why the two sit adjacent and the list says so. One added constant, no type changes, no behaviour change. |
 | 1.0 | No boundary change. Records in §6 that §4.2's hangup promise is plural and is now checked as such. It says a carrier that drops a connection unsubscribes its sinks, and TC-STDIO-4 and TC-WS-4 each hold one subscription - the case a bug is least likely to reach, since a `close` that handled only the first, or stopped at the first failure, passes it while leaking every other subscription on the connection. TC-WS-8 takes three, has the peer close one itself, then hangs up, and asserts all three are closed exactly once: the two halves of the bookkeeping - forgetting an id the peer unsubscribed, forgetting the rest at hangup - shown agreeing rather than each alone. The mutation is the shape of the bug: closing only the first subscription fails the new case and leaves the old one green. The test double also had to be fixed first, because it answered `sub-1` to every subscribe, which would have made any case about several subscriptions agree with itself whatever the carrier did. §4.2's wording now says "every one it holds" and why it matters. |
 | 1.0 | Corrects §7.1.1 and adds §4.7.1. §7.1.1 justified `EventSink` by saying the alternative left the renderer importing `tetanus-core` and `tetanus-turn`, which reads as a claim that it no longer does - and `crates/cli` imports both. The claim was narrower than its wording: `EventSink` removed the need to reach past the contract *to watch a session*, and it never removed those crates from that lane's dependency list, because §4.7's ownership table gives it the wiring. The boundary is about what a surface does with a type, not which crate it imports, and the wording now says so. §4.7.1 then names the three rules no conformance case can hold - the rest-pattern rule, the ban on matching engine enums, and using `convert` rather than a private mapping - because each is a property of the consuming lane's source rather than of any value crossing the boundary. A promise described as a check is worse than one described as a promise, since only the second gets audited. It records that two of the three are not kept today: `crates/cli` matches `tetanus_turn::StopReason` and `tetanus_session::SessionError` variants. Neither is this lane's to fix, and neither is urgent - an engine enum has no fallback, so the failure is a loud build break rather than a silent wrong answer - but leaving them unnamed would let the next reader assume the rules are kept because nothing says otherwise. No type changes. |
+| 1.0 | States the trust boundary (§4.1.2), which this document had never mentioned. A peer that can open a connection can do everything the engine can do - start turns that run tools and spend money, read every journal in the server's directory, read the resolved configuration - because there is no per-call authorization and none is planned. That is defensible for a personal harness and only defensible if what decides who may connect is taken seriously, and today nothing does: the WebSocket carrier accepts any TCP connection and hands it the whole `Engine`. In-process and stdio inherit a boundary the operating system already drew; WebSocket draws its own. Two reasons it must. Loopback is not a trust boundary on a shared machine. And the same-origin policy does not restrict WebSocket connections, so a page the user is merely visiting can open `ws://127.0.0.1:<port>` and drive the agent - the fire UI is a web surface, so this carrier exists to be driven by a browser and the attack surface is real rather than theoretical. So it authenticates with a secret established out of band and refuses before the upgrade, which is why no §4.5 code is added: an unauthenticated peer never reaches the JSON-RPC layer, and the frame that would carry an error is never sent. It also checks `Origin` where a handshake carries one. The secret cannot travel in a header, because a browser's WebSocket API cannot set them - it goes in the URL or `Sec-WebSocket-Protocol`, and a URL is logged by more things than a header, which is a cost to weigh rather than a reason to pretend otherwise. No type changes; the carrier slice that enforces this lands separately, and until it does the carrier should be treated as trusting whoever reaches the port. |
