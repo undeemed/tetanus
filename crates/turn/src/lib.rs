@@ -11,6 +11,7 @@
 //! - [`prompt`] is the named section registry the assembly starts from.
 //! - [`prune`] shrinks a tool result that is too long to keep whole.
 //! - [`repair`] writes the closers an interrupted journal is missing.
+//! - [`instructions`] reads the conventions a project keeps in its repository.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
 //! - [`schema`] checks a call's arguments against the schema its tool published.
@@ -23,6 +24,7 @@ pub mod boot;
 pub mod engine;
 pub mod events;
 pub mod fs;
+pub mod instructions;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
