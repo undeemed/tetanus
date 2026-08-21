@@ -267,6 +267,15 @@ polling a journal that stopped growing would keep saying the turn was running.
 The reason is settled onto the page in the wording [crates/cli/src/render/fault.rs](crates/cli/src/render/fault.rs)
 gives every other surface, because stderr is behind the alternate screen until the reader gives up.
 
+Whatever the view, the wait itself is one line on stderr
+([crates/ui/src/progress.rs](crates/ui/src/progress.rs)): the phase, a spinner while the stream is a
+terminal, and - once the phase has run longer than two seconds - how long it has been running.
+A spinner says the process is alive and not whether this call has been going for four seconds or
+four minutes, which is the question a reader waiting on a model actually has; a slow answer and one
+that will never arrive look identical until something counts.
+The plain form a redirected stream gets carries no clock: a log wants one line per phase, and a
+duration in it would make two runs of one turn print different bytes.
+
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
