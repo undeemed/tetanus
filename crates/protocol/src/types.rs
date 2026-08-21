@@ -219,6 +219,16 @@ pub enum KnownEvent {
         provider: String,
         model: String,
         max_steps: u32,
+        /// The session this journal was forked from, absent on one that was
+        /// opened rather than forked (section 4.4.6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_session: Option<String>,
+        /// The last parent seq this journal inherited, inclusive. Present
+        /// exactly when `parent_session` is: the inherited prefix is seqs `1`
+        /// through this one, and the child's own first event is the one after
+        /// it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork_seq: Option<u64>,
     },
     #[serde(rename = "turn/start")]
     TurnStart { turn: u64 },

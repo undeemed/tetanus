@@ -87,6 +87,7 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `session.create` | `SessionCreateParams` | `SessionInfo` | always | Served |
 | `session.list` | none | `SessionListResult` | always | Served |
 | `session.events` | `SessionEventsParams` | `SessionEventsResult` | always | Served |
+| `session.fork` | `SessionForkParams` | `SessionInfo` | `session.fork` | Reserved |
 | `session.subscribe` | `SessionSubscribeParams` | `SessionSubscribeResult` | `session.subscribe` | Served |
 | `session.unsubscribe` | `SessionUnsubscribeParams` | `Ack` | `session.subscribe` | Served |
 | `agent.prompt` | `AgentPromptParams` | `AgentPromptResult` | always | Served |
@@ -97,6 +98,11 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `config.dump` | none | `ConfigDumpResult` | always | Served |
 
 A call with no params accepts an absent `params`, or `{}`, and treats them alike.
+
+A reserved call is routed like any other, so it answers `NotImplemented` (`-32001`) and never `MethodNotFound` (`-32601`).
+The two are a whole decision apart for a caller: §4.5 exits 3 on the first, meaning this build rather than this call, and 2 on the second, meaning the caller is wrong.
+In Rust, `Reserved` is a default body on the `Engine` trait method that returns that error, so a shape can be frozen and compiled against before any build serves it.
+The slice that serves the call deletes that body, and §7.4's compile error for every implementor comes back with it.
 
 Every call is on the `Engine` trait, `session.subscribe` included.
 Its trait form takes one extra argument the wire does not carry: an `Arc<dyn EventSink>`, which is where the carrier wants its pushes delivered.
@@ -143,7 +149,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
-| `session/start` | `session_id`, `provider`, `model`, `max_steps` |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6) |
 | `turn/start` | `turn` |
 | `step/start` | `turn`, `step` |
 | `user/message` | `content` |
@@ -344,6 +350,62 @@ Replay and live delivery join at that boundary with no gap and no repeat, whatev
 A push carries the session it belongs to, and reaches only the subscriptions on that session.
 Both frames follow the rule: one connection may hold subscriptions on several sessions and never sees another session's `session/event` or `agent/status`.
 
+#### 4.4.6 Forking a session
+
+`session.fork` opens a new journal seeded with a prefix of another one's, so a caller can take a conversation a second way without losing the first.
+
+The child is a copy and not a reference.
+Nothing appended to either journal after the fork reaches the other, and the parent is not written to at all: a fork is a read of the parent and a write of the child.
+
+The child's journal is the inherited prefix with one line replaced:
+
+```text
+seq 0                 session/start   the child's own header, carrying parent_session and fork_seq
+seq 1 .. fork_seq     the parent's events, copied as they stand, keeping their own seq
+seq fork_seq+1 ..     the child's own work
+```
+
+The parent's `session/start` is the one line that is not copied, because the child's takes its place, one line for one line.
+That is what keeps §4.3's rule that `seq` equals the index of the line true of a forked journal, and it is why the copied events need no rewriting: a `sourceEventSeqs` in the prefix still names the events it named, since nothing ever cites seq 0.
+
+`fork_seq` is the last parent seq the child inherited, inclusive.
+It is `through_seq` when the caller named one and the parent's last seq when it did not.
+A parent that holds only its header is forked into a child that inherits nothing and reports `fork_seq: 0`, and the arithmetic is the same either way: the child's own first event is always the one after `fork_seq`.
+
+The child inherits the parent's provider, model and `max_steps` along with its events, because the history it starts from was produced under them.
+So `session.fork` takes no route parameters, and a caller that wants the same history under another model has no call for that in this version.
+
+**A boundary must be a closed one.**
+The inherited prefix may end on a between-turn event and must not end inside an open turn.
+The rule is stated over the log rather than over live state: the last `turn/start` or `turn/end` at or before the boundary decides, and a `turn/start` means the boundary is inside that turn.
+A child whose first inherited fact is half a turn would need §4.4.4's repair to close a turn that never ran on it, and would offer a provider a dangling tool call as its own history.
+
+What the call refuses, and which of §4.5's codes each refusal takes:
+
+| Refused | Code | `data` |
+| --- | --- | --- |
+| the source is not a session this server can open | `SessionNotFound` | `{ session_id }` |
+| `through_seq` is past the parent's last event | `InvalidParams` | `{ field: "through_seq" }` |
+| the boundary is inside an open turn | `InvalidParams` | `{ field: "through_seq" }` |
+| `child_session_id` already has a journal | `InvalidParams` | `{ field: "child_session_id" }` |
+| `child_session_id` is not 1 to 128 characters of `[A-Za-z0-9._-]` | `InvalidParams` | `{ field: "child_session_id" }` |
+
+The open-turn refusal names `through_seq` even when the caller omitted it, because naming an earlier one is the fix.
+
+A source whose seqs are not contiguous has no fork boundary to argue about, and takes the answer any read of it takes: `LogCorrupt`, naming the line, from the read that fetches the journal.
+A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written.
+
+A turn in flight on the source is not a refusal by itself.
+A journal is append-only, so a prefix of it is stable while it grows, and a caller that names a closed boundary gets exactly the child it asked for however busy the parent is.
+The one boundary a running turn moves is the default one - the parent's last event - and that is the case the open-turn rule already catches.
+
+A `child_session_id` that already has a journal is refused rather than reopened, which is the one place this call differs from `session.create` (§4.7).
+Reopening an id is what makes a session resumable; a fork that reopened one would append a second history to a journal that already holds one.
+
+The result is the child's `SessionInfo`, and the child is open when it is answered, so `agent.prompt` may run on it with no further call.
+Lineage is read from the child's `session/start` line and is deliberately not repeated on `SessionInfo`; §5 says why an added field on a type the other lane constructs is not the free addition it looks like.
+No subcommand calls `session.fork`: §4.7's table is the closed list of what a subcommand may call, and a row joins it when the presentation lane takes the affordance.
+
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -389,6 +451,8 @@ A document that was read and holds one value the key does not take is `InvalidPa
 
 Neither adds a code.
 A surface's match on `ErrorCode` is exhaustive on purpose, so a new code is a change both lanes land together, and these two failures need none: the rows above already carry the path, the key and the exit status each case wants.
+
+`session.fork` adds none either, for the same reason: §4.4.6 lists each of its refusals against a row above, and a refused fork is either a source that is not there or a parameter that is wrong.
 
 A failed tool call is not an error.
 It is a `tool/result` with `ok: false`, because it is a binding rejection the model sees, not a failure of the call the surface made.
@@ -473,6 +537,20 @@ Capability strings gate features, because a build may serve fewer calls than its
 **A minor bump covers additions only.**
 Adding a method, an optional field, an enum variant, a notification, a capability string, or an error code is a minor bump.
 
+**A reserved call does not bump the minor.**
+`Reserved` (§4.2) freezes a shape without serving it, so a peer that knows the call and one that has never heard of it are answered identically: `NotImplemented`, and no capability.
+The bump lands with the version that serves the call, which is the first version a capability check can tell apart from the one before it.
+
+**A surface reads `PROTOCOL_VERSION`; it does not spell the version.**
+The constant is in `tetanus-protocol`, and a literal `"1.0"` in a consuming lane turns a minor bump into an edit and a failing case in that lane.
+The version is the one string in this contract that no peer should hard-code.
+
+**An added field is minor on the wire and not always minor in Rust.**
+A JSON reader ignores a field it was not sent; a Rust struct literal does not, so adding even an optional field to a type the *other* lane constructs - rather than only receives - stops that lane compiling.
+Wire-optional is not source-optional.
+So an addition to a constructed type is a change both lanes land together, and until they do, an addition goes on the types a surface only ever reads.
+That is why §4.4.6 puts a forked session's lineage on its `session/start` line and not on `SessionInfo`, which the presentation lane builds in its own cases.
+
 **A major bump covers everything else.**
 Removing or renaming a method or field, changing a field's type, making an optional field required, narrowing an accepted value, or changing what an existing error code means is a major bump.
 
@@ -534,7 +612,11 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
-| §4.2 every call in the method table is served | TC-ENG-3 |
+| §4.2 every call the method table serves is served | TC-ENG-3 |
+| §4.2 a reserved call answers `NotImplemented`, and is not advertised | TC-ENG-4 |
+| §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
+| §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
+| §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
@@ -634,3 +716,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States what a turn the provider cut off at its output cap looks like (§4.4.2): `turn/end` carries `stop_reason: "max-tokens"`, `agent.prompt` still answers a summary, the reason is the turn's rather than the cut step's and does not leak into the next turn, and the truncated step dispatches no tool calls, because a completion that stopped mid-write can have stopped mid-arguments. Until now the boundary had no way to say an answer was incomplete: such a turn ended `"natural"`, which reads as a model that had finished. No type changes: `"max-tokens"` is a value of the growable `StopReason` by §7.5, and §7.6's mapping carries it as the fallback exactly as it carries `"interrupted"`. The engine change that ends such a turn lands on its own, with the §6 rows for these clauses; it adds a reason to `tetanus_turn::StopReason`, which by §3 no surface may match - the one surface that does today (`crates/cli/src/main.rs`) needs the arm that carries it, and that arm is the presentation lane's to write. |
 | 1.0 | States what the `assistant/message` of a cut-off step carries (§4.4.2): the §4.3.1 fields as always, with `tool_calls` empty and the provider's own finish reason kept. No type changes. The clause above says such a step dispatches nothing; it did not say what the durable message holds, and a call left on it is a call no `tool/result` answers, so the history a client derives asks the provider for a result that will never come and the next request on that session is refused. The raw calls stay on the cited `assistant/chunk` events. The engine change that does this lands with the rest of the cut-off behaviour. |
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
+| 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |

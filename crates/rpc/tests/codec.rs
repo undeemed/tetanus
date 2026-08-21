@@ -341,6 +341,37 @@ async fn an_unknown_method_names_itself() {
     assert!(engine.reached().is_empty(), "no engine call was reached");
 }
 
+/// TC-RPC-12: contract section 4.2. A method the table names but this build
+/// does not serve yet is routed, so it answers `NotImplemented` rather than
+/// `MethodNotFound`.
+///
+/// The two codes are one character apart in a log and a whole decision apart
+/// for a caller: section 4.5 exits 3 on the first, meaning "this build, not
+/// this call", and 2 on the second, meaning the caller is wrong. A reserved
+/// call that fell through to the unknown arm would tell every surface building
+/// against the frozen shape that the shape does not exist.
+#[tokio::test]
+async fn a_reserved_method_is_routed_rather_than_unknown() {
+    let (codec, _engine) = greeted().await;
+
+    let answer = send(
+        &codec,
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": method::SESSION_FORK,
+            "params": { "session_id": "s1" }
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["id"], 3);
+    assert_eq!(
+        answer["error"]["code"],
+        ErrorCode::NotImplemented as i32,
+        "{answer}"
+    );
+    assert_eq!(answer["error"]["data"]["method"], method::SESSION_FORK);
+}
+
 /// TC-RPC-6: contract section 4.5. Params that do not fit the call are refused
 /// with `InvalidParams` naming the field at fault, and never reach the engine.
 #[tokio::test]
