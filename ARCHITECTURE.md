@@ -348,6 +348,19 @@ gets it from a border where a terminal has to spend a row.
 The heading carries the model and how many turns are on the journal, which is the one fact about a
 resumed conversation that is nowhere else on the screen once its opening page has scrolled away.
 
+A paste is a paste and not typing.
+[`Tty`](crates/ui/src/terminal.rs) takes bracketed paste with raw mode and the alternate screen, so
+a terminal hands a pasted block over as one event; it becomes the characters it is made of, its
+newlines among them, and never an Enter.
+Without that, every newline in a pasted stack trace is a question, and forty lines are forty turns
+against a model that charges for each of them.
+`Line` keeps the breaks - what is sent is what was pasted, and the journal records it - and draws
+them as spaces, because the prompt is one row and a line feed written into it lands the rest of the
+prompt over whatever the view drew underneath.
+The row is measured the way it is drawn, so the cursor sits where the reader sees it rather than a
+column short for every break.
+The prompt on the reader's own scrollback takes the same mode, for the same reason.
+
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.

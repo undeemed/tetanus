@@ -22,6 +22,16 @@
 //! That arithmetic belongs with the text it is about, so [`Line::repaint`]
 //! returns the whole row - marker, text, cursor - and a caller writes it.
 //!
+//! # What a paste is
+//!
+//! The characters it is made of, its newlines among them. A terminal in
+//! bracketed paste hands the whole block over as one event, which
+//! [`Tty`](crate::Tty) turns into those characters, so an Enter is only ever a
+//! reader pressing return. The text keeps its breaks - that is what is sent,
+//! and what the journal records - and the row draws them as spaces, because
+//! the row is one row and a line feed written into it would put the rest of
+//! the prompt over whatever the view had drawn underneath.
+//!
 //! # Why a long line scrolls rather than wraps
 //!
 //! A line that wrapped would occupy two rows, and every repaint after it would
@@ -115,6 +125,19 @@ pub enum Typed {
     Ignored,
 }
 
+/// How a character of the line is drawn on the row.
+///
+/// Only one is drawn as anything else: a newline, which a pasted block carries
+/// and a one-row prompt cannot show as a break. It is a space, and it is a
+/// space everywhere the row is measured too, so the cursor lands where the
+/// reader sees it.
+fn drawn(char: char) -> char {
+    match char {
+        '\n' => ' ',
+        char => char,
+    }
+}
+
 /// A line being typed, and where the cursor is in it.
 ///
 /// The cursor is an index into the characters, and it may be one past the last
@@ -155,8 +178,8 @@ impl Line {
             }
             // Ctrl-J is the same byte a newline is, and a terminal in raw
             // mode is not translating it: it is what the Enter key sends
-            // through some terminals, and what every line of a pasted block
-            // ends with.
+            // through some terminals. A pasted newline is not this - it
+            // arrives inside a paste event and is inserted as text.
             Key::Enter | Key::Ctrl('j') => {
                 let asked = self.text();
                 self.text.clear();
@@ -252,15 +275,20 @@ impl Line {
     /// Cut and not [`truncate`](crate::truncate)d: the mark that function adds
     /// says a value was too long to show, and this text is not too long, it is
     /// scrolled. A mark would also take a column from the line being typed.
+    ///
+    /// A newline is drawn as a space. A pasted block keeps its breaks in the
+    /// text - that is what is sent, and what the journal records - but the row
+    /// is one row: a line feed written into it would put the rest of the
+    /// prompt on the row below, over whatever the view had drawn there.
     fn window(&self, room: usize) -> String {
         let mut columns = 0;
         let mut shown = String::new();
         for &char in &self.text[self.offset..] {
-            columns += visible_width(&char.to_string());
+            columns += visible_width(&drawn(char).to_string());
             if columns > room {
                 break;
             }
-            shown.push(char);
+            shown.push(drawn(char));
         }
         shown
     }
@@ -282,7 +310,12 @@ impl Line {
 
     /// The columns the characters in `from..to` draw in.
     fn columns(&self, from: usize, to: usize) -> usize {
-        visible_width(&self.text[from..to].iter().collect::<String>())
+        // Measured as it is drawn: a newline draws as a space and is one
+        // column, where `visible_width` reads the control character it is and
+        // says none. Measured that way the cursor lands a column short for
+        // every break in a pasted block.
+        let drawn: String = self.text[from..to].iter().copied().map(drawn).collect();
+        visible_width(&drawn)
     }
 
     /// Take out `from..to`, and leave the cursor where the text closed up.
@@ -687,6 +720,31 @@ mod tests {
         let rows: Vec<&str> = drawn.split('\r').collect();
         assert_eq!(rows[rows.len() - 5], "> \x1b[Kabcdefghij");
         assert_eq!(rows[rows.len() - 3], "> \x1b[Kfghij", "the window moved");
+    }
+
+    /// TC-UI-EDIT-12: a pasted block, as the keys a paste arrives as.
+    /// Expected: every character of it is in the line, its newlines included,
+    /// and none of them ended the line. What is sent is what was pasted - a
+    /// stack trace pasted into a chat is one question, not forty - and the row
+    /// draws the breaks as spaces because the row is one row.
+    #[test]
+    fn a_pasted_block_is_text_and_not_forty_questions() {
+        let mut line = Line::new();
+        for char in "fn main() {\n    ok()\n}".chars() {
+            assert_eq!(line.key(Key::Char(char)), Typed::Editing);
+        }
+
+        assert_eq!(line.text(), "fn main() {\n    ok()\n}");
+        let (shown, cursor) = line.shown(40);
+        assert!(!shown.contains('\n'), "a line feed on the row: {shown:?}");
+        assert_eq!(shown, "fn main() {     ok() }");
+        assert_eq!(cursor, 22);
+
+        // And the reader's own Enter still ends it, with the breaks in it.
+        assert_eq!(
+            line.key(Key::Enter),
+            Typed::Asked("fn main() {\n    ok()\n}".into())
+        );
     }
 
     /// TC-UI-EDIT-15: the other two keys that end a line.
