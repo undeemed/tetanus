@@ -68,6 +68,12 @@ pub(super) const INDENT: &str = "  ";
 /// read back.
 const CAP: usize = 16;
 
+/// The shortest reading either half of the pace is worth reporting from: a
+/// tenth of a second, which is the resolution [`duration`] prints at. Under
+/// it, `0.0s` reads as a measurement rather than as a wait too short to have
+/// one.
+const FLOOR: u64 = 100;
+
 /// What a reader has to remember between events: the tool call still waiting
 /// for its result, and what the turn has spent so far.
 #[derive(Default)]
@@ -85,6 +91,84 @@ pub struct Reader {
     spent: Option<Usage>,
     /// When the turn in progress started, from the journal's own clock.
     started: Option<u64>,
+    /// How fast the model answered, folded over the steps that recorded it.
+    pace: Pace,
+}
+
+/// What the journal says about the speed of a turn, as upstream's own turn
+/// footer folds it: the wait for the first token, and the rate the rest of it
+/// decoded at.
+///
+/// Both are derived here rather than carried across the boundary, because both
+/// are arithmetic over event times the journal already holds - and a surface
+/// deriving them cannot disagree with a journal it read.
+#[derive(Debug, Default, Clone, Copy)]
+struct Pace {
+    /// When the step in progress started, and when its first chunk arrived.
+    step: Option<u64>,
+    first: Option<u64>,
+    /// The wait for the first token of the turn's first step, which is the
+    /// one a reader is waiting through. Later steps are waiting on a tool.
+    waited: Option<u64>,
+    /// Milliseconds spent decoding, and the tokens decoded in them, over every
+    /// step that recorded both. A step missing either is left out rather than
+    /// counted as instant.
+    decoding: u64,
+    decoded: u64,
+}
+
+impl Pace {
+    /// A step began.
+    fn step(&mut self, time: u64) {
+        self.step = Some(time);
+        self.first = None;
+    }
+
+    /// A chunk arrived. Only the first of a step says anything.
+    fn chunk(&mut self, time: u64) {
+        if self.first.is_some() {
+            return;
+        }
+        self.first = Some(time);
+        if let Some(step) = self.step {
+            let waited = time.saturating_sub(step);
+            // The first step's wait, and no other: what a reader waited
+            // through before the answer began.
+            self.waited.get_or_insert(waited);
+        }
+    }
+
+    /// A message settled, carrying what it cost.
+    fn settled(&mut self, time: u64, usage: Option<&Usage>) {
+        let (Some(first), Some(usage)) = (self.first.take(), usage) else {
+            self.step = None;
+            return;
+        };
+        self.decoding += time.saturating_sub(first);
+        self.decoded += usage.completion_tokens;
+        self.step = None;
+    }
+
+    /// Tokens a second, over the steps that recorded both halves of it.
+    ///
+    /// `None` when too little time passed to divide by: a rate over a
+    /// millisecond is not a fast model, it is an unmeasured one, and a mock
+    /// that answers inside the clock's resolution would otherwise be reported
+    /// as the fastest provider anyone has ever seen.
+    fn rate(&self) -> Option<u64> {
+        (self.decoding >= FLOOR && self.decoded > 0)
+            .then(|| self.decoded * 1_000 / self.decoding)
+            .filter(|rate| *rate > 0)
+    }
+
+    /// The wait for the first token, when there was one worth reporting.
+    ///
+    /// Under a tenth of a second `duration` prints `0.0s`, which says less
+    /// than nothing: it reads as a measurement rather than as a wait too short
+    /// to have one.
+    fn waited(&self) -> Option<u64> {
+        self.waited.filter(|waited| *waited >= FLOOR)
+    }
 }
 
 impl Reader {
@@ -128,15 +212,19 @@ impl Reader {
                 {
                     self.spent = None;
                     self.started = Some(time);
+                    self.pace = Pace::default();
                     String::new()
                 },
                 theme
                     .paint(Role::Heading, &format!("turn {turn}"))
                     .to_string(),
             ],
-            KnownEvent::StepStart { step, .. } => vec![theme
-                .paint(Role::Muted, &format!("{INDENT}step {step}"))
-                .to_string()],
+            KnownEvent::StepStart { step, .. } => {
+                self.pace.step(time);
+                vec![theme
+                    .paint(Role::Muted, &format!("{INDENT}step {step}"))
+                    .to_string()]
+            }
             KnownEvent::UserMessage { content } => said(theme, width, "you", Role::Accent, content),
             KnownEvent::AssistantMessage {
                 content,
@@ -144,6 +232,7 @@ impl Reader {
                 usage,
                 ..
             } => {
+                self.pace.settled(time, usage.as_ref());
                 if let Some(step) = usage {
                     // Each step is billed for the whole prompt it resent, so
                     // the turn's cost is the sum of its requests, not of its
@@ -223,6 +312,28 @@ impl Reader {
                     let noun = if total == 1 { "token" } else { "tokens" };
                     closing.push_str(&format!(" {dot} {} {noun}", tokens(total)));
                 }
+                // How fast it was, on the turns slow enough for that to be a
+                // fact rather than a rounding: the wait for the first token,
+                // and the rate the rest decoded at. Upstream's turn footer
+                // carries the same pair, folded the same way - the first
+                // step's wait, because a later step is waiting on a tool, and
+                // a rate over the steps that recorded both halves of it.
+                //
+                // Behind the same threshold as the duration, and for the same
+                // reason: under a second these are noise, and two runs of one
+                // turn must print the same bytes.
+                if took.is_some_and(|took| took >= 1_000) {
+                    let pace = std::mem::take(&mut self.pace);
+                    if let Some(waited) = pace.waited() {
+                        closing.push_str(&format!(
+                            " {dot} first token in {}",
+                            duration(Duration::from_millis(waited))
+                        ));
+                    }
+                    if let Some(rate) = pace.rate() {
+                        closing.push_str(&format!(" {dot} {rate} tok/s"));
+                    }
+                }
                 let mut lines = vec![String::new(), closing];
                 if let Some(veto) = stop_veto {
                     lines.push(format!("{INDENT}held open by {}", tame(veto)));
@@ -230,8 +341,14 @@ impl Reader {
                 lines
             }
             // The streaming surface, and the frames of the turn. A finished
-            // turn reads better without them.
-            KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
+            // turn reads better without them - but the first chunk of a step
+            // is when the model started answering, which the closing line
+            // reports.
+            KnownEvent::AssistantChunk { .. } => {
+                self.pace.chunk(time);
+                Vec::new()
+            }
+            KnownEvent::StepEnd { .. } => Vec::new(),
         }
     }
     /// What the turn has spent so far, over every step of it.
@@ -1267,6 +1384,121 @@ mod tests {
         ] {
             assert!(told.contains(word), "`{word}` is not drawn:\n{told}");
         }
+    }
+
+    /// TC-CLI-TL-26: a turn slow enough to have a pace, over two steps.
+    /// Expected: the wait for the first token of the first step, and the rate
+    /// the answer decoded at, folded over the steps that recorded both halves
+    /// of it. Upstream's own turn footer carries this pair, and folds it the
+    /// same way: a later step's first token is a wait on a tool rather than on
+    /// the model, and a step with no usage is left out of the rate rather than
+    /// counted as free.
+    #[test]
+    fn a_slow_turn_says_how_fast_the_model_was() {
+        let out = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                // Six hundred milliseconds to the first token, then four
+                // hundred to decode two hundred of them: five hundred a second.
+                timed(
+                    600,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on ", "turn": 1, "step": 1 }),
+                ),
+                timed(
+                    1_000,
+                    "assistant/message",
+                    json!({ "content": "on it", "usage": { "prompt_tokens": 10, "completion_tokens": 200 } }),
+                ),
+                timed(1_000, "step/start", json!({ "turn": 1, "step": 2 })),
+                // A second step waits on a tool, not on the model: its wait is
+                // not the one reported, and its decoding still counts.
+                timed(
+                    3_000,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "done", "turn": 1, "step": 2 }),
+                ),
+                timed(
+                    3_600,
+                    "assistant/message",
+                    json!({ "content": "done", "usage": { "prompt_tokens": 10, "completion_tokens": 100 } }),
+                ),
+                timed(
+                    4_000,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 2, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+
+        let closing = out.lines().last().expect("a closing line").to_string();
+        assert!(closing.contains("first token in 0.6s"), "{closing}");
+        // Three hundred tokens over a second of decoding.
+        assert!(closing.contains("300 tok/s"), "{closing}");
+        assert!(
+            closing.contains("4.0s"),
+            "the duration went missing: {closing}"
+        );
+    }
+
+    /// TC-CLI-TL-27: the turns too fast, or too unmeasured, to have one.
+    /// Expected: nothing about pace. A turn under a second is noise - two runs
+    /// of it must print the same bytes - a first token inside a tenth of a
+    /// second reads as `0.0s`, which is a measurement nobody made, and a
+    /// message carrying no usage leaves a rate with nothing to divide.
+    #[test]
+    fn a_fast_or_unmeasured_turn_says_nothing_about_pace() {
+        let quick = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                timed(
+                    10,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+                ),
+                timed(
+                    20,
+                    "assistant/message",
+                    json!({ "content": "on it", "usage": { "prompt_tokens": 1, "completion_tokens": 2 } }),
+                ),
+                timed(
+                    30,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+        assert!(!quick.contains("tok/s"), "{quick}");
+        assert!(!quick.contains("first token"), "{quick}");
+
+        let unmeasured = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                timed(
+                    900,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+                ),
+                timed(2_000, "assistant/message", json!({ "content": "on it" })),
+                timed(
+                    2_000,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+        // The wait is a fact the journal holds even when nothing was billed.
+        assert!(unmeasured.contains("first token in 0.9s"), "{unmeasured}");
+        assert!(!unmeasured.contains("tok/s"), "{unmeasured}");
     }
 
     /// TC-CLI-TL-25: a tool whose name a terminal draws twice as wide.
