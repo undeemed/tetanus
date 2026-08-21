@@ -46,6 +46,26 @@ impl Mode {
         self != Mode::DangerFullAccess
     }
 
+    /// Whether `self` permits strictly more than `narrower`.
+    ///
+    /// The ordering is the vocabulary's own - `read-only` allows least,
+    /// `danger-full-access` allows most - and it exists as a method because
+    /// escalation is defined in terms of it: a retry may only ever ask for a
+    /// mode that is wider, and a request to "escalate" sideways or downwards
+    /// is a mistake to report rather than a widening to grant.
+    pub fn is_wider_than(self, narrower: Mode) -> bool {
+        self > narrower
+    }
+
+    /// The modes a call under `self` may ask to be escalated to, widest last.
+    /// Upstream exports the same list as `ESCALATION_TARGETS`.
+    pub fn wider_modes(self) -> Vec<Mode> {
+        [Mode::ReadOnly, Mode::WorkspaceWrite, Mode::DangerFullAccess]
+            .into_iter()
+            .filter(|mode| mode.is_wider_than(self))
+            .collect()
+    }
+
     /// The word a document writes and a message prints.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -166,6 +186,21 @@ impl Policy {
 
     pub fn accepts_partial(&self) -> bool {
         self.accept_partial
+    }
+
+    /// The same policy under a wider mode, for one approved call.
+    ///
+    /// Widening only: a caller that asks for a mode no wider than this one
+    /// gets `None`, because "escalate to the mode I already have" is a mistake
+    /// in what the model wrote and a silent no-op would hide it. Everything
+    /// else about the policy - the roots, the network decision, whether
+    /// partial enforcement is acceptable - is carried through, because an
+    /// escalation widens one axis and is not a new policy.
+    pub fn widened_to(&self, mode: Mode) -> Option<Self> {
+        mode.is_wider_than(self.mode).then(|| Self {
+            mode,
+            ..self.clone()
+        })
     }
 
     /// The roots this run may write under: none at all under `read-only`, and

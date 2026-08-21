@@ -28,8 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
+use tetanus_sandbox::Mode;
 use tetanus_turn::interrupt::Interrupt;
-use tetanus_turn::tools::{Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema};
+use tetanus_turn::tools::{
+    Permission, Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema,
+};
 
 use crate::backend::ShellBackend;
 use crate::proc::OutputSink;
@@ -136,6 +139,83 @@ impl ShellTools {
         &self.sessions
     }
 
+    /// The mode every ordinary call from these tools runs under.
+    pub fn mode(&self) -> Mode {
+        self.exec.config().sandbox.mode()
+    }
+
+    /// Whether this composition can escalate at all: there is no wider mode to
+    /// ask for when nothing is being confined.
+    fn escalates(&self) -> bool {
+        !self.mode().wider_modes().is_empty() && self.mode().confines()
+    }
+
+    /// The two escalation properties, for a schema that should advertise them.
+    ///
+    /// Unadvertised where the executor confines nothing, because an argument a
+    /// deployment cannot honour is one a model will spend a call discovering.
+    fn escalation_properties(&self) -> serde_json::Map<String, Value> {
+        let mut properties = serde_json::Map::new();
+        if !self.escalates() {
+            return properties;
+        }
+        let targets: Vec<&'static str> = self
+            .mode()
+            .wider_modes()
+            .into_iter()
+            .map(Mode::as_str)
+            .collect();
+        properties.insert(
+            "sandbox_permissions".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "enum": targets,
+                "description": "The wider sandbox mode this command needs. Only for retrying a command the sandbox just denied; needs a justification, and the person running this harness has to agree.",
+            }),
+        );
+        properties.insert(
+            "justification".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Required with sandbox_permissions: one sentence saying why this exact command needs the wider access.",
+            }),
+        );
+        properties
+    }
+
+    /// One command's confinement, which is the standing one unless this call
+    /// was approved for something wider.
+    async fn run_under(
+        &self,
+        escalated: Option<Mode>,
+        spec: &crate::shell::ShellSpec,
+    ) -> Result<crate::shell::ShellRun, ShellError> {
+        let Some(mode) = escalated else {
+            return self
+                .exec
+                .run_with(spec, self.sink(), Some(&self.interrupt))
+                .await;
+        };
+        // A wider policy for exactly this call. Built here rather than kept,
+        // because an escalation is one command's grant and a cached wider
+        // executor is a grant that outlives the question that bought it.
+        let widened = self
+            .exec
+            .config()
+            .sandbox
+            .widened_to(mode)
+            .expect("the request was checked as strictly wider before it was asked");
+        let once = ShellExec::new(
+            Arc::clone(&self.backend),
+            ShellConfig {
+                sandbox: widened,
+                ..self.exec.config().clone()
+            },
+        )?;
+        once.run_with(spec, self.sink(), Some(&self.interrupt))
+            .await
+    }
+
     fn sink(&self) -> Option<Arc<dyn OutputSink>> {
         self.watching
             .lock()
@@ -144,12 +224,101 @@ impl ShellTools {
     }
 }
 
+/// The two arguments an escalation is made of, read off one call.
+///
+/// Upstream pairs them for a reason worth keeping: a wider mode with no
+/// justification is a request nobody can answer, and a justification with no
+/// mode is a sentence about nothing. Either alone is a mistake in what the
+/// model wrote, and it is reported rather than half-honoured.
+struct Escalation {
+    to: Mode,
+    justification: String,
+}
+
+/// Read an escalation request off a call's arguments.
+///
+/// `Ok(None)` is the ordinary call, which is almost all of them. An `Err` is a
+/// request that cannot be granted as written - unpaired, empty, an unknown
+/// mode, or one no wider than the policy already in force - and it is refused
+/// before anything is asked of a human, because a question whose answer cannot
+/// be applied is worse than no question.
+fn escalation(arguments: &Value, from: Mode) -> Result<Option<Escalation>, ToolError> {
+    let mode = optional_text(arguments, "sandbox_permissions", SHELL)?;
+    let justification = optional_text(arguments, "justification", SHELL)?;
+    let (Some(mode), Some(justification)) = (mode.clone(), justification.clone()) else {
+        return match (mode, justification) {
+            (None, None) => Ok(None),
+            (Some(_), None) => Err(ToolError::InvalidArguments(
+                SHELL.into(),
+                "`sandbox_permissions` needs a `justification`: one sentence for the person who \
+                 has to decide"
+                    .into(),
+            )),
+            (None, Some(_)) => Err(ToolError::InvalidArguments(
+                SHELL.into(),
+                "`justification` means nothing without `sandbox_permissions`, which names the \
+                 wider mode this command needs"
+                    .into(),
+            )),
+            (Some(_), Some(_)) => unreachable!("both present is the branch above"),
+        };
+    };
+    let to = match mode.as_str() {
+        "read-only" => Mode::ReadOnly,
+        "workspace-write" => Mode::WorkspaceWrite,
+        "danger-full-access" => Mode::DangerFullAccess,
+        other => {
+            return Err(ToolError::InvalidArguments(
+                SHELL.into(),
+                format!("`sandbox_permissions` must name a sandbox mode, not {other:?}"),
+            ))
+        }
+    };
+    if !to.is_wider_than(from) {
+        return Err(ToolError::InvalidArguments(
+            SHELL.into(),
+            format!(
+                "this command already runs under {from}, so escalating to {to} would not widen \
+                 anything; ask for a mode that permits more, or run the command as it is"
+            ),
+        ));
+    }
+    Ok(Some(Escalation { to, justification }))
+}
+
 /// Run one command in a fresh shell.
 struct ShellTool(Arc<ShellTools>);
 
 #[async_trait::async_trait]
 impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
+        let mut parameters = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The command line to run. The shell parses it, so pipes, redirections and quoting all work.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What this command does, in five to ten words, for the person watching.",
+                },
+                "workdir": {
+                    "type": "string",
+                    "description": "Where to run it. Relative paths resolve against the workspace root. Defaults to the workspace root.",
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "How long the command may run before it and everything it started are killed. The deployment caps this.",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": false,
+        });
+        if let Some(properties) = parameters["properties"].as_object_mut() {
+            properties.extend(self.0.escalation_properties());
+        }
         ToolSchema {
             name: SHELL.into(),
             description: format!(
@@ -160,30 +329,7 @@ impl Tool for ShellTool {
                  output is cut to its tail.",
                 shell = self.0.backend.name()
             ),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The command line to run. The shell parses it, so pipes, redirections and quoting all work.",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "What this command does, in five to ten words, for the person watching.",
-                    },
-                    "workdir": {
-                        "type": "string",
-                        "description": "Where to run it. Relative paths resolve against the workspace root. Defaults to the workspace root.",
-                    },
-                    "timeout_ms": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "How long the command may run before it and everything it started are killed. The deployment caps this.",
-                    },
-                },
-                "required": ["command"],
-                "additionalProperties": false,
-            }),
+            parameters,
         }
     }
 
@@ -195,8 +341,39 @@ impl Tool for ShellTool {
         ToolMode::Exclusive
     }
 
+    /// An ordinary command runs; a command asking for a wider sandbox is
+    /// decided first.
+    ///
+    /// The gate is the engine's existing one, so an escalation is audited as
+    /// one `approval/asked`/`approval/decided` pair like every other decision
+    /// and needs no vocabulary of its own. The reason carries what the person
+    /// answering has to weigh: the command, the mode it would gain, and the
+    /// model's own sentence for why.
+    ///
+    /// A malformed request asks nothing. `execute` refuses it in words, which
+    /// is the better answer than putting an unanswerable question to a human.
+    fn permission(&self, arguments: &Value) -> Permission {
+        let Ok(Some(escalation)) = escalation(arguments, self.0.mode()) else {
+            return Permission::Allow;
+        };
+        let command = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("(no command)");
+        Permission::ask(format!(
+            "run `{command}` under {to} instead of {from}, because: {why}",
+            to = escalation.to,
+            from = self.0.mode(),
+            why = escalation.justification
+        ))
+    }
+
     async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
         let command = text(arguments, "command", SHELL)?;
+        // Reaching `execute` at all means the gate let this through: either
+        // there was no escalation, or the person answering granted it. What is
+        // left here is applying the mode that was approved.
+        let escalated = escalation(arguments, self.0.mode())?.map(|escalation| escalation.to);
         let mut request = ShellRequest::new(command);
         if let Some(workdir) = optional_text(arguments, "workdir", SHELL)? {
             request = request.workdir(workdir);
@@ -212,8 +389,7 @@ impl Tool for ShellTool {
             .map_err(|refused| refused_call(SHELL, refused))?;
         let run = self
             .0
-            .exec
-            .run_with(&spec, self.0.sink(), Some(&self.0.interrupt))
+            .run_under(escalated, &spec)
             .await
             .map_err(|refused| refused_call(SHELL, refused))?;
 

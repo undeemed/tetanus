@@ -460,15 +460,40 @@ mod harness {
         pub engine: TurnEngine,
         log: Arc<dyn SessionLog>,
         script: Arc<Script>,
+        /// Dropping this takes the answerer off the bus, so it lives exactly as
+        /// long as the session it answers for.
+        _answering: Option<tetanus_core::EffectHandle>,
         _dir: tempfile::TempDir,
     }
 
     impl Harness {
+        /// The same fixture with an answerer on the bus, for the escalation
+        /// cases: every question this session puts gets `outcome`.
+        pub async fn approving(
+            name: &str,
+            workspace: &std::path::Path,
+            mode: Mode,
+            arguments: Value,
+            outcome: tetanus_turn::approval::ApprovalOutcome,
+        ) -> Self {
+            Self::compose(name, workspace, mode, arguments, Some(outcome)).await
+        }
+
         pub async fn new(
             name: &str,
             workspace: &std::path::Path,
             mode: Mode,
             arguments: Value,
+        ) -> Self {
+            Self::compose(name, workspace, mode, arguments, None).await
+        }
+
+        async fn compose(
+            name: &str,
+            workspace: &std::path::Path,
+            mode: Mode,
+            arguments: Value,
+            answer: Option<tetanus_turn::approval::ApprovalOutcome>,
         ) -> Self {
             let dir = tempfile::tempdir().expect("temp dir");
             let bus = EventBus::new();
@@ -478,6 +503,11 @@ mod harness {
                 bus.clone(),
             )
             .expect("journal");
+            let answering = answer.map(|outcome| {
+                bus.on_waterfall::<tetanus_turn::approval::ApprovalAsk, _>(move |_ask, _next| {
+                    Box::pin(async move { outcome })
+                })
+            });
             let interrupt = Interrupt::new();
             let tools = ShellTools::new(
                 Arc::new(Bash::new()),
@@ -517,8 +547,19 @@ mod harness {
                 engine,
                 log,
                 script,
+                _answering: answering,
                 _dir: dir,
             }
+        }
+
+        /// Every record of one kind on the journal, in order.
+        pub fn records(&self, kind: &str) -> Vec<Value> {
+            self.log
+                .events()
+                .iter()
+                .filter(|event| event.ty == kind)
+                .map(|event| event.data.clone())
+                .collect()
         }
 
         pub fn results(&self) -> Vec<Value> {
@@ -617,4 +658,240 @@ mod harness {
             })
         }
     }
+}
+
+/// TC-PORT-SANDBOX-28: an approved escalation runs that one command wider.
+///
+/// Upstream: `sandbox/sandbox/tests/escalation.spec.ts` ("a denied command may
+/// be retried once under a wider mode with user approval").
+///
+/// This is the last thing upstream's sandbox row asked for that tetanus could
+/// build with what it has: the policy is here and the decision seam is here,
+/// so an escalation is the two of them meeting. It is deliberately not a new
+/// vocabulary - the gate is the engine's existing one, so the grant is audited
+/// as the same `approval/asked`/`approval/decided` pair as every other
+/// decision.
+///
+/// Input: a `read-only` policy; a model that asks for a write with
+/// `sandbox_permissions: workspace-write` and a justification; an answerer that
+/// grants.
+/// Expected: the write succeeds, the file exists, and the journal carries the
+/// question - with the command, the wider mode and the model's reason in it -
+/// paired with the grant.
+#[tokio::test]
+async fn an_approved_escalation_runs_that_one_command_wider() {
+    let Some(workspace) = enforcing() else { return };
+    let target = workspace.path().join("escalated.txt");
+    let harness = harness::Harness::approving(
+        "sandbox-escalation-granted",
+        workspace.path(),
+        Mode::ReadOnly,
+        json!({
+            "command": format!("echo widened > {}", target.display()),
+            "sandbox_permissions": "workspace-write",
+            "justification": "the build writes its output into the workspace",
+        }),
+        tetanus_turn::approval::ApprovalOutcome::AllowedOnce,
+    )
+    .await;
+
+    harness.engine.run_turn("write it").await.expect("turn");
+
+    let results = harness.results();
+    assert_eq!(results[0]["ok"], json!(true), "{}", results[0]["content"]);
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("the approved write landed"),
+        "widened\n"
+    );
+    let asked = harness.records("approval/asked");
+    assert_eq!(asked.len(), 1, "one escalation, one question");
+    let reason = asked[0]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("workspace-write") && reason.contains("read-only"),
+        "the question names both modes: {reason}"
+    );
+    assert!(
+        reason.contains("the build writes its output"),
+        "and the model's own sentence: {reason}"
+    );
+    assert_eq!(
+        harness.records("approval/decided")[0]["outcome"],
+        json!("allowed-once")
+    );
+}
+
+/// TC-PORT-SANDBOX-29: a refused escalation runs nothing.
+///
+/// Upstream: "a rejected escalation is final for that command".
+///
+/// The half that matters most. An escalation that ran anyway would make the
+/// question theatre, and the audit pair would record a refusal beside a file
+/// that got written regardless.
+///
+/// Input: the same call, with an answerer that refuses.
+/// Expected: the result is a failure the model reads, the file does not exist,
+/// and the journal carries the question paired with the refusal.
+#[tokio::test]
+async fn a_refused_escalation_runs_nothing() {
+    let Some(workspace) = enforcing() else { return };
+    let target = workspace.path().join("never-written.txt");
+    let harness = harness::Harness::approving(
+        "sandbox-escalation-refused",
+        workspace.path(),
+        Mode::ReadOnly,
+        json!({
+            "command": format!("echo widened > {}", target.display()),
+            "sandbox_permissions": "workspace-write",
+            "justification": "it needs to write",
+        }),
+        tetanus_turn::approval::ApprovalOutcome::Rejected,
+    )
+    .await;
+
+    harness.engine.run_turn("write it").await.expect("turn");
+
+    let results = harness.results();
+    assert_eq!(results[0]["ok"], json!(false));
+    assert!(
+        !target.exists(),
+        "a refused escalation wrote the file anyway"
+    );
+    // The question was really put and really answered: without this, a
+    // malformed request refused by validation would satisfy everything above.
+    assert_eq!(harness.records("approval/asked").len(), 1);
+    assert_eq!(
+        harness.records("approval/decided")[0]["outcome"],
+        json!("rejected"),
+        "it has to be the answerer that refused, not the argument check"
+    );
+    let content = results[0]["content"].as_str().expect("text");
+    assert!(
+        content.contains("not permitted")
+            || content.contains("rejected")
+            || content.contains("denied"),
+        "the model is told the decision went against it: {content}"
+    );
+}
+
+/// TC-PORT-SANDBOX-30: an escalation that cannot be granted as written is
+/// refused in words, and nobody is asked.
+///
+/// Upstream: `validateEscalationArgs` ("the pairing is the shared rule both
+/// enforcing families validate identically").
+///
+/// Putting an unanswerable question to a person is worse than refusing it: they
+/// cannot tell what they are agreeing to, and the model learns nothing about
+/// what it wrote. So the malformed shapes never reach the gate.
+///
+/// Input: a wider mode with no justification; a justification with no mode; and
+/// an escalation to a mode no wider than the one already in force.
+/// Expected: each is a failed result naming what is wrong, no file is written,
+/// and no question was asked at all.
+#[tokio::test]
+async fn an_escalation_that_cannot_be_granted_is_refused_in_words() {
+    let Some(workspace) = enforcing() else { return };
+    for (case, arguments, expected) in [
+        (
+            "no justification",
+            json!({ "command": "true", "sandbox_permissions": "workspace-write" }),
+            "needs a `justification`",
+        ),
+        (
+            "no mode",
+            json!({ "command": "true", "justification": "because" }),
+            "means nothing without `sandbox_permissions`",
+        ),
+        (
+            "not wider",
+            json!({
+                "command": "true",
+                "sandbox_permissions": "read-only",
+                "justification": "because",
+            }),
+            "would not widen anything",
+        ),
+    ] {
+        let harness = harness::Harness::approving(
+            &format!("sandbox-escalation-{}", case.replace(' ', "-")),
+            workspace.path(),
+            Mode::ReadOnly,
+            arguments,
+            tetanus_turn::approval::ApprovalOutcome::AllowedOnce,
+        )
+        .await;
+
+        harness.engine.run_turn("try it").await.expect("turn");
+
+        let results = harness.results();
+        assert_eq!(results[0]["ok"], json!(false), "{case}: {}", results[0]);
+        let content = results[0]["content"].as_str().expect("text");
+        assert!(
+            content.contains(expected),
+            "{case}: the refusal has to say what is wrong, got {content}"
+        );
+        assert!(
+            harness.records("approval/asked").is_empty(),
+            "{case}: a question was put that nobody could answer"
+        );
+    }
+}
+
+/// TC-PORT-SANDBOX-31: escalation is not advertised where there is nothing to
+/// escalate from.
+///
+/// Upstream hides the same two arguments when no sandboxing executor is
+/// mounted. An argument a deployment cannot honour costs a model a call to
+/// discover, and the discovery reads as the harness being inconsistent.
+///
+/// Input: the tool schema under a confining policy and under
+/// `danger-full-access`.
+/// Expected: advertised under the first, with the wider modes enumerated;
+/// absent under the second.
+#[test]
+fn escalation_is_advertised_only_where_it_means_something() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let confining = tools_under(Policy::new(Mode::ReadOnly, workspace.path()));
+    let schema = shell_schema(&confining);
+    let properties = &schema.parameters["properties"];
+    assert!(properties.get("sandbox_permissions").is_some());
+    assert_eq!(
+        properties["sandbox_permissions"]["enum"],
+        json!(["workspace-write", "danger-full-access"]),
+        "only the modes that are actually wider"
+    );
+    assert!(properties.get("justification").is_some());
+
+    let unconfined = tools_under(Policy::danger_full_access(workspace.path()));
+    let schema = shell_schema(&unconfined);
+    assert!(
+        schema.parameters["properties"]
+            .get("sandbox_permissions")
+            .is_none(),
+        "there is no wider mode to ask for, so nothing is advertised"
+    );
+}
+
+/// The shell tools under one policy, for the schema cases.
+fn tools_under(policy: Policy) -> Arc<tetanus_exec::tools::ShellTools> {
+    tetanus_exec::tools::ShellTools::new(
+        Arc::new(Bash::new()),
+        ShellConfig {
+            cwd: std::env::temp_dir(),
+            sandbox: policy,
+            ..ShellConfig::default()
+        },
+        tetanus_exec::session::SessionConfig::default(),
+        tetanus_turn::interrupt::Interrupt::new(),
+    )
+    .expect("this host can compose it")
+}
+
+/// The `shell` schema out of a registry those tools registered on.
+fn shell_schema(tools: &Arc<tetanus_exec::tools::ShellTools>) -> tetanus_turn::tools::ToolSchema {
+    tools
+        .registry()
+        .schemas()
+        .into_iter()
+        .find(|schema| schema.name == tetanus_exec::tools::SHELL)
+        .expect("the shell tool is registered")
 }
