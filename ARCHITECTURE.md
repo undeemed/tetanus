@@ -391,7 +391,8 @@ this one.
 Every view that polls a journal asks the filesystem whether it has grown before it asks the log for
 its events ([`appended`](crates/cli/src/main.rs)).
 A journal is append-only, so a file the same length as last time holds nothing this view has not
-seen - and `SessionLog::events` copies every event it holds, which a view polling twelve times a
+seen; the rule is that the length *changed*, not that it grew, so a journal truncated or replaced
+under the view is read again rather than trusted - and `SessionLog::events` copies every event it holds, which a view polling twelve times a
 second turns into a cost that grows with the conversation.
 Measured on a journal of six thousand events: a sixth of a core, spent on a conversation nobody was
 having; one `stat` a frame instead.
@@ -423,6 +424,9 @@ The caret is placed from where the prompt began rather than from the bottom of t
 when that row was drawn: a terminal too short for the whole arrangement drops what does not fit -
 the footer first - so a caret counted from the footer lands on the rule above the prompt, and a
 terminal with no room for a prompt at all has nowhere to put one.
+A terminal no columns wide draws nothing and is pointed at with nothing; terminals report that
+width while they are being resized, and a view that fell over there would take the conversation
+with it.
 
 `/think` and `/more` open what is already on the page: the model's thinking, folded to its first
 line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
