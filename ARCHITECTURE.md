@@ -428,6 +428,13 @@ A terminal no columns wide draws nothing and is pointed at with nothing; termina
 width while they are being resized, and a view that fell over there would take the conversation
 with it.
 
+The other two full-screen views hold at those sizes as well, and each has a case that sweeps them:
+the journal ([`browse`](crates/cli/src/render/browse.rs)), which refills on every width change, and
+the picker ([`pick`](crates/cli/src/render/pick.rs)), which composes its own frame so that the
+window can follow the cursor.
+Neither costs anything while it is up: they wait on a key rather than polling a journal, which is
+what a view over something already written can do.
+
 `/think` and `/more` open what is already on the page: the model's thinking, folded to its first
 line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
 to off the screen.
