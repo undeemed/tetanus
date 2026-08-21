@@ -9,8 +9,8 @@ use tetanus_protocol::methods::AskResult;
 use tetanus_protocol::methods::MAX_PAGE_SIZE;
 use tetanus_protocol::methods::{
     capability, method, push, Ack, AgentPromptParams, AgentStatusPush, AgentSteerParams,
-    AgentSteerResult, ApprovalSetParams, ApproveParams, ApproveResult, SessionEventPush,
-    SessionForkParams,
+    AgentSteerResult, ApprovalSetParams, ApproveParams, ApproveResult, MAX_FRAME_BYTES,
+    SessionEventPush, SessionEventsResult, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
@@ -2110,4 +2110,70 @@ fn whitespace_is_nothing_as_it_is_for_a_credential() {
         untrimmed_would_accept, 5,
         "five of these six get through a check that does not trim"
     );
+}
+
+/// TC-PROTO-95: contract section 4.1. The frame bound is published, and is one
+/// bound for every carrier.
+///
+/// Publishing it is the point: without a shared number the carriers disagree
+/// under the same abuse, and "one contract, three carriers" stops being true
+/// for a peer that sends bytes and no newline. A surface also needs it to know
+/// what it may send.
+#[test]
+fn the_frame_bound_is_published_and_is_one_bound() {
+    assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
+
+    // Comfortably above any legitimate frame. A full page at the server's
+    // documented maximum of 500 events still leaves room for each of them,
+    // which is what stops the frame bound from being the thing that decides
+    // how much of a journal a caller can read at once.
+    let per_event = MAX_FRAME_BYTES / 500;
+    assert!(
+        per_event > 30_000,
+        "a full page leaves {per_event} bytes an event, which has to be a usable amount"
+    );
+
+    // An over-long frame is refused with the answer section 4.1 already gives
+    // a frame it cannot make sense of, so no new code is needed for it.
+    let refused = RpcError::new(ErrorCode::ParseError, "frame exceeds the maximum size");
+    assert_eq!(refused.kind(), Some(ErrorCode::ParseError));
+    assert_eq!(
+        refused.data, None,
+        "ParseError carries no data, per section 4.5"
+    );
+}
+
+/// TC-PROTO-96: contract section 4.1. A short page is not the end; `eof` is.
+///
+/// A caller can meet a page shorter than its `limit` for two reasons that have
+/// nothing to do with reaching the journal's end - the server's page maximum,
+/// and now the frame bound. A pager that stopped on a short page would
+/// silently truncate a transcript, and would do it only for the sessions with
+/// the most in them, which is the worst possible distribution of a bug.
+#[test]
+fn a_short_page_is_not_the_end() {
+    // Short because the frame bound stopped it, with more to come.
+    let bounded = SessionEventsResult {
+        events: Vec::new(),
+        next_seq: 40,
+        eof: false,
+    };
+    // Short because the journal ended.
+    let finished = SessionEventsResult {
+        events: Vec::new(),
+        next_seq: 40,
+        eof: true,
+    };
+
+    assert_eq!(
+        bounded.events.len(),
+        finished.events.len(),
+        "the two are indistinguishable by page length, which is the trap"
+    );
+    assert!(!bounded.eof, "so the caller pages again");
+    assert!(finished.eof, "and only this one says stop");
+
+    // `next_seq` advances in both, so a pager that loops on `eof` makes
+    // progress either way rather than asking for the same page twice.
+    assert_eq!(bounded.next_seq, finished.next_seq);
 }

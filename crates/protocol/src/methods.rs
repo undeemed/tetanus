@@ -53,7 +53,18 @@ pub mod push {
 /// A caller paging with `next_seq` and `eof` never needs it. It is here for
 /// the one that wants a single round trip.
 pub const MAX_PAGE_SIZE: u32 = 500;
-
+/// The largest frame any carrier will send or accept, in bytes.
+///
+/// Contract section 4.1. One bound for every carrier, because without one they
+/// disagree under the same abuse: a WebSocket library refuses an over-long
+/// message by default, while a line reader given bytes and no newline grows
+/// its buffer until the process dies.
+///
+/// Sixteen mebibytes is far above any legitimate frame - a page of session
+/// events, a tool result, a completion - and far below what it costs to
+/// refuse. The engine keeps it from ever binding by not *writing* a durable
+/// event larger than this, so a page of one event always fits.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Capability strings a server advertises in [`HelloResult`]. A surface checks
 /// one before it uses an optional call.
 pub mod capability {
