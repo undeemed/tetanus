@@ -45,7 +45,7 @@ use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot;
 use tetanus_turn::log::topic;
 use tetanus_turn::{TurnConfig, TurnEngine};
-use tetanus_ui::{tame_line, when_killed, Held, Key, Keys, Policy, Role, Tty, Ui};
+use tetanus_ui::{tame_line, when_killed, Held, Key, Keys, Policy, Tty, Ui};
 
 use crate::render;
 use crate::{AdapterChoice, Reported};
@@ -418,9 +418,7 @@ impl Session<'_> {
             match parse(&asked) {
                 Input::Blank => continue,
                 Input::Leave => return Leaving::Ended,
-                Input::Help => self
-                    .view
-                    .settle(render::chat::card(self.view.theme(), self.size.0)),
+                Input::Help => self.view.card(),
                 Input::Unknown(command) => self.said(&format!(
                     "{} is not a command; /help lists them",
                     tame_line(command)
@@ -498,8 +496,7 @@ impl Session<'_> {
             )),
         };
         if let Err(fault) = &answered {
-            let lines = render::fault::lines(self.view.theme(), self.size.0, fault);
-            self.view.settle(lines);
+            self.view.fault(fault);
         }
         self.paint(out, Duration::ZERO);
         Some(answered)
@@ -512,8 +509,7 @@ impl Session<'_> {
 
     /// One line of this build's own words, on the transcript.
     fn said(&mut self, text: &str) {
-        let said = self.view.theme().paint(Role::Warn, text).to_string();
-        self.view.settle(vec![said]);
+        self.view.note(text);
     }
 
     /// Answer every keystroke waiting, and take the size the terminal reports.

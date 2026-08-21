@@ -354,6 +354,14 @@ blinks at the repaint's rate, hides the character under it and is invisible to a
 The commands are the chat's own, so a reader who knows `/help` and `/exit` needs no second
 vocabulary; the keys, the statuses and the wording are the ordinary chat's too, which is what lets
 a script wrap either.
+The view keeps what was said rather than the rows it drew - an event, a card, a note, a fault - and
+composes the rows again whenever the width changes, so a terminal that is narrowed folds the
+conversation into it rather than cutting each row's tail off, and one that is widened puts the
+folds back.
+`Page` does not rewrap, and says why: a live view must not rewrite history under a reader who is
+still reading it. A resize is not the stream rewriting anything, it is the reader asking for a new
+shape at the moment they ask - the same reading [`browse`](crates/cli/src/render/browse.rs) makes
+of the same rule.
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
