@@ -1455,6 +1455,7 @@ name = "tetanus-host"
 version = "0.1.0"
 dependencies = [
  "httparse",
+ "tempfile",
  "tokio",
  "tracing",
 ]

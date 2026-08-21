@@ -33,9 +33,11 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+mod frontend;
 mod respond;
 mod route;
 
+pub use frontend::Frontend;
 pub use respond::{Response, Status};
 pub use route::{Handler, Pattern, Request, Route};
 
@@ -61,13 +63,25 @@ pub struct WebServer {
     address: SocketAddr,
 }
 
-/// Who answers what, and the one who answers everything else.
+/// Who answers what, the one who answers everything else, and what every
+/// index response is run through on its way out.
 #[derive(Default)]
 struct Table {
     routes: HashMap<(Pattern, String), Route>,
     upgrades: HashMap<String, Route>,
     fallback: Option<Route>,
+    taps: Vec<(usize, Tap)>,
+    /// The number the next tap is filed under, so that a tap removed and one
+    /// added do not collide and the order stays the order they were added in.
+    next_tap: usize,
 }
+
+/// A transform every index response passes through.
+///
+/// This is how the boot manifest reaches the page: the assembly knows what the
+/// browser has to be told, the frontend knows nothing about the assembly, and
+/// the index is the one document both of them touch.
+pub type Tap = Arc<dyn Fn(String) -> String + Send + Sync>;
 
 /// A registration, undone by dropping it.
 ///
@@ -83,6 +97,7 @@ enum What {
     Route(Pattern, String),
     Upgrade(String),
     Fallback,
+    Tap(usize),
 }
 
 /// What a registration can go wrong by.
@@ -186,6 +201,36 @@ impl WebServer {
         })
     }
 
+    /// Add a transform to every index response, in the order taps are added.
+    ///
+    /// Unlike a route, a tap is not a seat: several plugins each have
+    /// something to tell the page, and they compose rather than exclude. The
+    /// order is the order they were added in, which is the assembly's, and the
+    /// guard removes exactly the one it holds.
+    pub fn tap_index(&self, tap: Tap) -> Registered {
+        let mut table = self.table.lock().expect("the route table");
+        let at = table.next_tap;
+        table.next_tap += 1;
+        table.taps.push((at, tap));
+        Registered {
+            table: Arc::clone(&self.table),
+            what: What::Tap(at),
+        }
+    }
+
+    /// Run a body through the registered taps, in order.
+    ///
+    /// Called by whoever owns the fallback seat on every index response. It
+    /// lives here rather than there because the taps are the assembly's and
+    /// the frontend is only the document they are applied to.
+    pub fn apply_index_taps(&self, html: String) -> String {
+        let taps: Vec<Tap> = {
+            let table = self.table.lock().expect("the route table");
+            table.taps.iter().map(|(_, tap)| Arc::clone(tap)).collect()
+        };
+        taps.into_iter().fold(html, |html, tap| tap(html))
+    }
+
     /// Answer requests until the listener fails.
     ///
     /// One task per connection, and a task that panics takes its own socket
@@ -261,6 +306,7 @@ impl Drop for Registered {
                 table.upgrades.remove(path);
             }
             What::Fallback => table.fallback = None,
+            What::Tap(at) => table.taps.retain(|(filed, _)| filed != at),
         }
     }
 }

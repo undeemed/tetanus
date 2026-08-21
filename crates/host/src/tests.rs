@@ -7,9 +7,14 @@
 //! answers 404; that an upgrade is matched on its own table and on the header
 //! rather than the pathname; and the two addresses this server will bind.
 //!
-//! Features NOT tested here: what any route answers with - that belongs to
-//! whoever registered it - and the static frontend's own semantics, which are
-//! its package's cases.
+//! For the frontend on that seat: that a file is served as what it is and an
+//! unknown extension as bytes; that a miss is the page with 200 rather than a
+//! 404; that nothing outside the dist root is served, written, escaped or
+//! symlinked; that a write which reached the fallback is 405; that every index
+//! response runs through the taps in order; and that the seat is given back.
+//!
+//! Features NOT tested here: what any other route answers with - that belongs
+//! to whoever registered it.
 //!
 //! Environmental needs: a loopback port the operating system picks. No case
 //! binds a fixed port, so the suite runs beside anything.
@@ -215,4 +220,150 @@ async fn a_head_this_carrier_will_not_parse_is_refused() {
     let long = format!("GET /{} HTTP/1.1\r\nhost: x\r\n\r\n", "a".repeat(20_000));
     let said = ask(address, &long).await;
     assert!(said.starts_with("HTTP/1.1 400"), "{said}");
+}
+
+/// A dist directory with an index, an asset and a file of an unknown kind.
+fn dist() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("index.html"), "<html>the page</html>").expect("index");
+    std::fs::create_dir_all(dir.path().join("assets")).expect("assets");
+    std::fs::write(dir.path().join("assets/app.js"), "console.log(1)").expect("js");
+    std::fs::write(dir.path().join("assets/thing.bin"), [0_u8, 1, 2]).expect("bin");
+    dir
+}
+
+/// TC-HOST-STATIC-1: a file that is there, and one whose extension this table
+/// does not know.
+/// Expected: the asset with its own type; the unknown one as
+/// `application/octet-stream`. A guess is worse than a download.
+#[tokio::test]
+async fn a_file_is_served_as_what_it_is_or_as_bytes() {
+    let dir = dist();
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("the seat is free");
+    tokio::spawn(server.serve(listener));
+
+    let js = ask(address, "GET /assets/app.js HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    assert!(js.contains("text/javascript"), "{js}");
+    assert!(js.contains("console.log(1)"), "{js}");
+
+    let bin = ask(address, "GET /assets/thing.bin HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    assert!(bin.contains("application/octet-stream"), "{bin}");
+}
+
+/// TC-HOST-STATIC-2: a path that is no file at all.
+/// Expected: `index.html`, with 200. Not 404 and not a redirect: the router in
+/// the page decides whether `/sessions/17` means anything, and it cannot
+/// decide if the server answered first.
+#[tokio::test]
+async fn a_miss_is_the_page_and_not_a_404() {
+    let dir = dist();
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    tokio::spawn(server.serve(listener));
+
+    let said = ask(address, "GET /sessions/17 HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    assert!(said.starts_with("HTTP/1.1 200"), "{said}");
+    assert!(said.contains("the page"), "{said}");
+}
+
+/// TC-HOST-STATIC-3: three ways of asking for something outside the root -
+/// written, escaped, and through a symlink.
+/// Expected: 403 for each. The check is on the resolved path, because `%2e%2e`
+/// and a symlink both spell `..` without writing it.
+#[tokio::test]
+async fn nothing_outside_the_frontend_is_served() {
+    let dir = dist();
+    let secret = dir.path().parent().expect("a parent").join("secret.txt");
+    std::fs::write(&secret, "not yours").expect("the file outside");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).expect("the symlink");
+
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    tokio::spawn(server.serve(listener));
+
+    for path in ["/../secret.txt", "/%2e%2e/secret.txt", "/link.txt"] {
+        let said = ask(address, &format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n")).await;
+        assert!(said.starts_with("HTTP/1.1 403"), "{path}: {said}");
+        assert!(
+            !said.contains("not yours"),
+            "{path} leaked the file: {said}"
+        );
+    }
+    let _ = std::fs::remove_file(secret);
+}
+
+/// TC-HOST-STATIC-4: a POST to a path no named route claimed.
+/// Expected: 405 with an `allow` header, not the page. A caller posting to an
+/// API that is not there must not be told it worked.
+#[tokio::test]
+async fn a_write_that_reached_the_fallback_is_refused() {
+    let dir = dist();
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    tokio::spawn(server.serve(listener));
+
+    let said = ask(
+        address,
+        "POST /api/models HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\n\r\n",
+    )
+    .await;
+    assert!(said.starts_with("HTTP/1.1 405"), "{said}");
+    assert!(said.to_lowercase().contains("allow: get, head"), "{said}");
+}
+
+/// TC-HOST-STATIC-5: two taps registered, then one dropped.
+/// Expected: every index response carries both transforms, in the order they
+/// were added; after the drop, only the other one. This is how the boot
+/// manifest reaches a page that knows nothing about the assembly.
+#[tokio::test]
+async fn every_index_response_runs_through_the_taps() {
+    let dir = dist();
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    let first = server.tap_index(Arc::new(|html| {
+        html.replace("</html>", "<b>one</b></html>")
+    }));
+    let _second = server.tap_index(Arc::new(|html| {
+        html.replace("</html>", "<b>two</b></html>")
+    }));
+    tokio::spawn(server.clone().serve(listener));
+
+    let said = ask(address, "GET / HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    let one = said.find("one").expect("the first tap ran");
+    let two = said.find("two").expect("the second tap ran");
+    assert!(one < two, "the taps ran out of order: {said}");
+
+    drop(first);
+    let said = ask(address, "GET / HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    assert!(!said.contains("one"), "a dropped tap still ran: {said}");
+    assert!(said.contains("two"), "{said}");
+}
+
+/// TC-HOST-STATIC-6: the seat, claimed and released.
+/// Expected: a second mount is refused while the first holds it, and the
+/// carrier answers 404 again once the guard is dropped. The seat is
+/// effect-scoped, so a frontend that goes away does not leave a page behind.
+#[tokio::test]
+async fn the_frontend_holds_one_seat_and_gives_it_back() {
+    let dir = dist();
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    tokio::spawn(server.clone().serve(listener));
+
+    assert_eq!(
+        Frontend::mount(&server, &dir.path().join("index.html")).err(),
+        Some(Taken::Fallback)
+    );
+
+    drop(seat);
+    let said = ask(address, "GET /whatever HTTP/1.1\r\nhost: x\r\n\r\n").await;
+    assert!(said.starts_with("HTTP/1.1 404"), "{said}");
 }
