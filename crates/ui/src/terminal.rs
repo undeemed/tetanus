@@ -72,7 +72,10 @@
 use std::io::{self, Write};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::{cursor, execute, terminal};
 
 /// What a full-screen view needs from the terminal, and nothing more.
@@ -115,21 +118,42 @@ pub trait Keys {
 /// leave stdout for a machine, as `tetanus serve` already does.
 pub struct Tty<W: Write> {
     out: W,
+    /// The keys a paste arrived as, waiting to be read one at a time.
+    ///
+    /// A paste is one event carrying many characters. A view reads one key per
+    /// call, so the rest queue here rather than being dropped or handed over
+    /// as a variant every caller would have to learn.
+    pasted: std::collections::VecDeque<Key>,
 }
 
 impl<W: Write> Tty<W> {
     /// Wrap the stream the view will draw on.
     pub fn new(out: W) -> Self {
-        Self { out }
+        Self {
+            out,
+            pasted: std::collections::VecDeque::new(),
+        }
     }
 }
 
 impl<W: Write> Keys for Tty<W> {
     fn key(&mut self, wait: Duration) -> io::Result<Option<Key>> {
+        // Whatever a paste is still owed, before the terminal is asked for
+        // anything new: the characters of one paste arrive in the order they
+        // were pasted or they are not that paste.
+        if let Some(key) = self.pasted.pop_front() {
+            return Ok(Some(key));
+        }
         if !event::poll(wait)? {
             return Ok(None);
         }
-        Ok(key_of(event::read()?))
+        let mut keys = keys_of(event::read()?);
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        let first = keys.remove(0);
+        self.pasted.extend(keys);
+        Ok(Some(first))
     }
 }
 
@@ -139,14 +163,27 @@ impl<W: Write> Console for Tty<W> {
         // still undoes both, whereas a failure between them in the other
         // order would leave a screen nobody is holding.
         terminal::enable_raw_mode()?;
-        execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide)
+        // Bracketed paste with them: without it a terminal hands a pasted
+        // block over as though somebody had typed it, and every newline in it
+        // is an Enter. A pasted stack trace is then forty questions.
+        execute!(
+            self.out,
+            terminal::EnterAlternateScreen,
+            EnableBracketedPaste,
+            cursor::Hide
+        )
     }
 
     fn restore(&mut self) -> io::Result<()> {
         // Both steps, always, and the first failure reported. Skipping the
         // rest after one fails is how a user ends up on their own scrollback
         // with no echo: the worst of the two halves rather than either.
-        let screen = execute!(self.out, cursor::Show, terminal::LeaveAlternateScreen);
+        let screen = execute!(
+            self.out,
+            cursor::Show,
+            DisableBracketedPaste,
+            terminal::LeaveAlternateScreen
+        );
         let raw = terminal::disable_raw_mode();
         screen.and(raw)
     }
@@ -167,11 +204,18 @@ pub struct Typing;
 
 impl Console for Typing {
     fn take(&mut self) -> io::Result<()> {
-        terminal::enable_raw_mode()
+        terminal::enable_raw_mode()?;
+        // The prompt on the reader's own scrollback wants a paste to be a
+        // paste as much as a full-screen view does. Written to stdout because
+        // this mode belongs to the terminal and this console holds no stream
+        // of its own; a stream that is not a terminal ignores it.
+        execute!(std::io::stdout(), EnableBracketedPaste)
     }
 
     fn restore(&mut self) -> io::Result<()> {
-        terminal::disable_raw_mode()
+        let paste = execute!(std::io::stdout(), DisableBracketedPaste);
+        let raw = terminal::disable_raw_mode();
+        paste.and(raw)
     }
 }
 
@@ -382,13 +426,30 @@ pub enum Key {
 /// never asks "was this an `a` with something held". Shift is not among them
 /// for the opposite reason - the terminal has already applied it, and the
 /// character that arrives is the shifted one.
+fn keys_of(event: Event) -> Vec<Key> {
+    // A paste is the characters it is made of, in order, and never an Enter:
+    // the newlines in it are text the reader pasted, not a reader pressing
+    // return forty times. `Line` keeps them and the row draws them as spaces,
+    // so what is sent is what was pasted.
+    if let Event::Paste(text) = event {
+        return text
+            .chars()
+            .map(|char| match char {
+                '\r' | '\n' => Key::Char('\n'),
+                char => Key::Char(char),
+            })
+            .collect();
+    }
+    key_of(event).into_iter().collect()
+}
+
+/// One keystroke, in the vocabulary a view codes against.
 fn key_of(event: Event) -> Option<Key> {
     let key = match event {
         Event::Key(key) => key,
         Event::Resize(cols, rows) => return Some(Key::Resize(cols, rows)),
-        // A mouse report, a focus change, a paste: real events that this
-        // vocabulary does not name yet. Dropping them is right; guessing at
-        // one is not.
+        // A mouse report or a focus change: real events that this vocabulary
+        // does not name yet. Dropping them is right; guessing at one is not.
         _ => return None,
     };
     // A terminal in the enhanced keyboard protocol reports the release of
@@ -594,7 +655,7 @@ mod tests {
         ];
 
         for (event, want) in cases {
-            assert_eq!(key_of(event), Some(want), "{event:?}");
+            assert_eq!(key_of(event.clone()), Some(want), "{event:?}");
         }
     }
 
@@ -612,6 +673,35 @@ mod tests {
         ));
         assert_eq!(key_of(release), None);
         assert_eq!(key_of(Event::FocusGained), None);
+    }
+
+    /// TC-UI-TERM-6: a paste, and an ordinary keystroke.
+    /// Expected: a paste is the characters it is made of, in order, with every
+    /// newline a character and not an Enter - a pasted stack trace is one
+    /// question, and without this it is one question per line. Anything else
+    /// is the one key it always was.
+    #[test]
+    fn a_paste_is_its_characters_and_never_an_enter() {
+        let pasted = keys_of(Event::Paste("ok\nand\r\non".into()));
+
+        assert!(
+            !pasted.contains(&Key::Enter),
+            "an Enter came out of a paste: {pasted:?}"
+        );
+        let text: String = pasted
+            .iter()
+            .map(|key| match key {
+                Key::Char(char) => *char,
+                other => panic!("not a character: {other:?}"),
+            })
+            .collect();
+        // `\r\n` is two characters on the wire and one break in the text.
+        assert_eq!(text, "ok\nand\n\non");
+
+        assert_eq!(
+            keys_of(Event::Key(KeyEvent::from(KeyCode::Enter))),
+            vec![Key::Enter]
+        );
     }
 
     /// TC-UI-TERM-7: the repeat half of a held key.

@@ -41,7 +41,11 @@ terminal_size = "0.4"
 # A terminal draws a CJK character in two columns and a combining mark in
 # none, so every width this workspace measures is asked of this crate.
 unicode-width = "0.2"
-crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
+crossterm = { version = "0.29", default-features = false, features = [
+    "events",
+    "bracketed-paste",
+    "windows",
+] }
 # Already in the tree under `crossterm`; named here because `crates/ui` asks
 # it for the watch that gives the terminal back when the process is killed.
 signal-hook = "0.3"
