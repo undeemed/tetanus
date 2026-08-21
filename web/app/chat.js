@@ -4,6 +4,7 @@ import { sessionList } from "./sidebar.js";
 import { approvalRow, askCard } from "./questions.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
+import { markdown } from "./markdown.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -300,7 +301,12 @@ function drawn(event) {
       const here = card || turnCard(undefined);
       here.tokens += (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
       const settled = here.live && here.live.kind === "ai" ? here.live.body : row("ai", "ai", "");
-      settled.textContent = data.content;
+      // A settled answer is a document: the model writes markdown, and a
+      // reader who has to parse fences by eye is reading the source of an
+      // answer rather than the answer. It replaces the streamed text, which
+      // stays plain while it arrives - a half-written fence is not a document
+      // yet.
+      settled.replaceChildren(markdown(data.content));
       settled.parentElement.classList.remove("live");
       if (here.live) here.live.body.parentElement.classList.remove("live");
       here.live = null;

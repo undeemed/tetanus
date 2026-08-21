@@ -154,3 +154,35 @@
 .trace-bad { color:var(--state-bad); }
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
+
+/* --- a rendered answer ------------------------------------------------- */
+
+.md { font:var(--size-body)/1.6 var(--font-prose); color:var(--text); }
+.md > :first-child { margin-top:0; }
+.md > :last-child { margin-bottom:0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin:var(--gap-wide) 0 var(--gap) 0; color:var(--text-bright);
+  font-size:var(--size-head); }
+.md p { margin:var(--gap) 0; overflow-wrap:anywhere; }
+.md ul, .md ol { margin:var(--gap) 0; padding-left:var(--gap-block); }
+.md li { margin:2px 0; }
+.md blockquote { margin:var(--gap) 0; padding-left:var(--gap-wide);
+  border-left:2px solid var(--line); color:var(--text-muted); }
+.md hr { border:0; border-top:1px solid var(--line); margin:var(--gap-wide) 0; }
+.md code { font:var(--size-small)/1.5 var(--font-code); background:var(--surface-sunken);
+  border:1px solid var(--line); border-radius:4px; padding:0 4px; }
+.md a { color:var(--accent); }
+/* A link the page could not vouch for keeps its text and says so quietly:
+   underlined but not coloured, so it does not read as clickable. */
+.md-inert { text-decoration:underline dotted var(--text-muted); }
+
+.code { margin:var(--gap) 0; border:1px solid var(--line); border-radius:var(--radius);
+  overflow:hidden; background:var(--surface-sunken); }
+.code-head { display:flex; align-items:center; justify-content:space-between;
+  gap:var(--gap); padding:5px var(--gap); border-bottom:1px solid var(--line);
+  background:var(--surface-panel); font:var(--size-small)/1.6 var(--font-code);
+  color:var(--text-muted); }
+.code-head .btn { padding:2px 9px; font-size:var(--size-small); }
+.code pre { margin:0; padding:var(--gap) var(--gap-wide); overflow-x:auto; }
+.code code { border:0; background:none; padding:0;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
