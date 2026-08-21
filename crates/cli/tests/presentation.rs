@@ -2142,3 +2142,72 @@ fn the_web_panel_binds_loopback_or_the_wildcard() {
         stderr(&refused)
     );
 }
+
+/// The bridge, asked one question over plain HTTP.
+fn over_http(port: u16, method: &str, kind: &str, body: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).expect("it connects");
+    let request = format!(
+        "POST /api/{method} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: {kind}\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).expect("written");
+    let mut said = String::new();
+    socket.read_to_string(&mut said).expect("read");
+    let status = said
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = said.split_once("\r\n\r\n").map(|(_, it)| it).unwrap_or("");
+    (status, body.to_string())
+}
+
+/// TC-CLI-WEB-5: the `/api` bridge - a media type that is not JSON, the
+/// handshake, a call after it, and a method this build does not have.
+/// Expected: 415 before dispatch for the media type, because a cross-site
+/// "simple" post must never execute a side-effectful method blind; 200 with
+/// the contract's own envelope for the rest, including the unknown method,
+/// whose failure is the engine's answer and not a fault of the carrier.
+#[test]
+fn the_api_bridge_answers_the_published_contract_over_http() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["web", "--frontend", "app", "--listen", "127.0.0.1:5399"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let (refused, _) = over_http(5399, "rpc.hello", "text/plain", "{}");
+    let (greeted, hello) = over_http(
+        5399,
+        "rpc.hello",
+        "application/json",
+        r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#,
+    );
+    let (listed, sessions) = over_http(5399, "session.list", "application/json", "{}");
+    let (unknown, nothing) = over_http(5399, "nope.nope", "application/json", "{}");
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(refused, 415, "a media type that is not JSON is refused");
+    assert_eq!(greeted, 200, "{hello}");
+    assert!(hello.contains("protocol_version"), "{hello}");
+    assert_eq!(listed, 200, "{sessions}");
+    assert!(sessions.contains("\"sessions\""), "{sessions}");
+    // The carrier worked; the method did not exist. Those are different facts
+    // and they are reported in different places.
+    assert_eq!(unknown, 200, "{nothing}");
+    assert!(nothing.contains("-32601"), "{nothing}");
+}

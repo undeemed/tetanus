@@ -20,7 +20,25 @@ pub enum Pattern {
 /// A function rather than a trait object with state: a route that needs state
 /// captures it, which is the same thing with less to say about it. `Send` and
 /// `Sync` because the accept loop hands requests to tasks.
-pub type Handler = Arc<dyn Fn(&Request) -> Response + Send + Sync>;
+///
+/// Answering is async because the interesting routes are: the API bridge asks
+/// the engine, which awaits. A sync route says so with [`answered`] rather
+/// than making every other route pretend it might block.
+pub type Handler = Arc<dyn Fn(Request) -> Answering + Send + Sync>;
+
+/// What a handler is still working out.
+pub type Answering = std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>;
+
+/// A handler that has the answer already.
+///
+/// Most routes do - a file off the disk, a refusal - and this is how they say
+/// so without writing an async block around a value.
+pub fn answered(handler: impl Fn(Request) -> Response + Send + Sync + 'static) -> Handler {
+    Arc::new(move |request| {
+        let answer = handler(request);
+        Box::pin(std::future::ready(answer))
+    })
+}
 
 /// One registration in the table.
 #[derive(Clone)]
@@ -57,6 +75,9 @@ pub struct Request {
     pub headers: HashMap<String, String>,
     /// Whether this is a protocol upgrade, which is matched in its own table.
     pub upgrade: bool,
+    /// What came after the head, for the routes that take one. Empty for the
+    /// requests that carry nothing, which is most of them.
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -89,6 +110,7 @@ impl Request {
             query,
             headers,
             upgrade,
+            body: Vec::new(),
         })
     }
 

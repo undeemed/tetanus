@@ -39,7 +39,7 @@ mod route;
 
 pub use frontend::Frontend;
 pub use respond::{Response, Status};
-pub use route::{Handler, Pattern, Request, Route};
+pub use route::{answered, Answering, Handler, Pattern, Request, Route};
 
 /// The addresses this server will bind, and nothing else.
 const BINDABLE: [&str; 2] = ["127.0.0.1", "0.0.0.0"];
@@ -351,8 +351,18 @@ impl WebServer {
             };
         }
         // Everything else is answered here, so the head this carrier peeked at
-        // is taken off the socket before the body is anybody's business.
+        // is taken off the socket, and then the body a route may want.
         take(&mut stream, head).await?;
+        let mut request = request;
+        match body(&mut stream, &request).await? {
+            Body::Read(body) => request.body = body,
+            // A body bigger than this carrier will hold is refused before it
+            // is read, not after: reading it to say no is the attack working.
+            Body::TooLarge => {
+                respond::write(&mut stream, &Response::status(Status::TooLarge)).await?;
+                return lingering_close(stream).await;
+            }
+        }
         let found = {
             let table = self.table.lock().expect("the route table");
             table.find(&request)
@@ -361,7 +371,7 @@ impl WebServer {
             respond::write(&mut stream, &Response::status(Status::NotFound)).await?;
             return lingering_close(stream).await;
         };
-        let answer = (route.handler)(&request);
+        let answer = (route.handler)(request).await;
         respond::write(&mut stream, &answer).await?;
         lingering_close(stream).await
     }
@@ -467,6 +477,38 @@ async fn read_head(stream: &TcpStream) -> io::Result<Option<(Request, usize)>> {
             Err(_) => return Ok(None),
         }
     }
+}
+
+/// The most this carrier will read after a head.
+///
+/// A prompt with an image in it is the big one, and it is nowhere near this.
+const BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// What came after the head.
+enum Body {
+    Read(Vec<u8>),
+    TooLarge,
+}
+
+/// Read the body a request declared, if it declared one.
+///
+/// Only `content-length`. A chunked body is not refused here so much as never
+/// arranged: this carrier serves a page and an API bridge, both of which send
+/// a length, and a transfer encoding nobody sends is a parser nobody has
+/// tested.
+async fn body(stream: &mut TcpStream, request: &Request) -> io::Result<Body> {
+    let Some(length) = request.header("content-length") else {
+        return Ok(Body::Read(Vec::new()));
+    };
+    let Ok(length) = length.trim().parse::<usize>() else {
+        return Ok(Body::Read(Vec::new()));
+    };
+    if length > BODY_LIMIT {
+        return Ok(Body::TooLarge);
+    }
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).await?;
+    Ok(Body::Read(body))
 }
 
 /// Take a peeked head off the socket, so the body starts where a reader of it

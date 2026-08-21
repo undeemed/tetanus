@@ -1,5 +1,6 @@
 //! The `tetanus` binary: run one documented turn headlessly.
 
+mod bridge;
 mod chat;
 mod prompt;
 mod render;

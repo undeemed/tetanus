@@ -28,7 +28,7 @@ use super::*;
 
 /// A handler that says which route answered.
 fn says(what: &'static str) -> Handler {
-    Arc::new(move |_| Response::text(Status::Ok, what))
+    answered(move |_| Response::text(Status::Ok, what))
 }
 
 /// A carrier bound on a port nobody chose.

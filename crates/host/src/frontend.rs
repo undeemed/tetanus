@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::{Handler, Registered, Request, Response, Status, Taken, WebServer};
+use super::{answered, Registered, Request, Response, Status, Taken, WebServer};
 
 /// The types this shell actually ships, and nothing aspirational.
 ///
@@ -86,8 +86,7 @@ impl Frontend {
             root,
         });
         let carrier = server.clone();
-        let handler: Handler = Arc::new(move |request| frontend.answer(&carrier, request));
-        server.register_fallback(handler)
+        server.register_fallback(answered(move |request| frontend.answer(&carrier, &request)))
     }
 
     /// What one request to the frontend gets.

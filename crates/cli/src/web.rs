@@ -109,6 +109,15 @@ pub fn web(
 
     let engine: Arc<dyn tetanus_protocol::methods::Engine> =
         Arc::new(tetanus_engine::HarnessEngine::new(booted));
+    // The other door onto the same room: `POST /api/<method>`, for a client
+    // that cannot hold a socket. Same engine, same dispatch table, same
+    // contract; what differs is only how a frame arrives.
+    let _bridge = crate::bridge::mount(&page, Arc::clone(&engine)).map_err(|taken| {
+        fail(
+            policy,
+            &RpcError::new(ErrorCode::Internal, taken.to_string()),
+        )
+    })?;
     // The origins this server is willing to be dialled from: its own, in the
     // spellings a browser sends. §4.1.2 refuses every browser origin until one
     // is named, and the point of serving the socket on the page's own port is

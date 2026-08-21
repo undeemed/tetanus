@@ -18,6 +18,8 @@ pub enum Status {
     Forbidden,
     NotFound,
     MethodNotAllowed,
+    TooLarge,
+    UnsupportedMedia,
     Error,
 }
 
@@ -31,6 +33,8 @@ impl Status {
             Status::Forbidden => (403, "Forbidden"),
             Status::NotFound => (404, "Not Found"),
             Status::MethodNotAllowed => (405, "Method Not Allowed"),
+            Status::TooLarge => (413, "Payload Too Large"),
+            Status::UnsupportedMedia => (415, "Unsupported Media Type"),
             Status::Error => (500, "Internal Server Error"),
         }
     }
