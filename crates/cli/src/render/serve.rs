@@ -36,7 +36,7 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use tetanus_ui::{Role, Ui};
+use tetanus_ui::{tame_line, Role, Ui};
 
 /// Which carrier is hosting the protocol, and what a person needs to know
 /// about it.
@@ -98,7 +98,13 @@ pub fn banner<W: Write>(ui: &mut Ui<W>, serving: &Serving) -> io::Result<()> {
     if let Carrier::WebSocket(address) = serving.carrier {
         rows.push(("address", address.to_string()));
     }
-    rows.push(("sessions", serving.sessions.display().to_string()));
+    // The directory came off `--dir`, so it is tamed like any other value
+    // drawn as one whole row. The address above it did not: it is what the
+    // socket reported after it bound, which is this build's own.
+    rows.push((
+        "sessions",
+        tame_line(&serving.sessions.display().to_string()),
+    ));
     rows.push(("protocol", serving.protocol.to_string()));
     let label = rows
         .iter()
@@ -133,8 +139,9 @@ pub fn stopped<W: Write>(ui: &mut Ui<W>, carrier: Carrier) -> io::Result<()> {
 /// Features tested: that the banner names the carrier, the sessions directory
 /// and the protocol version; that the WebSocket carrier also names the address
 /// it bound; that the banner says how to stop the process, which is a
-/// different key on each carrier; and that the closing line says why the
-/// process ended, which is a different reason on each.
+/// different key on each carrier; that the closing line says why the process
+/// ended, which is a different reason on each; and that a directory named with
+/// escape sequences is still drawn as one row.
 ///
 /// Features NOT tested here: that these lines land on stderr and never on
 /// stdout (owned by `main.rs`, asserted end to end in `tests/serve.rs`), the
@@ -237,5 +244,28 @@ mod tests {
         stopped(&mut ui, Carrier::WebSocket("127.0.0.1:34567")).expect("render");
 
         assert_eq!(ui.contents(), "note: interrupted, so the server stopped\n");
+    }
+
+    /// TC-CLI-SRV-6: a sessions directory whose name carries escape sequences.
+    /// Expected: the banner is four lines and the row holds the name with the
+    /// sequences taken out. `--dir` takes whatever a shell can quote, and this
+    /// banner is the first thing the server prints: a name that cleared the
+    /// screen here would take the two rows under it with it, and a line feed
+    /// in one would put `protocol` under a row that never said what it was.
+    #[test]
+    fn a_directory_named_with_an_escape_sequence_stays_one_row() {
+        let told = rendered(&Serving {
+            carrier: Carrier::Stdio,
+            sessions: Path::new("na\u{1b}[2Jsty\u{1b}]0;pwned\u{7}\nlogs"),
+            protocol: "1.0",
+        });
+
+        assert_eq!(
+            told,
+            "\ntetanus serving on stdio\n\
+             sessions  nasty logs\n\
+             protocol  1.0\n\
+             note: end with Ctrl-D\n"
+        );
     }
 }
