@@ -351,6 +351,27 @@ An `approval/asked` written between turns is inside nothing, so no repair would 
 `stop_reason: "interrupted"` is a new value of the growable `StopReason`, and §7.5 already fixes what an old surface does with one.
 A balanced journal is untouched, so this is invisible to every session that closed normally.
 
+#### 4.4.4.1 Reopening a journal this build did not write
+
+A journal outlives the build that wrote it. It is opened by a later version, by a deployment configured differently, or by a colleague's machine.
+
+**A resumed session runs under its header, not under this build's defaults.**
+`provider`, `model` and `max_steps` come from `session/start`, because the history the session is carrying was produced under them.
+This is the rule §4.4.6 already states for a fork - a child "inherits the parent's provider, model and `max_steps` along with its events" - and resuming is the same question asked far more often, so it is written down here rather than left to be inferred from the fork case.
+It also means a deployment that raises `agent.max_steps` does not silently change how an old session behaves when someone reopens it.
+
+**Opening a journal never needs its route; running a turn does.**
+`session.create`, `session.list`, `session.events` and `session.fork` work on a journal whose provider this build does not have.
+Reading is what a journal is for, and refusing to show someone their own history because the adapter that produced it is not installed would be the wrong trade entirely.
+`agent.prompt` is where the route is needed, and where the refusal belongs.
+
+**A route this build cannot serve is refused rather than substituted.**
+`agent.prompt` on such a session answers `InvalidParams`, whose `data` carries `field: "provider"` and the `provider` that is missing - one more key than §4.5's table describes for this code, because naming the field alone would leave the reader to go and read the journal to find out which provider it meant.
+
+Falling back to a working provider would be worse than the refusal.
+The conversation was produced by one model and would be continued by another, the journal would record no such switch, and a reader would see one provider's work followed by another's with nothing saying so.
+§4.4.6 already declines to offer the same history under another model deliberately; this is that decision arriving from the other direction, and the answer has to match.
+
 #### 4.4.5 Reading a journal: `from_seq`, `limit`, and the boundary
 
 `session.events` and `session.subscribe` both take a `from_seq`, and it means the same thing on each: a seq, not a count, and inclusive.
@@ -517,7 +538,7 @@ It is not a rendering: the presentation lane may replace it with its own wording
 | -32700 | `ParseError` | none | 2 |
 | -32600 | `InvalidRequest` | none | 2 |
 | -32601 | `MethodNotFound` | `{ method }` | 2 |
-| -32602 | `InvalidParams` | `{ field }` when one field is at fault | 2 |
+| -32602 | `InvalidParams` | `{ field }` when one field is at fault, plus `provider` when the fault is a route this build cannot serve (§4.4.4.1) | 2 |
 | -32603 | `Internal` | none | 1 |
 | -32000 | `UnsupportedProtocolVersion` | `{ server, client }` | 3 |
 | -32001 | `NotImplemented` | `{ method }` | 3 |
@@ -737,6 +758,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
+| §4.4.4.1 a resumed session runs under its header | TC-PROTO-110 |
+| §4.4.4.1 a journal opens without its route, and only running needs one | TC-PROTO-111 |
 | §4.4.5 `from_seq` is a seq and is inclusive, on both calls | TC-PAGE-2, TC-SUB-6 |
 | §4.4.5 a `from_seq` past the tail is a catch-up with nothing to catch up on | TC-PAGE-7, TC-SUB-6 |
 | §4.4.5 `limit` is clamped down, and zero reads as absent | TC-PAGE-3, TC-PAGE-6 |
@@ -828,3 +851,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Says what happens when a journal is reopened by a build that did not write it (§4.4.4.1, §4.5). A resumed session runs under its *header* - `provider`, `model`, `max_steps` from `session/start` - because the history it carries was produced under them, so a deployment that raises `agent.max_steps` does not silently change how an old session behaves when someone reopens it. That is the rule §4.4.6 already states for a fork, and resuming is the same question asked far more often, so it stops being something to infer from the fork case. Opening a journal never needs its route and running a turn does: `session.create`, `session.list`, `session.events` and `session.fork` all work on a journal whose provider this build lacks, because refusing to show someone their own history for want of an adapter is the wrong trade. `agent.prompt` is where the refusal belongs, and it is `InvalidParams` carrying `field: "provider"` *and* the provider - one more key than §4.5's table described, now written down, because naming the field alone leaves a reader to open the journal to find out which provider it meant. Substituting a working provider would be worse than refusing: the conversation was produced by one model and would be continued by another with nothing in the journal saying so, and §4.4.6 already declines to offer the same history under another model. No type changes and no behaviour change - all of this describes what the engine already does. |

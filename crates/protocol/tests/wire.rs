@@ -802,3 +802,95 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-110: contract section 4.4.4.1. A resumed session runs under its
+/// header.
+///
+/// The header is where `provider`, `model` and `max_steps` live, and they are
+/// what the session's existing history was produced under. A build that
+/// applied its own defaults instead would silently change how an old session
+/// behaves the moment someone reopened it - raise `agent.max_steps` in a
+/// deployment and every archived session starts running longer turns.
+#[test]
+fn a_resumed_session_runs_under_its_header() {
+    let header = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({
+            "session_id": "s1",
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-pro",
+            "max_steps": 4
+        }),
+        source_event_seqs: None,
+    };
+
+    match header.parse().expect("parse") {
+        KnownEvent::SessionStart {
+            provider,
+            model,
+            max_steps,
+            ..
+        } => {
+            assert_eq!(provider, "deepseek-official");
+            assert_eq!(model, "deepseek-v4-pro");
+            assert_eq!(
+                max_steps, 4,
+                "the budget the history was produced under, not this build's"
+            );
+        }
+        other => panic!("expected a header, got {other:?}"),
+    }
+
+    // All three are on the header rather than resolved per turn, which is what
+    // makes the rule expressible at all: a journal carries its own route.
+    let wire = serde_json::to_value(header.parse().expect("parse")).expect("serialize");
+    for carried in ["provider", "model", "max_steps"] {
+        assert!(wire.get(carried).is_some(), "the header carries {carried}");
+    }
+}
+
+/// TC-PROTO-111: contract section 4.4.4.1. A route this build cannot serve is
+/// refused where it is needed, and names which provider.
+///
+/// Opening a journal never needs its route - reading is what a journal is for,
+/// and refusing to show someone their own history because an adapter is not
+/// installed would be the wrong trade. The refusal belongs to `agent.prompt`,
+/// and it carries the provider as well as the field, because naming the field
+/// alone leaves a reader to open the journal to find out which provider it
+/// meant.
+#[test]
+fn a_route_this_build_cannot_serve_is_refused_where_it_is_needed() {
+    let refused = RpcError::new(
+        ErrorCode::InvalidParams,
+        "no adapter for provider `deepseek-official` in this build",
+    )
+    .with_data(json!({ "field": "provider", "provider": "deepseek-official" }));
+
+    assert_eq!(refused.kind(), Some(ErrorCode::InvalidParams));
+    assert_eq!(ErrorCode::InvalidParams.exit_status(), 2);
+
+    let data = refused.data.expect("data");
+    assert_eq!(data["field"], json!("provider"));
+    assert_eq!(
+        data["provider"],
+        json!("deepseek-official"),
+        "the extra key section 4.5 now describes: which provider, not just which field"
+    );
+
+    // The calls that keep working, so a journal from another build is still
+    // readable, pageable and forkable.
+    for readable in [
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+    ] {
+        assert_ne!(
+            readable,
+            method::AGENT_PROMPT,
+            "only prompting needs the route"
+        );
+    }
+}
