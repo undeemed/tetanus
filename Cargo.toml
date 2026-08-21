@@ -10,6 +10,7 @@ members = [
   "crates/engine",
   "crates/rpc",
   "crates/turn",
+  "crates/host",
 ]
 
 [workspace.package]
@@ -36,6 +37,10 @@ tempfile = "3"
 # Upstream pins some contracts with fast-check property suites; this is the
 # Rust equivalent, and never more than a dev-dependency.
 proptest = "1"
+# The request line and headers, parsed by the crate everybody uses for it
+# rather than by hand: a hand-rolled parser is where a carrier grows its
+# security bugs.
+httparse = "1"
 anstyle = "1"
 terminal_size = "0.4"
 # A terminal draws a CJK character in two columns and a combining mark in

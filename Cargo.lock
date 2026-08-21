@@ -1451,6 +1451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-host"
+version = "0.1.0"
+dependencies = [
+ "httparse",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tetanus-protocol"
 version = "0.1.0"
 dependencies = [
