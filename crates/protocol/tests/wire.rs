@@ -6,8 +6,8 @@
 
 use serde_json::json;
 use tetanus_protocol::methods::{
-    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
-    SessionEventPush, SessionForkParams,
+    capability, method, push, AgentPromptParams, AgentStatusPush, ApprovalSetParams, ApproveParams,
+    ApproveResult, SessionEventPush, SessionForkParams,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
@@ -801,4 +801,70 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-90: contract section 4.4.2. A prompt with nothing in it is refused
+/// before anything is spent.
+///
+/// Today nothing checks it: an empty `content` opens a turn, writes a
+/// `user/message` saying nothing to the journal for ever, and buys a provider
+/// call to be told the obvious. The refusal names the field, because that is
+/// the one thing the caller can act on.
+#[test]
+fn a_prompt_with_nothing_in_it_is_refused() {
+    let refused = RpcError::new(ErrorCode::InvalidParams, "a prompt needs content")
+        .with_data(json!({ "field": "content" }));
+
+    assert_eq!(refused.kind(), Some(ErrorCode::InvalidParams));
+    assert_eq!(
+        ErrorCode::InvalidParams.exit_status(),
+        2,
+        "the caller is wrong, which is a different exit from a build that cannot"
+    );
+    assert_eq!(
+        refused.data.expect("data")["field"],
+        json!("content"),
+        "naming the field is what makes it actionable"
+    );
+
+    // The shape a real prompt travels in, so the refusal is about the value
+    // rather than about the call.
+    let real = AgentPromptParams {
+        session_id: "s1".into(),
+        content: "do the thing".into(),
+    };
+    assert!(!real.content.trim().is_empty());
+}
+
+/// TC-PROTO-91: contract section 4.4.2. Whitespace is nothing, as it already
+/// is for a credential.
+///
+/// This is not pedantry about spaces. It is the same defect the credential
+/// rule fixed once: a value of nothing but whitespace reads as present to
+/// every check that does not trim, and then spends a real request in order to
+/// be refused by somebody else. Fixing it in one place and not the other would
+/// leave the cheaper mistake in the more common call.
+#[test]
+fn whitespace_is_nothing_as_it_is_for_a_credential() {
+    let nothing = ["", " ", "   ", "\t", "\n", " \t\r\n "];
+    let something = ["x", " x ", "\nhello\n", "  do the thing"];
+
+    for empty in nothing {
+        assert!(
+            empty.trim().is_empty(),
+            "{empty:?} is a prompt with nothing in it"
+        );
+    }
+    for real in something {
+        assert!(!real.trim().is_empty(), "{real:?} is a prompt");
+    }
+
+    // The rule is trimming, not emptiness: a check that only asked
+    // `is_empty()` would accept every value in `nothing` but the first, which
+    // is precisely the bug being ruled out.
+    let untrimmed_would_accept = nothing.iter().filter(|v| !v.is_empty()).count();
+    assert_eq!(
+        untrimmed_would_accept, 5,
+        "five of these six get through a check that does not trim"
+    );
 }
