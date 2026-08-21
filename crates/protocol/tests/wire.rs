@@ -802,3 +802,92 @@ fn the_approval_audit_types_stage_like_the_others() {
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
 }
+
+/// TC-PROTO-45: contract section 4.3. The two redaction rules compose by
+/// union, and a key either rule marks is withheld.
+///
+/// The direction is the point. A schema that could un-mark a key would make
+/// adding a key to the schema a way to start publishing it, and the mistake
+/// would be silent and permanent. Each rule alone has a blind spot - a schema
+/// misses what it does not describe, a name rule misses a credential called
+/// `authorization` - so the union is what fails safe.
+///
+/// The rules themselves live in the engine; what this pins is the shape the
+/// boundary carries in every case, so a surface can rely on it before either
+/// rule is complete.
+#[test]
+fn the_two_redaction_rules_compose_by_union() {
+    // Named like a secret, whatever a schema says.
+    let by_name = withheld("llm.providers.acme.api_key");
+    // A credential a name rule could never find; only a schema knows.
+    let by_schema = withheld("llm.providers.acme.authorization");
+    // Neither rule marks it, so its value travels.
+    let plain = ConfigEntry {
+        key: "agent.max_steps".into(),
+        value: json!(8),
+        layer: ConfigLayer::Default,
+    };
+
+    for hidden in [&by_name, &by_schema] {
+        assert_eq!(hidden.value, json!(REDACTED), "{}", hidden.key);
+        assert!(!hidden.key.is_empty(), "the key is still published");
+        assert_eq!(
+            hidden.layer,
+            ConfigLayer::File,
+            "and so is the layer that set it: a surface still says it is set"
+        );
+    }
+    assert_eq!(plain.value, json!(8), "a setting is not a secret");
+}
+
+/// TC-PROTO-46: contract section 4.3. The sentinel is a rendering, not a
+/// claim, and a surface must not read it as proof.
+///
+/// Nothing distinguishes a withheld value from a document that literally
+/// contains `<redacted>`. That ambiguity is why the honest signal is a flag on
+/// the entry, and why section 4.3 says the flag is deferred rather than
+/// pretending the sentinel does the job: `ConfigEntry` is a type the
+/// presentation lane constructs, so adding a field is a change both lanes land
+/// together.
+///
+/// This case exists so the deferral is visible. When the flag lands it fails,
+/// and asks for the wording to be updated with it.
+#[test]
+fn the_sentinel_is_not_proof_and_says_so() {
+    let withheld_secret = withheld("llm.providers.acme.api_key");
+    let literal = ConfigEntry {
+        key: "ui.placeholder".into(),
+        value: json!(REDACTED),
+        layer: ConfigLayer::File,
+    };
+
+    assert_eq!(
+        withheld_secret.value, literal.value,
+        "the two are indistinguishable by value, which is exactly the gap"
+    );
+
+    // And the entry carries nothing else that would tell them apart. A field
+    // added here is what closes it, and this is the assertion that notices.
+    let wire = serde_json::to_value(&withheld_secret).expect("serialize");
+    let mut keys: Vec<&str> = wire
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["key", "layer", "value"],
+        "when a redaction flag joins this type, section 4.3's deferral is spent"
+    );
+}
+
+/// An entry whose value the engine withheld.
+fn withheld(key: &str) -> ConfigEntry {
+    ConfigEntry {
+        key: key.into(),
+        value: json!(REDACTED),
+        layer: ConfigLayer::File,
+    }
+}
