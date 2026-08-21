@@ -734,6 +734,41 @@ This section makes the clean path clean; it does not remove the need for the oth
 There is no "server is stopping" code, deliberately.
 A call that arrives once the drain has begun would need one, and by §4.5 a new code is a change both lanes land together - so the carrier closes instead, which is a state every client already has to handle because a network does it unasked.
 A code becomes worth adding the day a client can usefully do something other than reconnect, and it lands in the version that can.
+#### 4.4.12 Retrying a call
+
+A carrier drops a connection, or an answer is lost on the way back, and the client does not know whether the call ran.
+Every RPC contract meets this, and the ones that do not say so leave each integrator to guess.
+
+**Reads may be repeated freely.**
+`rpc.hello`, `session.list`, `session.events`, `agent.status`, `catalog.tools`, `catalog.models` and `config.dump` change nothing, so a client repeats them without thinking.
+A second `rpc.hello` on one connection is accepted and settles the handshake again with the peer information it carried; the handshake is connection state (§4.4.1), and a client that re-greets has told the server the same thing twice rather than done something new.
+
+**These are safe because repeating them lands in the same place.**
+`session.create` reopens the id it is given, which is what makes a session resumable (§4.7), so a retry with the same id answers the same session rather than making a second one.
+`agent.interrupt` asks a turn to stop, and a turn asked twice is a turn asked once.
+`approval.set` writes nothing when the session already holds the policy (§4.4.7).
+`session.unsubscribe` answers `ok: false` for a subscription that is already gone, which is a fact and not a failure.
+
+**Three are not safe, and the contract owes a client the reason and the alternative.**
+
+| Call | What a blind retry does | What to do instead |
+| --- | --- | --- |
+| `agent.prompt` | runs the prompt a second time | read `agent.status`, or the journal from the seq you last saw |
+| `agent.steer` | delivers the message twice | read the journal for a `user/steer` carrying it |
+| `session.subscribe` | leaks the first subscription | unsubscribe the id you got, or drop the connection |
+
+`agent.prompt` is the one that costs money.
+A retry after the first call *completed* starts a genuine second turn - `SessionBusy` only protects the window where the first is still running, which is precisely the window a client that gave up waiting has already left.
+So a client that loses an answer asks what happened rather than asking again: `agent.status` says whether a turn is running, and `session.events` from the last seq the client saw says whether one ran and what it produced.
+That is always available, because the journal is the record of what happened and not a second copy of it (§7.2).
+
+**No idempotency key, and this is where it would go.**
+A key on `agent.prompt` would let the engine deduplicate and remove the whole problem.
+It is not added here because `AgentPromptParams` is a type the presentation lane constructs, so by §5 the field is a change both lanes land together - and because the read-then-decide route above is available today, needs nothing, and is what a client should do anyway before repeating work a user paid for.
+When it lands it goes here, and this paragraph is what it replaces.
+
+**A dropped connection unsubscribes.**
+§4.2 already says a carrier that loses a peer drops its sinks, so the leak above is bounded by the connection: a client that reconnects starts clean rather than accumulating deliveries for a socket nobody is reading.
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -981,6 +1016,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.4.8 the joining rule reproduces what the model read | TC-PROTO-26 |
 | §4.4.8 an empty part contributes nothing | TC-PROTO-27 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
+| §4.4.12 which calls a client may repeat | TC-PROTO-70 |
+| §4.4.12 unsubscribing twice is a fact, not a failure | TC-PROTO-71 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
 | §4.4.2 a turn the output cap cut off ends `max-tokens`, on the call and on the journal | TC-CAP-1 |
@@ -1103,3 +1140,4 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Settles §4.4.3, which reserved `ui/ask` and then said almost nothing about it. The call is still reserved, so nothing has been built against it and this costs nothing now; the same decisions found out later cost two lanes a rewrite. An answer covers every question or it is no answer, so a tool meets one of exactly two cases rather than a partial third its author never wrote code for; an answer naming a question nobody asked is ignored, because the questions are the contract. A question offering options accepts those labels and nothing else, and a single-select question given several is unanswered rather than first-wins - a tool acting on a guess about which the user meant is worse than a tool told it has none. `question/asked` and `question/answered` join §4.3.2 as a durable pair sharing an `id`, turn-enclosed and closed by repair, for §4.4.7's reasons: a transcript that shows what a tool did but not what the user was asked cannot explain it. An interrupt withdraws an outstanding ask and a late answer is discarded, as it does for an approval. Nothing else bounds the wait, deliberately - a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault - which is why the interrupt rule is not optional. No type changes and no new code. |
 | 1.0 | Publishes the page maximum as `methods::MAX_PAGE_SIZE` (§4.4.5). §4.4.5 has said since it was written that the server clamps `limit` to "its own maximum, which is 500", and 500 lived only in the engine and in that sentence - so the machine-readable half of this contract did not carry a number the prose did. A surface reads the constant now, for the reason §5 already gives `PROTOCOL_VERSION` and one more: a literal `500` in a consuming lane is a claim about a server it may not be talking to, and it fails silently, because asking for more than the maximum is clamped rather than refused. A surface that pages with `next_seq` and `eof` still needs nothing, which is why this was not noticed earlier; the constant is for the surface that wants one round trip instead of two, and that is exactly the surface a hard-coded number would break. One added constant, no type changes, and no behaviour change - `MAX_PAGE_SIZE` is the value the engine already clamps to, and TC-PROTO-60 pins the two together so they cannot drift. |
 | 1.0 | States what a server owes its journals when it is asked to stop (§4.4.11). `tetanus serve` hosts carriers, so a process being stopped mid-turn is an ordinary Tuesday, and until now the only path was the crash path - every deploy left a trail of half-turns for §4.4.4 to synthesize closers over on the next open. A stopping server stops accepting connections, interrupts each running turn at the next step boundary using the mechanism `agent.interrupt` already has rather than a second one, and waits: `turn/end` carries `stop_reason: "shutdown"`, the interrupted step gets its `step/end`, and `agent.prompt` answers a summary as a cancelled turn does. `"shutdown"` is deliberately not `"cancelled"` - the same event to the engine, different facts to a reader, since one is a decision to respect and the other is something to go and look at, and a transcript blaming a rolling restart on a user who did nothing sends them after the wrong thing. It is a growable `StopReason` value by §7.5, so no type changes. The drain is bounded and best-effort: a tool that will not return cannot be waited for, so a server that runs out of time exits with turns open and §4.4.4 repairs them - seeing `"interrupted"` after a restart now means the drain did not finish. No error code is added: a call arriving mid-drain would need one, and by §4.5 that is a change both lanes land together, so the carrier closes instead - a state every client already handles because a network does it unasked. |
+| 1.0 | Says which calls a client may repeat (§4.4.12). A carrier drops a connection or an answer is lost, and the client cannot tell whether the call ran - every RPC contract meets this, and one that does not say so leaves each integrator to guess. The reads are free; `session.create`, `agent.interrupt`, `approval.set` and `session.unsubscribe` are safe because repeating them lands in the same place, which is stated per call rather than asserted in general. Three are not safe and now carry the reason and the alternative: `agent.prompt` runs a second turn, `agent.steer` delivers twice, `session.subscribe` leaks the first subscription. `agent.prompt` is the one that costs money, and the sharp edge is worth spelling out - `SessionBusy` only guards the window where the first call is still running, which is exactly the window a client that gave up waiting has already left, so a retry after completion starts a genuine second turn. The alternative needs nothing new: `agent.status` and `session.events` from the last seq seen say whether a turn ran and what it produced, because the journal is the record rather than a copy of it (§7.2). An idempotency key would remove the problem and is deliberately not added - `AgentPromptParams` is a type the presentation lane constructs, so by §5 it is a change both lanes land together, and the read-then-decide route is what a client should do anyway before repeating work a user paid for. A second `rpc.hello` on one connection is settled too: accepted, because the handshake is connection state and re-greeting says the same thing twice. No type changes. |
