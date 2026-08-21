@@ -73,7 +73,8 @@ cargo test -p tetanus-core --test event_modes    # the four dispatch modes
 cargo test -p tetanus-turn --test boot           # registry composition
 cargo test -p tetanus-protocol --test wire       # the engine/presentation contract
 cargo test -p tetanus-hardness --test run_offline
-cargo test -p tetanus-turn --test properties   # what holds for every journal
+cargo test -p tetanus-turn --test properties              # what holds for every journal
+cargo test -p tetanus-turn --test upstream_fs_containment # a path the model chose
 ```
 
 Three rules keep it a gate rather than a formality.

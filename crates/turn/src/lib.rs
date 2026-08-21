@@ -3,6 +3,7 @@
 //!
 //! - [`engine`] drives the turn flow and owns the documented event order.
 //! - [`events`] declares the live extension points a turn dispatches.
+//! - [`fs`] decides whether a path the model chose is inside its workspace.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
 //! - [`prompt`] is the named section registry the assembly starts from.
@@ -16,6 +17,7 @@
 pub mod boot;
 pub mod engine;
 pub mod events;
+pub mod fs;
 pub mod interrupt;
 pub mod llm;
 pub mod log;
