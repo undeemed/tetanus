@@ -236,6 +236,7 @@ mod tests {
         frame.paint(&mut ui).expect("paint");
         ui.contents()
             .trim_start_matches("\x1b[H")
+            .trim_end_matches("\x1b[?25l")
             .trim_end_matches("\x1b[J")
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").to_string())

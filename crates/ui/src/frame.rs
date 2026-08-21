@@ -36,6 +36,25 @@
 //!   comes out as a staircase. This is the single most common way a first
 //!   full-screen view looks broken.
 //!
+//! # Where the cursor goes
+//!
+//! Nowhere, unless a frame says. A view that draws is read, not typed into,
+//! and a cursor parked wherever the last row ended is a distraction with no
+//! meaning - so [`Tty`](crate::Tty) hides it on the way in and a frame leaves
+//! it hidden.
+//!
+//! A view that is typed into needs the opposite. The prompt row of a chat is
+//! the one place on that screen where the terminal's own cursor says something
+//! true: this is where the next character lands. A drawn stand-in cannot do
+//! it, because a terminal that is repainted twelve times a second draws a
+//! block that blinks at the wrong rate, over the character under it, and never
+//! moves with the reader's own selection or their screen reader.
+//!
+//! So [`Frame::cursor`] names the cell, the paint puts the terminal's cursor
+//! there and shows it, and a frame that names none hides it again. Both are
+//! written on every paint rather than remembered, because the frame before
+//! this one may have been another view's.
+//!
 //! # Where the size comes from
 //!
 //! The caller. A frame is built for the size the terminal had when the view
@@ -57,6 +76,9 @@ pub struct Frame {
     cols: usize,
     rows: usize,
     lines: Vec<String>,
+    /// Where the terminal's own cursor belongs, as a row and a column counted
+    /// from zero. `None` is a frame nobody types into.
+    cursor: Option<(usize, usize)>,
 }
 
 impl Frame {
@@ -66,6 +88,7 @@ impl Frame {
             cols,
             rows,
             lines: Vec::with_capacity(rows),
+            cursor: None,
         }
     }
 
@@ -105,6 +128,23 @@ impl Frame {
         self.row("");
     }
 
+    /// Put the terminal's cursor on this cell, and show it.
+    ///
+    /// `row` and `col` are counted from zero, in rows of the frame and columns
+    /// a terminal draws - a caller measuring a painted row asks
+    /// [`visible_width`](crate::visible_width) for the column, never the byte
+    /// count. A cell outside the frame is clamped to the last one inside it,
+    /// because a cursor moved past the edge is a cursor the terminal puts
+    /// somewhere of its own choosing.
+    ///
+    /// Called twice, the last call wins: the cursor is one fact about the
+    /// frame, not a list.
+    pub fn cursor(&mut self, row: usize, col: usize) {
+        let row = row.min(self.rows.saturating_sub(1));
+        let col = col.min(self.cols.saturating_sub(1));
+        self.cursor = Some((row, col));
+    }
+
     /// Write the frame to the terminal, in one pass from the top left.
     pub fn paint<W: Write>(&self, ui: &mut Ui<W>) -> io::Result<()> {
         let charset = ui.theme().charset();
@@ -134,6 +174,12 @@ impl Frame {
         // - a terminal that was made shorter. The cursor is on the last row,
         // so this erases from there down.
         write!(out, "\x1b[J")?;
+        // The cursor last, after every row is written: an absolute move made
+        // before them would be undone by the writing.
+        match self.cursor {
+            Some((row, col)) => write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1)?,
+            None => write!(out, "\x1b[?25l")?,
+        }
         ui.flush()
     }
 }
@@ -143,8 +189,11 @@ impl Frame {
 /// Features tested: that a frame paints exactly its own height whatever was
 /// added to it; that rows are cut to the width by what a terminal draws; that
 /// rows past the bottom are dropped; that rows are separated by `\r\n` and
-/// never by a bare `\n`; that nothing follows the last row; and that two
-/// frames are equal exactly when they would paint the same screen.
+/// never by a bare `\n`; that nothing follows the last row but the cursor's
+/// own sequence; that a frame naming a cursor cell places and shows it, that
+/// one naming none hides it, and that a cell outside the frame is brought
+/// back inside; and that two frames are equal exactly when they would paint
+/// the same screen.
 ///
 /// Features NOT tested here: the cut itself (owned by `text::fit`, asserted in
 /// `tests/text.rs`), the colour policy (owned by `theme`), and getting into
@@ -180,7 +229,7 @@ mod tests {
 
         assert_eq!(
             painted(&frame),
-            "\x1b[Hone\x1b[K\r\ntwo\x1b[K\r\nthree\x1b[K\x1b[J"
+            "\x1b[Hone\x1b[K\r\ntwo\x1b[K\r\nthree\x1b[K\x1b[J\x1b[?25l"
         );
     }
 
@@ -196,7 +245,7 @@ mod tests {
 
         assert_eq!(
             painted(&frame),
-            "\x1b[Hone\x1b[K\r\n\x1b[K\r\n\x1b[K\r\n\x1b[K\x1b[J"
+            "\x1b[Hone\x1b[K\r\n\x1b[K\r\n\x1b[K\r\n\x1b[K\x1b[J\x1b[?25l"
         );
         assert_eq!(frame.free(), 3);
     }
@@ -213,7 +262,10 @@ mod tests {
             frame.row(row);
         }
 
-        assert_eq!(painted(&frame), "\x1b[Hone\x1b[K\r\ntwo\x1b[K\x1b[J");
+        assert_eq!(
+            painted(&frame),
+            "\x1b[Hone\x1b[K\r\ntwo\x1b[K\x1b[J\x1b[?25l"
+        );
         assert_eq!(frame.free(), 0);
     }
 
@@ -226,7 +278,7 @@ mod tests {
         let mut frame = Frame::new(6, 1);
         frame.row("a long row indeed");
 
-        assert_eq!(painted(&frame), "\x1b[Ha lon\u{2026}\x1b[K\x1b[J");
+        assert_eq!(painted(&frame), "\x1b[Ha lon\u{2026}\x1b[K\x1b[J\x1b[?25l");
     }
 
     /// TC-UI-FRAME-5: the two terminator rules, stated as their own case
@@ -245,7 +297,7 @@ mod tests {
 
         assert_eq!(told.matches('\n').count(), told.matches("\r\n").count());
         assert_eq!(told.matches("\r\n").count(), 2, "{told:?}");
-        assert!(told.ends_with("three\x1b[K\x1b[J"), "{told:?}");
+        assert!(told.ends_with("three\x1b[K\x1b[J\x1b[?25l"), "{told:?}");
     }
 
     /// TC-UI-FRAME-7: two frames that would paint the same screen.
@@ -270,6 +322,47 @@ mod tests {
         assert_ne!(build(10, 3, &["one", "two"]), build(10, 4, &["one", "two"]));
     }
 
+    /// TC-UI-FRAME-8: a frame that names a cursor cell, and one that does not.
+    /// Expected: an absolute move to that cell and a show, written after every
+    /// row - a move made before them would be undone by the writing - and a
+    /// hide on the frame that names none. Both on every paint, because the
+    /// frame before this one may have been another view's, and a cursor left
+    /// showing over a page nobody types into is a caret blinking at a reader
+    /// with nothing to type.
+    #[test]
+    fn a_cursor_is_placed_after_the_rows_and_hidden_when_there_is_none() {
+        let mut typed = Frame::new(20, 3);
+        typed.row("tetanus");
+        typed.row("");
+        typed.row("> hello");
+        typed.cursor(2, 7);
+
+        let shown = painted(&typed);
+        assert!(
+            shown.ends_with("\x1b[J\x1b[3;8H\x1b[?25h"),
+            "not placed and shown: {shown:?}"
+        );
+
+        let mut read = Frame::new(20, 1);
+        read.row("tetanus");
+        assert!(painted(&read).ends_with("\x1b[?25l"), "not hidden");
+    }
+
+    /// TC-UI-FRAME-9: a cursor named outside the frame, and named twice.
+    /// Expected: clamped to the last cell inside it, and the last call wins. A
+    /// cursor moved past the edge is one the terminal puts somewhere of its
+    /// own choosing, which is a caret in a place no view meant.
+    #[test]
+    fn a_cursor_outside_the_frame_is_brought_back_inside_it() {
+        let mut frame = Frame::new(10, 2);
+        frame.row("one");
+        frame.cursor(9, 40);
+        assert!(painted(&frame).ends_with("\x1b[2;10H\x1b[?25h"));
+
+        frame.cursor(0, 1);
+        assert!(painted(&frame).ends_with("\x1b[1;2H\x1b[?25h"));
+    }
+
     /// TC-UI-FRAME-6: a terminal with no room at all.
     /// Expected: the cursor goes home, the screen is erased, and nothing is
     /// written. A window dragged to nothing is a real state, and the frame
@@ -279,7 +372,7 @@ mod tests {
         let mut frame = Frame::new(0, 0);
         frame.row("nowhere to put this");
 
-        assert_eq!(painted(&frame), "\x1b[H\x1b[J");
+        assert_eq!(painted(&frame), "\x1b[H\x1b[J\x1b[?25l");
         assert_eq!(frame.free(), 0);
     }
 }
