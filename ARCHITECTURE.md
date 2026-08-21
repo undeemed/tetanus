@@ -54,7 +54,7 @@ The one live case is the position of `system-prompt/assemble`
 ```text
 crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/turn     tetanus-turn      turn engine, events, LLM seam, tools, boot, trace
-       -> crates/session  tetanus-session   durable event vocabulary + JSONL journal
+       -> crates/session  tetanus-session   durable event vocabulary, JSONL and SQLite journals, projections
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
@@ -174,6 +174,16 @@ payload, and `sourceEventSeqs` on the surface events that cite their inputs.
 `replay()` reads a journal back and verifies `seq` contiguity: a gap means the file is not a faithful
 copy of the log that produced it.
 
+`SessionLog` is a seam and not a description of that one writer.
+`SqliteSessionStore` ([crates/session/src/sqlite.rs](crates/session/src/sqlite.rs)) keeps every
+session of a deployment in one database behind the same trait, and `sessions.backend` picks between
+them at boot.
+Everything the JSONL journal promises is promised there, including per-append durability: each
+append is its own commit under `synchronous = FULL`, because a backend a caller cannot tell apart
+must not quietly promise less.
+`import_jsonl` and `export_jsonl` move a session between the two, losslessly in both directions -
+both writers serialize the same `SessionEvent`, so the round trip is byte-identical.
+
 Model history is *derived* from the log by `derive_messages`
 ([crates/turn/src/log.rs](crates/turn/src/log.rs)), never stored beside it.
 Model-visible means logged.
@@ -205,6 +215,51 @@ Both are unbounded waits with exactly one way out, which is why an interrupt wit
 question rather than only stopping the turn at its next step boundary.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
+
+Derivation is also where compaction happens
+([crates/turn/src/compaction.rs](crates/turn/src/compaction.rs)), and that is the whole design.
+A journal is append-only, so a conversation that has outgrown its context window cannot have its
+older span deleted or rewritten.
+Instead a `compaction/summary` record names the events it shadows and the surface event immediately
+after it stands in their place; `compaction::surface` applies that rule wherever history is derived.
+A replay therefore reproduces the compacted history from the same records rather than from a second
+stored copy that could disagree with them.
+The adjacency of a record and its replacement is contractual rather than tidy: it is what lets a
+consumer with bounded state price a replacement without keeping a price per message.
+A cut never separates a tool call from its result, judged over the current surface rather than over
+step markers, because compaction moves surface positions and step markers do not follow.
+
+The folds a reader wants over that log are projections
+([crates/session/src/projection.rs](crates/session/src/projection.rs)): a named `init`/`apply`/`view`
+per domain, driven forward as events commit.
+A unit contributes mathematics and nothing else - no clock, no subscription, JSON state - which is
+what lets a value be checkpointed at all, since anything a projection knows could have been
+recomputed rather than remembered.
+The two that price nothing are [crates/session/src/units.rs](crates/session/src/units.rs), so a
+listing that wants a title need not link a provider adapter; the three that do are
+[crates/turn/src/projections.rs](crates/turn/src/projections.rs), beside the estimator they share.
+Each step writes a `request/context` record before it dispatches, carrying the route, its window and
+what the system prompt and tool catalog cost, which is what the context breakdown anchors on and
+what lets a turn a provider failure ended still say what it tried to send.
+
+What a run *works out* rather than what happened to it goes in the key-value store
+([crates/core/src/storage.rs](crates/core/src/storage.rs)): declared tables of JSON in one file,
+replaced whole by an atomic rename.
+A projection checkpoint, a computed title and a cache each belong there - reproducible from the log,
+expensive enough to keep, and not facts, so not journal entries.
+A payload too large to carry goes to the spill store
+([crates/core/src/spill.rs](crates/core/src/spill.rs)), which keeps the whole thing in an owner-only
+file and hands the model a bounded preview and a locator.
+
+A credential goes in neither, and in particular not in the settings document
+([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).
+The document is read into layers, published by `config.dump`, quoted in diagnostics and pasted into
+bug reports; `crates/config/src/secret.rs` exists to redact values that should never have been there.
+The credential store is the process environment over an owner-only file, and its values never enter
+a layer at all, so there is nothing for a surface to forget to redact.
+The environment wins and is visibly read-only: a key supplied at launch is the run's explicit intent
+and nothing in the process can edit it, so a write against a reference it supplies is refused rather
+than accepted into a file that resolution would then ignore.
 
 The other durable record is the settings document: `settings.yaml` (or `.json`) under the harness
 home, which is `$TETANUS_HOME` or `~/.tetanus`

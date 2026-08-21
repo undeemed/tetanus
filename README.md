@@ -54,8 +54,11 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | --- | --- | --- |
 | Turn flow | The complete documented sequence, `turn/start` through `turn/end`, driven end to end | Continuation after a stop veto |
 | Extension points | Eight live extension points in a turn, over the four dispatch modes upstream documents | Capability seams (`fs/*`, telemetry) |
-| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited | Compaction, session query |
-| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports, the usage and context projections |
+| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited; a SQLite store behind the same seam, chosen by `sessions.backend`, with a lossless migration either way | Session query, telemetry |
+| Context | A conversation that outgrows its window folds its older span into a summary recorded on the journal, so a replay derives the compacted history; over-long tool results shrink first, without a model | Manual compaction, per-model policy |
+| Projections | Named folds over the journal, driven as events commit and checkpointed: title, stats, token usage, context pressure, context breakdown | Telemetry, log export |
+| Secrets and spill | A credential store outside the settings document - the environment over an owner-only file - whose values reach no dump, log line or journal; oversized payloads spill to disk behind a bounded preview | Wiring spill into the tool pipeline |
+| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports |
 | Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order; a call a tool declares irreversible is decided before it runs, and a refused call never runs | Shell, subprocess, MCP client; cancellation inside a step |
 | Filesystem | A filesystem service with a local and a sandboxed backend behind one trait - read, write, edit, list, glob, stat, delete - each failing in a named class rather than an `io::Error` string; seven model-facing tools over it; the read-before-write policy that refuses to overwrite what a session has not read | Read windows over bytes, a search tool, the kernel sandbox backends |
 | Permissions | A tool call gated on a decision, audited on the journal as one `approval/asked`/`approval/decided` pair; user questions with the same durable pair; presets bundling the filesystem mode and the approval policy under one name | Serving the decision over the boundary (`approval.set`, `ui/approve`, `ui/ask`) |
@@ -231,11 +234,11 @@ A Cargo workspace of nine crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
-| `tetanus-core` | [crates/core](crates/core) | Plugin registry, typed service registry, four-mode event bus, RAII effect handles |
-| `tetanus-session` | [crates/session](crates/session) | Durable `SessionEvent` vocabulary, append-only JSONL journal, replay |
-| `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, the decision seams a call and a question are gated on, boot composition, tracer |
+| `tetanus-core` | [crates/core](crates/core) | Plugin registry, typed service registry, four-mode event bus, RAII effect handles, the durable key-value store and the spill store |
+| `tetanus-session` | [crates/session](crates/session) | Durable `SessionEvent` vocabulary, the JSONL and SQLite journals behind one seam, replay, and the projection registry with the units that need no pricing |
+| `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, the decision seams a call and a question are gated on, boot composition, tracer, compaction and the priced projections |
 | `tetanus-fs` | [crates/fs](crates/fs) | The filesystem service, its local and sandboxed backends, the read-before-write policy, the model-facing file tools, and the permission presets over them |
-| `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, and the settings document it reads |
+| `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, the settings document it reads, and the credential store that deliberately is not in it |
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
