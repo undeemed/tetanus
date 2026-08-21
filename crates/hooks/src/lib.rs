@@ -19,6 +19,7 @@ pub mod events;
 pub mod invariant;
 pub mod matcher;
 pub mod merge;
+pub mod payload;
 pub mod runner;
 pub mod types;
 
