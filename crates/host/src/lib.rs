@@ -59,6 +59,12 @@ const HEAD_LIMIT: usize = 16 * 1024;
 /// that need not even be malicious to do it.
 const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long disposal waits for the connections already in hand.
+///
+/// A request halfway through its response gets to finish; a handler that will
+/// not finish does not get to keep the process alive.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a refused connection is drained before it is shut down.
 const LINGER: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -70,6 +76,14 @@ const LINGER: std::time::Duration = std::time::Duration::from_millis(250);
 pub struct WebServer {
     table: Arc<Mutex<Table>>,
     address: SocketAddr,
+    /// Set once, when the server is asked to stop. Handlers that hold a socket
+    /// of their own watch it, because the carrier cannot close a socket it
+    /// handed away.
+    stopping: tokio::sync::watch::Sender<bool>,
+    /// How many connections are still being answered. Disposal waits on this
+    /// rather than on a clock: a request that is halfway through a response is
+    /// a reader who would otherwise see a truncated one.
+    answering: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Who answers what, the one who answers everything else, and what every
@@ -238,6 +252,8 @@ impl WebServer {
         let server = Self {
             table: Arc::new(Mutex::new(Table::default())),
             address,
+            stopping: tokio::sync::watch::channel(false).0,
+            answering: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         Ok((server, listener))
     }
@@ -345,22 +361,72 @@ impl WebServer {
         taps.into_iter().fold(html, |html, tap| tap(html))
     }
 
-    /// Answer requests until the listener fails.
+    /// Ask the server to stop, and tell every handler holding a socket.
+    ///
+    /// Upstream's disposal "starts `close()` and `closeAllConnections()`,
+    /// destroys every tracked upgraded socket, and returns only after the HTTP
+    /// server and those sockets have closed". This is the first half: after
+    /// it, no connection is accepted and everyone who took a socket knows.
+    pub fn stop(&self) {
+        let _ = self.stopping.send(true);
+    }
+
+    /// A watch that turns true when [`stop`](Self::stop) is called.
+    ///
+    /// Handed to a handler that took a socket, because the carrier gave that
+    /// socket away and cannot close it: a stream holding a response open has
+    /// to end it itself, and this is how it learns to.
+    pub fn stopping(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
+
+    /// Answer requests until the listener fails, or until asked to stop.
     ///
     /// One task per connection, and a task that panics takes its own socket
     /// with it: a carrier that let one bad request end the process would make
     /// every route's bug everybody's outage.
+    ///
+    /// Asked to stop, it stops accepting and then waits for the connections
+    /// already in hand - a request halfway through its response is a reader
+    /// who would otherwise see a truncated one. The wait is bounded, because a
+    /// handler that will not finish must not keep a process alive; a stream
+    /// deliberately held open is exactly that case, and it is told to stop
+    /// through the watch rather than waited for.
     pub async fn serve(self, listener: TcpListener) -> io::Result<()> {
+        let mut stopping = self.stopping.subscribe();
         loop {
-            let (stream, _) = listener.accept().await?;
-            let server = self.clone();
-            tokio::spawn(async move {
-                if let Err(err) = server.answer(stream).await {
-                    // A request that could not be answered is this connection's
-                    // problem and nobody else's.
-                    tracing::warn!(%err, "the request was not answered");
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let server = self.clone();
+                    server.answering.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    tokio::spawn(async move {
+                        if let Err(err) = server.answer(stream).await {
+                            // A request that could not be answered is this
+                            // connection's problem and nobody else's.
+                            tracing::warn!(%err, "the request was not answered");
+                        }
+                        server
+                            .answering
+                            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    });
                 }
-            });
+                _ = stopping.changed() => break,
+            }
+        }
+        drop(listener);
+        self.settled().await;
+        Ok(())
+    }
+
+    /// Wait for the connections in hand, and not for ever.
+    async fn settled(&self) {
+        let bound = std::time::Instant::now() + SETTLE;
+        while self.answering.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            if std::time::Instant::now() > bound {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 

@@ -222,13 +222,16 @@ pub fn web(
         })?;
 
     let served = runtime.block_on(async {
-        tokio::select! {
-            served = page.clone().serve(pages) => served,
-            // The key the banner named. The server has no end of its own: it
-            // accepts until the accept fails, so the interrupt is the shutdown
-            // and this exits 0, the way `tetanus serve` does for the same key.
-            _ = tokio::signal::ctrl_c() => Ok(()),
-        }
+        let stopper = page.clone();
+        tokio::spawn(async move {
+            // The key the banner named. It stops the server rather than
+            // abandoning it: a reader halfway through a response gets the rest
+            // of it, and the streams holding a response open are told to end
+            // rather than cut.
+            let _ = tokio::signal::ctrl_c().await;
+            stopper.stop();
+        });
+        page.clone().serve(pages).await
     });
     served.map_err(|broken| fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string())))?;
     render::web::stopped(&mut err).ok();

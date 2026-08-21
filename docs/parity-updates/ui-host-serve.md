@@ -31,9 +31,18 @@ tetanus: `crates/host`, `WebServer`.
   handler still answers with a `Response` rather than being handed the raw
   socket. The socket handoff lands with the `/api` bridge, which is the first
   route that needs one; `crates/rpc` already owns the WebSocket half.
-- **Disposal that waits.** Upstream's disposal closes the server, closes every
-  connection and returns only once they are shut. Here dropping the listener
-  ends the accept loop; tracking live connections lands with the shutdown path.
+- ~~**Disposal that waits.**~~ Landed. `stop()` stops the accept loop and
+  `serve` then waits for the connections already in hand before it returns -
+  a request halfway through its response is a reader who would otherwise see a
+  truncated one. The wait is bounded at two seconds, because a handler that
+  will not finish must not keep a process alive.
+
+  What upstream does by destroying tracked sockets, this does by telling: a
+  handler that took a socket watches `stopping()`, since the carrier gave that
+  socket away and cannot close it. The SSE stream is the case that matters -
+  it holds a response open for ever by design - and it writes an
+  `event: closing` frame and ends, rather than dropping, so a reader does not
+  read a closed socket as a network fault and reconnect into nothing.
 
 ## Deliberate differences
 

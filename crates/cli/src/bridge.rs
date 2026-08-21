@@ -103,12 +103,14 @@ pub fn mount(
     let stream = {
         let pushes = pushes.clone();
         let auth = Arc::clone(&auth);
+        let carrier = server.clone();
         server.register_stream(
             EVENTS,
             Arc::new(move |socket, request| {
                 let pushes = pushes.clone();
                 let auth = Arc::clone(&auth);
-                tokio::spawn(async move { events(socket, request, pushes, auth).await });
+                let stopping = carrier.stopping();
+                tokio::spawn(async move { events(socket, request, pushes, auth, stopping).await });
             }),
         )?
     };
@@ -138,6 +140,7 @@ async fn events(
     request: Request,
     pushes: Pushes,
     auth: Arc<Auth>,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
 ) {
     let presented = Presented {
         token: request
@@ -166,7 +169,21 @@ async fn events(
     }
 
     let mut frames = pushes.listen();
-    while let Some(frame) = frames.recv().await {
+    loop {
+        let frame = tokio::select! {
+            frame = frames.recv() => match frame {
+                Some(frame) => frame,
+                None => return,
+            },
+            // The server is going away. A stream is the one response that
+            // would otherwise hold it open for ever, so it ends itself - and
+            // says why, rather than leaving a reader to read a closed socket
+            // as a network fault and reconnect into nothing.
+            _ = stopping.changed() => {
+                let _ = socket.write_all(b"event: closing\ndata: {}\n\n").await;
+                return;
+            }
+        };
         // One `data:` line per frame. A frame with a newline in it would end
         // the event early, and the codec never writes one - a JSON string
         // escapes them - but the stream says so rather than trusting it.

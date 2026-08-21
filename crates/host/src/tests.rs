@@ -6,7 +6,9 @@
 //! that the fallback seat is single-owner and that an unclaimed carrier
 //! answers 404; that an upgrade is matched on its own table and on the header
 //! rather than the pathname; that an upgrade handler is handed the socket
-//! with nothing read off it; and the two addresses this server will bind.
+//! with nothing read off it; that a server asked to stop stops accepting and
+//! tells the handlers holding sockets; and the two addresses this server will
+//! bind.
 //!
 //! For the directory picker: that a listing is directories only, name-sorted,
 //! with dead links left out and hidden reported rather than applied; that the
@@ -592,4 +594,59 @@ fn a_path_that_is_not_fully_qualified_is_refused() {
 #[test]
 fn the_backend_says_what_it_can_do() {
     assert_eq!(Browse::default().capability(), Capability::Browse);
+}
+
+/// TC-HOST-WEB-9: a server asked to stop.
+/// Expected: `serve` returns, nothing more is accepted, and a handler holding
+/// a socket of its own has been told - the carrier gave that socket away and
+/// cannot close it, so a stream holding a response open has to end it itself.
+#[tokio::test]
+async fn a_server_asked_to_stop_stops_accepting_and_says_so() {
+    let (server, listener) = carrier().await;
+    let address = server.address();
+    let told = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watched = Arc::clone(&told);
+    let mut stopping = server.stopping();
+    tokio::spawn(async move {
+        let _ = stopping.changed().await;
+        watched.store(true, std::sync::atomic::Ordering::Release);
+    });
+    let _route = server
+        .register(Pattern::Exact, "/here", says("here"))
+        .expect("free");
+    let serving = tokio::spawn(server.clone().serve(listener));
+
+    // Up, and answering.
+    assert!(ask(address, "GET /here HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .contains("here"));
+
+    server.stop();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), serving).await;
+    assert!(ended.is_ok(), "serve did not return");
+    assert!(
+        told.load(std::sync::atomic::Ordering::Acquire),
+        "a handler holding a socket was not told"
+    );
+
+    // And the address is no longer answering.
+    let after = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        TcpStream::connect(address),
+    )
+    .await;
+    let refused = match after {
+        Ok(Ok(mut open)) => {
+            use tokio::io::AsyncReadExt;
+            let mut byte = [0_u8; 1];
+            // A listener that is gone either refuses the connect or accepts
+            // nothing and reads zero; both are "not serving".
+            open.write_all(b"GET /here HTTP/1.1\r\nhost: x\r\n\r\n")
+                .await
+                .ok();
+            matches!(open.read(&mut byte).await, Ok(0) | Err(_))
+        }
+        _ => true,
+    };
+    assert!(refused, "the server kept answering after it was stopped");
 }
