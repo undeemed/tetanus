@@ -1781,6 +1781,7 @@ dependencies = [
  "tetanus-core",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
