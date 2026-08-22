@@ -1620,7 +1620,6 @@ dependencies = [
  "tetanus-config",
  "tetanus-core",
  "tetanus-engine",
- "tetanus-exec",
  "tetanus-host",
  "tetanus-protocol",
  "tetanus-rpc",
