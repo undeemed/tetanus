@@ -126,8 +126,11 @@
   user-select:none; }
 .fs-code { flex:1 1 auto; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); }
 .fs-list { font:var(--size-small)/1.7 var(--font-code); }
-.fs-entry { display:flex; gap:var(--gap-wide); align-items:baseline; }
-.fs-name { flex:1 1 auto; overflow-wrap:anywhere; color:var(--text); }
+/* The fact sits beside the name and not at the far edge of the window: a size
+   flushed right across nine hundred pixels stops being a fact about that file
+   and becomes a column to trace with a finger. */
+.fs-entry { display:flex; gap:var(--gap); align-items:baseline; }
+.fs-name { flex:0 1 auto; overflow-wrap:anywhere; color:var(--text); }
 .fs-fact { flex:0 0 auto; color:var(--text-muted); }
 .fs-dir > .fs-name { color:var(--accent); }
 .fs-other > .fs-name { color:var(--text-muted); }
@@ -152,7 +155,7 @@
 .sh-session { display:flex; gap:var(--gap-wide); align-items:baseline; }
 .sh-id { flex:0 0 auto; color:var(--text); }
 .sh-backend { flex:0 0 auto; color:var(--text-muted); }
-.sh-cwd { flex:1 1 auto; overflow-wrap:anywhere; color:var(--text-muted); }
+.sh-cwd { flex:0 1 auto; overflow-wrap:anywhere; color:var(--text-muted); }
 
 /* --- a list of conversations ------------------------------------------ */
 

@@ -43,13 +43,22 @@ const MARKERS = [
   { start: "[killed by signal: ", end: "]", as: "pill", tone: "bad", say: (v) => `killed by ${v}` },
   { start: "[timed out after ", end: "]", as: "pill", tone: "bad", say: (v) => `timed out after ${v}` },
   { exact: "[interrupted]", as: "pill", tone: "busy", say: () => "interrupted" },
-  { start: "[sandbox: ", end: "]", as: "note" },
+  { start: "[sandbox: ", end: "]", as: "note", say: (v) => v },
   {
     exact: "[the command left processes running; they were killed with its process group]",
     as: "note",
+    say: () => "the command left processes running; they were killed with its process group",
   },
-  { start: "[output truncated;", end: "]", as: "note" },
+  { start: "[output truncated;", end: "]", as: "note", say: (v) => `output truncated;${v}` },
 ];
+
+// The brackets are dropped from a note and kept nowhere: they are the marker
+// syntax, and this page has just finished parsing it. What is inside each of
+// these is a sentence written for a person - "this is policy, not a bug in the
+// command" - and printing it still wrapped in the machine's punctuation asks
+// the reader to do the parsing again.
+// A pill's text is rewritten rather than unwrapped, because `exit code: 2` is
+// a field name and a value where `exit 2` is the thing itself.
 
 /** Views for the five tools `crates/exec` registers. */
 export const shellViews = {

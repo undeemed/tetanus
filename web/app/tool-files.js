@@ -33,7 +33,6 @@
 // have to be computed against a copy this page does not have - and a diff
 // drawn from the wrong base is worse than no diff.
 
-import { pill } from "./primitives.js";
 import { codeBlock } from "./markdown.js";
 
 /** The most lines of a file this page will draw as rows. */
@@ -74,7 +73,7 @@ export const fileViews = {
       const content = typeof args?.content === "string" ? args.content : null;
       return content === null
         ? path(args)
-        : `${path(args)} · ${count(content.split("\n").length, "line")}`;
+        : `${path(args)} · ${count(rows(content), "line")}`;
     },
     call: (args) =>
       typeof args?.content === "string"
@@ -103,7 +102,8 @@ export const fileViews = {
           ? labelled("with nothing - the matched text is deleted", null, null)
           : labelled("with", now, path(args)),
       );
-      if (args.replace_all) root.append(pill("every occurrence", "busy"));
+      // `replace_all` is on the fold and is not repeated here. It was, and the
+      // page said the same thing twice a centimetre apart.
       return root;
     },
   },
@@ -291,6 +291,18 @@ function whole(value) {
 
 function count(many, thing) {
   return `${many} ${thing}${many === 1 ? "" : "s"}`;
+}
+
+/**
+ * How many lines a piece of text has, counted the way the tool counts them.
+ *
+ * Rust's `str::lines` treats a trailing newline as the end of the last line
+ * and not as the start of an empty one, so `"a\n"` is one line. Splitting on
+ * `\n` here would say two, and the summary would then disagree with the
+ * `(N lines, M bytes)` the tool's own result reports about the same write.
+ */
+function rows(text) {
+  return text === "" ? 0 : text.replace(/\n$/, "").split("\n").length;
 }
 
 /**
