@@ -17,8 +17,12 @@
 //! - [`terminal`] is a persistent terminal over one: a shell driven one send
 //!   at a time, with a viewport, a bounded scrollback it can page back
 //!   through, and a `^C` that reaches the command rather than the shell.
-//! - [`tools`] is what the model can actually call: `shell` for one command,
-//!   and `shell_open`/`shell_run`/`shell_close`/`shell_list` for the sessions.
+//! - [`terminals`] is which terminals a composition has open and who may
+//!   touch them.
+//! - [`tools`] and [`terminal_tools`] are what the model can actually call:
+//!   `shell` for one command, `shell_open`/`shell_run`/`shell_close`/
+//!   `shell_list` for the pipe-backed sessions, and the `terminal_*` family
+//!   for the ones with a terminal underneath.
 //!
 //! Parity: upstream `packages/subprocess`, `packages/shell` and
 //! `packages/terminal`, restated against this seam. `docs/parity.md` records
@@ -33,6 +37,8 @@ pub mod session;
 pub mod shell;
 #[cfg(target_os = "linux")]
 pub mod terminal;
+#[cfg(target_os = "linux")]
+pub mod terminal_tools;
 #[cfg(target_os = "linux")]
 pub mod terminals;
 pub mod tools;

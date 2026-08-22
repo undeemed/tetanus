@@ -544,6 +544,26 @@ fn signal_session(session: i32, signal: i32) {
     }
 }
 
+impl Drop for PtySession {
+    /// A session nobody holds any more is a session nobody can close, so
+    /// dropping one hangs its terminal up.
+    ///
+    /// It cannot wait - `drop` is not async - so this is the signal and not
+    /// the ladder: `SIGHUP` to everything on the terminal, which is what a
+    /// terminal emulator being closed sends and what an interactive shell
+    /// exits on. Without it the shell outlives the harness: the read task
+    /// holds the master open until the child ends, and the child is waiting
+    /// for input that will never come.
+    fn drop(&mut self) {
+        if self.exited.borrow().is_some() {
+            return;
+        }
+        // Safety: a plain `killpg` on the group this session's leader made.
+        unsafe { libc::killpg(self.leader, libc::SIGHUP) };
+        signal_session(self.leader, libc::SIGHUP);
+    }
+}
+
 /// The master side of a pty, owned so it closes with the session.
 struct Master(OwnedFd);
 

@@ -866,8 +866,46 @@ fn registry(interrupt: &Arc<Interrupt>) -> ToolRegistry {
         tetanus_exec::session::SessionConfig::default(),
         Arc::clone(interrupt),
     );
+    register_terminals(&mut registry, interrupt);
     registry
 }
+
+/// The terminal family, where a host can have a terminal at all.
+///
+/// One registry of sessions per tool registry, and one tool registry per
+/// session, so a session's terminals are its own: the owner below is a name
+/// for that boundary rather than an identity, because tetanus sessions do not
+/// have one yet.
+#[cfg(target_os = "linux")]
+fn register_terminals(registry: &mut ToolRegistry, interrupt: &Arc<Interrupt>) {
+    use tetanus_exec::terminals::{Owner, Terminals};
+
+    let terminals = match Terminals::with(
+        tetanus_exec::terminal::TerminalConfig::default(),
+        Arc::new(tetanus_exec::backend::Bash::new()),
+    ) {
+        Ok(terminals) => Arc::new(terminals),
+        Err(refused) => {
+            // Nothing here can fail on a host that has a bash, and the tools
+            // are not worth failing a whole run over: a build with no terminal
+            // family still has `shell` and `shell_run`.
+            eprintln!("the terminal tools are unavailable in this build: {refused}");
+            return;
+        }
+    };
+    tetanus_exec::terminal_tools::TerminalTools::new(
+        terminals,
+        Owner::new("session"),
+        Arc::clone(interrupt),
+    )
+    .register(registry);
+}
+
+/// A host with no pseudo-terminals gets no terminal tools: they are the one
+/// family that cannot be answered with an explanation, because opening a
+/// terminal is the whole call.
+#[cfg(not(target_os = "linux"))]
+fn register_terminals(_registry: &mut ToolRegistry, _interrupt: &Arc<Interrupt>) {}
 
 /// The tools one session runs with, for the engine that serves many sessions
 /// at once. Each session gets its own, because each has its own interrupt.
