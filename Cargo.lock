@@ -1662,6 +1662,7 @@ dependencies = [
  "tempfile",
  "tetanus-config",
  "tetanus-core",
+ "tetanus-exec",
  "tetanus-mcp",
  "tetanus-session",
  "tetanus-turn",

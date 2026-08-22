@@ -25,6 +25,10 @@ async-trait.workspace = true
 tracing.workspace = true
 tetanus-turn = { path = "../turn" }
 tetanus-config = { path = "../config" }
+# The one seam every child in this workspace leaves through. A server started
+# here is ended over its own process group, so what the server starts goes
+# with it.
+tetanus-exec = { path = "../exec" }
 
 [dev-dependencies]
 tokio = { workspace = true }

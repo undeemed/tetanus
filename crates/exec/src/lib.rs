@@ -5,6 +5,9 @@
 //!   environment the caller listed, a working directory, captured stdio, an
 //!   exit status or a signal, incremental output, and a termination that
 //!   reaches the whole process group rather than one child.
+//! - [`piped`] is a child this process talks to rather than waits for: a
+//!   protocol peer on stdio, ended over its own process group so what it
+//!   started goes with it.
 //! - [`backend`] is which shell that command goes through: `bash`, `pwsh`, and
 //!   a loud refusal for a backend whose binary this host does not have.
 //! - [`shell`] is one command through one backend: the deployment's defaults
@@ -29,6 +32,7 @@
 //! what is served and what is not.
 
 pub mod backend;
+pub mod piped;
 pub mod proc;
 #[cfg(target_os = "linux")]
 pub mod pty;
