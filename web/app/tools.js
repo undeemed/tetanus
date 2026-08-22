@@ -12,10 +12,11 @@
 // frame, which is honest and complete rather than a placeholder: name,
 // arguments as a tree, the result, and whether it worked.
 //
-// The seam has now been used twice as intended. `echo` is this file's own; the
-// seven filesystem tools are one import from `tool-files.js` and no change
-// anywhere else, which is what the table was for. The process, MCP and web
-// tools follow the same way as their lanes land.
+// The seam has now been used as intended three times. `echo` is this file's
+// own; the seven filesystem tools are one import from `tool-files.js` and the
+// five shell tools one from `tool-shell.js`, with no change anywhere else,
+// which is what the table was for. The MCP and web tools follow the same way
+// as their lanes land.
 //
 // # The fold line carries a summary, because a name alone is not one
 //
@@ -35,6 +36,7 @@
 
 import { disclosure, jsonTree, pill } from "./primitives.js";
 import { fileViews } from "./tool-files.js";
+import { shellViews } from "./tool-shell.js";
 
 /**
  * Views by tool name. Empty of everything but the tool this build has, and
@@ -67,9 +69,11 @@ export const views = {
     result: (content) => text(content),
   },
 
-  // The filesystem family, from `crates/fs`. Spread rather than listed, so
-  // adding a file tool is a change to one file and not to two.
+  // The two families that have landed, from `crates/fs` and `crates/exec`.
+  // Spread rather than listed, so adding a tool to one of them is a change to
+  // one file and not to two.
   ...fileViews,
+  ...shellViews,
 };
 
 /**
@@ -122,11 +126,15 @@ const SUMMARY_MAX = 90;
  */
 export function toolResult(name, content, ok) {
   const view = views[name];
-  // A failure is the tool's own words and never a view's reading of them: the
-  // views here parse a success format, and `read`'s failure is
-  // `FS_NOT_FOUND: ...`, which has no numbered lines in it to find.
   const root = frame(ok ? "result" : "failed", name, null);
-  root.body.append(view?.result && ok ? view.result(content) : text(content));
+  // A view draws a failure only if it said it could. The two are separate
+  // because they are separate formats: `read`'s failure is `FS_NOT_FOUND: ...`
+  // with no numbered lines in it to find, so `read` declares no `failure` and
+  // gets the tool's own words. `shell`'s failure is the case its view exists
+  // for - a non-zero exit is exactly when the code and the stderr matter - so
+  // it declares one.
+  const drawn = ok ? view?.result?.(content) : view?.failure?.(content);
+  root.body.append(drawn ?? text(content));
   if (!ok) root.head.append(pill("failed", "bad"));
   return root;
 }

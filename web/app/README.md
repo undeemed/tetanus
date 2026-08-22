@@ -77,6 +77,18 @@ The fold also carries a **summary** from the view, because a transcript of a doz
 labelled `read` says nothing about which file. A tool without a view shows its name alone - a
 summary this page invented from arguments it does not understand would be a guess printed as a fact.
 
+[tool-shell.js](tool-shell.js) is the shell family from `crates/exec`. The markers that crate
+appends - `[exit code: N]`, `[timed out after Nms]`, `[killed by signal: X]`, the sandbox denial,
+the swept process group - are, in its own words, "a wire format in all but name", and
+`shell::parse_exit` is the engine-side parser. This is the page-side one: a status becomes a pill,
+a policy denial and a sweep become notes, and `[stderr]` splits the two streams. Three of those
+change what the output *means* and are invisible at the bottom of forty lines of build log.
+
+These views draw a **failure** as well as a success, which the file views deliberately do not: a
+non-zero exit is exactly when the code and the stderr matter, whereas a failed `read` is
+`FS_NOT_FOUND: …` with no shape to read. A bracketed line this page does not recognise stays in the
+body where it came from.
+
 [tool-files.js](tool-files.js) is the filesystem family from `crates/fs`: `read` draws its window
 with a real gutter, `list` marks the directories the tool marked, `glob` keeps the line that says
 the search stopped, and `write` and `edit` put the text that is the change in the body instead of

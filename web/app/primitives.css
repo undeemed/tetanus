@@ -133,6 +133,27 @@
 .fs-other > .fs-name { color:var(--text-muted); }
 .fs-edit > .fs-half:last-of-type { margin-top:var(--gap); }
 
+/* --- a command and what it printed --------------------------------------- */
+
+.sh-marks { display:flex; flex-wrap:wrap; gap:var(--gap-tight);
+  margin-bottom:var(--gap-tight); }
+.sh-stream { margin:var(--gap-tight) 0; }
+.sh-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+/* stderr is captioned and ruled rather than coloured red: plenty of programs
+   write progress there, and a page that painted all of it as failure would be
+   wrong more often than right. */
+.sh-caption { margin:0 0 2px 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-code); }
+.sh-bad { border-left:2px solid var(--line); padding-left:var(--gap); }
+.sh-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-prose); overflow-wrap:anywhere; }
+.sh-list { font:var(--size-small)/1.7 var(--font-code); }
+.sh-session { display:flex; gap:var(--gap-wide); align-items:baseline; }
+.sh-id { flex:0 0 auto; color:var(--text); }
+.sh-backend { flex:0 0 auto; color:var(--text-muted); }
+.sh-cwd { flex:1 1 auto; overflow-wrap:anywhere; color:var(--text-muted); }
+
 /* --- a list of conversations ------------------------------------------ */
 
 .list { max-height:min(52vh,420px); overflow:auto; }
