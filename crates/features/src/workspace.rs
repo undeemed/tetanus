@@ -28,7 +28,7 @@
 //! Parity: upstream `packages/workspace/workspace`. Most of that package is a
 //! *registry* of workspaces for a picker - persisted order, bootstrap from
 //! session headers, titles, cwd-drift grouping - which is a surface's state
-//! over a store rather than something a turn reads; `docs/parity-updates/`
+//! over a store rather than something a turn reads; `docs/parity.md`
 //! names it. What restates here is what one session knows about the one project
 //! it is in.
 

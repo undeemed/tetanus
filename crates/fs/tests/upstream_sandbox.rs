@@ -16,7 +16,7 @@
 //! What differs from upstream, deliberately. Upstream fences its two mutations
 //! and lets every read through; tetanus fences resolution, so a read outside
 //! the workspace is refused too. That is strictly narrower and it is one rule
-//! rather than two. `docs/parity-updates/` records it. Upstream's
+//! rather than two. `docs/parity.md` records it. Upstream's
 //! `danger-full-access` is a mode of its sandboxing backend; here it selects
 //! the unfenced backend instead, so there is no branch inside the fence whose
 //! job is to skip the fence.

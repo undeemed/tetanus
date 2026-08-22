@@ -31,7 +31,7 @@
 //! Parity: upstream `packages/skill/skill` and `packages/skill/skill-filesystem`,
 //! pinned by their `skill.spec.ts` and `skill-filesystem.spec.ts`. Upstream's
 //! provider registry, its root watcher and its durable catalogue injection are
-//! named in `docs/parity-updates/`.
+//! named in `docs/parity.md`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

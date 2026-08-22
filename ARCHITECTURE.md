@@ -1276,9 +1276,9 @@ The MCP client exists over stdio (§4.11); its streamable-HTTP transport, and im
 admitted into a durable attachment store, are the named follow-ups.
 Agent presets are composed per session (§4.12); authoring one, and switching the preset of a running
 session, are not served.
-Kernel sandboxing exists for processes and for the file service (§4.10); the approved-escalation
-retry is the remaining named follow-up in
-[docs/parity-updates/sandbox-policy-and-landlock.md](docs/parity-updates/sandbox-policy-and-landlock.md).
+Kernel sandboxing exists for processes and for the file service (§4.10), and the per-call escalation
+stamp is served through the ordinary approval gate; what is left is named in the `sandbox/*` row of
+[docs/parity.md](docs/parity.md).
 The file tools exist and are composed by whoever builds a registry
 ([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
 is the presentation lane's wiring, per §4.7's ownership table in

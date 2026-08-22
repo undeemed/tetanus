@@ -48,14 +48,25 @@ A surface never reaches past the wire type to match an engine enum instead, such
 
 ### 4.1 Context view: carriers
 
-One contract, three carriers.
+One contract, four carriers.
 Every carrier moves the same payloads, so a surface that works over one works over the others.
 
 | Carrier | Who uses it | Framing |
 | --- | --- | --- |
 | In process | the `tetanus` binary | direct calls on the `Engine` trait, no serialization |
 | stdio | an editor or a script driving the binary | JSON-RPC 2.0, one object per line, UTF-8, no embedded newlines |
-| WebSocket | the fire UI | JSON-RPC 2.0, one object per text frame |
+| WebSocket | the browser panel, and any client that can hold a connection | JSON-RPC 2.0, one object per text frame |
+| HTTP | a client that cannot hold one: a `curl`, a script, a page behind a proxy that will not carry sockets | JSON-RPC 2.0, one object as the body of `POST /api/<method>`, one object as the response body |
+
+The HTTP carrier is a door onto the same room and not a second contract: the method is the path, the params are the request body, the answer is the response body, and the frame in between is the one the other carriers move.
+It has no push.
+A `session.subscribe` made over it has nowhere to deliver, so a surface that wants events uses the WebSocket, which is served on the same address.
+
+Every `POST /api/<method>` must declare `application/json`.
+Anything else is refused with 415 before the call is dispatched, because a browser sends three media types cross-site without asking permission first and none of them is that one; demanding it is what turns a cross-site attempt into a preflight the origin rules then refuse.
+
+An HTTP status describes the carrier and never the call.
+A method that ran and failed answers 200 with the contract's error object in the body, so a caller cannot mistake "the model refused" for "the server is broken".
 
 The envelope is JSON-RPC 2.0 exactly: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
 A frame whose `jsonrpc` is absent or is not the string `"2.0"` is rejected, not guessed at.
@@ -66,9 +77,10 @@ That covers a frame that is not JSON, a frame that is JSON but not a request, an
 `rpc::Id::Null` is that value.
 Dropping such a frame silently would leave a client waiting for a reply it will never get, which is the one failure a codec must not have; a client never sends the value itself.
 
-Pushes reach all three carriers the same way.
+Pushes reach the three carriers that have a way to push.
+The HTTP carrier is the one that does not, which is why a surface that wants events holds the socket instead.
 `session.subscribe` takes an `EventSink` alongside its params, supplied by the carrier and never by the wire.
-The stdio and WebSocket carriers implement `EventSink` as "serialize and write a frame"; the in-process caller implements it as "hand to the renderer".
+The stdio and WebSocket carriers implement `EventSink` as "serialize and write a frame"; the in-process caller implements it as "hand to the renderer"; the HTTP carrier has no sink of its own, and the composition that mounts it serves `GET /api/events` beside it for a reader that wants the stream.
 So one renderer serves every carrier, and no surface has to reach past `tetanus-protocol` to see a chunk arrive.
 
 Both peers demultiplex incoming frames with `rpc::Message`, because the server may also call the client (§4.4.3).
@@ -76,7 +88,7 @@ Both peers demultiplex incoming frames with `rpc::Message`, because the server m
 **A frame has a maximum size, and it is the same on every carrier.**
 `methods::MAX_FRAME_BYTES` is that bound.
 Without one the carriers disagree under the same abuse: a WebSocket library refuses an over-long message by default, while a line reader given bytes and no newline grows its buffer until the process dies.
-"One contract, three carriers" (§7.1.1) is not true if one of them can be made to fall over by a peer the others merely refuse.
+"One contract, four carriers" (§7.1.1) is not true if one of them can be made to fall over by a peer the others merely refuse.
 
 **Inbound, an over-long frame is refused, not read.**
 The carrier stops reading it and answers `ParseError` with `id: null`, which is the answer §4.1 already gives a frame it cannot make sense of - a frame nobody finished sending is one of those.
@@ -204,6 +216,8 @@ It is an estimate that is usually close and occasionally negative, and a reader 
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
+Five more are written and are deliberately not in that list, because a surface needs nothing special to render them: `request/context`, and the four `compaction/*` types of §4.3.2.
+They are the worked example of the rule this section states - a build that has not learned them shows them raw, and `KnownEvent` has no variant for any of them yet.
 Six more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run, and `context/snapshot`, the live facts a turn told the model about the world it is running in (§4.3.2).
 A surface renders them raw until it takes them, which is what "the vocabulary grows" means in practice.
 `session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
@@ -228,7 +242,7 @@ Both mean the same thing to a caller, which is to render the raw event.
 | `assistant/chunk` | `chunk` (`text` \| `reasoning` \| `tool_call`), plus `delta` for the first two and `call` for the third, plus `turn` and `step` |
 | `assistant/message` | `content`, `reasoning`, `tool_calls`, `finish_reason`, `usage` |
 | `tool/call` | `id`, `name`, `arguments` |
-| `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) |
+| `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) or refused before it ran (§4.4.7, `TOOL_NOT_PERMITTED`) |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
 
@@ -267,25 +281,50 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 
 | `type` | `data` |
 | --- | --- |
-| `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
+| `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `request_id` (`null` when the provider named none), `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
 | `llm/retry-started` | `turn`, `step`, `retry` |
 | `approval/asked` | `id`, `tool_name`, plus `call_id` and `reason` when the asker had them |
 | `approval/decided` | `id`, `outcome` |
 | `approval/policy` | `policy` |
 | `context/snapshot` | `turn`, `parts` (each `name` and `text`) |
 | `user/steer` | `content`, `turn`, `taken` |
+| `request/context` | `turn`, `step`, `provider`, `model`, `context_window`, `system_tokens`, `tools_tokens` |
+| `compaction/start` | `shadowed_range` |
+| `compaction/summary` | `start_seq`, `summary`, `provider`, `model`, `shadowed_range`, `shadowed_seqs`, `shadowed_token_count` |
+| `compaction/end` | `start_seq`, plus `error` on an attempt that did not commit |
+| `compaction/prune` | `shadowed_range`, `shadowed_seqs`, `shadowed_token_count` |
 | `question/asked` | `id`, `questions` |
 | `question/answered` | `id`, `answers`, `answered` |
+| `permission/preset` | `preset` |
+| `hook/invoked` | `turn`, `point`, `dialect`, `handlerId`, plus `matcher` when the hook was selected by a pattern |
+| `hook/result` | `turn`, `point`, `handlerId`, `decision`, `durationMs`, plus `exitCode` when the process ran, plus `stderrSummary` when it printed anything |
+| `fs/mode` | `mode` (`read-only`, `workspace-write`, `danger-full-access`) |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
 `retry` counts from one and is the attempt about to be made, not the one that failed.
 `code` is the stable failure classification of §4.5, and `message` is the provider's own words.
+`request_id` is the provider's id for the attempt that failed.
+It is on the record because a retried refusal is reported to nobody: the turn recovered, no error was ever returned, and the journal is then the only place that can answer which requests a provider refused and under what ids.
+It carries `null` where the provider named none, following `max_retries`, because a reader folding many records wants a uniform shape - where §4.5's error object omits the key instead, following `status`, because a surface reading `data` is rendering one failure rather than folding many.
 
 The three `approval/*` types are §4.4.7's audit.
 `approval/asked` and `approval/decided` are one pair sharing an `id`, and `approval/policy` is the durable form of a policy switch: the last one on the journal is the session's override.
 `outcome` is one of §4.4.7's four words and `policy` one of its two, both spelled exactly as the wire enums spell them.
 They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: their place is their position between the boundaries of the step that asked.
+
+`question/asked` and `question/answered` are written by the engine today, with the payloads this table fixes; they are staged rather than parsed for the reason above.
+
+The two `hook/*` types are log-only: nothing in a turn reads them back, neither carries `sourceEventSeqs`, and they exist so that "why was my tool call denied" has an answer on the journal.
+They are turn-enclosed and appear as an invoked/result pair correlated by `handlerId`.
+`dialect` says which bridge ran the hook - a native plugin at the same interception point is not a bridge and writes no `hook/*` events at all.
+Three fields are **omitted rather than null**, each because absent and present-but-empty are different facts: `matcher` for a match-all hook, since "matched everything" and "matched this pattern" would otherwise blur; `exitCode` when the hook could not be run, since a failed spawn must not read as a clean exit; and `stderrSummary` when the hook printed nothing.
+`decision` is always present - the hook's permission answer if it gave one, otherwise `stop` when it asked to halt, otherwise `pass` - so a reader never infers "nothing happened" from an absent field.
+
+`permission/preset`, `fs/mode` and `approval/policy` are the durable form of the two knobs a permission preset bundles, plus the intent behind them.
+`permission/preset` is intent and nothing executes on it: the knobs decide, each folded by its own reader, last-one-wins, exactly as §4.4.7 folds the policy.
+The intent is recorded separately because two presets can bundle the same pair, so without it a journal could not say which one a person chose - and the answer a surface shows back should be the words they used.
+Neither derives to a message and neither carries a `turn` or a `step`, for the reason the approval pair carries none.
 
 `context/snapshot` is §4.4.8's record of what a turn told the model about the world outside the conversation - the date, the working directory, the branch it is on.
 It carries the parts rather than the rendered text, joined the way §4.4.8 fixes, so a surface can show which provider contributed what and a reader can still reconstruct exactly what the model saw.
@@ -451,6 +490,30 @@ What the provider did send is still on the `assistant/chunk` events the message 
 `"max-tokens"` is a value of the growable `StopReason` (§7.5), not a new variant, so no wire type changes.
 The engine names it as a reason of its own, and §7.6's mapping carries it across as the fallback, the way §4.4.4's `"interrupted"` already travels.
 
+#### 4.4.2.1 `request/context` is written before the request, never after the answer
+
+A step writes it after the system prompt is assembled - because it prices that assembly - and before `agent/request`, because a listener that rewrites the request must not be able to change what the journal already said the request was.
+It is written before the provider is called at all, so a turn a provider failure ended still says what it tried to send.
+
+It is the anchor the context projections fold.
+Before it existed, the three token projections had no envelope to price against, which is what had blocked them.
+
+#### 4.4.2.2 A compaction record and its replacement are adjacent, and that is contractual
+
+`compaction/summary` and `compaction/prune` each name a range of surface events and state that range's heuristic price.
+**The next surface event on the log is the replacement for that range**, and nothing may be appended between them.
+
+This is not a tidiness rule.
+It is what lets a consumer with bounded state - one running total and at most one pending claim - price a replacement without retaining a price per message, which is the difference between a projection checkpoint that stays a fixed handful of numbers and one that grows for the life of a session.
+
+Two consequences a reader can rely on:
+
+- A record followed by anything other than a surface event shadows nothing. It described a replacement that never landed, and honouring it against a later event would shadow a range that event never named.
+- A replacement arriving with no adjacent record folds neutrally rather than failing. A journal written before this protocol existed has no record to find, and bounded state cannot reconstruct what was replaced; degrading to drift keeps replay working, where refusing would make old journals unreadable.
+
+The replacement takes the **position** of the range it shadows, not the end of the conversation.
+A checkpoint condensing the first twenty messages belongs where those twenty were, in front of the tail that was kept verbatim.
+
 #### 4.4.3 Asking the user
 
 ```text
@@ -501,6 +564,23 @@ This is §4.4.7's rule and it is the same rule for the same reason.
 **Nothing else bounds the wait.**
 There is no timeout: a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault.
 The interrupt is the way out, which is why the previous rule is not optional.
+#### 4.4.3.1 `session.create` takes a preset
+
+`session.create` accepts one optional parameter beyond the ones §4.2 names.
+
+| Field | Type | Required | Meaning |
+| --- | --- | ---: | --- |
+| `preset` | string | no | The named agent preset this session is composed from: a model, a tool subset, a prompt shape and a persona, resolved server-side out of the settings document. Omit for the server's default preset, if it has one, and for no preset at all when it has none. |
+
+**An explicit `provider`, `model` or `max_steps` wins over what the preset says.**
+A caller that named both asked for that model on that agent.
+
+**A preset this server does not compose is `InvalidParams`**, with `data.field = "preset"`, `data.preset` naming what was asked for, and `data.known` listing the ids that exist, so a surface can offer them rather than making the user guess.
+
+**The choice is durable and is made once.**
+The id is written into the session's `session/start` header, a fork inherits it, and a document edited afterwards does not move a session that is already composed.
+`SessionInfo` is unchanged: a surface that needs the preset of a cold session reads the header through `session.events`.
+
 #### 4.4.4 Reopening a journal a crash left open
 
 A process that dies mid-turn leaves a journal whose last turn never ended, and possibly a tool call no `tool/result` answers.
@@ -695,6 +775,10 @@ This is the one place an interrupt takes effect inside a step rather than at its
 `never` is the unattended stance, and its point is that the answer is knowable without a human: a run in CI neither hangs nor waits for a client that will not answer.
 It settles `rejected` and not `unavailable`, because a deployment that chose it did decide.
 
+There is deliberately no third word meaning "grant without asking".
+It would put a bypass of the gate inside the enum the gate reads, and a deployment that wants unattended grants attaches an answerer that grants them - a decision with a name and a code path.
+That is also why the widest permission preset still asks: bundling `never` with `danger-full-access`, as upstream does, would make the widest preset refuse the calls the narrower one allows.
+
 A session's policy is the last `approval/policy` on its journal, and the deployment's `approval.policy` setting when the journal holds none.
 The fold is the whole state, so a resumed session is under the policy it was under, with nothing to replay but the log itself.
 `approval.set` writes that event; it is the only thing that does, and a caller reads the policy back by folding the events it already receives rather than by a call of its own.
@@ -708,8 +792,14 @@ An `id` is fresh per ask and is never reused, so two calls of the same tool in o
 The pair is inside the open turn, for the reason §4.4.4 gives: the turn is what repair closes, and a question outside one could never be closed.
 Asking with no turn open is `Internal`, and nothing is appended.
 
+**The question is put after `tools/pre-execute` and before `tools/execute`**, so what is decided is the call that would actually run.
+A listener may rewrite a call, and approving one call while executing another is the failure a gate exists to prevent.
+A denial skips `tools/execute` and `tools/post-execute` both: a post-execute listener observes an execution, and there was none.
+
 **A denied call is a `tool/result`, not an error.**
 The call is not dispatched, and the step gets a `tool/result` with `ok: false` whose `content` says the call was not permitted.
+The result carries `code: "TOOL_NOT_PERMITTED"`, because a call that never ran has no outcome to report.
+`ok: false` and the sentence are what the model reads; the code is what a surface routes on.
 §4.5 already fixes this shape: a binding rejection the model reads is not a failure of the call the surface made, so `agent.prompt` still answers a summary and the turn ends normally.
 The model is told, so it can do something else rather than wait on a result that is not coming.
 
@@ -944,13 +1034,17 @@ It is not a rendering: the presentation lane may replace it with its own wording
 | -32003 | `SessionBusy` | `{ session_id, turn }` | 4 |
 | -32004 | `Cancelled` | none | 130 |
 | -32005 | `MissingCredential` | `{ provider, env }` | 5 |
-| -32006 | `ProviderError` | `{ provider, status }` | 6 |
+| -32006 | `ProviderError` | `{ provider, status }`, plus `request_id` when the provider named one | 6 |
 | -32007 | `ToolUnknown` | `{ name }` | 4 |
 | -32008 | `LogCorrupt` | `{ session_id, line }` | 1 |
 | -32009 | `Io` | `{ path }` when a path is at fault | 1 |
 
 A code's meaning is frozen for the life of a major version.
 A surface that meets a code it does not know reports the raw code and message, and exits 1; `RpcError::kind()` returns `None` rather than remapping it onto a known code.
+
+`request_id` on a `ProviderError` is the provider's own identifier for the request it refused, present only when the response carried one.
+It is `data` rather than part of the message because this section lets a surface replace the message, and an id a surface may delete is an id a user cannot quote - and it is the one fact about a refusal nobody can reconstruct, since the status is on the response and the words are in the body while the id exists only in the provider's logs.
+A refusal that never reached a provider - a transport or protocol failure - carries no id and no key, for the reason `status` is absent there: an absent key says the fact does not exist, where a null invites a surface to print one.
 
 The exit-status column is the contract, not a suggestion.
 `ErrorCode::exit_status()` is the single source, so no surface invents its own.
@@ -1023,12 +1117,18 @@ Each subcommand is defined as the calls it makes, and makes no others.
 | `tetanus tools` | `catalog.tools` |
 | `tetanus models` | `catalog.models` |
 | `tetanus config` | `config.dump` |
-| `tetanus serve` | hosts the stdio and WebSocket carriers |
+| `tetanus serve` | hosts the stdio carrier; with `--listen`, the WebSocket carrier; with `--listen --frontend`, the browser panel with the WebSocket and HTTP carriers on that one address |
 | `tetanus info` | none; build metadata only |
 
 `tetanus chat` is `tetanus run` held open: one `session.create` and one `session.subscribe`, then an `agent.prompt` for each message, all against the same session id.
 It needs no call of its own because a conversation is already what a session is: every `agent.prompt` against a session id is a turn on the journal that session has been writing since it was opened (§4.4.1, §4.4.2), and the engine answers each one in the light of the turns already on it.
 So nothing about the conversation is held by the surface, and a chat that names the same journal tomorrow is the same conversation.
+
+**`sessions.backend` selects the artifact a journal lives in.**
+`jsonl` is the default, one journal file per session; `sqlite` is one database under the sessions root holding every session.
+It is resolved at boot, and both an unserved name and a database this build cannot open are refused there rather than at the first `session.create`: a store this build cannot read is a deployment fault, and one that waits for the first turn to report itself is one a user finds first.
+Under `sqlite`, `session.create` with a `path` is `InvalidParams` naming that field - a session inside a database is named by its id, and answering a caller's named file with some other session's log would be worse than refusing.
+`config.dump` reports the key like any other settled one.
 
 A journal is addressed by id, never by path, because an id is what every other call takes.
 `SessionCreateParams.path` is the bridge: naming a path opens the journal there and returns its `SessionInfo`, with the id read from the journal's own `session/start` line.
@@ -1145,6 +1245,17 @@ Four rules make additions safe, and a surface must follow all four.
 
 The conformance cases in §6 hold the first three to their word.
 The fourth cannot be checked from this side - it is a property of the consuming lane's source, not of any value that crosses the boundary - so it is a promise, and the cost of breaking it is paid by whoever adds the next field.
+
+### 5.1 Types that are deliberately not on this boundary yet
+
+**The feature state a surface reads.** `tetanus_features::view` holds `SessionView` and `WorkspaceView`: the todo list, the goal and its revision, plan mode, the feedback count, the attachments a session admitted, and the workspace sketch, folded from the journal with stable field names and no engine type in them.
+They are Rust types inside this workspace and nothing on this boundary carries them.
+
+Publishing them is three changes and they land together, in a version both lanes take: two calls in §4.2's table, `session.view` and `workspace.view`, both reads and both idempotent by §4.4.12; the structs in `crates/protocol::types`, which is minor by §5 for a client that matches with a rest pattern and a build break for one that does not; and a push, only if a panel is to be live rather than polled - and the honest cheaper answer is that a client already receives `session/event` and can re-fold, so a push should wait until somebody has measured the polling.
+
+Two properties of those types are settled now so that publishing them changes nothing but the address.
+A view carries no bytes: an attachment is named, measured and content-addressed, and the content is fetched by id, because base64 in a fold is a frame nobody can read, a log line nobody can grep and a memory spike on every subscriber.
+And a view says how far it folded, so a surface receiving two folds out of order can tell which is newer.
 
 ## 6. Verification
 
@@ -1292,7 +1403,7 @@ That surface is powerful and undocumented as a protocol, and every upstream rele
 JSON-RPC 2.0 was picked over a bespoke framing because it already answers request correlation, one-way notifications, bidirectional calls and a structured error object, and because a presentation surface can drive it from any language without a generator.
 The cost is that it says nothing about streams; §4.4.2 answers that by streaming durable session events as notifications instead of inventing a stream type.
 
-### 7.1.1 One sink, three carriers
+### 7.1.1 One sink, the carriers that can push
 
 The first draft left `session.subscribe` off the `Engine` trait, on the reasoning that a subscription binds to a connection and an in-process caller has none.
 The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by reaching into `tetanus-core` and `tetanus-turn` for the bus, which is the lane boundary §3 draws.
@@ -1396,3 +1507,11 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | No boundary change. Records in §6 that §4.2's hangup promise is plural and is now checked as such. It says a carrier that drops a connection unsubscribes its sinks, and TC-STDIO-4 and TC-WS-4 each hold one subscription - the case a bug is least likely to reach, since a `close` that handled only the first, or stopped at the first failure, passes it while leaking every other subscription on the connection. TC-WS-8 takes three, has the peer close one itself, then hangs up, and asserts all three are closed exactly once: the two halves of the bookkeeping - forgetting an id the peer unsubscribed, forgetting the rest at hangup - shown agreeing rather than each alone. The mutation is the shape of the bug: closing only the first subscription fails the new case and leaves the old one green. The test double also had to be fixed first, because it answered `sub-1` to every subscribe, which would have made any case about several subscriptions agree with itself whatever the carrier did. §4.2's wording now says "every one it holds" and why it matters. |
 | 1.0 | Corrects §7.1.1 and adds §4.7.1. §7.1.1 justified `EventSink` by saying the alternative left the renderer importing `tetanus-core` and `tetanus-turn`, which reads as a claim that it no longer does - and `crates/cli` imports both. The claim was narrower than its wording: `EventSink` removed the need to reach past the contract *to watch a session*, and it never removed those crates from that lane's dependency list, because §4.7's ownership table gives it the wiring. The boundary is about what a surface does with a type, not which crate it imports, and the wording now says so. §4.7.1 then names the three rules no conformance case can hold - the rest-pattern rule, the ban on matching engine enums, and using `convert` rather than a private mapping - because each is a property of the consuming lane's source rather than of any value crossing the boundary. A promise described as a check is worse than one described as a promise, since only the second gets audited. It records that two of the three are not kept today: `crates/cli` matches `tetanus_turn::StopReason` and `tetanus_session::SessionError` variants. Neither is this lane's to fix, and neither is urgent - an engine enum has no fallback, so the failure is a loud build break rather than a silent wrong answer - but leaving them unnamed would let the next reader assume the rules are kept because nothing says otherwise. No type changes. |
 | 1.0 | States the trust boundary (§4.1.2), which this document had never mentioned. A peer that can open a connection can do everything the engine can do - start turns that run tools and spend money, read every journal in the server's directory, read the resolved configuration - because there is no per-call authorization and none is planned. That is defensible for a personal harness and only defensible if what decides who may connect is taken seriously, and today nothing does: the WebSocket carrier accepts any TCP connection and hands it the whole `Engine`. In-process and stdio inherit a boundary the operating system already drew; WebSocket draws its own. Two reasons it must. Loopback is not a trust boundary on a shared machine. And the same-origin policy does not restrict WebSocket connections, so a page the user is merely visiting can open `ws://127.0.0.1:<port>` and drive the agent - the fire UI is a web surface, so this carrier exists to be driven by a browser and the attack surface is real rather than theoretical. So it authenticates with a secret established out of band and refuses before the upgrade, which is why no §4.5 code is added: an unauthenticated peer never reaches the JSON-RPC layer, and the frame that would carry an error is never sent. It also checks `Origin` where a handshake carries one. The secret cannot travel in a header, because a browser's WebSocket API cannot set them - it goes in the URL or `Sec-WebSocket-Protocol`, and a URL is logged by more things than a header, which is a cost to weigh rather than a reason to pretend otherwise. No type changes; the carrier slice that enforces this lands separately, and until it does the carrier should be treated as trusting whoever reaches the port. |
+| 1.0 | Records a fourth carrier in §4.1 and widens §4.7's `tetanus serve` row. The HTTP carrier - `POST /api/<method>`, params as the request body, the answer as the response body - was built for the browser panel and for clients that cannot hold a connection open, and it moves the same frames through the same codec, so no payload, method or code changes and `crates/protocol` is untouched. Three properties are written down because they are decisions rather than mechanics: it has no push, so a `session.subscribe` over it has nowhere to deliver and a surface that wants events uses the socket served on the same address; every call must declare `application/json`, refused with 415 before dispatch, because that is what forces a cross-site attempt through a preflight the origin rules refuse; and an HTTP status describes the carrier alone, with a failed call answering 200 and the contract's error object, so that "the model refused" and "the server is broken" cannot be confused. §4.1.2's posture applies to it unchanged and is enforced before the JSON-RPC layer, with the token in the query or as a bearer header. §7.1.1's title and the two "three carriers" sentences are corrected to say which carriers can push. |
+| 1.0 | Records the permission gate the engine now runs, and the two knobs behind it. §4.3.1 gains `TOOL_NOT_PERMITTED` on the `tool/result` of a call a decision refused before it ran - a value joining a vocabulary §4.3.2 states is open, not a new mechanism. §4.4.7 says where the gate sits, which it had left unsaid: the question is put after `tools/pre-execute` and before `tools/execute`, so what is decided is the call that would actually run, and a denial skips `tools/execute` and `tools/post-execute` both. §4.3.2 gains `permission/preset` and `fs/mode`, the durable form of the pair a permission preset bundles, with the intent recorded separately because two presets can bundle the same pair and the answer a surface shows back should be the words the person used; `question/asked` and `question/answered` are noted as written, with the payloads that table already fixed. Nothing else is proposed: no third `ApprovalPolicy` word, because it would put a bypass of the gate inside the enum the gate reads; no `needs_approval` on `ToolDescriptor`, for §5's reason; and `ui/approve` and `ui/ask` stay reserved. No wire type changes and no version bump. |
+| 1.0 | Publishes five durable types the engine writes (§4.3.1, §4.3.2) and the two rules a reader of them needs (§4.4.2.1, §4.4.2.2). `request/context` is the request envelope - route, context window, and what the system prompt and the tool catalog cost - written after the prompt is assembled and before `agent/request`, because a listener that rewrites the request must not change what the journal already said the request was, and before the provider is called at all, so a turn a provider failure ended still says what it tried to send. It is the anchor the three token projections had been blocked on. The four `compaction/*` types carry the transaction, and their contractual rule is adjacency: the next surface event after a `summary` or a `prune` is the replacement for the range it shadows, and nothing may be appended between them, because that is what lets a bounded fold price a replacement with one running total and one pending claim instead of a price per message. Two consequences are stated for readers: a record followed by anything else shadows nothing, and a replacement with no adjacent record folds neutrally rather than failing, so a journal written before the protocol stays readable. §4.7 gains `sessions.backend`, resolved at boot, with `session.create` refusing a `path` under `sqlite`. Additive by §4.3.2's own mechanism; no struct, method, code or existing payload changes. |
+| 1.0 | `session.create` gains an optional `preset`, naming the agent a session is composed from (§4.4.3.1). Additive; the field is absent on every request written before it, and a server that does not know the field ignores it per §7.5. An explicit `provider`, `model` or `max_steps` wins over what the preset says, because a caller that named both asked for that model on that agent. The refusal for an unknown id carries the known ids so a surface can offer them rather than making the user guess. The choice is durable and made once: the id is written into `session/start` and a fork inherits it, so a document edited afterwards does not move a session that is already composed. `SessionInfo` is unchanged; a surface that needs the preset of a cold session reads the header. |
+| 1.0 | Names, in a new §5.1, the boundary types that are deliberately not here yet: `SessionView` and `WorkspaceView`, the folded feature state a panel reads. They live in `crates/features` and nothing on this boundary carries them, so this records what publishing them costs - two idempotent read calls in §4.2, the structs in `crates/protocol::types`, and a push only if polling has been measured and found wanting - and settles the two properties that make the eventual move an address change and nothing else: a view carries no bytes, and it says how far it folded. Written down now because a type the presentation lane constructs lands when both lanes take it, and the other lane should be able to say what it needs before that is settled. No type changes. |
+| 1.0 | Publishes the provider's own id for a refused request in the two places a refusal is reported (§4.5, §4.3.2): `request_id` on `ProviderError.data` when the provider named one, and on the `llm/retry` record for a refusal a policy recovered from. Additive and minor by §5 - both are `serde_json` payloads, no Rust type in `crates/protocol` changes, no code is added and nothing is renamed. The id is `data` and not part of the message because §4.5 already lets a surface replace the message with its own wording keyed on the code, so a fact carried in the sentence is a fact a conforming surface may delete - and this is the one fact about a refusal nobody can reconstruct, since the status is on the response and the words are in the body but the id exists only in the provider's logs. It is also the only thing a user can quote to a provider's support, which the harness discarded until now. The wait a throttled provider asks for stays unpublished, and the contrast is the argument: a surface can say "retrying" from what it already has. Two spellings on purpose - the durable record carries `null` for a provider that named none, following `max_retries`, and the error object omits the key, following `status`, because one is folded by a reader of many records and the other is rendered as one failure. Rendering the id is the presentation lane's change and is not asked for here. |
+| 1.0 | Publishes the two `hook/*` journal types (§4.3.1, §4.3.2), written when an out-of-process hook runs: `hook/invoked` and `hook/result`, turn-enclosed, log-only and correlated by `handlerId`, so that "why was my tool call denied" has an answer on the journal. Nothing in `crates/protocol` changes - these are journal types the contract describes by name and payload - and nothing in a turn reads them back. Three fields are omitted rather than null, each because absent and empty are different facts: `matcher` for a match-all hook, `exitCode` for a hook that could not be run, and `stderrSummary` for one that printed nothing. `decision` is always present, so a reader never has to infer "nothing happened" from a missing field. Additive under all four §5 rules: no existing payload changes, no enum gains a variant, an unknown journal type is already rendered raw, and nothing destructures these because nothing produced them until now. |
+| 1.0 | No boundary change. Folds every note under `docs/contract-updates/` into this document and deletes them: the notes existed because lanes in flight collide on this file, and a note nobody has folded is a contract change nobody can read here. |

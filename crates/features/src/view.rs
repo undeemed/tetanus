@@ -28,7 +28,7 @@
 //! here for the same reason, and it costs a consumer one thing: match a struct
 //! with a rest pattern, or a field added later stops your build.
 //!
-//! The shapes are published in `docs/contract-updates/features-ui-surfaces.md`,
+//! The shapes are published in `docs/interface-contract.md` §5.1,
 //! which is what a surface author reads before writing a panel.
 
 use std::path::{Path, PathBuf};

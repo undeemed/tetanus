@@ -15,7 +15,7 @@
 //! would be indirection with no second caller. Its root watcher, its durable
 //! catalogue injection with the per-step tombstone protocol, its bundled
 //! `skill-badge` asset, and its `resourceBase` hint for skills that ship files
-//! alongside are named in `docs/parity-updates/`. Upstream reads its skill
+//! alongside are named in `docs/parity.md`. Upstream reads its skill
 //! files through `ctx.fs`; this reads them directly, because the fs service is
 //! a consumer-facing seam for model-supplied paths and these paths are the
 //! deployment's own.

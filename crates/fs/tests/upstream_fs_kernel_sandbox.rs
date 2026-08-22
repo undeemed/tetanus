@@ -17,7 +17,7 @@
 //! same backend without the kernel layer and succeeds.
 //!
 //! What is not restated, and why. This is the follow-up
-//! `docs/parity-updates/sandbox-policy-and-landlock.md` named, so the policy
+//! `docs/parity.md` named, so the policy
 //! vocabulary, the backend probe and the degraded-kernel refusal are already
 //! ported in `crates/sandbox/tests/upstream_sandbox.rs` (TC-PORT-SANDBOX-1..12)
 //! and the process side in `crates/exec/tests/upstream_sandbox_exec.rs`

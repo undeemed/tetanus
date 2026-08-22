@@ -27,7 +27,7 @@
 //! other hosts' backends. Its escalation half (`escalation.spec.ts`) is an
 //! approval flow over a policy - the seam is `tetanus_turn::approval`, and
 //! wiring the two together is a named follow-up rather than something to
-//! invent here. `docs/parity-updates/sandbox-policy-and-landlock.md` carries
+//! invent here. `docs/parity.md` carries
 //! the list with reasons.
 //!
 //! Environmental needs: Linux with Landlock enabled (this file is skipped
@@ -313,7 +313,7 @@ fn a_policy_beyond_this_kernel_is_refused_unless_partial_is_accepted() {
 /// kernel.
 ///
 /// Upstream has no network axis in its policy and says so; this is the
-/// addition `docs/parity-updates/` records, and it is asserted the same way
+/// addition `docs/parity.md` records, and it is asserted the same way
 /// everything else here is - by being refused.
 ///
 /// Input: a listener on loopback, then a connection to it from a thread

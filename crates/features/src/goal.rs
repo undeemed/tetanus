@@ -29,7 +29,7 @@
 //!
 //! Parity: upstream `packages/goal/goal` and `packages/goal/tool-goal`, pinned
 //! by their `goal.spec.ts`, `projection.spec.ts` and `tool-goal.spec.ts`. The
-//! autonomous round driver is not restated; `docs/parity-updates/` says why.
+//! autonomous round driver is not restated; `docs/parity.md` says why.
 
 use std::sync::Arc;
 

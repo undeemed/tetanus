@@ -20,7 +20,7 @@
 //! persisted, so a journal-only restatement has nothing to hold. Its
 //! `maxGoalRounds` cap counts rounds that driver admits. Its Remote/Gateway
 //! adaptation, its projection registry and its HMR disposal cases are Cordis
-//! machinery. `docs/parity-updates/` carries all of it.
+//! machinery. `docs/parity.md` carries all of it.
 //!
 //! Environmental needs: a writable temporary directory and a Tokio runtime.
 //!

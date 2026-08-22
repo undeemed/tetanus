@@ -402,7 +402,7 @@ pub unsafe fn restrict_this_thread(ruleset: RawFd) -> Result<(), std::io::Error>
 /// confining *itself* rather than a child.
 ///
 /// The filesystem service is the intended caller, and it is not written yet;
-/// `docs/parity-updates/` records that as the next slice. It is here because
+/// `docs/parity.md` records that as the next slice. It is here because
 /// it is the same three syscalls, and because a policy that can only be
 /// applied to children would quietly become "the shell is confined and the
 /// write tool is not".

@@ -16,7 +16,7 @@
 //! What is not restated, and why. The filesystem service is another lane's
 //! crate and is not landed here, so "the same policy applied by the file
 //! tools" is a named follow-up in
-//! `docs/parity-updates/sandbox-policy-and-landlock.md` rather than a guess at
+//! `docs/parity.md` rather than a guess at
 //! an API that does not exist yet. Upstream's escalation flow - a denied
 //! command retried once under a wider mode with user approval - needs the
 //! approval seam wired to the policy, which is the other named follow-up.

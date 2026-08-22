@@ -23,7 +23,7 @@
 //! `command-feedback.spec.ts`. Upstream's `message-feedback` - a per-message
 //! rating with its own durable store, versions and checkpoints - is a different
 //! feature over a store this workspace does not have;
-//! `docs/parity-updates/` names it.
+//! `docs/parity.md` names it.
 
 use std::sync::Arc;
 

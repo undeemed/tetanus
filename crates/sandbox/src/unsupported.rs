@@ -16,7 +16,7 @@
 //! So the trait shape stays - [`crate::prepare`] is the same call on every
 //! platform, and the Windows backend is a module to fill in rather than a
 //! design to revisit - and asking for confinement here fails loudly, naming
-//! what would have to be built. `docs/parity-updates/` carries it as a named
+//! what would have to be built. `docs/parity.md` carries it as a named
 //! follow-up with the same reasoning.
 //!
 //! **macOS.** Upstream uses Seatbelt (`sandbox-exec`). The same argument

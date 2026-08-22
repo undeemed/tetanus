@@ -22,7 +22,7 @@
 //! restriction per thread and a policy change would then race threads that
 //! have already restricted themselves. The tool pipeline already treats a
 //! mutation as a barrier, so the cost lands mostly on parallel reads, and
-//! `docs/parity-updates/` records widening it as its own slice.
+//! `docs/parity.md` records widening it as its own slice.
 //!
 //! **A denial arrives already classified.** The vocabulary in
 //! [`crate::error`] separates `SandboxDenied` - this build decided - from

@@ -18,7 +18,7 @@
 //! Parity: upstream's `glob` tool is `packages/fs/tool-fs-search`, which shells
 //! out to `ripgrep` and `fd`. tetanus answers the same question in-process: a
 //! harness that needs an external binary to list files is a harness that fails
-//! differently on every machine, and `docs/parity-updates/` records the split.
+//! differently on every machine, and `docs/parity.md` records the split.
 
 use crate::error::FsError;
 

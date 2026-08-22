@@ -16,7 +16,7 @@
 //! *registry* for a picker: persisted order, bootstrap from session headers,
 //! titles, cwd-drift grouping, rollback of a provisional cache entry. That is a
 //! surface's state over a store rather than something a turn reads, and
-//! `docs/parity-updates/` names it. Upstream's attachment store is
+//! `docs/parity.md` names it. Upstream's attachment store is
 //! transactional over a durable object store with reference metadata and
 //! cancellation; this stores files under a session directory, so its
 //! cancellation, reference-mismatch and domain-close cases have nothing to

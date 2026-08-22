@@ -25,7 +25,7 @@
 //!
 //! Parity: upstream `packages/fs/fs-sandbox`. Upstream fences its two
 //! mutations and lets every read through; tetanus fences resolution, which is
-//! strictly narrower. `docs/parity-updates/` records that, and
+//! strictly narrower. `docs/parity.md` records that, and
 //! [`crate::access`] says why.
 
 use std::path::{Path, PathBuf};

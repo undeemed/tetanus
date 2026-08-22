@@ -25,7 +25,7 @@
 //! `integration.spec.ts` and `invariant.spec.ts`. Upstream defers a user's
 //! selection until the next accepted pre-step, so a flip lands on a step
 //! boundary rather than inside one; tetanus records the flip when it is made
-//! and `docs/parity-updates/` says why the difference is not observable at the
+//! and `docs/parity.md` says why the difference is not observable at the
 //! seam this crate owns.
 
 use std::sync::Arc;
