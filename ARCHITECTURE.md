@@ -96,6 +96,9 @@ Every module in it has one shape - a durable event type, a fold over the log, a 
 answers - because state a replay cannot reproduce is state the harness would lose, and a cache beside
 the journal is a second copy that can disagree with it
 ([crates/features/src/lib.rs](crates/features/src/lib.rs)).
+A surface reads that state through one module - [crates/features/src/view.rs](crates/features/src/view.rs) -
+rather than through the folds themselves, so the vocabulary a panel is written against is a published
+shape with stable field names instead of this crate's own types.
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
