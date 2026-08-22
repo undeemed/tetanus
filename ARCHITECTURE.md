@@ -201,10 +201,24 @@ The engine resolves four services from the registry and names no implementation:
 | `ToolsService` | `tools` | `ToolRegistry` | `EchoTool` |
 | `SessionService` | `sessions` | `dyn SessionLog` | `JsonlSessionLog` |
 | `PromptService` | `system-prompt` | `PromptRegistry` | the engine's own base section |
+| `ContextService` | `runtime-context` | `ContextRegistry` | the clock reading a turn is prepared at |
 
-`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the four providers plus
-`AgentLoopPlugin`, which provides nothing and declares the other four as dependencies, so a missing
-provider fails at boot naming `agent-loop` rather than mid-turn.
+`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the five providers plus
+`AgentLoopPlugin`, which provides nothing and declares the four the loop cannot run without as
+dependencies, so a missing provider fails at boot naming `agent-loop` rather than mid-turn.
+`ContextService` is the one a turn runs happily without: it is provided empty, and an empty one
+writes nothing.
+
+`ContextRegistry` ([crates/turn/src/context.rs](crates/turn/src/context.rs)) is what a turn tells
+the model about the world outside the conversation - the date now, the working directory and the
+branch later. It is gathered once, between `turn/start` and the first `step/start`, and recorded as
+`context/snapshot` ([docs/interface-contract.md](docs/interface-contract.md) section 4.4.8). It is
+carried as a user message and never as a prompt section, which is the whole design: a provider
+caches a prompt by its longest stable prefix, and a sentence saying what time it is would
+invalidate that prefix on every request of every session. Only the newest snapshot derives to a
+message - yesterday's date is worse than no date - and the earlier ones stay on the journal, which
+records what happened. The parts are the record and the rendering is derived from them by section
+4.3's joining rule, so a replay shows the model exactly what the run did.
 
 `PromptRegistry` ([crates/turn/src/prompt.rs](crates/turn/src/prompt.rs)) is what one assembly
 starts from. A section has a unique name, an explicit order, and text that is either fixed or asked

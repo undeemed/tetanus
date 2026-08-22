@@ -8,7 +8,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::{boot, PromptService};
+use tetanus_turn::boot::{boot, ContextService, PromptService};
+use tetanus_turn::context::ContextRegistry;
 use tetanus_turn::llm::mock::MockAdapter;
 use tetanus_turn::prompt::PromptRegistry;
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
@@ -87,6 +88,11 @@ pub struct Harness {
     /// of a shared fixture it does not use.
     #[allow(dead_code)]
     pub sections: Arc<PromptRegistry>,
+    /// The runtime-context providers a turn gathers before its first step.
+    /// Only the runtime-context suite registers one; every other suite runs
+    /// with it empty, which is why the mock flow carries no `context/snapshot`.
+    #[allow(dead_code)]
+    providers: Arc<ContextRegistry>,
     #[allow(dead_code)]
     trace: TurnTrace,
     // Not every suite sharing this fixture listens on the bus, and a test
@@ -127,16 +133,31 @@ impl Harness {
 
         let trace = TurnTrace::attach(&bus);
         let sections = ctx.services.require::<PromptService>().expect("sections");
+        let providers = ctx.services.require::<ContextService>().expect("context");
         let engine = TurnEngine::from_context(&ctx, config).expect("engine");
 
         Self {
             engine,
             log_path,
             sections,
+            providers,
             trace,
             bus,
             _dir: dir,
         }
+    }
+
+    /// The runtime-context registry this session gathers from.
+    #[allow(dead_code)]
+    pub fn context(&self) -> &ContextRegistry {
+        &self.providers
+    }
+
+    /// The journal as a reader of the file sees it, which is the only copy a
+    /// resumed session has.
+    #[allow(dead_code)]
+    pub fn journal(&self) -> Vec<tetanus_session::SessionEvent> {
+        tetanus_session::replay(&self.log_path).expect("the journal reads back")
     }
 
     #[allow(dead_code)]

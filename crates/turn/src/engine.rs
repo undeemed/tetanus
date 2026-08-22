@@ -36,8 +36,11 @@ use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
 use tetanus_session::{SessionError, SessionLog};
 
 use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalService};
-use crate::boot::{InterruptService, LlmService, PromptService, SessionService, ToolsService};
+use crate::boot::{
+    ContextService, InterruptService, LlmService, PromptService, SessionService, ToolsService,
+};
 use crate::compaction::{self, CompactionBudget, Summarizer};
+use crate::context::{ContextAt, ContextRegistry};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PostToolDecision, PreStep, PreStepDecision,
     RequestError, RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute,
@@ -210,6 +213,10 @@ pub struct TurnEngine {
     log: Arc<dyn SessionLog>,
     bus: EventBus,
     prompt: Arc<PromptRegistry>,
+    /// What a turn tells the model about the world outside the conversation.
+    /// Empty unless a composition provided providers, and an empty one writes
+    /// nothing (contract section 4.4.8).
+    context: Arc<ContextRegistry>,
     /// The seam that decides whether a gated call may run, and audits it. One
     /// per engine, because the audit ids it mints must not collide and the
     /// journal it writes to is this session's.
@@ -262,6 +269,13 @@ impl TurnEngine {
             log,
             bus: ctx.bus.clone(),
             prompt,
+            // Optional by design: a composition that registers no providers
+            // behaves exactly as every composition did before there was a
+            // runtime context to gather.
+            context: ctx
+                .services
+                .get::<ContextService>()
+                .unwrap_or_else(|| Arc::new(ContextRegistry::new())),
             approvals,
             _base: base,
             config,
@@ -419,6 +433,7 @@ impl TurnEngine {
         let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         self.log
             .append(topic::TURN_START, serde_json::json!({ "turn": turn }))?;
+        self.snapshot_context(turn)?;
 
         let mut progress = Progress::default();
         // `AssertUnwindSafe` is the deliberate part. A panic mid-turn leaves
@@ -495,6 +510,30 @@ impl TurnEngine {
     /// The step count is the caller's rather than part of the answer, because
     /// the closer reports how many steps a turn spent even when the last of
     /// them failed.
+    /// Gather the runtime context for one turn and record it, once, between
+    /// `turn/start` and the first `step/start` (contract section 4.4.8).
+    ///
+    /// Once per turn and not once per step, because the snapshot is a fact
+    /// about when the turn began: nothing re-reads it, so a step that runs for
+    /// ten minutes is working from the time the turn started with, and a tool
+    /// that changed directory does not retroactively change what the model was
+    /// told.
+    ///
+    /// A snapshot whose parts are all empty is not written at all, so a
+    /// deployment that configures no providers pays nothing - not a journal
+    /// line, and not a message on the wire.
+    fn snapshot_context(&self, turn: u64) -> Result<(), TurnError> {
+        let parts = self.context.snapshot(&ContextAt { turn });
+        if crate::context::render(&parts).is_empty() {
+            return Ok(());
+        }
+        self.log.append(
+            topic::CONTEXT_SNAPSHOT,
+            serde_json::json!({ "turn": turn, "parts": parts }),
+        )?;
+        Ok(())
+    }
+
     async fn run_steps(
         &self,
         turn: u64,

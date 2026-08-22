@@ -37,6 +37,7 @@
 pub mod approval;
 pub mod boot;
 pub mod compaction;
+pub mod context;
 pub mod engine;
 pub mod events;
 pub mod fs;
