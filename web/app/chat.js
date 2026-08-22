@@ -36,7 +36,7 @@ const at = (id) => document.getElementById(id);
 const view = {
   where: at("where"), who: at("who"), state: at("state"), turns: at("turns"),
   scroll: at("scroll"), asked: at("asked"), send: at("send"), hint: at("hint"),
-  form: at("composer"),
+  form: at("composer"), stop: at("stop"),
 };
 
 const query = new URLSearchParams(location.search);
@@ -101,6 +101,8 @@ let socket = null;
 let pending = new Map();
 let nextId = 1;
 let busy = false;
+/** Whether an interrupt has already been asked for on the running turn. */
+let stopping = false;
 // How long to wait before dialling again, doubling up to a cap. A panel left
 // open on a server that has gone home should not dial it twice a minute all
 // afternoon, and a server that comes back should be found in seconds.
@@ -347,6 +349,24 @@ function closing(data) {
     cut.textContent = "the answer stops where the cap did; ask again to go on";
     end.append(cut);
   }
+  // Two reasons that sound like each other and are not, so both are worded.
+  //
+  // `cancelled` is the Stop button: §4.4.2 says an interrupted turn "closes
+  // normally" carrying that reason. `interrupted` is crash repair - §4.4.4's
+  // closer, written by `session.create` when it finds a turn that never ended
+  // because the process holding it died. A reader who read one as the other
+  // would either think they had stopped a turn they did not, or go looking
+  // for the person who stopped one that nobody did.
+  const why = {
+    cancelled: "stopped on request; the step already running finished first",
+    interrupted: "this turn never ended - the process died and the journal was repaired when it reopened",
+  }[data.stop_reason];
+  if (why) {
+    const asked = document.createElement("div");
+    asked.className = "hint";
+    asked.textContent = why;
+    end.append(asked);
+  }
   here.el.append(end);
   card = null;
   return true;
@@ -444,7 +464,11 @@ function reported(status) {
   if (status.session_id !== session) return;
   if (status.state === "running") {
     const where = status.step ? `turn ${status.turn} · step ${status.step}` : `turn ${status.turn}`;
-    settle("busy", `Working: ${where}`);
+    // A turn that has been asked to stop keeps saying so. The steps still
+    // arriving are the ones between the ask and the boundary it lands on, and
+    // overwriting the line with "Working: step 7" would read as the interrupt
+    // having been ignored.
+    settle("busy", stopping ? `Stopping after ${where}` : `Working: ${where}`);
   } else if (!busy) {
     resting();
   }
@@ -504,6 +528,59 @@ function ready(can) {
   view.send.disabled = !can;
 }
 
+// ---------------------------------------------------------------------------
+// Stopping a turn.
+//
+// `agent.interrupt` is served, and the carrier reads it while the
+// `agent.prompt` it stops is still outstanding - the WebSocket module says so
+// in as many words. So the only thing missing was a way to ask.
+//
+// A conversation you cannot stop is the defect: a model that has decided to
+// read the whole tree runs until its step budget does, and without this the
+// reader's options are closing the tab, which loses nothing on the journal but
+// does not stop the turn either.
+//
+// The turn ends at the next step boundary (§4.4.2), not immediately, and it
+// ends with `stop_reason: "interrupted"` rather than as a failure - so the
+// button says it asked and the turn's own closing line says when it landed.
+// A page that claimed "stopped" the moment the call returned would be claiming
+// something the contract does not promise.
+// ---------------------------------------------------------------------------
+
+function showStop(running) {
+  view.send.hidden = running;
+  view.stop.hidden = !running;
+  if (!running) {
+    stopping = false;
+    view.stop.disabled = false;
+    view.stop.textContent = "Stop";
+  }
+}
+
+view.stop.addEventListener("click", async () => {
+  // "A turn asked twice is a turn asked once" (§7.2), so a second press is
+  // harmless - but a button that keeps offering an action already taken makes
+  // a reader press it again and doubt the first one landed.
+  if (stopping) return;
+  stopping = true;
+  view.stop.disabled = true;
+  view.stop.textContent = "Stopping…";
+  try {
+    await call("agent.interrupt", { session_id: session });
+    // Not "stopped": the turn ends at the next step boundary, and the step in
+    // flight finishes first. What is true now is that it was asked.
+    settle("busy", "Asked the turn to stop; it ends at the next step boundary.");
+  } catch (failure) {
+    gave(failure);
+    // The ask did not land, so the control goes back to offering it. A greyed
+    // Stop after a failed interrupt is a page that has quietly given up on
+    // the reader's behalf.
+    stopping = false;
+    view.stop.disabled = false;
+    view.stop.textContent = "Stop";
+  }
+});
+
 function toBottom() {
   // Only when the reader is already at the end. Scrolling away is how someone
   // reads what was said earlier, and a live turn must not undo it.
@@ -532,6 +609,7 @@ function gave(failure) {
 async function ask(said) {
   busy = true;
   ready(false);
+  showStop(true);
   view.asked.value = "";
   grow();
   try {
@@ -547,6 +625,7 @@ async function ask(said) {
     grow();
   } finally {
     busy = false;
+    showStop(false);
     if (socket && socket.readyState === WebSocket.OPEN) ready(true);
     view.asked.focus();
   }

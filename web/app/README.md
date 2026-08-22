@@ -52,8 +52,8 @@ description of the same events.
   behind it answers anyone who can reach the port. Run it where you would run `cargo run`.
 - **Mock replies only, today.** `tetanus serve` builds its engine with the default provider set,
   which is the offline mock. A real model through this panel waits on the engine lane.
-- **One session per page.** No session list, no picker, no interrupt button. `tetanus sessions` and
-  `agent.interrupt` exist; this page does not use them yet.
+- **One session per page.** A conversation is named in the query and the page puts it there itself,
+  but two conversations cannot be open at once.
 
 ## Ownership
 
@@ -170,6 +170,23 @@ inside a JSON tree. Those tools answer **rendered prose**, not structures, so ea
 a *reader* of a format the engine owns and can change - which is why a row that does not parse is
 printed exactly as it arrived rather than dropped or guessed at, and why a failed result is never
 handed to a view at all.
+
+## Stopping a turn
+
+**Stop** takes Send's seat while a turn runs - beside it, it would move Send under the cursor the
+moment a turn started, and the button a reader hits would not be the one they aimed at. It calls
+`agent.interrupt`, which the WebSocket carrier reads while the `agent.prompt` it stops is still
+outstanding.
+
+It says *asked*, never *stopped*: §4.4.2 ends the turn at the next step boundary and does not abort
+an in-flight provider call, so a page claiming the turn had stopped would claim something the
+contract does not promise. A second press is not sent - "a turn asked twice is a turn asked once" -
+and an interrupt that failed puts the control back rather than giving up on the reader's behalf.
+
+The two closing reasons that sound alike are worded apart. `cancelled` is this button. `interrupted`
+is §4.4.4's crash-repair closer, written when `session.create` finds a turn whose process died -
+and a reader who read one as the other would either think they stopped a turn they did not, or go
+looking for whoever stopped one that nobody did.
 
 ## The keyboard
 

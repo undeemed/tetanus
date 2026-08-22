@@ -97,6 +97,11 @@
  }
  button:disabled { color:var(--muted); border-color:var(--line); background:var(--pane);
    cursor:default; }
+ /* Stop takes Send's seat rather than sitting beside it, so it is never the
+    button a reader hits by aiming at the other one. Coloured, because it is
+    the one control here that acts on work already in progress. */
+ #stop { color:var(--red); border-color:var(--red); }
+ #stop:hover:not(:disabled) { background:#2e1d1d; }
  .hint { max-width:920px; margin:8px auto 0; color:var(--muted); font-size:12.5px;
    display:flex; gap:14px; flex-wrap:wrap; }
  .hint .fault { color:var(--red); }
@@ -206,7 +211,11 @@
   <form id="composer">
     <textarea id="asked" rows="1" placeholder="Ask something…"
       autocomplete="off" autofocus disabled></textarea>
+    <!-- One seat, two controls. A Stop that appears beside Send would move
+         Send under the reader's cursor the moment a turn starts, and the
+         button they meant to press is not the one they would hit. -->
     <button id="send" type="submit" disabled>Send</button>
+    <button id="stop" type="button" hidden>Stop</button>
   </form>
   <p class="hint">
     <span id="hint">Waiting for the server.</span>
