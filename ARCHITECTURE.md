@@ -1058,6 +1058,58 @@ on a platform that has none ([crates/sandbox/src/unsupported.rs](crates/sandbox/
 There is no path where asking for confinement and getting none is a success; the one way to run
 unconfined is to write `danger-full-access`.
 
+### 4.11 Interface view - outside the machine
+
+Two capabilities reach past this process: a Model Context Protocol server, which is a program
+somebody else wrote answering on a pipe this process owns, and an HTTP request. Both are built the
+same way, and the shape is the point.
+
+**Everything is decided above a seam.** An MCP server is a `Link`
+([crates/mcp/src/link.rs](crates/mcp/src/link.rs)) - a pair of message channels - and the stdio
+transport is one implementation of it; every HTTP request goes through an `HttpTransport`
+([crates/web/src/http.rs](crates/web/src/http.rs)). The handshake, the revision check, paginated
+discovery, the request budget, the redirect rule, the size cap, the content-type list and the
+charset decode are all decisions made above those two traits, so the whole policy is asserted with
+no socket in the suite and the live transports stay thin enough to read in one sitting.
+
+**A failure out there is a failed tool call, never a failed turn.** `McpFault::class` and
+`WebFault::code` name the failure on the result the model reads and the journal keeps. A server that
+dies, hangs, or writes a line that is not a message ends its call with a class; the step commits and
+the loop continues. TC-PORT-MCP-32 is that promise stated as behaviour against a real child process.
+
+**Nothing this process starts outlives it.** A server is spawned with `kill_on_drop` and shut down
+through a close-input, wait, kill ladder, with the departure reported rather than assumed; seven
+cases spend a real child process to assert against `/proc` that it is gone, including on the path
+where the handshake failed and no client was ever returned. A `Supervisor`
+([crates/mcp/src/supervisor.rs](crates/mcp/src/supervisor.rs)) reconnects on a bounded budget:
+delays double to a ceiling, an attempt cap ends the retrying for good, and only real uptime past
+that ceiling buys a fresh budget, so a server that connects and dies four times a second exhausts
+its cap rather than restarting for ever.
+
+A server's tools reach the model through the ordinary registry, under `mcp__<server>__<raw>`
+([crates/mcp/src/tools.rs](crates/mcp/src/tools.rs)), so nothing in the turn engine knows an MCP tool
+from a native one. Both crates read their own section of the settings document
+(`mcp.servers.<name>`, `web.tools.*`) and are composed into a harness rather than depended on by
+one.
+
+### 4.12 Interface view - the agent a session is composed from
+
+A *preset* is a named agent: a model, a provider, a step budget, a tool subset, a prompt shape and a
+persona, written inline in the settings document or in a preset directory under the same keys. A
+caller names one on `session.create`; an explicit `model`, `provider` or `max_steps` on the same
+call wins over what the preset says, because a caller that named both asked for that model on that
+agent.
+
+The id is resolved once, at creation, and written into the session's `session/start` header
+([crates/engine/src/preset.rs](crates/engine/src/preset.rs)). A fork inherits it, and a document
+edited afterwards does not move a session that is already composed: a session whose agent changed
+under it half way through would leave a journal that is a record of two agents with nothing marking
+the boundary. The tool subset is applied to the registry that session's turns are booted on, so the
+model is never offered a tool it may not call - being offered one and refused is a step spent on a
+refusal - and a preset naming a tool the harness does not have is refused where it is used rather
+than quietly narrowed. The persona is a prompt section of its own at order zero, beside what plugins
+contribute rather than replacing them.
+
 ## 5. Verification - the conformance approach
 
 Parity with upstream is asserted, not asserted about.
@@ -1106,8 +1158,12 @@ not protocol-level.
 
 ## 7. Not built yet
 
-A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
-a PTY and the terminal tools that need one, background jobs, the web UI, and the WASM plugin host.
+A settings-file watcher, live subtree remount, cancellation inside a step, further adapters,
+background jobs, and the WASM plugin host.
+The MCP client exists over stdio (§4.11); its streamable-HTTP transport, and image and audio results
+admitted into a durable attachment store, are the named follow-ups.
+Agent presets are composed per session (§4.12); authoring one, and switching the preset of a running
+session, are not served.
 Kernel sandboxing exists for processes and for the file service (§4.10); the approved-escalation
 retry is the remaining named follow-up in
 [docs/parity-updates/sandbox-policy-and-landlock.md](docs/parity-updates/sandbox-policy-and-landlock.md).
