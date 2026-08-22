@@ -152,16 +152,41 @@ function one(question, chosen) {
 }
 
 /**
- * The durable audit, as a row on the transcript.
+ * The durable audit, as rows on the transcript - with the pair kept together.
  *
  * `approval/asked` says a decision was needed; `approval/decided` says how it
- * went; `approval/policy` says the session's rule changed. Each is drawn from
- * the journal, so a conversation read tomorrow still shows them.
+ * went; `approval/policy` says the session's rule changed. Each is on the
+ * journal, so a conversation read tomorrow still shows them.
+ *
+ * # Why this holds state instead of being a function per event
+ *
+ * `crates/turn/src/approval.rs` is explicit that the two halves are "one pair
+ * per question, sharing an `id`", and it appends the ask *before* the question
+ * goes out and the decision whenever it settles. So the two are separated on
+ * the journal by everything that happened while a person was deciding - and
+ * drawn as two independent rows, the second is a bare pill saying `rejected`
+ * with nothing on the page saying what was rejected. With one question in
+ * flight a reader can infer it; with two they cannot, and the engine gives
+ * them the `id` precisely so they do not have to.
+ *
+ * So a tracker: the ask draws a row and the decision finds it and completes
+ * it. A decision whose ask is not on the page still draws - a reader who
+ * opened a conversation part-way through gets a row naming the id rather than
+ * nothing at all.
  */
-export function approvalRow(type, data) {
+export function approvals() {
+  const open = new Map();
+  return { row: (type, data) => row(open, type, data) };
+}
+
+function row(open, type, data) {
   switch (type) {
     case "approval/asked": {
-      const root = disclosure(`asked whether ${data.tool_name} may run`, { open: false });
+      // Open, not folded. The reason is the whole content of the question -
+      // "delete X and everything under it; this cannot be undone" - and a
+      // reader who has to click to find out what is being decided is a reader
+      // deciding without it.
+      const root = disclosure(`asked whether ${data.tool_name} may run`, { open: true });
       if (data.reason) {
         const why = document.createElement("p");
         why.className = "ask-detail";
@@ -169,17 +194,39 @@ export function approvalRow(type, data) {
         root.body.append(why);
       }
       if (data.call_id) root.body.append(pill(`call ${data.call_id}`));
+      const waiting = pill("waiting for a decision", "busy");
+      root.head.append(waiting);
+      if (data.id) open.set(data.id, { root, waiting });
       return root;
     }
     case "approval/decided": {
       const known = OUTCOMES[data.outcome];
-      const root = document.createElement("div");
-      root.className = "ask-decided";
       // A word this build has never seen is drawn as itself and toned as a
       // refusal, because §4.4.7 says the engine reads an unknown outcome as a
       // denial - a surface that drew it as neutral would disagree with what
       // actually happened.
-      root.append(pill(known ? known.said : data.outcome, known ? known.tone : "bad"));
+      const outcome = pill(known ? known.said : data.outcome, known ? known.tone : "bad");
+      const asked = data.id === undefined ? undefined : open.get(data.id);
+      if (asked) {
+        open.delete(data.id);
+        asked.waiting.replaceWith(outcome);
+        // Folded now it is settled: a decided question is history, and the
+        // reason it was asked is one click away instead of on the page in
+        // front of whatever the reader is actually reading.
+        asked.root.open = false;
+        // Nothing to append - the row that was already on the page is the row
+        // that now says how it went.
+        return null;
+      }
+      const root = document.createElement("div");
+      root.className = "ask-decided";
+      if (data.id) {
+        const which = document.createElement("span");
+        which.className = "ask-why";
+        which.textContent = `decision ${data.id}`;
+        root.append(which);
+      }
+      root.append(outcome);
       return root;
     }
     case "approval/policy": {

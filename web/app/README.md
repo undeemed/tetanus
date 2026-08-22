@@ -66,6 +66,19 @@ directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
 
+## Being asked, and the audit of what was decided
+
+[questions.js](questions.js) draws the live `ui/ask` card and the durable audit. Every question is
+answered, always: §4.4.3 makes a client that does not answer a denial, so **Dismiss** answers with
+no labels rather than offering a way out that says nothing.
+
+`approval/asked` and `approval/decided` are "one pair per question, sharing an `id`", and the audit
+is a **tracker** rather than a function per event for that reason: the two halves are separated on
+the journal by everything that happened while somebody was deciding, and drawn independently the
+second is a bare `rejected` with nothing saying what was rejected. An ask draws open, says it is
+waiting, and folds when its decision completes it. A decision whose ask is off the top of the page
+still draws, naming the id.
+
 ## What the run is working toward
 
 [features.js](features.js) draws the standing state - the goal and its phase, plan mode, the plan

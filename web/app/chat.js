@@ -1,7 +1,7 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
-import { approvalRow, askCard } from "./questions.js";
+import { approvals, askCard } from "./questions.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
@@ -410,13 +410,23 @@ function toolWork(type, data) {
   return false;
 }
 
-/** The durable audit of a decision about whether a tool may run (§4.3.2). */
+/**
+ * The durable audit of a decision about whether a tool may run (§4.3.2).
+ *
+ * One tracker for the page and not one per turn: an approval asked in one turn
+ * can be decided in the next, and a tracker that was thrown away at the turn
+ * boundary would lose exactly the pairs that took longest to settle.
+ */
+const audit = approvals();
+
 function audited(type, data) {
   if (!type.startsWith("approval/")) return false;
   const here = card || turnCard(undefined);
-  const said = approvalRow(type, data);
-  if (!said) return false;
-  here.el.append(said);
+  const said = audit.row(type, data);
+  // `null` means the tracker completed a row already on the page rather than
+  // producing a new one. The event was handled either way, which is what the
+  // caller is asking.
+  if (said) here.el.append(said);
   return true;
 }
 
