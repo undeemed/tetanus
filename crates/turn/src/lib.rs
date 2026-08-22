@@ -9,6 +9,8 @@
 //!   how full the context is, and what it is made of.
 //! - [`events`] declares the live extension points a turn dispatches.
 //! - [`fs`] decides whether a path the model chose is inside its workspace.
+//! - [`inbox`] queues input that arrived while the loop was busy, durably,
+//!   until a boundary can carry it.
 //! - [`log`] declares the durable session-event vocabulary and derives model
 //!   history from it.
 //! - [`prompt`] is the named section registry the assembly starts from.
@@ -34,6 +36,7 @@ pub mod compaction;
 pub mod engine;
 pub mod events;
 pub mod fs;
+pub mod inbox;
 pub mod instructions;
 pub mod interrupt;
 pub mod llm;

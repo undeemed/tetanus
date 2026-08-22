@@ -41,6 +41,17 @@ pub mod topic {
     /// would be feeding it the harness's own bookkeeping as conversation.
     pub const QUESTION_ASKED: &str = "question/asked";
     pub const QUESTION_ANSWERED: &str = "question/answered";
+
+    /// One mutation of the queue of input waiting for a boundary the loop has
+    /// not reached yet ([`crate::inbox`]). The queues are a replay-once fold
+    /// of these, so the record carries normalized coordinates rather than what
+    /// a caller asked for.
+    ///
+    /// It does not derive to a message. What the model sees is the
+    /// `user/message` written when a claimed prompt enters a turn; deriving
+    /// the queue as well would show it every message twice, once while it was
+    /// still waiting.
+    pub const INBOX_SPLICED: &str = "agent/inbox/spliced";
 }
 
 /// Derive the model history from the log. Replay is re-derivation from the
