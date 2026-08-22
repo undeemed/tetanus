@@ -226,6 +226,32 @@ pub enum TerminalError {
     /// A page was asked for in a way that has no answer.
     #[error("{0}")]
     BadPage(String),
+    /// No backend is registered under the type a caller asked for.
+    #[error("no terminal backend is registered as {asked:?}; this deployment offers {}", listed(.registered))]
+    NoBackend {
+        asked: String,
+        registered: Vec<String>,
+    },
+    /// Two backends claimed one type, which would make a request ambiguous.
+    #[error("a terminal backend called {0:?} is already registered")]
+    DuplicateBackend(String),
+    /// This owner already has a session by that name.
+    #[error(
+        "{owner} already has a terminal session named {name:?}; close it, or choose another name"
+    )]
+    DuplicateName { owner: String, name: String },
+    /// A name that names nothing.
+    #[error("{0}")]
+    BadName(String),
+    /// No session has ever had this id.
+    #[error("no terminal session {0:?}")]
+    NoSession(String),
+    /// The session exists and belongs to somebody else. Said plainly rather
+    /// than as "no such session", because the boundary is between parts of one
+    /// harness: a caller that reached for another owner's session has a bug to
+    /// read, not a secret to keep.
+    #[error("terminal session {0:?} belongs to another owner")]
+    Foreign(String),
     /// A signal that would end the session was aimed at the shell itself.
     #[error("{signal} aimed at the shell would end terminal session {id:?}; close it instead, or signal it while a command is running")]
     WouldKillShell { id: String, signal: &'static str },
@@ -237,6 +263,14 @@ pub enum TerminalError {
         #[source]
         source: PtyError,
     },
+}
+
+/// The registered backend types, for a refusal that says what is on offer.
+fn listed(registered: &[String]) -> String {
+    if registered.is_empty() {
+        return "none at all".to_string();
+    }
+    registered.join(", ")
 }
 
 /// The signals a caller may deliver to a terminal.

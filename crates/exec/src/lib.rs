@@ -33,6 +33,8 @@ pub mod session;
 pub mod shell;
 #[cfg(target_os = "linux")]
 pub mod terminal;
+#[cfg(target_os = "linux")]
+pub mod terminals;
 pub mod tools;
 pub mod transcript;
 
