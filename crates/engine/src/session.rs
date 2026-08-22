@@ -62,6 +62,31 @@ pub struct SessionHeader {
     /// before presets existed, which is why it is optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    /// The session that **started** this one as a subagent (contract
+    /// section 4.4.9).
+    ///
+    /// Deliberately not `parent_session`, and deliberately not one field with
+    /// a kind beside it. A fork is a copy of a conversation; a subagent is a
+    /// different conversation another one asked for. A session can be both -
+    /// a fork of a subagent's journal is still that subagent's work - which is
+    /// the case a single origin field cannot represent. `tetanus_subagent`'s
+    /// `children` fold reads this and nothing else to answer what a session
+    /// delegated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<String>,
+    /// How many levels of delegation deep this session is; absent means none
+    /// (contract section 4.4.9).
+    ///
+    /// Durable rather than held in memory because the bound has to survive a
+    /// resume: `tetanus_subagent::depth` takes the larger of this and any
+    /// runtime value, so a restarted subagent cannot come back believing it is
+    /// a root session and free to delegate again.
+    ///
+    /// `u32` because `tetanus_protocol::KnownEvent::SessionStart` parses this
+    /// same line: a width this writer allowed and that reader did not would
+    /// produce a journal the presentation lane could not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
 }
 
 /// The artifact a deployment keeps its journals in.
@@ -295,6 +320,8 @@ impl SessionStore {
                     parent_session: None,
                     fork_seq: None,
                     preset: preset_id,
+                    spawned_by: None,
+                    depth: None,
                 };
                 let value = serde_json::to_value(&header).map_err(crate::convert::internal)?;
                 log.append(SESSION_START, value)
@@ -377,6 +404,13 @@ impl SessionStore {
             // A fork continues one conversation, so it continues it as the
             // same agent: the preset is inherited rather than re-resolved.
             preset: parent.preset,
+            // Contract section 4.4.9: a fork inherits the origin facts it is a
+            // copy of. A fork of a subagent's journal is still that subagent's
+            // work, and it is the same conversation continued rather than a
+            // generation deeper - so both carry over unchanged, while
+            // `parent_session` and `fork_seq` above are the child's own.
+            spawned_by: parent.spawned_by,
+            depth: parent.depth,
         };
         let mut seed = Vec::with_capacity(boundary as usize + 1);
         seed.push(SessionEvent {
