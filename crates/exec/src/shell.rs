@@ -42,6 +42,14 @@ pub struct ShellConfig {
     pub max_capture: usize,
     /// How long a killed process group has between SIGTERM and SIGKILL.
     pub grace: Duration,
+    /// Where the whole of a stream goes when `max_capture` drops part of it,
+    /// and which session's directory it goes in.
+    ///
+    /// `None` is the default and means the bound is the end of the story: a
+    /// truncated result says so and the dropped bytes are gone. A deployment
+    /// that sets it trades disk for the ability to answer "what did the build
+    /// actually print", which is the question a tail cannot answer.
+    pub spill: Option<SpillTo>,
     /// The kernel boundary every command runs behind.
     ///
     /// The default is `danger-full-access`, which is the behaviour this seam
@@ -60,11 +68,25 @@ impl Default for ShellConfig {
             max_timeout: Duration::from_secs(600),
             max_capture: 64 * 1024,
             grace: Duration::from_secs(3),
+            spill: None,
             sandbox: Policy::danger_full_access(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ),
         }
     }
+}
+
+/// Where spilled output is kept, and whose it is.
+///
+/// The session scopes the directory, so one run's artifacts are not scattered
+/// through another's. There is no model-issued call id here because a tool
+/// does not get one: `Tool::execute` is handed arguments, not the call that
+/// carried them, so the executor numbers its own runs and the number is what
+/// makes two commands in one session distinguishable.
+#[derive(Debug, Clone)]
+pub struct SpillTo {
+    pub store: Arc<tetanus_core::spill::SpillStore>,
+    pub session: String,
 }
 
 /// What a caller asks for. Everything optional is filled by
@@ -166,6 +188,10 @@ pub struct ShellExec {
     /// honour the policy fail while someone is still watching, rather than on
     /// the first command a model writes.
     confinement: Arc<Confinement>,
+    /// How many commands this executor has run, so two spilled artifacts in
+    /// one session have different names and a reader can see which came
+    /// first.
+    runs: std::sync::atomic::AtomicU64,
 }
 
 impl ShellExec {
@@ -179,6 +205,7 @@ impl ShellExec {
             resolved,
             config,
             confinement,
+            runs: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -259,6 +286,17 @@ impl ShellExec {
         }
         if self.confinement.confines() {
             command = command.confined(Arc::clone(&self.confinement));
+        }
+        if let Some(spill) = &self.config.spill {
+            let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            command = command.spilling(
+                Arc::clone(&spill.store),
+                tetanus_core::spill::SpillSource {
+                    session_id: spill.session.clone(),
+                    tool: "shell".to_string(),
+                    call_id: format!("run-{run}"),
+                },
+            );
         }
         let output = match interrupt {
             Some(interrupt) => command.run_watching(interrupt).await?,
@@ -436,15 +474,23 @@ fn suffix_marker(text: &str, prefix: &str, suffix: &str) -> Option<(String, Stri
 }
 
 /// One stream's text, with the truncation notice a reader needs to know the
-/// log they are reading is not the whole log.
+/// log they are reading is not the whole log - and, where the deployment kept
+/// it, where the rest of it is.
 fn stream_text(captured: &crate::proc::Captured) -> String {
     if !captured.truncated {
         return captured.text.clone();
     }
-    format!(
-        "{}\n[output truncated; the beginning was dropped to fit the capture bound]",
-        captured.text
-    )
+    match &captured.spilled {
+        None => format!(
+            "{}\n[output truncated; the beginning was dropped to fit the capture bound]",
+            captured.text
+        ),
+        Some(locator) => format!(
+            "{}\n[output truncated; the beginning was dropped to fit the capture bound; the whole \
+             stream is at {locator}]",
+            captured.text
+        ),
+    }
 }
 
 /// Whether this run looks like the sandbox refused something.

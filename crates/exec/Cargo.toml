@@ -13,6 +13,9 @@ tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tetanus-turn = { path = "../turn" }
+# The spill store: where the whole of a stream goes when a bound drops part of
+# it. One store for the workspace, so an operator finds one kind of artifact.
+tetanus-core = { path = "../core" }
 tetanus-sandbox = { path = "../sandbox" }
 
 [target.'cfg(unix)'.dependencies]
@@ -28,7 +31,6 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 # The tool suites drive a real turn: a booted engine, a real journal, and a
 # scripted adapter standing in for the model.
-tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
 
 [target.'cfg(unix)'.dev-dependencies]

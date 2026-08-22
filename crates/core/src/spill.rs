@@ -95,14 +95,29 @@ impl SpillStore {
     /// existing path, symlink included, so a pre-planted target in a shared
     /// root cannot redirect the write.
     pub fn save(&self, source: &SpillSource, content: &str) -> Result<SpillRef, SpillError> {
+        let mut writing = self.open(source)?;
+        writing.write(content.as_bytes())?;
+        writing.finish()
+    }
+
+    /// Open an artifact and write it as it is produced.
+    ///
+    /// [`SpillStore::save`] is the whole-payload case and is written in terms
+    /// of this one, so both put files in the same place under the same names
+    /// and an operator finds one kind of artifact rather than two.
+    ///
+    /// The streaming half exists because of who has the bytes. A tool result
+    /// is spilled *after* the fact by whoever holds it, but a process's output
+    /// is bounded *while* it runs - by the time anything above the seam sees a
+    /// result, the dropped prefix is gone and no post-hoc spill can bring it
+    /// back. Only the producer can keep what it is about to drop, and it must
+    /// do so without holding the whole stream in memory, which is what it was
+    /// dropping bytes to avoid.
+    pub fn open(&self, source: &SpillSource) -> Result<SpillWriter, SpillError> {
         let dir = self
             .root
             .join(format!("session-{}", segment(&source.session_id)));
-        let unwritable = |path: &Path, error: std::io::Error| SpillError::Unwritable {
-            path: path.to_path_buf(),
-            source: error,
-        };
-        std::fs::create_dir_all(&dir).map_err(|e| unwritable(&dir, e))?;
+        std::fs::create_dir_all(&dir).map_err(|error| unwritable(&dir, error))?;
 
         let base = format!("{}-{}", segment(&source.tool), segment(&source.call_id));
         for attempt in 0..1_000 {
@@ -118,15 +133,12 @@ impl SpillStore {
                 options.mode(0o600);
             }
             match options.open(&path) {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(content.as_bytes())
-                        .map_err(|e| unwritable(&path, e))?;
-                    file.sync_all().map_err(|e| unwritable(&path, e))?;
-                    return Ok(SpillRef {
-                        locator: path.display().to_string(),
-                        bytes: content.len(),
-                    });
+                Ok(file) => {
+                    return Ok(SpillWriter {
+                        file,
+                        path,
+                        bytes: 0,
+                    })
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(unwritable(&path, error)),
@@ -136,6 +148,56 @@ impl SpillStore {
             &dir,
             std::io::Error::other("a thousand names for one call are all taken"),
         ))
+    }
+}
+
+/// One artifact being written as its producer makes it.
+#[derive(Debug)]
+pub struct SpillWriter {
+    file: std::fs::File,
+    path: PathBuf,
+    bytes: usize,
+}
+
+impl SpillWriter {
+    /// Where this artifact will be, for a producer that wants to say so before
+    /// it has finished writing.
+    pub fn locator(&self) -> String {
+        self.path.display().to_string()
+    }
+
+    /// Append. Bytes rather than text, because a process's output is bytes
+    /// and a character split across two reads must not become two writes of
+    /// something else.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), SpillError> {
+        use std::io::Write;
+        self.file
+            .write_all(bytes)
+            .map_err(|error| unwritable(&self.path, error))?;
+        self.bytes += bytes.len();
+        Ok(())
+    }
+
+    /// Flush to the filesystem and answer where it went.
+    pub fn finish(mut self) -> Result<SpillRef, SpillError> {
+        use std::io::Write;
+        self.file
+            .flush()
+            .map_err(|error| unwritable(&self.path, error))?;
+        self.file
+            .sync_all()
+            .map_err(|error| unwritable(&self.path, error))?;
+        Ok(SpillRef {
+            locator: self.locator(),
+            bytes: self.bytes,
+        })
+    }
+}
+
+fn unwritable(path: &Path, source: std::io::Error) -> SpillError {
+    SpillError::Unwritable {
+        path: path.to_path_buf(),
+        source,
     }
 }
 

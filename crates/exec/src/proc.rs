@@ -47,6 +47,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
+use tetanus_core::spill::{SpillSource, SpillStore, SpillWriter};
 use tetanus_sandbox::{Confinement, Enforcement};
 use tetanus_turn::interrupt::Interrupt;
 
@@ -151,6 +152,12 @@ pub struct Captured {
     /// Whether anything was dropped to fit the bound. A reader that shows the
     /// text without this is telling someone a truncated log is the whole log.
     pub truncated: bool,
+    /// Where the whole stream was kept, when the caller asked for a spill and
+    /// the bound dropped something. `None` covers three different things and
+    /// they all read the same to a caller: nothing was dropped, nobody asked,
+    /// or the spill itself failed - and a failed spill is never a failed
+    /// command.
+    pub spilled: Option<String>,
 }
 
 /// Why a command stopped.
@@ -238,6 +245,16 @@ pub struct Command {
     /// could not be honoured never becomes a `Command` at all, because
     /// preparing it already failed.
     confinement: Option<Arc<Confinement>>,
+    /// Where to keep the whole of a stream this command's bound would
+    /// otherwise drop.
+    spill: Option<Spill>,
+}
+
+/// Where a dropped stream is kept, and what to call it.
+#[derive(Debug, Clone)]
+pub struct Spill {
+    pub store: Arc<SpillStore>,
+    pub source: SpillSource,
 }
 
 impl std::fmt::Debug for Command {
@@ -266,6 +283,7 @@ impl Command {
             limits: Limits::default(),
             sink: None,
             confinement: None,
+            spill: None,
         }
     }
 
@@ -345,6 +363,21 @@ impl Command {
     /// answered and what is left is one descriptor to apply.
     pub fn confined(mut self, confinement: Arc<Confinement>) -> Self {
         self.confinement = Some(confinement);
+        self
+    }
+
+    /// Keep the whole of any stream the capture bound drops.
+    ///
+    /// Only the producer can do this. A bounded capture drops its beginning
+    /// while the command is still running, so by the time a result exists the
+    /// dropped bytes are gone and nothing above this seam can spill them. The
+    /// file is opened the first time a bound is exceeded and never before, so
+    /// a command whose output fits costs no filesystem at all - and because
+    /// the buffer still holds everything at that instant, what lands on disk
+    /// is the complete stream rather than the part that arrived after somebody
+    /// noticed.
+    pub fn spilling(mut self, store: Arc<SpillStore>, source: SpillSource) -> Self {
+        self.spill = Some(Spill { store, source });
         self
     }
 
@@ -502,10 +535,32 @@ impl Command {
         stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
         which: Stream,
     ) -> Reader {
-        let tail = Arc::new(Tail::new(self.limits.max_capture));
+        let tail = Arc::new(Tail::new(self.limits.max_capture, self.spill_for(which)));
         let sink = self.sink.clone();
         let task = tokio::spawn(collect(stream, Arc::clone(&tail), sink, which));
         Reader { tail, task }
+    }
+}
+
+impl Command {
+    /// This command's spill target for one stream.
+    ///
+    /// The stream is folded into the artifact's name because a command that
+    /// overran on both produces two files, and "which of these is stderr" is
+    /// not a question an operator should have to answer by reading them.
+    fn spill_for(&self, which: Stream) -> Option<Spill> {
+        let spill = self.spill.as_ref()?;
+        let suffix = match which {
+            Stream::Stdout => "stdout",
+            Stream::Stderr => "stderr",
+        };
+        Some(Spill {
+            store: Arc::clone(&spill.store),
+            source: SpillSource {
+                tool: format!("{}-{suffix}", spill.source.tool),
+                ..spill.source.clone()
+            },
+        })
     }
 }
 
@@ -559,6 +614,7 @@ async fn wait_for(task: &JoinHandle<()>) {
 /// task ever saw end-of-file.
 struct Tail {
     bound: usize,
+    spill: Option<Spill>,
     state: Mutex<TailState>,
 }
 
@@ -566,33 +622,75 @@ struct Tail {
 struct TailState {
     kept: Vec<u8>,
     truncated: bool,
+    /// Open once the bound has been exceeded, and only then.
+    writing: Option<SpillWriter>,
+    /// Where the whole stream went, once the writer has been closed.
+    spilled: Option<String>,
 }
 
 impl Tail {
-    fn new(bound: usize) -> Self {
+    fn new(bound: usize, spill: Option<Spill>) -> Self {
         Self {
             bound,
+            spill,
             state: Mutex::new(TailState::default()),
         }
     }
 
     fn push(&self, bytes: &[u8]) {
         let mut state = self.state.lock().expect("no panic holds this lock");
-        state.kept.extend_from_slice(bytes);
-        if state.kept.len() > self.bound {
-            // Drop from the front: the end of a stream is where the error and
-            // the summary are.
-            let excess = state.kept.len() - self.bound;
-            state.kept.drain(..excess);
-            state.truncated = true;
+        // Already spilling: this piece goes to the file before the buffer
+        // decides what to forget.
+        if let Some(writing) = state.writing.as_mut() {
+            if let Err(refused) = writing.write(bytes) {
+                tracing::warn!(%refused, "a command's output could not be spilled");
+                state.writing = None;
+            }
         }
+        state.kept.extend_from_slice(bytes);
+        if state.kept.len() <= self.bound {
+            return;
+        }
+        // The first overflow, and the last moment the buffer holds the whole
+        // stream: open the file here and everything before this point is kept.
+        if state.writing.is_none() && state.spilled.is_none() {
+            if let Some(spill) = &self.spill {
+                match spill.store.open(&spill.source) {
+                    Ok(mut writing) => match writing.write(&state.kept) {
+                        Ok(()) => state.writing = Some(writing),
+                        Err(refused) => {
+                            tracing::warn!(%refused, "a command's output could not be spilled")
+                        }
+                    },
+                    Err(refused) => {
+                        tracing::warn!(%refused, "a command's output could not be spilled")
+                    }
+                }
+            }
+        }
+        // Drop from the front: the end of a stream is where the error and
+        // the summary are.
+        let excess = state.kept.len() - self.bound;
+        state.kept.drain(..excess);
+        state.truncated = true;
     }
 
     fn captured(&self) -> Captured {
-        let state = self.state.lock().expect("no panic holds this lock");
+        let mut state = self.state.lock().expect("no panic holds this lock");
+        if let Some(writing) = state.writing.take() {
+            match writing.finish() {
+                Ok(kept) => state.spilled = Some(kept.locator),
+                // The bytes are on disk either way; what failed is the promise
+                // that they are all there, so nothing is promised.
+                Err(refused) => {
+                    tracing::warn!(%refused, "a command's spilled output could not be closed")
+                }
+            }
+        }
         Captured {
             text: text_of(&state.kept, state.truncated),
             truncated: state.truncated,
+            spilled: state.spilled.clone(),
         }
     }
 }

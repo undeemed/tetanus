@@ -41,7 +41,9 @@ use std::time::Duration;
 
 use tetanus_exec::backend::{BackendError, Bash, Markers, PowerShell, ShellBackend};
 use tetanus_exec::proc::Ending;
-use tetanus_exec::shell::{parse_exit, render, ShellConfig, ShellError, ShellExec, ShellRequest};
+use tetanus_exec::shell::{
+    parse_exit, render, ShellConfig, ShellError, ShellExec, ShellRequest, SpillTo,
+};
 
 /// TC-PORT-SHELL-1: the bash backend resolves to a program on this host.
 ///
@@ -448,6 +450,70 @@ async fn a_command_that_starts_a_daemon_does_not_hold_the_turn() {
     assert!(
         text.contains("killed with its process group"),
         "the model is told what happened to what it started: {text}"
+    );
+}
+
+/// TC-PORT-SHELL-20: a truncated result tells the model where the rest of the
+/// output is, and it is really there.
+///
+/// Upstream reports the path of the file it wrote when its bound dropped
+/// bytes. The marker matters as much as the file: a model reading
+/// `[output truncated]` knows only that it is missing something, while one
+/// reading a locator can run `head` on it, or hand it to a person. A
+/// deployment that configured no store gets the plain notice, because there is
+/// nothing to point at and a marker naming nowhere is worse than no marker.
+///
+/// Input: one command printing far past the bound, run twice - once with a
+/// spill store configured, once without.
+/// Expected: the first result's notice names an artifact that holds the first
+/// line the capture no longer has; the second's says only that it was cut, and
+/// names no path.
+#[tokio::test]
+async fn a_truncated_result_says_where_the_rest_of_the_output_is() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(tetanus_core::spill::SpillStore::at(
+        dir.path().join("spill"),
+    ));
+    let noisy = "for i in $(seq 1 20000); do echo line-$i; done";
+
+    let kept = bash_exec(ShellConfig {
+        max_capture: 4 * 1024,
+        spill: Some(SpillTo {
+            store,
+            session: "a-session".to_string(),
+        }),
+        ..ShellConfig::default()
+    });
+    let text = render(&run(&kept, ShellRequest::new(noisy)).await);
+
+    let locator = text
+        .lines()
+        .find_map(|line| line.split("the whole stream is at ").nth(1))
+        .map(|rest| rest.trim_end_matches(']').to_string())
+        .unwrap_or_else(|| panic!("the notice does not say where the output went: {text}"));
+    let whole = std::fs::read_to_string(&locator).expect("the artifact is readable");
+    assert!(
+        whole.contains("line-1\n"),
+        "the artifact should hold what the capture dropped"
+    );
+    assert!(
+        !text.contains("line-1\n"),
+        "the capture itself keeps only the tail"
+    );
+
+    let plain = bash_exec(ShellConfig {
+        max_capture: 4 * 1024,
+        ..ShellConfig::default()
+    });
+    let text = render(&run(&plain, ShellRequest::new(noisy)).await);
+    assert!(
+        text.contains("[output truncated; the beginning was dropped to fit the capture bound]"),
+        "a deployment with no store still says the log is not the whole log: {}",
+        &text[text.len().saturating_sub(200)..]
+    );
+    assert!(
+        !text.contains("the whole stream is at"),
+        "there is nowhere to point at, so nothing is pointed at"
     );
 }
 

@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tetanus_core::spill::{SpillSource, SpillStore};
 use tetanus_exec::proc::{Chunk, Collected, Command, Ending, Limits, ProcessError, Stream};
 use tetanus_turn::interrupt::Interrupt;
 
@@ -679,6 +680,158 @@ async fn an_interrupt_ends_the_command_and_its_group() {
     assert!(!alive(child), "child {child} survived the interrupt");
 }
 
+/// TC-PORT-PROC-19: what the bound drops is kept, and the result says where.
+///
+/// Upstream: `subprocess-local` writes the complete stream to a file when its
+/// in-memory bound drops bytes, and reports the path.
+///
+/// This can only be done by the producer, which is the whole reason it lives
+/// here. A bounded capture drops its beginning *while the command runs*, so by
+/// the time a result exists the bytes are gone and no policy above this seam
+/// can spill what it never saw - `tetanus_core::spill` applied to a finished
+/// result would file the tail and call it the output.
+///
+/// Input: a command printing far more than the bound keeps, with a spill
+/// store.
+/// Expected: the capture is bounded and says it was cut; the artifact holds
+/// every line including the first, which the capture no longer has; and the
+/// result names where it is.
+#[tokio::test]
+async fn what_the_bound_drops_is_kept_and_the_result_says_where() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Arc::new(SpillStore::at(dir.path().join("spill")));
+
+    let output = sh("for i in $(seq 1 20000); do echo line-$i; done")
+        .limits(Limits {
+            max_capture: 4 * 1024,
+            ..Limits::default()
+        })
+        .spilling(Arc::clone(&store), source("run-1"))
+        .run()
+        .await
+        .expect("the command ran");
+
+    assert!(
+        output.stdout.truncated,
+        "the bound should have dropped some"
+    );
+    assert!(
+        !output.stdout.text.contains("line-1\n"),
+        "the capture keeps the tail, so the first line is gone from it"
+    );
+    let locator = output
+        .stdout
+        .spilled
+        .as_ref()
+        .expect("the whole stream was kept");
+    let whole = std::fs::read_to_string(locator).expect("the artifact is readable");
+    assert!(
+        whole.contains("line-1\n") && whole.contains("line-20000\n"),
+        "the artifact is the whole stream, not the part that arrived after the bound was hit"
+    );
+    assert_eq!(
+        whole
+            .lines()
+            .filter(|line| line.starts_with("line-"))
+            .count(),
+        20_000,
+        "every line is there exactly once"
+    );
+}
+
+/// TC-PORT-PROC-20: a command that fits costs no artifact, and the two streams
+/// are told apart.
+///
+/// The other half of TC-PORT-PROC-19, and the reason the file is opened on the
+/// first overflow rather than at the start: a harness that filed every command
+/// would fill a disk with the output of `echo`. The stream suffix matters for
+/// the opposite reason - a command that overran on both produces two
+/// artifacts, and "which of these is stderr" should not need reading them.
+///
+/// Input: a command whose output fits the bound, then one that overruns both
+/// streams.
+/// Expected: nothing is spilled for the first and no directory is even made;
+/// the second names two different artifacts, one per stream, each holding that
+/// stream's output.
+#[tokio::test]
+async fn a_command_that_fits_costs_no_artifact_and_the_streams_are_told_apart() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().join("spill");
+    let store = Arc::new(SpillStore::at(&root));
+
+    let small = sh("echo just a line")
+        .spilling(Arc::clone(&store), source("run-1"))
+        .run()
+        .await
+        .expect("the command ran");
+    assert_eq!(small.stdout.spilled, None, "nothing was dropped");
+    assert!(
+        !root.exists(),
+        "a command that fits should not make a spill directory at all"
+    );
+
+    let both = sh("for i in $(seq 1 4000); do echo out-$i; echo err-$i 1>&2; done")
+        .limits(Limits {
+            max_capture: 2 * 1024,
+            ..Limits::default()
+        })
+        .spilling(Arc::clone(&store), source("run-2"))
+        .run()
+        .await
+        .expect("the command ran");
+
+    let out = both.stdout.spilled.expect("stdout was spilled");
+    let err = both.stderr.spilled.expect("stderr was spilled");
+    assert_ne!(out, err, "one artifact per stream");
+    assert!(
+        out.contains("stdout") && err.contains("stderr"),
+        "the artifacts name their stream: {out} / {err}"
+    );
+    let out = std::fs::read_to_string(&out).expect("readable");
+    let err = std::fs::read_to_string(&err).expect("readable");
+    assert!(out.contains("out-1\n") && !out.contains("err-1\n"));
+    assert!(err.contains("err-1\n") && !err.contains("out-1\n"));
+}
+
+/// TC-PORT-PROC-21: a spill that cannot be written is not a failed command.
+///
+/// `tetanus_core::spill` states the rule for tool results and it is the same
+/// rule here: storage that is full, absent or refused must leave the command
+/// exactly as it would have been. A harness that turned a successful build
+/// into an error because it could not file the log away has broken the thing
+/// the model was actually doing.
+///
+/// Input: a command that overruns its bound, with a spill root that cannot be
+/// created because a file is in its way.
+/// Expected: the command still reports its exit status and its bounded tail,
+/// and simply names no artifact.
+#[tokio::test]
+async fn a_spill_that_cannot_be_written_is_not_a_failed_command() {
+    let dir = TempDir::new().expect("temp dir");
+    let blocked = dir.path().join("not-a-directory");
+    std::fs::write(&blocked, "a file where a directory would go").expect("wrote the blocker");
+    let store = Arc::new(SpillStore::at(&blocked));
+
+    let output = sh("for i in $(seq 1 5000); do echo line-$i; done; echo THE-END")
+        .limits(Limits {
+            max_capture: 2 * 1024,
+            ..Limits::default()
+        })
+        .spilling(store, source("run-1"))
+        .run()
+        .await
+        .expect("the command ran");
+
+    assert_eq!(output.code, Some(0), "the command itself was fine");
+    assert!(output.stdout.truncated);
+    assert_eq!(output.stdout.spilled, None, "nothing is promised");
+    assert!(
+        output.stdout.text.contains("THE-END"),
+        "the bounded tail is still there: {}",
+        tail(&output.stdout.text)
+    );
+}
+
 /// TC-PORT-PROC-18: a character split across two reads is delivered whole.
 ///
 /// A chunk boundary falls wherever the pipe happened to fill, so a multi-byte
@@ -827,6 +980,15 @@ fn alive(pid: i32) -> bool {
         std::thread::sleep(Duration::from_millis(10));
     }
     true
+}
+
+/// One spill source, for a case that only cares that two runs differ.
+fn source(call_id: &str) -> SpillSource {
+    SpillSource {
+        session_id: "a-session".to_string(),
+        tool: "shell".to_string(),
+        call_id: call_id.to_string(),
+    }
 }
 
 /// The last of a capture, for a failure message that is readable.
