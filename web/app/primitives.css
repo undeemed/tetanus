@@ -46,11 +46,14 @@
 /* --- the disclosure -------------------------------------------------- */
 
 .disclose { border-left:2px solid var(--line); padding-left:var(--gap); }
-.disclose-head { cursor:pointer; color:var(--text-muted);
+/* A row, so a caller can put a second thing beside the label and have it
+   truncate instead of pushing the fold onto two lines. */
+.disclose-head { cursor:pointer; color:var(--text-muted); display:flex;
+  gap:var(--gap); align-items:baseline;
   font:var(--size-small)/1.6 var(--font-code); list-style:none; }
 .disclose-head::-webkit-details-marker { display:none; }
 .disclose-head:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.disclose-mark { display:inline-block; width:1em; transition:transform .12s ease; }
+.disclose-mark { flex:0 0 auto; width:1em; transition:transform .12s ease; }
 .disclose[open] > .disclose-head .disclose-mark { transform:rotate(90deg); }
 .disclose-body { padding:var(--gap-tight) 0 var(--gap) 0; }
 .disclose-bad { border-left-color:var(--state-bad); }
@@ -104,6 +107,31 @@
 .tool-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
   font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
 .tool-failed > .disclose-head { color:var(--state-bad); }
+/* The summary beside a tool's name. Truncated rather than wrapped: a fold is
+   one row, and a two-row fold moves every row under it as the reader scans. */
+.tool-said { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; color:var(--text); font-family:var(--font-code); }
+
+/* --- a file, a listing, a set of matches -------------------------------- */
+
+/* A caption or an aside the tool wrote, kept as prose so it does not read as
+   another row of the result. */
+.fs-note { margin:0 0 var(--gap-tight) 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-prose); overflow-wrap:anywhere; }
+.fs-file { font:var(--size-small)/1.6 var(--font-code); }
+.fs-line { display:flex; gap:var(--gap); align-items:baseline; }
+/* The gutter is a column of its own so the code starts at one place whatever
+   the numbers are; tab alignment cannot do that outside a terminal. */
+.fs-no { flex:0 0 auto; min-width:4ch; text-align:right; color:var(--text-muted);
+  user-select:none; }
+.fs-code { flex:1 1 auto; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); }
+.fs-list { font:var(--size-small)/1.7 var(--font-code); }
+.fs-entry { display:flex; gap:var(--gap-wide); align-items:baseline; }
+.fs-name { flex:1 1 auto; overflow-wrap:anywhere; color:var(--text); }
+.fs-fact { flex:0 0 auto; color:var(--text-muted); }
+.fs-dir > .fs-name { color:var(--accent); }
+.fs-other > .fs-name { color:var(--text-muted); }
+.fs-edit > .fs-half:last-of-type { margin-top:var(--gap); }
 
 /* --- a list of conversations ------------------------------------------ */
 

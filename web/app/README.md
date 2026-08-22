@@ -66,6 +66,25 @@ directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
 
+## How a tool call is drawn
+
+[tools.js](tools.js) is the shared frame - a fold with the tool's name on it, its arguments, its
+result, and whether it worked - and `views` is a table keyed by tool name that a per-tool view drops
+into. A tool with no entry gets the frame, which is the ordinary case and not a placeholder: MCP
+servers advertise their own tools, so the set is open by construction.
+
+The fold also carries a **summary** from the view, because a transcript of a dozen calls all
+labelled `read` says nothing about which file. A tool without a view shows its name alone - a
+summary this page invented from arguments it does not understand would be a guess printed as a fact.
+
+[tool-files.js](tool-files.js) is the filesystem family from `crates/fs`: `read` draws its window
+with a real gutter, `list` marks the directories the tool marked, `glob` keeps the line that says
+the search stopped, and `write` and `edit` put the text that is the change in the body instead of
+inside a JSON tree. Those tools answer **rendered prose**, not structures, so each of these views is
+a *reader* of a format the engine owns and can change - which is why a row that does not parse is
+printed exactly as it arrived rather than dropped or guessed at, and why a failed result is never
+handed to a view at all.
+
 ## The keyboard
 
 Every panel opens with Alt and a letter - `Alt+S` sessions, `Alt+T` trace, `Alt+M` models, `Alt+W`

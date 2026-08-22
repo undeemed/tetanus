@@ -8,17 +8,23 @@
 //
 // # What is here, and what is deliberately not
 //
-// This build serves exactly one tool: `echo`. The filesystem, process, MCP and
-// web tools are real, but they are real on other lanes' branches and none of
-// them is on this tree - so a view for them here would be a screen drawn
-// against a shape nobody can produce, which is the mock-and-rewrite the gap
-// list warns about.
+// `views` is a table keyed by tool name; a tool with no entry gets the generic
+// frame, which is honest and complete rather than a placeholder: name,
+// arguments as a tree, the result, and whether it worked.
 //
-// What exists instead is the seam they drop into. `views` is a table keyed by
-// tool name; a tool with no entry gets the generic frame, which is honest and
-// complete rather than a placeholder: name, arguments as a tree, the result,
-// and whether it worked. When the fs lane lands `read_file`, the view for it is
-// one entry in this table and no change anywhere else.
+// The seam has now been used twice as intended. `echo` is this file's own; the
+// seven filesystem tools are one import from `tool-files.js` and no change
+// anywhere else, which is what the table was for. The process, MCP and web
+// tools follow the same way as their lanes land.
+//
+// # The fold line carries a summary, because a name alone is not one
+//
+// A transcript of a dozen calls all labelled `read` tells a reader nothing
+// about which file, and opening twelve folds to find out is the cost. Upstream
+// puts a per-tool summary on its `ToolRow` for the same reason. A view supplies
+// it from the arguments; a tool without a view still shows its name alone,
+// because a summary this page invented from arguments it does not understand
+// would be a guess printed as a fact.
 //
 // # Why the generic frame is not a fallback to be embarrassed about
 //
@@ -28,6 +34,7 @@
 // the tools a deployment added on purpose.
 
 import { disclosure, jsonTree, pill } from "./primitives.js";
+import { fileViews } from "./tool-files.js";
 
 /**
  * Views by tool name. Empty of everything but the tool this build has, and
@@ -55,18 +62,56 @@ export const views = {
    * sentence in.
    */
   echo: {
+    summary: (args) => (typeof args?.text === "string" ? args.text : null),
     call: (args) => text(typeof args?.text === "string" ? args.text : JSON.stringify(args)),
     result: (content) => text(content),
   },
+
+  // The filesystem family, from `crates/fs`. Spread rather than listed, so
+  // adding a file tool is a change to one file and not to two.
+  ...fileViews,
 };
 
-/** A tool call, drawn by its own view when it has one. */
+/**
+ * A tool call, drawn by its own view when it has one.
+ *
+ * A view's `call` may answer `null` for arguments it does not recognise - a
+ * `write` with no `content` in it - and that falls back to the tree rather
+ * than to an empty fold. A view is a better rendering of a shape it knows, not
+ * a promise to render every shape.
+ */
 export function toolCall(name, args) {
-  const root = frame("call", name);
   const view = views[name];
-  root.body.append(view?.call ? view.call(args) : jsonTree(args ?? {}));
+  const root = frame("call", name, said(view, args));
+  root.body.append(view?.call?.(args) ?? jsonTree(args ?? {}));
   return root;
 }
+
+/**
+ * The summary beside a tool's name, or nothing.
+ *
+ * Bounded, and bounded here rather than in each view, so no view can put a
+ * model-written argument of any length onto the fold and push the rest of the
+ * row off the screen. A summary is a glance; the body is the detail.
+ */
+function said(view, args) {
+  let summary = null;
+  try {
+    summary = view?.summary?.(args);
+  } catch {
+    // A view that threw on arguments it did not expect loses its summary and
+    // nothing else. The call itself is still drawn, which is the part the
+    // transcript cannot do without.
+    summary = null;
+  }
+  if (typeof summary !== "string") return null;
+  const oneLine = summary.replace(/\s+/g, " ").trim();
+  if (!oneLine) return null;
+  return oneLine.length > SUMMARY_MAX ? `${oneLine.slice(0, SUMMARY_MAX - 1)}\u2026` : oneLine;
+}
+
+/** How much of a summary fits on a fold before it stops being a glance. */
+const SUMMARY_MAX = 90;
 
 /**
  * A tool result, drawn by the same view, and told apart by whether it worked.
@@ -76,8 +121,11 @@ export function toolCall(name, args) {
  * result would call a successful `list_dir` on an empty directory a failure.
  */
 export function toolResult(name, content, ok) {
-  const root = frame(ok ? "result" : "failed", name);
   const view = views[name];
+  // A failure is the tool's own words and never a view's reading of them: the
+  // views here parse a success format, and `read`'s failure is
+  // `FS_NOT_FOUND: ...`, which has no numbered lines in it to find.
+  const root = frame(ok ? "result" : "failed", name, null);
   root.body.append(view?.result && ok ? view.result(content) : text(content));
   if (!ok) root.head.append(pill("failed", "bad"));
   return root;
@@ -91,9 +139,15 @@ export function toolResult(name, content, ok) {
  * returns a file: an unfolded result pushes the reply that follows it off the
  * screen.
  */
-function frame(kind, name) {
+function frame(kind, name, summary) {
   const root = disclosure(name, { open: false, tone: kind === "failed" ? "bad" : undefined });
   root.classList.add(`tool-${kind}`);
+  if (summary) {
+    const aside = document.createElement("span");
+    aside.className = "tool-said";
+    aside.textContent = summary;
+    root.head.append(aside);
+  }
   return root;
 }
 
