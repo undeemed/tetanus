@@ -60,7 +60,8 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/features tetanus-features  the built-in feature tools over the session journal
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
-  -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells, shell tools
+  -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells and terminals,
+                                       the shell and terminal tools
        -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
@@ -1030,6 +1031,36 @@ the turn's own interrupt, so stopping a turn kills the command it started rather
 the loop. A composition supplies that switch through `boot_with`
 ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)); the engine mints one per session, because one
 switch shared across sessions would let an interrupt in one stop another.
+
+The fourth layer is a terminal rather than a pipe, and it exists because a program behaves
+differently when it believes it has one - it colours, it pages, it prompts without echoing, and an
+interactive program may refuse to run at all.
+[crates/exec/src/pty.rs](crates/exec/src/pty.rs) allocates one: the child `setsid`s and takes the
+slave as its controlling terminal, the size is set before anything starts, the master is drained
+continuously so the kernel's buffer never blocks the child, and a signal goes to whichever process
+group owns the terminal now. Closing sweeps the terminal's whole *session* rather than one process
+group, because job control puts each job in a group of its own and a group kill would leave a
+background `sleep` behind.
+
+`terminal::TerminalSession` ([crates/exec/src/terminal.rs](crates/exec/src/terminal.rs)) is a shell
+on one, driven one send at a time. Readiness is announced rather than guessed: the shell is told to
+print an OSC 133 marker before every prompt, so a send settles when the shell says the command is
+over and the marker carries its exit status. `crates/exec/src/sanitize.rs` reads that marker out of
+the stream and takes the terminal's control language with it, carrying a sequence split across two
+reads rather than half-printing it. Silence and an absolute deadline are the fallbacks for a program
+that prints no marker, and the turn's interrupt is the fourth ending - it aims `SIGINT` at the
+foreground group, so a stopped turn costs the command and not the session. `terminals::Terminals`
+([crates/exec/src/terminals.rs](crates/exec/src/terminals.rs)) is who may touch which session: an
+`Owner` is compared exactly, ids are never re-used, and names are unique within one owner.
+`terminal_tools::TerminalTools`
+([crates/exec/src/terminal_tools.rs](crates/exec/src/terminal_tools.rs)) registers the six the model
+calls - `terminal_open`, `terminal_send`, `terminal_read`, `terminal_signal`, `terminal_close`,
+`terminal_list` - with typing as a barrier and reading, listing and signalling parallel-safe.
+
+The two persistent families are not redundant. A pipe-backed session ends when a turn is stopped,
+because a shell reading a pipe has nothing to interrupt; a terminal-backed one interrupts the
+command and stays open. Most work wants the first, which is cheaper and needs no session to close;
+anything interactive needs the second.
 
 ### 4.10 Interface view - the sandbox
 
