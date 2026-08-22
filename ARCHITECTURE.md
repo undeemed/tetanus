@@ -60,8 +60,8 @@ crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/features tetanus-features  the built-in feature tools over the session journal
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
-  -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells and terminals,
-                                       the shell and terminal tools
+  -> crates/exec     tetanus-exec      subprocess and piped seams, shell backends, persistent shells
+                                       and terminals, the shell and terminal tools
        -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
@@ -272,7 +272,10 @@ A projection checkpoint, a computed title and a cache each belong there - reprod
 expensive enough to keep, and not facts, so not journal entries.
 A payload too large to carry goes to the spill store
 ([crates/core/src/spill.rs](crates/core/src/spill.rs)), which keeps the whole thing in an owner-only
-file and hands the model a bounded preview and a locator.
+file and hands the model a bounded preview and a locator. It has two doors, and which one a caller
+uses follows from who holds the bytes: a finished payload is `save`d, while a producer that is
+*dropping* bytes as it goes - `crates/exec` bounding a command's output - `open`s a writer and
+streams into it, because by the time a result exists what it dropped is gone.
 
 A credential goes in neither, and in particular not in the settings document
 ([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).
@@ -1013,6 +1016,23 @@ Every child leads its own process group, so termination is a SIGTERM to the grou
 then a SIGKILL to the group: a command that starts grandchildren and a command that traps SIGTERM
 both end. When the leader exits but something it started still holds the output pipe, the group is
 swept and the caller is told - otherwise an orphan would hold a turn open for ever.
+
+`proc::Command`'s bound is not the end of what it captured. When a stream outgrows it the whole
+stream is written to the storage lane's spill store
+([crates/core/src/spill.rs](crates/core/src/spill.rs)) and the truncation notice a model reads
+carries the locator. The file is opened on the first overflow and never before, so a command whose
+output fits touches no filesystem - and because the buffer still holds everything at that instant,
+what lands on disk is the complete stream. Only the producer can do this: a policy above the seam
+sees a result whose beginning is already gone. A spill that fails leaves the command exactly as it
+was.
+
+`piped::PipedCommand` ([crates/exec/src/piped.rs](crates/exec/src/piped.rs)) is the other shape of
+child: one this harness *talks to* rather than waits for. A protocol peer on stdio - an MCP server
+today, an out-of-process hook later - is a long conversation where stdout is the wire and closing
+stdin is the request to leave. It is a seam rather than a `spawn` in each consumer because of what
+the seam guarantees: the peer leads its own process group and is ended over that group, so a server
+that starts helpers of its own does not leave them behind. `crates/mcp` starts its servers through
+it and keeps only the framing.
 
 `backend::ShellBackend` ([crates/exec/src/backend.rs](crates/exec/src/backend.rs)) is which shell a
 command goes through. `Bash` and `PowerShell` ship; a backend whose binary is absent refuses,
