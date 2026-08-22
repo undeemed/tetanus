@@ -100,8 +100,22 @@ The fold also carries a **summary** from the view, because a transcript of a doz
 labelled `read` says nothing about which file. A tool without a view shows its name alone - a
 summary this page invented from arguments it does not understand would be a guess printed as a fact.
 
-[tool-shell.js](tool-shell.js) is the shell family from `crates/exec`. The markers that crate
-appends - `[exit code: N]`, `[timed out after Nms]`, `[killed by signal: X]`, the sandbox denial,
+[tool-shell.js](tool-shell.js) is the shell **and terminal** families from `crates/exec` - eleven
+tools over one marker table, because that crate says of the terminal family that "they are the same
+markers upstream renders, so a presentation that parses one parses both". Splitting them would
+split the table in two and let a marker be taught to one reader and not the other.
+
+What a reader wants from a terminal is not "what did it print" but "is it waiting for me", so
+`[wait: …]` is drawn as a phrase - *waiting for input*, *still running*, *the shell exited* - rather
+than as the field value. A `terminal_read` page is never stamped `exit 0`: it is a window onto
+scrollback and did not exit anything.
+
+One finding is recorded rather than fixed here:
+[docs/contract-updates/ui-terminal-send-secrets.md](../../docs/contract-updates/ui-terminal-send-secrets.md)
+- a `terminal_send` answering a password prompt is on the journal in plain text, every surface draws
+it, and the only reliable signal for masking it is on the engine side.
+
+The markers that crate appends - `[exit code: N]`, `[timed out after Nms]`, `[killed by signal: X]`, the sandbox denial,
 the swept process group - are, in its own words, "a wire format in all but name", and
 `shell::parse_exit` is the engine-side parser. This is the page-side one: a status becomes a pill,
 a policy denial and a sweep become notes, and `[stderr]` splits the two streams. Three of those

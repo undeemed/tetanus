@@ -1,4 +1,4 @@
-// The shell tools, drawn as a terminal.
+// The shell and terminal tools, drawn as a terminal.
 //
 // Upstream's `ui-tool` renders `bash` as a command and its output, with the
 // exit status as a pill rather than as a line of text at the bottom. It can do
@@ -33,6 +33,15 @@
 // when a reader needs the exit code and the stderr split out. So these views
 // declare `failure` as well as `result`; the file tools deliberately do not,
 // because their failures are `FS_NOT_FOUND: ...` and have no shape to read.
+//
+// # Both families are here, because they are one marker vocabulary
+//
+// `crates/exec` says of the terminal family that "they are the same markers
+// upstream renders, so a presentation that parses one parses both", and it is
+// literally true: `[exit code: N]` and `[output truncated]` are shared, and
+// `[wait: …]`, `[session: …]` and `[lines: …]` are the terminal's additions to
+// the same table. Splitting them across two files would split one table in two
+// and let a marker be taught to one reader and not the other.
 
 import { pill } from "./primitives.js";
 import { codeBlock } from "./markdown.js";
@@ -50,7 +59,34 @@ const MARKERS = [
     say: () => "the command left processes running; they were killed with its process group",
   },
   { start: "[output truncated;", end: "]", as: "note", say: (v) => `output truncated;${v}` },
+  { exact: "[output truncated]", as: "note", say: () => "output truncated" },
+
+  // The terminal family's three. `wait` is the important one and the reason
+  // this family exists: it says *why* a send came back, and "the program is
+  // asking you something" and "it is still going" are the two answers a reader
+  // acts on differently. Drawn as a phrase rather than as the token, because
+  // `stdin_read` is a field value and "waiting for input" is the fact.
+  { start: "[wait: ", end: "]", as: "pill", tone: "busy", say: (v) => WAITS[v] ?? `came back: ${v}` },
+  {
+    start: "[session: ",
+    end: "]",
+    as: "pill",
+    // A terminal whose shell has gone is a terminal every later send will
+    // fail against, so it is not a neutral fact.
+    tone: undefined,
+    say: (v) => (v === "running" ? "session running" : `session ${v}`),
+  },
+  { start: "[lines: ", end: "]", as: "note", say: (v) => `lines ${v}` },
 ];
+
+/** Why a send came back, worded for a reader rather than for a field. */
+const WAITS = {
+  stdin_read: "waiting for input",
+  inferred_idle: "idle at a prompt",
+  timeout: "still running",
+  session_exit: "the shell exited",
+  interrupted: "interrupted",
+};
 
 // The brackets are dropped from a note and kept nowhere: they are the marker
 // syntax, and this page has just finished parsing it. What is inside each of
@@ -67,9 +103,9 @@ export const shellViews = {
     // person watching", so when it wrote one, that is the summary it wrote it
     // to be. The command itself is one keystroke away in the body.
     summary: (args) => phrase(args?.description) ?? phrase(args?.command),
-    call: (args) => command(args, ["workdir", "timeout_ms"]),
-    result: (said) => terminal(said),
-    failure: (said) => terminal(said),
+    call: (args) => command(args, "command", ["workdir", "timeout_ms"]),
+    result: (said) => printed(said, { assumeExit: true }),
+    failure: (said) => printed(said, { assumeExit: true }),
   },
 
   shell_run: {
@@ -78,14 +114,49 @@ export const shellViews = {
       const where = phrase(args?.session_id);
       return said && where ? `${said} · in ${where}` : said ?? where;
     },
-    call: (args) => command(args, ["session_id"]),
-    result: (said) => terminal(said),
-    failure: (said) => terminal(said),
+    call: (args) => command(args, "command", ["session_id"]),
+    result: (said) => printed(said, { assumeExit: true }),
+    failure: (said) => printed(said, { assumeExit: true }),
   },
 
   shell_open: { summary: (args) => phrase(args?.cwd) ?? "the workspace root" },
   shell_close: { summary: (args) => phrase(args?.session_id) },
-  shell_list: { result: (said) => sessions(said) },
+  shell_list: { result: (said) => rows(said) },
+
+  // The terminal family. A terminal is the one thing that can drive a program
+  // which refuses to run without one, so what a reader wants from these is not
+  // "what did it print" but "is it waiting for me".
+  terminal_open: {
+    summary: (args) => phrase(args?.name) ?? phrase(args?.type) ?? "a terminal",
+    result: (said) => printed(said, { assumeExit: false }),
+  },
+  terminal_send: {
+    summary: (args) => {
+      const typed = phrase(args?.text);
+      const where = phrase(args?.session_id);
+      // `submit: false` types without pressing Enter, which is how a password
+      // prompt or a partial line is fed. A reader looking at two sends of the
+      // same text needs to know which one was entered.
+      const said = typed === null ? null : args?.submit === false ? `${typed} (not submitted)` : typed;
+      return said && where ? `${said} · in ${where}` : said ?? where;
+    },
+    call: (args) => command(args, "text", ["session_id", "submit"]),
+    result: (said) => printed(said, { assumeExit: false }),
+    failure: (said) => printed(said, { assumeExit: false }),
+  },
+  terminal_read: {
+    summary: (args) => phrase(args?.session_id),
+    result: (said) => printed(said, { assumeExit: false }),
+  },
+  terminal_signal: {
+    summary: (args) => {
+      const signal = phrase(args?.signal);
+      const where = phrase(args?.session_id);
+      return signal && where ? `${signal} · to ${where}` : signal ?? where;
+    },
+  },
+  terminal_close: { summary: (args) => phrase(args?.session_id) },
+  terminal_list: { result: (said) => rows(said) },
 };
 
 /**
@@ -96,31 +167,35 @@ export const shellViews = {
  * which is all `parse_exit` needs, since it only wants the status - would miss
  * the sandbox denial that is the whole reason the command failed.
  */
-export function terminal(said) {
+export function printed(said, { assumeExit = true } = {}) {
   const { body, marks } = peel(String(said ?? ""));
   const root = document.createElement("div");
   root.className = "sh";
 
-  if (marks.some((mark) => mark.as === "pill")) {
+  const pills = marks.filter((mark) => mark.as === "pill");
+  // Silence is what success looks like to the model, and a pill is what it
+  // looks like to a reader: for a command, the absence of a status marker is
+  // `exit 0`, and saying so is cheaper than making someone infer it from
+  // nothing.
+  //
+  // Only for a command. A terminal page has no exit status to be silent
+  // about - `terminal_read` is a window onto scrollback, and stamping it
+  // `exit 0` would be answering a question nobody asked with a fact that is
+  // not true of it.
+  if (pills.length > 0 || assumeExit) {
     const row = document.createElement("div");
     row.className = "sh-marks";
-    for (const mark of marks) {
-      if (mark.as === "pill") row.append(pill(mark.text, mark.tone));
-    }
-    root.append(row);
-  } else {
-    // Silence is what success looks like to the model, and a pill is what it
-    // looks like to a reader: the absence of a status marker is `exit 0`, and
-    // saying so is cheaper than making someone infer it from nothing.
-    const row = document.createElement("div");
-    row.className = "sh-marks";
-    row.append(pill("exit 0", "ok"));
+    if (pills.length === 0) row.append(pill("exit 0", "ok"));
+    for (const mark of pills) row.append(pill(mark.text, mark.tone));
     root.append(row);
   }
 
   const [out, err] = split(body);
-  if (out === "(no output)") {
-    root.append(note("the command printed nothing"));
+  if (out === "(no output)" || out === "(no new output)" || out === "(no retained output)") {
+    // The three sentinels the engine writes for "nothing here", said in words
+    // rather than shown as a line of literal parentheses that reads like
+    // output the program produced.
+    root.append(note(out === "(no output)" ? "the command printed nothing" : out.slice(1, -1)));
   } else if (out !== "") {
     root.append(stream(out, null));
   }
@@ -133,13 +208,20 @@ export function terminal(said) {
 }
 
 /**
- * `shell_list`'s answer: `id`, backend, directory and state, tab-separated.
+ * A listing of sessions: `shell_list`'s four tab-separated fields, or
+ * `terminal_list`'s five.
  *
- * The one row that matters is a session that is gone, because every later
- * `shell_run` against it will fail and the reason is here. A row this page
- * cannot split is printed whole rather than dropped.
+ * One function for both because the fields line up where it matters: the id is
+ * first and the state is fourth in each, so the difference is one trailing
+ * fact - a pid - which draws as another muted cell without being named. A
+ * second copy of this that differed only in a column count would be a second
+ * place for the state to be read out of the wrong field.
+ *
+ * The state is the row that matters, in both families: a shell that is gone
+ * and a terminal whose shell exited are sessions every later call will fail
+ * against, and the reason is in that field.
  */
-export function sessions(said) {
+export function rows(said) {
   const root = document.createElement("div");
   root.className = "sh-list";
   for (const row of String(said ?? "").replace(/\n$/, "").split("\n")) {
@@ -148,13 +230,17 @@ export function sessions(said) {
       root.append(note(row));
       continue;
     }
-    const [id, backend, cwd, state] = parts;
     const line = document.createElement("div");
     line.className = "sh-session";
-    line.append(cell(id, "sh-id"), cell(backend, "sh-backend"), cell(cwd, "sh-cwd"));
-    // `gone: <reason>` is the tool's own wording and is kept; only the tone is
-    // this page's, and it is decided on the prefix rather than on a guess.
-    line.append(pill(state, state.startsWith("gone") ? "bad" : "ok"));
+    line.append(cell(parts[0], "sh-id"), cell(parts[1], "sh-backend"), cell(parts[2], "sh-cwd"));
+    // The tool's own wording is kept - `gone: the shell exited`,
+    // `exited code=1 signal=null` - and only the tone is this page's. Anything
+    // that is not the one word meaning "still there" is a fault, which is the
+    // safe way round: a state added later reads as needing attention rather
+    // than as fine.
+    const state = parts[3];
+    line.append(pill(state, state === "running" ? "ok" : "bad"));
+    for (const extra of parts.slice(4)) line.append(cell(extra, "sh-backend"));
     root.append(line);
   }
   return root;
@@ -225,12 +311,12 @@ function stream(text, caption) {
 }
 
 /** The command, as a block, with whatever else the call carried beside it. */
-function command(args, extras) {
-  const said = phrase(args?.command);
+function command(args, key, extras) {
+  const said = phrase(args?.[key]);
   if (said === null) return null;
   const root = document.createElement("div");
   root.className = "sh-call";
-  root.append(codeBlock(args.command, "sh"));
+  root.append(codeBlock(args[key], "sh"));
   const facts = extras
     .filter((key) => args?.[key] !== undefined && args?.[key] !== null && args?.[key] !== "")
     .map((key) => `${key}: ${args[key]}`);
