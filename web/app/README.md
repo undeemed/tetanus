@@ -66,6 +66,29 @@ directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
 
+## What the run is working toward
+
+[features.js](features.js) draws the standing state - the goal and its phase, plan mode, the plan
+the model put up, the task list, what the run has reported, and what is attached - in the trace
+panel, above the path.
+
+It is **folded from `session/event`, not fetched**, and that is the sanctioned route rather than a
+shortcut: `tetanus_features::view::SessionView` is the same state as a Rust type, and
+[docs/contract-updates/features-ui-surfaces.md](../../docs/contract-updates/features-ui-surfaces.md)
+§3 says `session.view` and `workspace.view` are deferred, with "a client already receives
+`session/event` and can re-fold" as the answer in the meantime. Every one of these types is a
+whole-value snapshot, so the fold is "the last one wins" - except where it is not, and attachments
+and reports accumulate, which the panel table marks with `many`.
+
+[docs/contract-updates/ui-features-panels.md](../../docs/contract-updates/ui-features-panels.md) is
+this lane's reply to that note: what the panels needed, what the re-fold costs, and the one call
+(`workspace.view`) that has no page-side substitute.
+
+`todo.status` and `goal.phase` are strings on the wire so that a value added later renders as
+itself, and they do: an unknown status keeps its word and gets a neutral mark. The empty state
+tells "this run has no goal" from "this build has no goals" by reading `catalog.tools`, which the
+page already asks for - not by guessing.
+
 ## How a tool call is drawn
 
 [tools.js](tools.js) is the shared frame - a fold with the tool's name on it, its arguments, its

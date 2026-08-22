@@ -716,13 +716,18 @@ document.getElementById("sessions-close").onclick = () => sessionsDialog.close()
 const traceDialog = document.getElementById("trace");
 const traceBody = document.getElementById("trace-body");
 
-document.getElementById("trace-open").onclick = () => {
+document.getElementById("trace-open").onclick = async () => {
   traceDialog.showModal();
   // What the run is working toward sits above what it did: a goal is the
   // reason for the path, and reading the path first is reading the answer
   // before the question.
-  panel(document.getElementById("standing"), seen);
+  //
+  // The path is drawn first and without waiting, because it needs nothing but
+  // the journal already in hand; the panel above it waits only for the tool
+  // list, which is what tells "this run has no goal" apart from "this build
+  // has no goals".
   trace(traceBody, trajectory(seen));
+  panel(document.getElementById("standing"), seen, { offers: await offered() });
 };
 document.getElementById("trace-close").onclick = () => traceDialog.close();
 
@@ -731,6 +736,28 @@ document.getElementById("trace-close").onclick = () => traceDialog.close();
 // ---------------------------------------------------------------------------
 
 const catalogueDialog = document.getElementById("catalogue");
+
+/** What this build advertises, asked once and remembered. */
+let offeredTools = null;
+
+/**
+ * The names in `catalog.tools`, or `null` if the call could not be made.
+ *
+ * Cached because two panels ask the same question and the answer cannot change
+ * without a new process: `catalog.tools` is built from the registry a turn is
+ * booted with. `null` on failure rather than an empty list - "this build offers
+ * no tools" and "nobody could tell me" lead a panel to different words.
+ */
+async function offered() {
+  if (offeredTools) return offeredTools;
+  try {
+    const answered = await window.TETANUS_CALL("catalog.tools", {});
+    offeredTools = (answered.tools || []).map((tool) => tool.name);
+  } catch {
+    return null;
+  }
+  return offeredTools;
+}
 
 document.getElementById("catalogue-open").onclick = async () => {
   catalogueDialog.showModal();
@@ -741,6 +768,7 @@ document.getElementById("catalogue-open").onclick = async () => {
       window.TETANUS_CALL("catalog.models", {}),
       window.TETANUS_CALL("catalog.tools", {}),
     ]);
+    offeredTools = (toolset.tools || []).map((tool) => tool.name);
     models(shown, providers.providers || [], {
       current: running,
       onStart: (provider, chosen) => {

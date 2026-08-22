@@ -207,6 +207,38 @@
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
 
+/* --- what the run is working toward -------------------------------------- */
+
+.feat, .feat-file { padding:var(--gap-tight) 0; }
+.feat-file + .feat-file { border-top:1px solid var(--line); }
+.feat-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap; }
+.feat-said { margin:0; color:var(--text);
+  font:var(--size-body)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-quiet { margin:0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-bad { margin:var(--gap-tight) 0 0 0; color:var(--state-bad);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-todo { display:flex; gap:var(--gap); align-items:baseline;
+  font:var(--size-body)/1.6 var(--font-prose); }
+.feat-mark { flex:0 0 auto; width:1em; text-align:center; font-family:var(--font-code); }
+.feat-completed { color:var(--state-ok); }
+.feat-in_progress { color:var(--state-busy); }
+.feat-pending, .feat-unknown { color:var(--text-muted); }
+/* A finished task is struck through and dimmed rather than removed: the list
+   is what the model said it would do, and what it has already done is how a
+   reader judges how far along it is. */
+.feat-done { color:var(--text-muted); text-decoration:line-through;
+  overflow-wrap:anywhere; }
+/* Neither half grows. The status belongs beside the task, not at the far edge
+   of the panel - the same call the file listing and the session list make, and
+   for the same reason: a word that far from its row stops being about it. */
+.feat-todo > .feat-said, .feat-todo > .feat-done { flex:0 1 auto; }
+/* The word beside the glyph. Small and muted, because it repeats what the
+   colour and the mark already say to anyone who can see them - and is the
+   only thing that says it to anyone who cannot. */
+.feat-state { flex:0 0 auto; color:var(--text-muted); font-size:var(--size-small);
+  font-family:var(--font-code); }
+
 /* --- a rendered answer ------------------------------------------------- */
 
 .md { font:var(--size-body)/1.6 var(--font-prose); color:var(--text); }
