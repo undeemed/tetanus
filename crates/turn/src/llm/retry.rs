@@ -277,6 +277,14 @@ fn schedule(
         "provider": ev.provider,
         "code": ev.failure.code,
         "message": ev.failure.message,
+        // The provider's own id for the attempt that failed, `null` when it
+        // named none. It is on the record rather than only on the event
+        // because a retried refusal is the case where nobody is watching: the
+        // turn recovered, nothing was reported, and the journal is the only
+        // place left that can say which requests the provider refused and
+        // under what ids. Upstream keeps it on the same record, and validates
+        // that it is never an empty string.
+        "request_id": ev.failure.provider_request_id,
         "retry": retry,
         // An unbounded policy has no ceiling to report, and says so rather
         // than reporting a number a reader would take for a limit.

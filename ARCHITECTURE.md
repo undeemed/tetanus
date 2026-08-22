@@ -368,6 +368,12 @@ decoded.
 Every failure carries a stable code (`LlmError::code`), and
 [crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs) decides from that code whether another
 attempt is worth making and how long to wait first.
+A refusal also carries the provider's own id for the request it refused, read off the response
+headers (`llm::REQUEST_ID_HEADERS`), because that id exists only in the provider's logs and is the
+one fact about a failure this harness cannot reconstruct from what arrived.
+It travels three ways: to a recovery listener on `RequestFailure`, onto the `llm/retry` record when a
+policy recovered and nobody was told, and into the published error's `data` when the failure reached
+the caller ([docs/interface-contract.md](docs/interface-contract.md) section 4.5).
 The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
 which is what keeps its cases offline and free of a clock.
 

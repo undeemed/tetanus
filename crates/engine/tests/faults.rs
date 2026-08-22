@@ -76,6 +76,53 @@ fn a_provider_answer_carries_its_status_and_exits_six() {
     assert_eq!(ErrorCode::ProviderError.exit_status(), 6);
 }
 
+/// TC-REQID-6: a refusal the caller is told about carries the id to quote.
+///
+/// It sits in this suite because this is where section 4.5's table is
+/// verified, and the table's `ProviderError` row is what now carries the id.
+/// The rest of the request-id rule is `crates/turn/tests/upstream_request_id.rs`.
+///
+/// A surface may replace this error's message with its own wording, keyed on
+/// the code - section 4.5 says so - which is exactly why the id cannot live in
+/// the sentence. `data` is the only place a fact survives a surface that
+/// renders its own words.
+///
+/// Input: a 429 the provider named, then the same refusal with no id, then a
+/// failure that never reached a provider.
+/// Expected: `request_id` in `data` for the first; the key absent for the
+/// other two, for TC-FAULT-3's reason - an absent key says the fact does not
+/// exist, where a null invites a surface to print one.
+#[test]
+fn a_refusal_the_provider_named_publishes_the_id_to_quote() {
+    let named = mapped(TurnError::Llm(LlmError::Provider {
+        status: 429,
+        message: "rate limited".to_string(),
+        retry_after_ms: None,
+        request_id: Some("req_01HZY8QK".to_string()),
+    }));
+
+    assert_eq!(named.kind(), Some(ErrorCode::ProviderError));
+    assert_eq!(data(&named)["request_id"], "req_01HZY8QK");
+    assert_eq!(data(&named)["status"], 429, "beside the status it took");
+
+    let anonymous = mapped(TurnError::Llm(LlmError::Provider {
+        status: 429,
+        message: "rate limited".to_string(),
+        retry_after_ms: None,
+        request_id: None,
+    }));
+    assert_eq!(
+        data(&anonymous).get("request_id"),
+        None,
+        "a provider that named none publishes no key: {anonymous:?}"
+    );
+
+    let unreached = mapped(TurnError::Llm(LlmError::Transport(
+        "connection reset".to_string(),
+    )));
+    assert_eq!(data(&unreached).get("request_id"), None, "{unreached:?}");
+}
+
 /// TC-FAULT-3: a provider that never answered reports no status.
 ///
 /// Input: a transport failure, then a protocol failure.

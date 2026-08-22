@@ -141,16 +141,33 @@ pub fn turn_error(
             )
             .with_data(serde_json::json!({ "provider": provider, "env": env }))
         }
-        // The wait the provider asked for is not published: section 4.5 fixes
-        // the fields this error's `data` carries, so adding one is a change to
-        // the contract and not to this table.
+        // The wait the provider asked for is still not published: section 4.5
+        // fixes the fields this error's `data` carries, so adding one is a
+        // change to the contract and not to this table. `request_id` is
+        // published because that change was made - and it is the field worth
+        // making it for, since a surface can render a wait as "try again
+        // later" but nothing can reconstruct an id the response carried away.
+        // The key is absent rather than null when the provider named none, for
+        // TC-FAULT-3's reason: an absent key says the fact does not exist,
+        // where a null invites a surface to print one.
         TurnError::Llm(LlmError::Provider {
-            status, message, ..
-        }) => RpcError::new(
-            ErrorCode::ProviderError,
-            format!("provider `{provider}` answered {status}: {message}"),
-        )
-        .with_data(serde_json::json!({ "provider": provider, "status": status })),
+            status,
+            message,
+            request_id,
+            ..
+        }) => {
+            let mut data = serde_json::Map::new();
+            data.insert("provider".to_string(), provider.into());
+            data.insert("status".to_string(), (*status).into());
+            if let Some(id) = request_id {
+                data.insert("request_id".to_string(), id.as_str().into());
+            }
+            RpcError::new(
+                ErrorCode::ProviderError,
+                format!("provider `{provider}` answered {status}: {message}"),
+            )
+            .with_data(serde_json::Value::Object(data))
+        }
         TurnError::Llm(LlmError::Sink(e)) => internal(format!("session log refused a chunk: {e}")),
         // No status: the provider never answered, so the field the table
         // names is absent rather than invented.
