@@ -95,6 +95,7 @@ impl EngineConfig {
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
             max_parallel_tool_calls: parallel(&settings, key::MAX_PARALLEL_TOOL_CALLS)?
                 .unwrap_or(base.max_parallel_tool_calls),
+            sandbox: sandbox(&settings, &base.sandbox)?,
             tool_order: crate::tools::order(&settings, &base.tools)?,
             presets: crate::preset::roster(&settings)?,
             retry: crate::retry::policy(&settings)?,
@@ -136,6 +137,54 @@ fn text(settings: &Config, key: &str) -> Result<Option<String>, ConfigError> {
         Some(text) if !text.trim().is_empty() => Ok(Some(text.to_string())),
         _ => Err(bad(key, "a name", &resolved.value)),
     }
+}
+
+/// The confinement every child of this deployment runs behind.
+///
+/// Three keys rather than one, because a mode without a root is only half an
+/// answer: `workspace-write` has to write *somewhere*, and a deployment that
+/// runs the harness from one directory and works in another would otherwise
+/// have its writes refused with nothing to change. The network decision is
+/// separate for the reason the policy states - Landlock governs TCP, so a
+/// deployment wanting an offline build has nowhere else to say so.
+///
+/// A mode this build does not know is refused rather than ignored: a
+/// deployment that wrote `sandbox.mode: read_only` meant to be confined, and
+/// running it unconfined because the spelling was wrong is the one outcome
+/// nobody would forgive.
+fn sandbox(
+    settings: &Config,
+    base: &tetanus_sandbox::Policy,
+) -> Result<tetanus_sandbox::Policy, ConfigError> {
+    let workspace = match text(settings, key::SANDBOX_WORKSPACE)? {
+        Some(root) => PathBuf::from(root),
+        None => base.workspace_root().to_path_buf(),
+    };
+    let mode = match settings.get(key::SANDBOX_MODE) {
+        None => base.mode(),
+        Some(resolved) => {
+            let named = resolved.value.as_str().unwrap_or_default();
+            tetanus_sandbox::Mode::parse(named).ok_or_else(|| {
+                bad(
+                    key::SANDBOX_MODE,
+                    &format!("one of {}", tetanus_sandbox::Mode::NAMES.join(", ")),
+                    &resolved.value,
+                )
+            })?
+        }
+    };
+    let mut policy = tetanus_sandbox::Policy::new(mode, workspace);
+    if let Some(resolved) = settings.get(key::SANDBOX_NETWORK) {
+        let allowed = resolved
+            .value
+            .as_bool()
+            .ok_or_else(|| bad(key::SANDBOX_NETWORK, "true or false", &resolved.value))?;
+        policy = policy.network(match allowed {
+            true => tetanus_sandbox::Network::Allow,
+            false => tetanus_sandbox::Network::Deny,
+        });
+    }
+    Ok(policy)
 }
 
 /// The step ceiling. Zero is not a ceiling a turn can run under, so it is a

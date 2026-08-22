@@ -15,6 +15,9 @@ tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+# The confinement vocabulary, so a document's `sandbox.mode` is settled here
+# with every other key rather than parsed again by each composition.
+tetanus-sandbox = { path = "../sandbox" }
 
 [dev-dependencies]
 tokio = { workspace = true }

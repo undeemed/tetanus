@@ -66,6 +66,20 @@ impl Mode {
             .collect()
     }
 
+    /// The mode a document named, or nothing if it named something else.
+    ///
+    /// The inverse of [`Mode::as_str`], and it lives beside it so the two
+    /// cannot drift: a fourth mode added to the enum and not to both is a
+    /// deployment whose configuration silently means something else.
+    pub fn parse(word: &str) -> Option<Self> {
+        [Mode::ReadOnly, Mode::WorkspaceWrite, Mode::DangerFullAccess]
+            .into_iter()
+            .find(|mode| mode.as_str() == word)
+    }
+
+    /// Every mode a document may name, for a refusal that lists them.
+    pub const NAMES: [&'static str; 3] = ["read-only", "workspace-write", "danger-full-access"];
+
     /// The word a document writes and a message prints.
     pub fn as_str(self) -> &'static str {
         match self {

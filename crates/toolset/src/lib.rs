@@ -60,6 +60,12 @@ pub mod key {
     pub const SOURCES: &str = "tools.sources";
     /// The filesystem mode the file tools are fenced by.
     pub const FS_MODE: &str = "fs.mode";
+    /// What every child a composition starts is confined to. Settled strictly
+    /// by the engine, and read here so one policy value reaches the shell
+    /// tools, the persistent shells and the terminals alike.
+    pub const SANDBOX_MODE: &str = "sandbox.mode";
+    pub const SANDBOX_WORKSPACE: &str = "sandbox.workspace";
+    pub const SANDBOX_NETWORK: &str = "sandbox.network";
 }
 
 /// Every source this build ships, in the order a reader meets them.
@@ -87,14 +93,21 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                 // still gets a `shell` tool that answers with the reason,
                 // because a tool that quietly vanished looks to the model like
                 // a build that never had one.
+                let sandbox = cx.sandbox();
                 tetanus_exec::tools::ShellTools::register_or_explain(
                     registry,
                     Arc::new(tetanus_exec::backend::Bash::new()),
                     tetanus_exec::shell::ShellConfig {
                         spill: spill_to(cx),
+                        cwd: sandbox.workspace_root().to_path_buf(),
+                        sandbox: sandbox.clone(),
                         ..tetanus_exec::shell::ShellConfig::default()
                     },
-                    tetanus_exec::session::SessionConfig::default(),
+                    tetanus_exec::session::SessionConfig {
+                        cwd: sandbox.workspace_root().to_path_buf(),
+                        sandbox: sandbox.clone(),
+                        ..tetanus_exec::session::SessionConfig::default()
+                    },
                     Arc::clone(&cx.interrupt),
                 );
                 register_terminals(registry, cx);
@@ -169,8 +182,13 @@ fn spill_to(cx: &Composition) -> Option<tetanus_exec::shell::SpillTo> {
 fn register_terminals(registry: &mut ToolRegistry, cx: &Composition) {
     use tetanus_exec::terminals::{Owner, Terminals};
 
+    let sandbox = cx.sandbox();
     let terminals = match Terminals::with(
-        tetanus_exec::terminal::TerminalConfig::default(),
+        tetanus_exec::terminal::TerminalConfig {
+            cwd: sandbox.workspace_root().to_path_buf(),
+            sandbox,
+            ..tetanus_exec::terminal::TerminalConfig::default()
+        },
         Arc::new(tetanus_exec::backend::Bash::new()),
     ) {
         Ok(terminals) => Arc::new(terminals),

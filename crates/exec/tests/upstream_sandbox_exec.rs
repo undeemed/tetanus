@@ -368,6 +368,90 @@ async fn a_refused_tool_call_is_contained_and_recorded() {
     );
 }
 
+/// TC-PORT-SANDBOX-32: a terminal is confined by the same policy value, and
+/// its own children with it.
+///
+/// The gap this closes is one this lane left itself. The pty layer grew a
+/// confined spawn when terminals landed, and nothing asserted it through a
+/// terminal: every sandbox case ran a command or a pipe-backed session. A
+/// terminal is the one seam where an unconfined child would be invisible -
+/// the model opens it once and types into it for the rest of the turn - so a
+/// deployment that confined `shell` and not `terminal_open` would have
+/// confined nothing at all.
+///
+/// The second half matters as much: a terminal's shell starts *its own*
+/// children, and Landlock is inherited across `exec`, so a policy applied once
+/// to the session leader governs everything typed into it afterwards.
+///
+/// Input: a terminal opened under `read-only`; a write attempted directly, and
+/// another through a child process of the terminal's shell.
+/// Expected: neither file exists, the shell says it was refused both times,
+/// and the session is still usable afterwards - a denial is not a death.
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn a_terminal_is_confined_by_the_same_policy_and_so_are_its_children() {
+    if enforcing().is_none() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let session = match tetanus_exec::terminal::TerminalSession::open(
+        "pty-1".into(),
+        None,
+        "bash".into(),
+        Arc::new(Bash::new()),
+        tetanus_exec::terminal::TerminalConfig {
+            cwd: workspace.path().to_path_buf(),
+            sandbox: Policy::new(Mode::ReadOnly, workspace.path()),
+            idle_silence: Duration::from_secs(5),
+            timeout: Duration::from_secs(20),
+            grace: Duration::from_millis(200),
+            ..tetanus_exec::terminal::TerminalConfig::default()
+        },
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(why) => {
+            eprintln!("skipped: no terminal on this host ({why})");
+            return;
+        }
+    };
+
+    let direct = session
+        .send("echo denied > direct.txt", true, None)
+        .await
+        .expect("sent");
+    assert_ne!(
+        direct.code,
+        Some(0),
+        "the shell should have been refused: {:?}",
+        direct.viewport
+    );
+    assert!(
+        !workspace.path().join("direct.txt").exists(),
+        "a terminal wrote a file the policy forbade"
+    );
+
+    let through_a_child = session
+        .send("bash -c 'echo denied > child.txt'", true, None)
+        .await
+        .expect("sent");
+    assert_ne!(through_a_child.code, Some(0));
+    assert!(
+        !workspace.path().join("child.txt").exists(),
+        "a child of the terminal's shell escaped the policy"
+    );
+
+    // The session survives being refused: a policy denial is the command's
+    // answer, and a model has to be able to try something else.
+    let after = session
+        .send("echo still-here", true, None)
+        .await
+        .expect("sent");
+    assert!(after.viewport.contains("still-here"));
+    session.close().await;
+}
+
 // ---------------------------------------------------------------- fixtures
 
 /// A workspace to confine, or `None` after reporting the case skipped on a

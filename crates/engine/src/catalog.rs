@@ -23,6 +23,13 @@ pub mod key {
     pub const MODEL: &str = "model.default";
     pub const MAX_STEPS: &str = "agent.max_steps";
     pub const MAX_PARALLEL_TOOL_CALLS: &str = "agent.max_parallel_tool_calls";
+    /// What every child this deployment starts is confined to.
+    pub const SANDBOX_MODE: &str = "sandbox.mode";
+    /// The root `workspace-write` writes under. Defaults to where the process
+    /// was started, which is the directory a person means by "here".
+    pub const SANDBOX_WORKSPACE: &str = "sandbox.workspace";
+    /// Whether a confined child may reach the network.
+    pub const SANDBOX_NETWORK: &str = "sandbox.network";
 }
 
 /// Answers the read-only calls from one place, so `tetanus tools`, a model
@@ -60,6 +67,20 @@ impl Catalogs {
                 (
                     key::MAX_PARALLEL_TOOL_CALLS,
                     serde_json::json!(config.max_parallel_tool_calls.get()),
+                ),
+                (
+                    key::SANDBOX_MODE,
+                    serde_json::json!(config.sandbox.mode().as_str()),
+                ),
+                (
+                    key::SANDBOX_WORKSPACE,
+                    serde_json::json!(config.sandbox.workspace_root().display().to_string()),
+                ),
+                (
+                    key::SANDBOX_NETWORK,
+                    serde_json::json!(
+                        config.sandbox.network_policy() == tetanus_sandbox::Network::Allow
+                    ),
                 ),
             ],
         }

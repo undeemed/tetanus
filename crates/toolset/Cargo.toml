@@ -15,6 +15,9 @@ tetanus-turn = { path = "../turn" }
 # One line per landed tool crate. Adding a source is a line here and a line in
 # `sources()`; nothing else in the workspace changes.
 tetanus-exec = { path = "../exec" }
+# One policy value for every child a composition starts, read from the same
+# document the engine settled it from.
+tetanus-sandbox = { path = "../sandbox" }
 tetanus-features = { path = "../features" }
 tetanus-fs = { path = "../fs" }
 tetanus-mcp = { path = "../mcp" }

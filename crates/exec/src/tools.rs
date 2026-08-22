@@ -263,16 +263,13 @@ fn escalation(arguments: &Value, from: Mode) -> Result<Option<Escalation>, ToolE
             (Some(_), Some(_)) => unreachable!("both present is the branch above"),
         };
     };
-    let to = match mode.as_str() {
-        "read-only" => Mode::ReadOnly,
-        "workspace-write" => Mode::WorkspaceWrite,
-        "danger-full-access" => Mode::DangerFullAccess,
-        other => {
-            return Err(ToolError::InvalidArguments(
-                SHELL.into(),
-                format!("`sandbox_permissions` must name a sandbox mode, not {other:?}"),
-            ))
-        }
+    // The vocabulary is the sandbox crate's, and reading it is too: a
+    // hand-written match here is a fourth mode away from being wrong.
+    let Some(to) = Mode::parse(&mode) else {
+        return Err(ToolError::InvalidArguments(
+            SHELL.into(),
+            format!("`sandbox_permissions` must name a sandbox mode, not {mode:?}"),
+        ));
     };
     if !to.is_wider_than(from) {
         return Err(ToolError::InvalidArguments(

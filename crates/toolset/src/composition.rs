@@ -137,6 +137,44 @@ impl Composition {
         self
     }
 
+    /// What every child this composition starts is confined to: commands,
+    /// persistent shells and terminals alike.
+    ///
+    /// One value for all of them, which is the point. A deployment that
+    /// confined its commands and not its terminals has confined nothing,
+    /// because the model can open a terminal and type the same command into
+    /// it - and before this was read here, each of the three configurations
+    /// built a `danger-full-access` policy of its own.
+    ///
+    /// The engine settles the same keys strictly, so a document this build
+    /// cannot read never reaches a run (`tetanus config` reports what it
+    /// settled, with the layer that decided it). Here an unreadable value
+    /// falls back to the harness default rather than refusing, for
+    /// [`Composition::fs_mode`]'s reason inverted: a catalogue must not fail,
+    /// and the run that would have been confined was already refused.
+    pub(crate) fn sandbox(&self) -> tetanus_sandbox::Policy {
+        let workspace = self
+            .settings
+            .get(key::SANDBOX_WORKSPACE)
+            .and_then(|resolved| resolved.value.as_str().map(PathBuf::from))
+            .unwrap_or_else(|| self.workspace.clone());
+        let mode = self
+            .settings
+            .get(key::SANDBOX_MODE)
+            .and_then(|resolved| resolved.value.as_str().map(str::to_string))
+            .and_then(|name| tetanus_sandbox::Mode::parse(&name))
+            .unwrap_or(tetanus_sandbox::Mode::DangerFullAccess);
+        let policy = tetanus_sandbox::Policy::new(mode, workspace);
+        match self
+            .settings
+            .get(key::SANDBOX_NETWORK)
+            .and_then(|resolved| resolved.value.as_bool())
+        {
+            Some(false) => policy.network(tetanus_sandbox::Network::Deny),
+            _ => policy,
+        }
+    }
+
     /// The filesystem mode the document names, or the fenced default.
     ///
     /// A mode this build does not know is the document's mistake and is

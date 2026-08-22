@@ -75,6 +75,14 @@ pub struct EngineConfig {
     /// at all: a provider's block is the whole policy for its route. Resolved
     /// from the document by [`crate::retry::provider_policies`].
     pub provider_retry: BTreeMap<String, tetanus_turn::llm::retry::RetryPolicy>,
+    /// What every child a composition starts for this deployment is confined
+    /// to: commands, persistent shells, terminals and hooks alike.
+    ///
+    /// The engine starts no processes itself, so it never applies this - it
+    /// settles it, because a policy is a document's answer like any other and
+    /// two compositions parsing `sandbox.mode` for themselves is how one seam
+    /// ends up confined and another does not. `crates/exec` applies it.
+    pub sandbox: tetanus_sandbox::Policy,
     /// The adapter behind each provider a session may name.
     pub providers: Arc<dyn Providers>,
     /// The tools every turn on this engine can call, and the list
@@ -109,6 +117,12 @@ impl Default for EngineConfig {
             tool_order: None,
             retry: tetanus_turn::llm::retry::RetryPolicy::default(),
             provider_retry: BTreeMap::new(),
+            // No confinement unless a deployment asks for one, and named
+            // rather than implied: this is the behaviour the harness has
+            // always had, and a reader of the config page sees the word.
+            sandbox: tetanus_sandbox::Policy::danger_full_access(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
