@@ -522,6 +522,30 @@ impl TerminalSession {
         submit: bool,
         interrupt: Option<&Interrupt>,
     ) -> Result<SendOutcome, TerminalError> {
+        self.send_waiting(text, submit, None, interrupt).await
+    }
+
+    /// [`TerminalSession::send`], waiting only as long as the caller asked.
+    ///
+    /// This is how work is started and left running. Upstream's answer to "run
+    /// the build and come back later" is a background job with a job store
+    /// behind it; a terminal needs neither, because the session *is* the
+    /// collection point - a send that stops waiting leaves the command running
+    /// on the terminal, [`TerminalSession::read`] collects what it has printed
+    /// since, and [`TerminalSession::signal`] stops it. What was missing was a
+    /// way to say so deliberately rather than by setting a deployment-wide
+    /// timeout low and hoping.
+    ///
+    /// `within` is clamped by the deployment's own bound: a caller can ask to
+    /// wait less, never more, for the reason every other cap in this crate
+    /// exists.
+    pub async fn send_waiting(
+        &self,
+        text: &str,
+        submit: bool,
+        within: Option<Duration>,
+        interrupt: Option<&Interrupt>,
+    ) -> Result<SendOutcome, TerminalError> {
         let Ok(_one_at_a_time) = self.sending.try_lock() else {
             return Err(TerminalError::SendActive(self.id.clone()));
         };
@@ -547,7 +571,9 @@ impl TerminalSession {
             self.pty.write(&typed).await?;
         }
 
-        let settled = self.wait_for_readiness(prompts_before, interrupt).await;
+        let settled = self
+            .wait_for_readiness(prompts_before, within, interrupt)
+            .await;
         let snapshot = self.watched.text.snapshot();
         let seen = without_prompt_furniture(&snapshot.since(from));
         Ok(SendOutcome {
@@ -687,7 +713,7 @@ impl TerminalSession {
     /// Wait until the shell asks for input for the first time, and keep what
     /// it printed on the way as the session's banner.
     async fn reach_first_prompt(&self, backend: &'static str) -> Result<(), TerminalError> {
-        let settled = self.wait_for_readiness(0, None).await;
+        let settled = self.wait_for_readiness(0, None, None).await;
         let banner = self.watched.text.snapshot().text();
         match settled {
             WaitReason::StdinRead | WaitReason::InferredIdle => {
@@ -736,9 +762,11 @@ impl TerminalSession {
     async fn wait_for_readiness(
         &self,
         prompts_before: usize,
+        within: Option<Duration>,
         interrupt: Option<&Interrupt>,
     ) -> WaitReason {
-        let deadline = Instant::now() + self.config.timeout;
+        let budget = within.map_or(self.config.timeout, |asked| asked.min(self.config.timeout));
+        let deadline = Instant::now() + budget;
         loop {
             if self.watched.prompts.load(Ordering::Acquire) > prompts_before {
                 return WaitReason::StdinRead;
@@ -757,7 +785,12 @@ impl TerminalSession {
                 self.drain_prompt(prompts_before).await;
                 return WaitReason::Interrupted;
             }
-            if self.watched.idle_for() >= self.config.idle_silence {
+            // A caller waiting deliberately for a short time means the
+            // deadline, not silence: a command that prints nothing for its
+            // first half-second has not gone quiet, and answering
+            // `inferred_idle` would tell the caller something this seam does
+            // not know.
+            if within.is_none() && self.watched.idle_for() >= self.config.idle_silence {
                 return WaitReason::InferredIdle;
             }
             if Instant::now() >= deadline {

@@ -198,6 +198,11 @@ impl Tool for SendTool {
                         "type": "boolean",
                         "description": "Press Enter after the text. Defaults to true.",
                     },
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How long to wait for an answer before returning and leaving the command running. Defaults to the deployment's own bound, which also caps this.",
+                    },
                 },
                 "required": ["session_id", "text"],
                 "additionalProperties": false,
@@ -229,8 +234,12 @@ impl Tool for SendTool {
             }
         };
         let submit = optional_flag(arguments, "submit", TERMINAL_SEND)?.unwrap_or(true);
+        let within = optional_millis(arguments, "wait_ms", TERMINAL_SEND)?;
 
-        match session.send(&typed, submit, Some(&self.0.interrupt)).await {
+        match session
+            .send_waiting(&typed, submit, within, Some(&self.0.interrupt))
+            .await
+        {
             Ok(outcome) => {
                 let text = bounded(render_send(&outcome), self.0.max_result_bytes);
                 // A send that came back on a prompt reporting a failure is a
@@ -584,6 +593,31 @@ fn optional_flag(arguments: &Value, field: &str, tool: &str) -> Result<Option<bo
         Some(other) => Err(ToolError::InvalidArguments(
             tool.into(),
             format!("`{field}` must be true or false, got {other}"),
+        )),
+    }
+}
+
+/// A wait, in milliseconds. Zero is refused rather than treated as "do not
+/// wait": a send that waited no time at all would answer before the terminal
+/// had echoed anything, and a model reading that empty viewport would conclude
+/// the command printed nothing.
+fn optional_millis(
+    arguments: &Value,
+    field: &str,
+    tool: &str,
+) -> Result<Option<std::time::Duration>, ToolError> {
+    match arguments.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(millis) if millis > 0 => Ok(Some(std::time::Duration::from_millis(millis))),
+            _ => Err(ToolError::InvalidArguments(
+                tool.into(),
+                format!("`{field}` must be a positive whole number of milliseconds, got {number}"),
+            )),
+        },
+        Some(other) => Err(ToolError::InvalidArguments(
+            tool.into(),
+            format!("`{field}` must be a positive whole number of milliseconds, got {other}"),
         )),
     }
 }

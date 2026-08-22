@@ -460,7 +460,129 @@ async fn a_stopped_turn_interrupts_the_command_and_leaves_the_session() {
     drop(dir);
 }
 
+/// TC-PORT-TERM-41: long work is started and collected later, which is what a
+/// terminal has instead of a background job.
+///
+/// Upstream's answer to "run the build and come back" is `run_in_background`,
+/// which returns a job id that `job_output` and `job_kill` collect - one
+/// feature with a job store behind it, and tetanus has no store (`jobs/*` in
+/// `docs/parity.md`). A terminal needs none: the session *is* the collection
+/// point. A send that stops waiting leaves the command running on the
+/// terminal, a read collects what it printed since, and a signal stops it.
+///
+/// `wait_ms` is what makes that deliberate rather than accidental. Without it
+/// a model could only get the same behaviour by hoping the deployment's
+/// timeout was short, and would read `[wait: timeout]` as a fault rather than
+/// as the answer it asked for.
+///
+/// Input: a session; a send of a slow counting loop with a small `wait_ms`;
+/// then a read; then a signal; then a read.
+/// Expected: the send returns promptly saying it did not wait for the end and
+/// the session is still running; the first read shows the command had
+/// progressed; the signal reaches it; and the second read shows more output
+/// than the first, then no more.
+#[tokio::test]
+async fn long_work_is_started_and_collected_later() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let interrupt = Interrupt::new();
+    let (_dir, tools) = terminal_tools_in(workspace.path(), interrupt);
+    let session = tools
+        .terminals()
+        .open(&Owner::new("session"), Default::default())
+        .await
+        .expect("a terminal");
+    let registry = tools.registry();
+    let id = session.id().to_string();
+
+    let started = std::time::Instant::now();
+    let outcome = registry
+        .execute(&call(
+            "c1",
+            TERMINAL_SEND,
+            json!({
+                "session_id": id,
+                "text": "for i in $(seq 1 100); do echo tick-$i; sleep 0.1; done",
+                "wait_ms": 400,
+            }),
+        ))
+        .await
+        .expect("the call answered");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a short wait must come back short, not wait for the command"
+    );
+    assert!(
+        outcome.content.contains("[wait: timeout]"),
+        "the send says it stopped waiting rather than that the command ended: {:?}",
+        outcome.content
+    );
+    assert!(
+        outcome.content.contains("[session: running]"),
+        "the work is still going on the terminal: {:?}",
+        outcome.content
+    );
+
+    let first = read_page(&registry, &id).await;
+    assert!(
+        first.contains("tick-"),
+        "the command was running while nobody waited: {first:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let second = read_page(&registry, &id).await;
+    assert!(
+        ticks(&second) > ticks(&first),
+        "it should have gone on printing: {} then {}",
+        ticks(&first),
+        ticks(&second)
+    );
+
+    let stopped = registry
+        .execute(&call(
+            "c2",
+            TERMINAL_SIGNAL,
+            json!({ "session_id": id, "signal": "SIGINT" }),
+        ))
+        .await
+        .expect("the call answered");
+    assert!(
+        stopped.content.contains("delivered SIGINT"),
+        "the signal is how a caller stops what it started: {:?}",
+        stopped.content
+    );
+
+    let after = read_page(&registry, &id).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let later = read_page(&registry, &id).await;
+    assert_eq!(
+        ticks(&after),
+        ticks(&later),
+        "the command was stopped, so nothing more should arrive"
+    );
+    tools.terminals().close_all().await;
+}
+
 // ---------------------------------------------------------------- fixtures
+
+/// The whole retained page of one session, through the tool a model would use.
+async fn read_page(registry: &tetanus_turn::tools::ToolRegistry, id: &str) -> String {
+    registry
+        .execute(&call(
+            "read",
+            TERMINAL_READ,
+            json!({ "session_id": id, "count": 500 }),
+        ))
+        .await
+        .expect("the call answered")
+        .content
+}
+
+/// How many ticks a page holds, which is how a case measures progress without
+/// depending on how fast the machine is.
+fn ticks(page: &str) -> usize {
+    page.matches("tick-").count()
+}
 
 /// A step written against what the earlier results said, which is how a case
 /// names the session the model opened one step ago.
