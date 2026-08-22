@@ -19,6 +19,8 @@
 //! - [`skill`] is the instructions a project or a person keeps on disk.
 //! - [`workspace`] is what the harness knows about the project it is in.
 //! - [`attachment`] is the files and blobs carried into a turn.
+//! - [`view`] is what a surface reads: all of the above, as data with stable
+//!   field names and no engine type in it.
 //!
 //! Parity: upstream `packages/todo`, `goal`, `plan`, `feedback`, `attachment`,
 //! `workspace` and `skill`, restated against the tetanus seams that carry the
@@ -30,4 +32,5 @@ pub mod goal;
 pub mod plan;
 pub mod skill;
 pub mod todo;
+pub mod view;
 pub mod workspace;

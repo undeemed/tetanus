@@ -292,7 +292,7 @@ pub fn attach(
 /// inconsistent store rather than overwritten, because whichever of the two
 /// callers is wrong, silently replacing one's bytes with the other's is worse.
 fn publish(root: &Path, id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-    let path = root.join(id);
+    let path = object_path(root, id);
     match std::fs::read(&path) {
         Ok(existing) if existing == bytes => return Ok(()),
         Ok(_) => {
@@ -314,9 +314,19 @@ fn publish(root: &Path, id: &str, bytes: &[u8]) -> Result<(), StoreError> {
     })
 }
 
+/// Where one object lives under a store root.
+///
+/// The name *is* the content address, so the layout is flat: nothing here needs
+/// a fan-out directory for a store whose size is one session's attachments, and
+/// a reader outside this module - the surface vocabulary in [`crate::view`] -
+/// asks here rather than keeping a second copy of the rule.
+pub fn object_path(root: &Path, id: &str) -> PathBuf {
+    root.join(id)
+}
+
 /// Read one stored object back.
 pub fn read(root: &Path, id: &str) -> Result<Vec<u8>, StoreError> {
-    let path = root.join(id);
+    let path = object_path(root, id);
     std::fs::read(&path).map_err(|error| StoreError::Storage {
         path: path.display().to_string(),
         reason: error.to_string(),
