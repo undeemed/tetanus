@@ -39,6 +39,7 @@ use tetanus_session::SessionEvent;
 use tetanus_turn::approval::{
     ApprovalAsk, ApprovalOutcome, ApprovalPolicy, ApprovalService, TOOL_NOT_PERMITTED,
 };
+use tetanus_turn::events::ToolsPermission;
 use tetanus_turn::log::topic;
 use tetanus_turn::tools::{
     Permission, Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema,
@@ -568,4 +569,118 @@ fn quieten_deliberate_panics() {
             }
         }));
     });
+}
+
+/// TC-PORT-INT-10: an ungated tool can be gated from outside, without the
+/// tool author's help.
+///
+/// The routing rule, and the reason the seam moved. A registry's answer is
+/// static and a tool author cannot know a deployment's policy, so a gate that
+/// could only be reached for calls somebody had already flagged could never be
+/// added to an existing tool - which is exactly what a permission table or an
+/// out-of-process `PreToolUse` hook needs to do.
+///
+/// Input: a turn whose tool declares `Allow`, and a `tools/permission`
+/// listener that raises it to `Ask`, with an answerer that refuses.
+/// Expected: the call never ran, and the model reads the refusal.
+#[tokio::test]
+async fn a_listener_can_gate_a_call_the_tool_declared_allowed() {
+    let (harness, ran) = gated("perm-routed-ask", "").await;
+    // The tool's own answer is `Allow` for this case: the reason is empty, so
+    // `GatedEcho` would not gate it on its own.
+    let _policy = harness
+        .bus()
+        .on_waterfall::<ToolsPermission, _>(|ev, next| {
+            Box::pin(async move {
+                next.run(ev)
+                    .await
+                    .most_restrictive(Permission::ask("a deployment gates this"))
+            })
+        });
+    let (_answerer, asked) = answerer(harness.bus(), ApprovalOutcome::Rejected);
+
+    harness
+        .engine
+        .run_turn("gate me from outside")
+        .await
+        .expect("turn");
+
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the outside policy was put"
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "and the call never ran");
+}
+
+/// TC-PORT-INT-11: a deny refuses the call without staging a question.
+///
+/// The path a `PreToolUse` hook needs. A policy that has already decided must
+/// not put a question: there is no human in that loop, so the ask would hang
+/// on somebody with nothing to add, or fail closed on a decision already
+/// taken. The refusal reaches the model in the hook's own words.
+#[tokio::test]
+async fn a_denied_call_never_runs_and_no_question_is_put() {
+    let (harness, ran) = gated("perm-routed-deny", "").await;
+    let _policy = harness
+        .bus()
+        .on_waterfall::<ToolsPermission, _>(|ev, next| {
+            Box::pin(async move {
+                next.run(ev)
+                    .await
+                    .most_restrictive(Permission::deny("a hook forbade this"))
+            })
+        });
+    let (_answerer, asked) = answerer(harness.bus(), ApprovalOutcome::AllowedOnce);
+
+    harness.engine.run_turn("deny me").await.expect("turn");
+    let events = harness.engine.log().events();
+
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the call never ran");
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        0,
+        "and no question was put, because the answer was already known"
+    );
+    assert!(
+        of_type(&events, topic::APPROVAL_ASKED).is_empty(),
+        "a deny stages no audit pair: nobody was asked"
+    );
+    let result = of_type(&events, topic::TOOL_RESULT);
+    let content = result[0].data["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("a hook forbade this"),
+        "the model reads the refuser's own words: {content}"
+    );
+}
+
+/// TC-PORT-INT-12: a listener may only make a permission stricter.
+///
+/// A listener that could widen one would let a plugin quietly un-gate the
+/// irreversible call a tool author deliberately gated - the tool author is the
+/// one who knows the call is irreversible, and no deployment policy should be
+/// able to overrule that downwards.
+#[tokio::test]
+async fn a_listener_cannot_widen_what_the_tool_declared() {
+    let (harness, ran) = gated("perm-no-widen", "this deletes things").await;
+    let _sneaky = harness
+        .bus()
+        .on_waterfall::<ToolsPermission, _>(|ev, next| {
+            Box::pin(async move {
+                let decided = next.run(ev).await;
+                // The fold is what enforces it: a listener returning `Allow`
+                // outright still cannot lower what was declared.
+                decided.most_restrictive(Permission::Allow)
+            })
+        });
+    let (_answerer, asked) = answerer(harness.bus(), ApprovalOutcome::Rejected);
+
+    harness.engine.run_turn("try to widen").await.expect("turn");
+
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the tool's own gate still fired"
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "and its refusal still held");
 }

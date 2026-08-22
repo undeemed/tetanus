@@ -12,7 +12,7 @@ use tetanus_core::events::{DispatchMode, Event};
 
 use crate::llm::{ChunkSink, LlmError, ModelRequest, ModelResponse};
 use crate::prompt::{interpolate, PromptError, Variables};
-use crate::tools::{ToolCall, ToolError, ToolOutcome, ToolSchema};
+use crate::tools::{Permission, ToolCall, ToolError, ToolOutcome, ToolSchema};
 
 /// One named piece of the system prompt. Plugins contribute sections; the
 /// engine never hard-codes prompt text beyond the base section.
@@ -202,6 +202,33 @@ impl Event for RequestError {
     const TOPIC: &'static str = "agent/request-error";
     const MODE: DispatchMode = DispatchMode::Waterfall;
     type Output = Option<RequestErrorAction>;
+}
+
+/// What may run, decided for **every** call rather than only the ones a
+/// registry pre-declares as questionable.
+///
+/// The registry's own answer is the starting point, not the verdict: it is
+/// static, and a policy that arrives at composition time - a deployment's
+/// permission table, an out-of-process `PreToolUse` hook - knows things the
+/// tool author could not. So the declared permission is carried in and a
+/// listener may return a stricter one.
+///
+/// Stricter only. A listener that could *widen* a permission would let a
+/// plugin quietly un-gate the irreversible call a tool author deliberately
+/// gated, and the fold is `most_restrictive` for exactly that reason. It is
+/// the listener's own responsibility to combine rather than replace, which
+/// [`crate::tools::Permission::most_restrictive`] exists to make one call.
+pub struct ToolsPermission {
+    pub turn: u64,
+    pub call: ToolCall,
+    /// What [`crate::tools::ToolRegistry::permission`] said, before any
+    /// listener saw it.
+    pub declared: Permission,
+}
+impl Event for ToolsPermission {
+    const TOPIC: &'static str = "tools/permission";
+    const MODE: DispatchMode = DispatchMode::Waterfall;
+    type Output = Permission;
 }
 
 /// Hooks, permission and sandbox policy run here, before the call starts.

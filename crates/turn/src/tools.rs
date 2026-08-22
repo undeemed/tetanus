@@ -89,6 +89,14 @@ pub enum Permission {
     /// words for a human, as contract section 4.4.7 fixes - text to read, not
     /// a code to match on.
     Ask { reason: String },
+    /// Do not run it, and do not put a question either.
+    ///
+    /// Distinct from `Ask` answered no, and the distinction is the point: a
+    /// policy that already knows the answer must not stage a decision nobody
+    /// is going to take. An out-of-process hook forbidding a call is the case
+    /// this exists for - there is no human in that loop, so a question would
+    /// hang or fail closed on a decision that had already been made.
+    Deny { reason: String },
 }
 
 impl Permission {
@@ -99,6 +107,39 @@ impl Permission {
         }
     }
 
+    /// Refuse, in the refuser's own words.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny {
+            reason: reason.into(),
+        }
+    }
+
+    /// How restrictive this is, least first.
+    ///
+    /// An order rather than a comparison written at each site, so
+    /// "most restrictive wins" is a property of the type. `crates/hooks`
+    /// folds several hooks' answers the same way and for the same reason.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Allow => 0,
+            Self::Ask { .. } => 1,
+            Self::Deny { .. } => 2,
+        }
+    }
+
+    /// The stricter of two answers, keeping the stricter one's words.
+    ///
+    /// Ties keep the left, which is the earlier answer: two listeners that
+    /// both deny leave the first one's reason, so a chain of policies reads in
+    /// the order it ran rather than reporting whichever spoke last.
+    pub fn most_restrictive(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
     /// Whether this call has to be decided before it runs.
     ///
     /// A method rather than a `matches!` at the gate, for the reason
@@ -106,6 +147,14 @@ impl Permission {
     /// permission is a match nobody should write twice.
     pub fn needs_decision(&self) -> bool {
         matches!(self, Self::Ask { .. })
+    }
+
+    /// The words a refusal shows, for the answers that carry any.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Allow => None,
+            Self::Ask { reason } | Self::Deny { reason } => Some(reason),
+        }
     }
 }
 

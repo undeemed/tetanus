@@ -41,7 +41,7 @@ use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PostToolDecision, PreStep, PreStepDecision,
     RequestError, RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute,
-    ToolsPostExecute, ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
+    ToolsPermission, ToolsPostExecute, ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
 };
 use crate::inbox::{Inbox, InboxError, InboxTarget, PendingMessage};
 use crate::interrupt::Interrupt;
@@ -855,7 +855,7 @@ impl TurnEngine {
         // executing another is the whole failure mode a gate exists to
         // prevent. Before, because a decision taken after the effect is not a
         // decision.
-        if let Some(refusal) = self.decide(&call).await? {
+        if let Some(refusal) = self.decide(turn, &call).await? {
             return Ok((
                 index,
                 Settled {
@@ -909,20 +909,36 @@ impl TurnEngine {
     /// [`ApprovalService`]'s promise rather than this function's. What is
     /// decided here is only what the model is told, and that a denial is a
     /// result rather than a failure of the turn.
-    async fn decide(&self, call: &ToolCall) -> Result<Option<String>, TurnError> {
-        let Permission::Ask { reason } = self.tools.permission(call) else {
-            return Ok(None);
+    async fn decide(&self, turn: u64, call: &ToolCall) -> Result<Option<String>, TurnError> {
+        // Every call goes past the seam, not only the ones the registry
+        // pre-declares as questionable. A policy that arrives at composition
+        // time knows what a tool author could not, and a gate it can only
+        // reach for calls somebody already flagged is a gate that cannot be
+        // added to an existing tool.
+        let mut asked = ToolsPermission {
+            turn,
+            call: call.clone(),
+            declared: self.tools.permission(call),
         };
-        let outcome = self
-            .approvals
-            .request(
-                ApprovalRequest::new(&call.name)
-                    .about_call(&call.id)
-                    .because(reason),
-                &self.interrupt,
-            )
-            .await?;
-        Ok(outcome.refusal(&call.name))
+        match self.bus.waterfall(&mut asked, pass_permission()).await {
+            Permission::Allow => Ok(None),
+            // Already decided, so no question is put: staging one for a policy
+            // that has answered would hang on a human who has nothing to add,
+            // or fail closed on a decision already taken.
+            Permission::Deny { reason } => Ok(Some(reason)),
+            Permission::Ask { reason } => {
+                let outcome = self
+                    .approvals
+                    .request(
+                        ApprovalRequest::new(&call.name)
+                            .about_call(&call.id)
+                            .because(reason),
+                        &self.interrupt,
+                    )
+                    .await?;
+                Ok(outcome.refusal(&call.name))
+            }
+        }
     }
 
     /// Append one settled call's `tool/result`, citing the `tool/call` it
@@ -1028,6 +1044,13 @@ fn no_recovery() -> Terminal<RequestError> {
 
 fn build_request() -> Terminal<AgentRequest> {
     Arc::new(|ev: &mut AgentRequest| Box::pin(async move { ev.request.clone() }))
+}
+
+fn pass_permission() -> Terminal<ToolsPermission> {
+    Arc::new(|ev: &mut ToolsPermission| {
+        let declared = ev.declared.clone();
+        Box::pin(async move { declared })
+    })
 }
 
 fn pass_call() -> Terminal<ToolsPreExecute> {

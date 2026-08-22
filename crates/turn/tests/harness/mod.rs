@@ -47,6 +47,15 @@ pub const MOCK_TURN_FLOW: &[&str] = &[
     "assistant/message",
     "tool/call",
     "tools/pre-execute",
+    // Every call is routed past the permission seam now, not only the ones the
+    // registry pre-declares: a gate a deployment can only reach for calls
+    // somebody already flagged cannot be added to an existing tool.
+    //
+    // After `tools/pre-execute` and not before it, which is the same rule the
+    // approval gate already followed: a listener may rewrite the call, and
+    // what is decided has to be what would actually run. Deciding first would
+    // permit one command and execute another.
+    "tools/permission",
     "tools/execute",
     "tools/post-execute",
     "tool/result",
