@@ -8,6 +8,7 @@ license.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
@@ -23,7 +24,6 @@ tetanus-web = { path = "../web" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tempfile.workspace = true
-tetanus-core = { path = "../core" }
 # The assembly is what the binary composes, and TC-TOOLSET-2 reads the engine's
 # own default rather than a copy of it. A dev-dependency only: nothing in this
 # crate's own build knows the engine exists, which is what keeps the engine

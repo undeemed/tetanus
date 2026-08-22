@@ -241,10 +241,17 @@ pub async fn chat<W: Write>(
     let ctx = boot_with(
         bus,
         adapter,
-        Arc::new(crate::tools::registry_for(
-            &crate::tools::Whose::session(&opened.session_id, settled.journal.parent()),
-            &interrupt,
-        )),
+        Arc::new(crate::tools::registry(
+            policy,
+            document,
+            &crate::tools::whose(
+                &settled.settings.resolved,
+                &opened.session_id,
+                log.clone(),
+                settled.journal.parent(),
+                &interrupt,
+            ),
+        )?),
         log.clone(),
         Arc::clone(&interrupt),
     )

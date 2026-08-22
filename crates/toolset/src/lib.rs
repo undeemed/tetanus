@@ -82,6 +82,12 @@ pub struct Composition {
     /// The directory the file tools are fenced to and the workspace tools
     /// describe.
     pub workspace: PathBuf,
+    /// Where this session's durable artifacts already live - the directory of
+    /// its journal - for a tool that has to put something on disk. `None` is a
+    /// session with no file behind it, and a tool that needs one keeps
+    /// nothing: an artifact nobody can find later is a file nobody deletes
+    /// either.
+    pub artifacts: Option<PathBuf>,
     /// The harness home, for the skill roots that live under it.
     pub home: Option<PathBuf>,
     /// The resolved settings document. `web`, `mcp` and the filesystem mode
@@ -113,6 +119,7 @@ impl Composition {
             log: Arc::new(UnusedLog),
             session_id: "catalogue".to_string(),
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            artifacts: None,
             home: None,
             settings: Arc::new(Config::default()),
             mcp: Vec::new(),
@@ -152,6 +159,26 @@ impl Composition {
     #[must_use]
     pub fn home(mut self, home: Option<PathBuf>) -> Self {
         self.home = home;
+        self
+    }
+
+    /// Where this session already keeps things on disk.
+    ///
+    /// The directory is made absolute here, because what is built from it is a
+    /// locator a *model* reads and a presentation may open. A relative path
+    /// resolves against whatever directory the reader happens to be in, which
+    /// for anything but this process is the wrong one - and a journal named
+    /// `j.jsonl` has `""` for a parent, which is not a directory at all.
+    #[must_use]
+    pub fn artifacts(mut self, artifacts: Option<&Path>) -> Self {
+        self.artifacts = artifacts.map(|dir| {
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
+            std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+        });
         self
     }
 
@@ -323,7 +350,7 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
         ),
         Source::registered(
             "exec",
-            "Running commands, bounded in output and in time.",
+            "Running commands and terminals, bounded in output and in time.",
             |registry| {
                 // `register_or_explain`, not `register`: a host with no shell
                 // still gets a `shell` tool that answers with the reason,
@@ -332,10 +359,14 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                 tetanus_exec::tools::ShellTools::register_or_explain(
                     registry,
                     Arc::new(tetanus_exec::backend::Bash::new()),
-                    tetanus_exec::shell::ShellConfig::default(),
+                    tetanus_exec::shell::ShellConfig {
+                        spill: spill_to(cx),
+                        ..tetanus_exec::shell::ShellConfig::default()
+                    },
                     tetanus_exec::session::SessionConfig::default(),
                     Arc::clone(&cx.interrupt),
                 );
+                register_terminals(registry, cx);
             },
         ),
         Source::registered(
@@ -380,6 +411,59 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
         ),
     ]
 }
+
+/// Where this session's oversized command output is kept, when it has a place
+/// of its own to keep it.
+///
+/// A session with no journal on disk gets no store rather than a temporary
+/// one: an artifact nobody can find later is a file nobody deletes either.
+fn spill_to(cx: &Composition) -> Option<tetanus_exec::shell::SpillTo> {
+    let artifacts = cx.artifacts.as_ref()?;
+    Some(tetanus_exec::shell::SpillTo {
+        store: Arc::new(tetanus_core::spill::SpillStore::at(
+            artifacts.join("artifacts"),
+        )),
+        session: cx.session_id.clone(),
+    })
+}
+
+/// The terminal family, where a host can have a terminal at all.
+///
+/// One registry of sessions per tool registry, and one tool registry per
+/// session, so a session's terminals are its own twice over: by construction,
+/// and by name. The name is what makes a foreign-session refusal mean
+/// something - the registry compares owners exactly, and until a session had
+/// an id to give it, every session called itself the same thing.
+#[cfg(target_os = "linux")]
+fn register_terminals(registry: &mut ToolRegistry, cx: &Composition) {
+    use tetanus_exec::terminals::{Owner, Terminals};
+
+    let terminals = match Terminals::with(
+        tetanus_exec::terminal::TerminalConfig::default(),
+        Arc::new(tetanus_exec::backend::Bash::new()),
+    ) {
+        Ok(terminals) => Arc::new(terminals),
+        Err(refused) => {
+            // Nothing here can fail on a host that has a bash, and the tools
+            // are not worth failing a whole run over: a build with no terminal
+            // family still has `shell` and `shell_run`.
+            tracing::warn!(%refused, "the terminal tools are unavailable in this build");
+            return;
+        }
+    };
+    tetanus_exec::terminal_tools::TerminalTools::new(
+        terminals,
+        Owner::new(&cx.session_id),
+        Arc::clone(&cx.interrupt),
+    )
+    .register(registry);
+}
+
+/// A host with no pseudo-terminals gets no terminal tools: they are the one
+/// family that cannot be answered with an explanation, because opening a
+/// terminal is the whole call.
+#[cfg(not(target_os = "linux"))]
+fn register_terminals(_registry: &mut ToolRegistry, _cx: &Composition) {}
 
 /// The feature tools, each composed with the journal it folds over.
 ///

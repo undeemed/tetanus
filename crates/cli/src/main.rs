@@ -29,7 +29,7 @@ use tetanus_ui::{
 
 use render::help;
 use render::live::Live;
-use tools::{catalog, registry, registry_for, session_tools, Whose};
+use tools::{catalog, listing, registry, session_tools, whose};
 
 #[derive(Parser)]
 #[command(
@@ -395,7 +395,8 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             Ok(())
         }
         Cmd::Tools { json } => {
-            let catalog = catalog();
+            let booted = settings::booted(policy, &document, &[])?;
+            let catalog = catalog(policy, &document, &booted.resolved)?;
             if json {
                 return render::json::line(&mut out, &catalog)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -659,8 +660,8 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // the document's answer and not this file's.
             let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
                 tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                    tools: Arc::new(registry(&Interrupt::new())),
-                    session_tools: Some(session_tools()),
+                    tools: Arc::new(registry(policy, &document, &listing(&booted.resolved))?),
+                    session_tools: Some(session_tools(policy, &document, &booted.resolved)?),
                     ..booted
                 }),
             );
@@ -696,7 +697,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: tetanus_protocol::PROTOCOL_VERSION,
                 providers: providers().providers.len(),
-                tools: catalog().tools.len(),
+                tools: catalog(
+                    policy,
+                    &document,
+                    &settings::booted(policy, &document, &[])?.resolved,
+                )?
+                .tools
+                .len(),
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
             };
@@ -1782,10 +1789,17 @@ async fn run<W: std::io::Write>(
         adapter,
         // The session that will call them: its terminals are owned by it, and
         // anything it has to keep on disk lands beside its own journal.
-        Arc::new(registry_for(
-            &Whose::session(&opened.session_id, settled.journal.parent()),
-            &interrupt,
-        )),
+        Arc::new(registry(
+            policy,
+            document,
+            &whose(
+                &settled.settings.resolved,
+                &opened.session_id,
+                log.clone(),
+                settled.journal.parent(),
+                &interrupt,
+            ),
+        )?),
         log.clone(),
         Arc::clone(&interrupt),
     )

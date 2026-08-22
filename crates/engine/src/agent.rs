@@ -75,7 +75,9 @@ pub type SessionTools =
 ///
 /// Borrowed rather than owned because it is read while the registry is being
 /// built and never kept: a tool that needs the id past that point copies it.
-#[derive(Debug, Clone, Copy)]
+/// `Debug` is written out rather than derived because a journal has no useful
+/// rendering and deriving it would put the trait bound on every caller.
+#[derive(Clone, Copy)]
 pub struct ToolScope<'a> {
     /// The session's own id, as its journal header records it.
     pub session_id: &'a str,
@@ -83,6 +85,22 @@ pub struct ToolScope<'a> {
     /// its journal - for a tool that has to put something on disk. `None` is a
     /// session with no file behind it, and a tool that needs one keeps nothing.
     pub artifacts: Option<&'a std::path::Path>,
+    /// The journal this session's journal-backed tools fold over.
+    ///
+    /// The same log the turn engine appends to, deliberately: a feature tool
+    /// keeps its whole state as a fold over the session's events, so a tool
+    /// writing to a journal of its own would be state a replay could not
+    /// reproduce and a reader could not find.
+    pub log: &'a Arc<dyn SessionLog>,
+}
+
+impl std::fmt::Debug for ToolScope<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolScope")
+            .field("session_id", &self.session_id)
+            .field("artifacts", &self.artifacts)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The offline default: the deterministic mock adapter and nothing else, so a
@@ -371,11 +389,13 @@ impl Runtime {
         // work outside the process, so `agent.interrupt` on one session stops
         // that session's commands and nobody else's.
         let interrupt = Interrupt::new();
+        let log = Arc::clone(&session.log) as Arc<dyn SessionLog>;
         let base = match &self.session_tools {
             Some(build) => build(
                 &ToolScope {
                     session_id: &session.header.session_id,
                     artifacts: session.path.parent(),
+                    log: &log,
                 },
                 &interrupt,
             ),
@@ -383,14 +403,8 @@ impl Runtime {
         };
         let composed = self.composed(session, &base)?;
         let tools = composed.tools.clone().unwrap_or(base);
-        let ctx = boot_with(
-            session.bus.clone(),
-            adapter,
-            tools,
-            Arc::clone(&session.log) as Arc<dyn SessionLog>,
-            interrupt,
-        )
-        .map_err(internal)?;
+        let ctx =
+            boot_with(session.bus.clone(), adapter, tools, log, interrupt).map_err(internal)?;
 
         // The persona is a prompt section rather than a rewritten base, so a
         // deployment's own words sit beside what plugins contribute instead of
