@@ -317,8 +317,19 @@ what the system prompt and tool catalog cost, which is what the context breakdow
 what lets a turn a provider failure ended still say what it tried to send.
 
 What a run *works out* rather than what happened to it goes in the key-value store
-([crates/core/src/storage.rs](crates/core/src/storage.rs)): declared tables of JSON in one file,
-replaced whole by an atomic rename.
+([crates/core/src/storage](crates/core/src/storage)): declared tables of JSON, behind one seam with
+two media under it.
+`json::Store` keeps them in one file replaced whole by an atomic rename; `sqlite::SqliteStore` keeps
+them in a database that writes one row, opened lazily so a store nobody writes to still leaves no
+file.
+Which medium a deployment wants is a deployment's decision, so both mount by name in
+`StorageRegistry` and a consumer holds a `dyn KvStore` that cannot tell them apart.
+The rules belong to the seam rather than to either backend - declared tables, an undeclared one as a
+caller mistake, a declared-but-absent one reading empty, another component's table kept, nothing
+written until something is stored - and
+[crates/core/tests/storage_backends.rs](crates/core/tests/storage_backends.rs) asserts each of them
+against both, which is the arrangement that caught the file backend materializing a store for a
+`remove` that found nothing.
 A projection checkpoint, a computed title and a cache each belong there - reproducible from the log,
 expensive enough to keep, and not facts, so not journal entries.
 A payload too large to carry goes to the spill store

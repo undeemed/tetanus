@@ -1,15 +1,5 @@
-//! A small durable key-value store: named tables of JSON, in one file that is
+//! The file-backed key-value store: named tables of JSON, in one file that is
 //! replaced whole and atomically.
-//!
-//! The session log answers "what happened"; this answers "what did we work
-//! out". A projection checkpoint, a computed title, a cache - each is
-//! reproducible from the log and expensive enough to be worth keeping, and
-//! none of it belongs in an append-only journal of facts.
-//!
-//! **Tables are declared when the store is opened.** Reaching for one that was
-//! not declared is a caller mistake and is reported as one, rather than
-//! creating it. A typo would otherwise write to a table nobody reads, which is
-//! indistinguishable from the data being lost.
 //!
 //! **The file is replaced whole, atomically.** A write goes to a temporary
 //! file in the same directory, is fsynced, and is renamed over the target;
@@ -27,10 +17,12 @@
 //! never been written creates no file, so a run that stores nothing leaves no
 //! trace.
 //!
+//! The rules this shares with the other backend are stated once, on
+//! [`super::KvStore`], and asserted against both in
+//! `crates/core/tests/storage_backends.rs`.
+//!
 //! Parity: upstream `packages/storage/storage-json`, pinned by its
-//! `json-backend.spec.ts`. Its SQLite backend and the domain layer over both
-//! are separate packages and stay phase (2)/(3); the registry that lets a
-//! deployment choose between them is only worth having once there are two.
+//! `json-backend.spec.ts`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -38,46 +30,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::{valid_name, KvStore, StorageError, Table};
+
 /// The format marker every store file carries.
 ///
 /// A file whose version is not this one is refused rather than guessed at: the
 /// tables are the point, and reading them under the wrong rules would hand a
 /// caller values that mean something else.
 pub const FORMAT_VERSION: u32 = 1;
-
-/// One table's contents.
-pub type Table = BTreeMap<String, Value>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum StorageError {
-    #[error("{}: cannot be read: {source}", path.display())]
-    Unreadable {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("{}: cannot be written: {source}", path.display())]
-    Unwritable {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// The file is not a store this build can read at all.
-    #[error("{}: does not parse as a store: {message}", path.display())]
-    Malformed { path: PathBuf, message: String },
-    /// The file is a store, written by something else. Distinct from
-    /// [`Malformed`](Self::Malformed) because the answers differ: one is a
-    /// corrupt file, the other is a file from a version that may still be
-    /// running.
-    #[error("{}: is format version {found}, and this build reads {FORMAT_VERSION}", path.display())]
-    ForeignVersion { path: PathBuf, found: u32 },
-    /// A table that was not declared at open. A caller error, and never a
-    /// reason to create one.
-    #[error("no table {name:?} was declared for this store (declared: {declared:?})")]
-    UndeclaredTable { name: String, declared: Vec<String> },
-    #[error("{what} name {name:?} must be 1 to 64 characters of [a-z0-9._-]")]
-    BadName { what: &'static str, name: String },
-}
 
 /// Named tables of JSON, persisted in one file.
 #[derive(Debug)]
@@ -153,7 +113,17 @@ impl Store {
     }
 
     /// Remove one value, and publish. Answers what was there.
+    ///
+    /// A remove that found nothing publishes nothing. Found by the conformance
+    /// suite the two backends share (TC-PORT-STORE-C5): clearing a key that
+    /// was never set used to write the file, so a run whose only storage call
+    /// was a defensive `remove` left a store behind - which is exactly the
+    /// "nothing is written until something is stored" rule this module opens
+    /// with, broken by the one operation that looks like it changes nothing.
     pub fn remove(&mut self, table: &str, key: &str) -> Result<Option<Value>, StorageError> {
+        if self.table(table)?.get(key).is_none() {
+            return Ok(None);
+        }
         self.mutate(table, |t| t.remove(key))
     }
 
@@ -293,21 +263,24 @@ fn parse(path: &Path, text: &str) -> Result<BTreeMap<String, Table>, StorageErro
         .collect()
 }
 
-/// Whether a name is one this store will accept.
-///
-/// The character set is the one that is safe in a file name, a JSON key and a
-/// log line at once, so a name never has to be escaped differently depending
-/// on where it is being shown.
-fn valid_name(what: &'static str, name: &str) -> Result<(), StorageError> {
-    let shaped = (1..=64).contains(&name.len())
-        && name.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
-        });
-    match shaped {
-        true => Ok(()),
-        false => Err(StorageError::BadName {
-            what,
-            name: name.to_string(),
-        }),
+impl KvStore for Store {
+    fn get(&self, table: &str, key: &str) -> Result<Option<Value>, StorageError> {
+        Ok(Store::get(self, table, key)?.cloned())
+    }
+
+    fn read_table(&self, name: &str) -> Result<Table, StorageError> {
+        Ok(Store::table(self, name)?.clone())
+    }
+
+    fn put(&mut self, table: &str, key: &str, value: Value) -> Result<Option<Value>, StorageError> {
+        Store::put(self, table, key, value)
+    }
+
+    fn remove(&mut self, table: &str, key: &str) -> Result<Option<Value>, StorageError> {
+        Store::remove(self, table, key)
+    }
+
+    fn declared(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
     }
 }
