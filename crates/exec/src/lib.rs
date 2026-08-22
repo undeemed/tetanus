@@ -12,6 +12,11 @@
 //! - [`session`] is a persistent shell: one long-lived process a turn reuses,
 //!   keeping its directory and its variables between tool calls, with a death
 //!   that is reported rather than restarted underneath the caller.
+//! - [`pty`] is a real pseudo-terminal: the thing an interactive program
+//!   needs and a pipe cannot give.
+//! - [`terminal`] is a persistent terminal over one: a shell driven one send
+//!   at a time, with a viewport, a bounded scrollback it can page back
+//!   through, and a `^C` that reaches the command rather than the shell.
 //! - [`tools`] is what the model can actually call: `shell` for one command,
 //!   and `shell_open`/`shell_run`/`shell_close`/`shell_list` for the sessions.
 //!
@@ -23,8 +28,11 @@ pub mod backend;
 pub mod proc;
 #[cfg(target_os = "linux")]
 pub mod pty;
+pub mod sanitize;
 pub mod session;
 pub mod shell;
+#[cfg(target_os = "linux")]
+pub mod terminal;
 pub mod tools;
 pub mod transcript;
 

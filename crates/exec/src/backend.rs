@@ -100,6 +100,43 @@ pub trait ShellBackend: Send + Sync {
     /// the input closes - the long-lived session a turn reuses.
     fn session(&self) -> Vec<String>;
 
+    /// The arguments that start this shell interactively, on a terminal.
+    ///
+    /// Distinct from [`ShellBackend::session`] because a shell reading a pipe
+    /// and a shell driving a terminal are different programs in one binary:
+    /// only the interactive one has job control, so only it gives a command a
+    /// process group of its own for `^C` to reach. The default is the pipe
+    /// invocation, which is honest for a backend that has no separate
+    /// interactive mode.
+    fn interactive(&self) -> Vec<String> {
+        self.session()
+    }
+
+    /// What a terminal session is told once it has reached its first prompt,
+    /// one command per entry.
+    ///
+    /// A terminal echoes what is typed at it, so without this a viewport
+    /// begins with the command the caller just sent, as though the program had
+    /// printed it - and on a shell with line editing it arrives twice, once
+    /// from the terminal and once from the shell redrawing the line. The
+    /// caller already knows what it sent, so the echo is noise it would have
+    /// to strip; turning it off makes a viewport the program's output and
+    /// nothing else.
+    fn terminal_setup(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Environment that makes this backend say where its prompts are.
+    ///
+    /// A terminal session settles a command when the shell announces that it
+    /// finished, and that announcement is a prompt marker the shell is
+    /// configured here to print ([`crate::sanitize::PROMPT_MARKER_PREFIX`]).
+    /// A backend that returns nothing is not broken: readiness falls back to
+    /// silence, which is what upstream infers from for every backend.
+    fn prompt_environment(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
     /// What a fresh session has to be told before it behaves like one, one
     /// command per line.
     ///
@@ -191,8 +228,44 @@ impl ShellBackend for Bash {
         vec!["--noprofile".to_string(), "--norc".to_string()]
     }
 
+    fn interactive(&self) -> Vec<String> {
+        // `-i` is what buys job control, which is what gives a command its own
+        // process group: without it a `^C` on the terminal would reach the
+        // shell instead of the command the model meant to stop.
+        vec![
+            "--noprofile".to_string(),
+            "--norc".to_string(),
+            "-i".to_string(),
+        ]
+    }
+
+    fn prompt_environment(&self) -> BTreeMap<String, String> {
+        // `PROMPT_COMMAND` runs before every prompt, so the marker is printed
+        // once per finished command and carries that command's status. `PS1`
+        // is re-asserted inside it because a command that overwrote the
+        // variable would otherwise silence every later prompt - upstream
+        // re-asserts it for the same reason.
+        [
+            ("PS1".to_string(), crate::sanitize::PROMPT_TEXT.to_string()),
+            (
+                "PROMPT_COMMAND".to_string(),
+                format!(
+                    "printf '\\033]{prefix}%s\\007' \"$?\"; PS1='{prompt}'",
+                    prefix = crate::sanitize::PROMPT_MARKER_PREFIX,
+                    prompt = crate::sanitize::PROMPT_TEXT,
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     fn setup(&self) -> Vec<String> {
         vec!["exec 2>&1".to_string()]
+    }
+
+    fn terminal_setup(&self) -> Vec<String> {
+        vec!["stty -echo".to_string()]
     }
 
     fn wrap(&self, command: &str, markers: &Markers) -> String {

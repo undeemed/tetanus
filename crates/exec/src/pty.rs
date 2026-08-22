@@ -155,6 +155,24 @@ impl PtySession {
         env: &[(String, String)],
         config: PtyConfig,
     ) -> Result<Self, PtyError> {
+        Self::spawn_confined(argv, cwd, env, config, None).await
+    }
+
+    /// [`PtySession::spawn`], behind a kernel boundary the caller prepared.
+    ///
+    /// The boundary is applied once, to the shell itself, for the reason
+    /// [`crate::session`] applies it once to its own: everything the shell
+    /// later starts is a child of a restricted process and inherits the
+    /// restriction, which is what makes a session safe to keep open across
+    /// tool calls. The confinement is prepared by the caller, in the caller's
+    /// process, because the descriptor it holds has to outlive the spawn.
+    pub async fn spawn_confined(
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        config: PtyConfig,
+        confinement: Option<Arc<tetanus_sandbox::Confinement>>,
+    ) -> Result<Self, PtyError> {
         let (master, slave_path) = allocate()?;
         set_size(master.as_raw_fd(), config.rows, config.cols)?;
 
@@ -195,6 +213,22 @@ impl PtySession {
                 }
                 Ok(())
             });
+        }
+        // After the terminal is taken, never before: Landlock forbids nothing
+        // this hook needs, but a boundary applied first would be one more
+        // thing to reason about in the half of a fork that may not allocate.
+        // Hooks run in the order they were added.
+        if let Some(ruleset) = confinement
+            .as_ref()
+            .and_then(|confinement| confinement.ruleset.as_ref())
+        {
+            let ruleset = ruleset.as_raw_fd();
+            // Safety: as in `crate::proc` - `prctl` and two Landlock syscalls,
+            // no allocation and no locks, on a descriptor the caller holds for
+            // the length of this spawn.
+            unsafe {
+                command.pre_exec(move || tetanus_sandbox::landlock::restrict_this_thread(ruleset));
+            }
         }
 
         let child = command.spawn().map_err(|source| PtyError::Spawn {
@@ -411,9 +445,13 @@ impl PtySession {
 
     /// End the session and everything in it, and wait until it is gone.
     ///
-    /// Idempotent, and group-scoped for the reason every other terminator in
-    /// this crate is: the leader is a shell, and what it started is what would
-    /// otherwise be left behind.
+    /// Idempotent, and scoped to the terminal's whole *session* rather than to
+    /// one process group. The difference is job control: an interactive shell
+    /// puts each job it starts in a process group of its own, so `sleep 60 &`
+    /// is outside the leader's group and a group kill cannot reach it - which
+    /// is exactly how a harness that has exited leaves a `sleep` behind for an
+    /// hour. Everything the terminal ever started shares the session the
+    /// leader made with `setsid`, so that is the boundary swept.
     pub async fn close(&self) {
         self.closing.store(true, Ordering::Release);
         let mut exited = self.exited.clone();
@@ -425,6 +463,84 @@ impl PtySession {
             }
         })
         .await;
+        self.sweep_session().await;
+    }
+
+    /// End whatever else is still on this terminal's session.
+    ///
+    /// A polite rung first, because a job that traps `SIGTERM` to tidy up
+    /// deserves the chance it would get from a terminal hanging up; then
+    /// `SIGKILL` for whatever is still there, because a session nobody owns
+    /// any more must not outlive the harness that made it.
+    async fn sweep_session(&self) {
+        if in_session(self.leader).is_empty() {
+            return;
+        }
+        signal_session(self.leader, libc::SIGHUP);
+        signal_session(self.leader, libc::SIGTERM);
+        let deadline = tokio::time::Instant::now() + self.grace;
+        while tokio::time::Instant::now() < deadline {
+            if in_session(self.leader).is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        signal_session(self.leader, libc::SIGKILL);
+    }
+}
+
+/// Every process still in the terminal's session, this one aside.
+///
+/// Asked of `/proc` because the kernel offers no "signal this session" call:
+/// `killpg` reaches one process group, and job control is precisely the
+/// business of putting things in other ones. The session id outlives its
+/// leader, so this still finds a job that was orphaned when the shell died.
+#[cfg(target_os = "linux")]
+fn in_session(session: i32) -> Vec<i32> {
+    let mut found = Vec::new();
+    let ours = std::process::id() as i32;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if pid == ours {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `comm` is in parentheses and may hold spaces and parentheses of its
+        // own, so the fields are counted from after the last `)`: state, ppid,
+        // pgrp, session.
+        let Some(after) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
+            continue;
+        };
+        let mut fields = after.split_whitespace();
+        if let (Some(_state), Some(_ppid), Some(_pgrp), Some(sid)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next().and_then(|sid| sid.parse::<i32>().ok()),
+        ) {
+            if sid == session {
+                found.push(pid);
+            }
+        }
+    }
+    found
+}
+
+/// Deliver one signal to everything left on a terminal's session.
+#[cfg(target_os = "linux")]
+fn signal_session(session: i32, signal: i32) {
+    for pid in in_session(session) {
+        // Safety: a plain `kill` on a pid this process just read out of
+        // `/proc`. A pid that has exited in between answers `ESRCH`, which is
+        // the answer this loop wants anyway.
+        unsafe { libc::kill(pid, signal) };
     }
 }
 
