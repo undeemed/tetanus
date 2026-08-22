@@ -4,15 +4,20 @@
 //! this build offers, the rules that make adding a crate to it safe, and the
 //! settings key that selects sources. This is not a port: upstream composes
 //! tools through Cordis plugin loading, where a duplicate name is resolved by
-//! load order. It is the seam five pending tool crates will each add one line
-//! to, written before them so the line is settled rather than negotiated.
+//! load order. It is the seam each landed tool crate adds one line to.
 //!
 //! Approach: the assembly directly, with stand-in sources for the rules, and
 //! against the shipped set for the properties that must hold of what actually
 //! ships. A case that only used stand-ins would pass on a build whose real
 //! sources collide.
 //!
-//! Environmental needs: none. No case touches a filesystem or a network.
+//! Features NOT tested here: that the *binary* offers what this composes,
+//! which is `crates/cli/tests/toolset.rs`'s - a crate can be right and the
+//! program people run can still not offer it, and only a case that execs the
+//! binary can tell the difference.
+//!
+//! Environmental needs: a writable temp directory, because the shipped `fs`
+//! source opens a workspace root. No case reaches a network.
 //!
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
@@ -21,8 +26,16 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tetanus_config::{Config, Document, Layer};
-use tetanus_toolset::{key, Assembly, AssemblyError, Source};
+use tetanus_toolset::{key, Assembly, AssemblyError, Composition, Source};
 use tetanus_turn::tools::{Tool, ToolError, ToolOutcome, ToolSchema};
+
+/// A composition rooted somewhere writable, so the `fs` source composes the
+/// same way it does under the binary.
+fn shipped() -> (tempfile::TempDir, Composition) {
+    let root = tempfile::tempdir().expect("temp dir");
+    let cx = Composition::catalogue().workspace(root.path());
+    (root, cx)
+}
 
 /// A tool that exists only to be named.
 struct Named(&'static str);
@@ -79,14 +92,17 @@ fn settings(value: Option<serde_json::Value>) -> Config {
 /// name collided.
 #[test]
 fn the_shipped_sources_compose_and_every_tool_has_one_owner() {
-    let assembly = Assembly::stock();
+    let (_root, cx) = shipped();
+    let assembly = Assembly::stock(&cx);
     let roster = assembly.roster();
     let named: Vec<String> = roster
         .iter()
         .flat_map(|(_, _, tools)| tools.clone())
         .collect();
 
-    let registry = Assembly::stock().build().expect("the shipped set composes");
+    let registry = Assembly::stock(&cx)
+        .build()
+        .expect("the shipped set composes");
 
     let registered: Vec<String> = registry.names().cloned().collect();
     let mut sorted = named.clone();
@@ -100,36 +116,120 @@ fn the_shipped_sources_compose_and_every_tool_has_one_owner() {
     assert_eq!(sorted, registered, "the roster and the registry agree");
     for tool in &registered {
         assert!(
-            Assembly::stock().source_of(tool).is_some(),
+            Assembly::stock(&cx).source_of(tool).is_some(),
             "{tool} has an owner"
         );
     }
 }
 
-/// TC-TOOLSET-2: the binary and the engine compose the same registry.
+/// TC-TOOLSET-1b: every landed tool crate is actually in the shipped set.
 ///
-/// The drift this crate exists to prevent. Before it, `crates/cli` and
-/// `crates/engine` each wrote their own expression and both happened to say
-/// `EchoTool`; with five crates landing, the day they disagree is the day a
-/// user is offered a tool the turn cannot dispatch, or the other way round.
+/// The case that says "a crate exists" is not the same as "the assembly offers
+/// it". A crate can be in the workspace, tested, and reachable from nothing;
+/// this names each landed source and one tool it must contribute, so deleting
+/// a line from `sources()` fails here rather than going unnoticed until a user
+/// asks why the model cannot read a file.
 ///
-/// Input: the engine's default tool registry, and the shipped assembly.
-/// Expected: the same tool names. The case reads the engine's own default
-/// rather than a copy of it, so wiring one of the two call sites back to a
-/// private expression fails here.
+/// Input: the shipped roster.
+/// Expected: every landed source present, each carrying the tool named. `web`
+/// and `mcp` are declared but empty, because both are opt-in: a source that
+/// vanished when a deployment had not configured it would make `tools.sources`
+/// mean something different on every host.
 #[test]
-fn the_engine_default_and_the_shipped_assembly_hold_the_same_tools() {
-    let engine_default = tetanus_engine::EngineConfig::default();
+fn every_landed_tool_crate_is_in_the_shipped_set() {
+    let (_root, cx) = shipped();
+    let roster = Assembly::stock(&cx).roster();
+    let of = |name: &str| {
+        roster
+            .iter()
+            .find(|(source, _, _)| *source == name)
+            .unwrap_or_else(|| panic!("the {name} source is composed; roster: {roster:?}"))
+            .2
+            .clone()
+    };
 
-    let from_engine: Vec<String> = engine_default.tools.names().cloned().collect();
-    let from_assembly: Vec<String> = Assembly::stock()
+    assert!(of("builtin").contains(&"echo".to_string()));
+    assert!(of("exec").contains(&"shell".to_string()));
+    assert!(of("fs").contains(&"read".to_string()));
+    assert!(of("features").contains(&"todo_write".to_string()));
+    // Declared and empty until the document says otherwise.
+    assert_eq!(of("web"), Vec::<String>::new());
+    assert_eq!(of("mcp"), Vec::<String>::new());
+}
+
+/// TC-TOOLSET-1c: a session's registry offers what the catalogue advertised.
+///
+/// The drift the binary can actually suffer. Its listing is built against a
+/// composition with no session and its turns are built against one per
+/// session, so the two run different code paths through `sources()`; a source
+/// that quietly contributed nothing without a journal would make `tetanus
+/// tools` a lie.
+///
+/// Input: a catalogue composition and a session composition on one document.
+/// Expected: the same tool names.
+#[test]
+fn a_sessions_registry_offers_what_the_catalogue_advertised() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let listed: Vec<String> =
+        tetanus_toolset::registry(&Composition::catalogue().workspace(root.path()))
+            .expect("composes")
+            .names()
+            .cloned()
+            .collect();
+
+    let bus = tetanus_core::EventBus::new();
+    let log = tetanus_session::JsonlSessionLog::create("s1", root.path().join("s.jsonl"), bus)
+        .expect("journal");
+    let session: Vec<String> = tetanus_toolset::registry(
+        &Composition::for_session(
+            tetanus_turn::interrupt::Interrupt::new(),
+            log as Arc<dyn tetanus_session::SessionLog>,
+            "s1",
+        )
+        .workspace(root.path()),
+    )
+    .expect("composes")
+    .names()
+    .cloned()
+    .collect();
+
+    assert_eq!(listed, session);
+    assert!(listed.contains(&"read".to_string()), "{listed:?}");
+}
+
+/// TC-TOOLSET-2: the engine's offline default is the assembly's `builtin`
+/// source and nothing private.
+///
+/// The engine deliberately does *not* compose the shipped set: it has no
+/// session, so the file tools would key their observations on nobody and the
+/// feature tools would fold over a journal that is not a session's, and
+/// `crates/engine` would gain a dependency on every tool crate - which is the
+/// line `ARCHITECTURE.md` §4.2 draws when it says nothing depends on
+/// `tetanus-fs`. What it must not do is grow a *private* expression of its
+/// own, which is the drift that started this crate.
+///
+/// Input: the engine's default tool registry, and the `builtin` source.
+/// Expected: the same names. Adding a tool to the engine's default without
+/// adding it to `builtin`, or renaming the source, fails here.
+#[test]
+fn the_engine_default_holds_the_builtin_source_and_nothing_private() {
+    let (_root, cx) = shipped();
+    let from_engine: Vec<String> = tetanus_engine::EngineConfig::default()
+        .tools
+        .names()
+        .cloned()
+        .collect();
+
+    let builtin: Vec<String> = Assembly::stock(&cx)
+        .only(["builtin"])
+        .expect("the builtin source is shipped")
         .build()
         .expect("composes")
         .names()
         .cloned()
         .collect();
 
-    assert_eq!(from_engine, from_assembly);
+    assert_eq!(from_engine, builtin);
     assert!(
         !from_engine.is_empty(),
         "a build with no tools is not this one"

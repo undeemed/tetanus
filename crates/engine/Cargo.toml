@@ -15,7 +15,6 @@ tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
-tetanus-toolset = { path = "../toolset" }
 
 [dev-dependencies]
 tokio = { workspace = true }

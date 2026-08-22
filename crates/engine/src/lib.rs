@@ -32,7 +32,7 @@ use tetanus_protocol::methods::{
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::SessionInfo;
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
-use tetanus_turn::tools::ToolRegistry;
+use tetanus_turn::tools::{EchoTool, ToolRegistry};
 
 use crate::agent::{MockProviders, Providers, Runtime};
 use crate::catalog::Catalogs;
@@ -112,10 +112,14 @@ impl Default for EngineConfig {
             // Offline by default: a build with no configuration still runs a
             // full documented turn, with no key and no network.
             providers: Arc::new(MockProviders),
-            // One assembly, shared with the binary: what `tetanus tools`
-            // lists and what a turn can dispatch are the same list rather than
-            // two expressions that agree today.
-            tools: Arc::new(tetanus_toolset::stock_registry()),
+            // The offline minimum, which is the `builtin` source of the
+            // assembly the binary composes. Not the whole assembly: this
+            // engine has no session, so the file tools would key their
+            // observations on nobody and the feature tools would fold over a
+            // journal that is not a session's - and `crates/engine` would gain
+            // a dependency on every tool crate, which is the line ARCHITECTURE
+            // §4.2 draws. TC-TOOLSET-2 holds the two together by name.
+            tools: Arc::new(ToolRegistry::new().with(Arc::new(EchoTool))),
             // The library composes no tool that leaves the process; the
             // binary does, and sets this when it does.
             session_tools: None,

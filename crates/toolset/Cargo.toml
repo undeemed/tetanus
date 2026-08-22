@@ -7,13 +7,25 @@ license.workspace = true
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tetanus-config = { path = "../config" }
+tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+# One line per landed tool crate. Adding a source is a line here and a line in
+# `sources()`; nothing else in the workspace changes.
+tetanus-exec = { path = "../exec" }
+tetanus-features = { path = "../features" }
+tetanus-fs = { path = "../fs" }
+tetanus-mcp = { path = "../mcp" }
+tetanus-web = { path = "../web" }
 
 [dev-dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
-# The assembly is what the engine defaults to, so TC-TOOLSET-2 reads the
-# engine's own default rather than a copy of it. A dev-dependency only: nothing
-# in this crate's own build knows the engine exists.
+tempfile.workspace = true
+tetanus-core = { path = "../core" }
+# The assembly is what the binary composes, and TC-TOOLSET-2 reads the engine's
+# own default rather than a copy of it. A dev-dependency only: nothing in this
+# crate's own build knows the engine exists, which is what keeps the engine
+# free of every tool crate.
 tetanus-engine = { path = "../engine" }
