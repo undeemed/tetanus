@@ -176,8 +176,17 @@ function one(question, chosen) {
  */
 export function approvals() {
   const open = new Map();
-  return { row: (type, data) => row(open, type, data) };
+  return {
+    // Named, not matched on the `approval/` prefix, so a type added to the
+    // family later is not claimed and silently dropped - it falls through to
+    // the raw rendering §4.3.2 asks for.
+    handles: (type) => APPROVAL_TYPES.includes(type),
+    row: (type, data) => row(open, type, data),
+  };
 }
+
+/** The three durable types of the decision audit (§4.3.2). */
+const APPROVAL_TYPES = ["approval/asked", "approval/decided", "approval/policy"];
 
 function row(open, type, data) {
   switch (type) {

@@ -207,6 +207,17 @@
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
 
+/* --- what a deployment's own hooks did ----------------------------------- */
+
+.hook-fact { margin:0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-code); overflow-wrap:anywhere; }
+/* A hook's own words on stderr. Ruled rather than coloured: it is the reason
+   the hook gives, and plenty of hooks write to stderr while allowing. */
+.hook-said { margin:var(--gap-tight) 0 0 0; padding-left:var(--gap);
+  border-left:2px solid var(--line); color:var(--text);
+  font:var(--size-small)/1.5 var(--font-code); white-space:pre-wrap;
+  overflow-wrap:anywhere; }
+
 /* --- a page fetched, and a search ---------------------------------------- */
 
 .web-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap;

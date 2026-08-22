@@ -72,6 +72,18 @@ change to the boundary belongs in that document and in `crates/protocol`, never 
 answered, always: §4.4.3 makes a client that does not answer a denial, so **Dismiss** answers with
 no labels rather than offering a way out that says nothing.
 
+[tool-hooks.js](tool-hooks.js) is the same shape for `hook/invoked` and `hook/result`, which pair by
+`handler_id`. A hook is the one thing on a transcript that is neither the model's doing nor the
+harness's, and when a turn stops for no reason the conversation explains, a hook is very often why -
+so the row says which point, which bridge, which handler and what it decided. The pairing key is the
+handler **and** the point, because one handler configured at two points can have both open inside a
+turn. A clean exit is not printed; a non-zero one is, because printing `exit 0` on every row buries
+the one that says 2.
+
+Both trackers name the types they draw rather than matching a prefix, so a type added to either
+family later is not claimed and silently dropped - it falls through to the raw rendering §4.3.2 asks
+for.
+
 `approval/asked` and `approval/decided` are "one pair per question, sharing an `id`", and the audit
 is a **tracker** rather than a function per event for that reason: the two halves are separated on
 the journal by everything that happened while somebody was deciding, and drawn independently the

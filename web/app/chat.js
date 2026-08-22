@@ -2,6 +2,7 @@ import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
 import { approvals, askCard } from "./questions.js";
+import { hooks } from "./tool-hooks.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
@@ -419,14 +420,23 @@ function toolWork(type, data) {
  */
 const audit = approvals();
 
+/**
+ * The same, for the deployment's own hooks - and one tracker for the page for
+ * the same reason.
+ */
+const hooked = hooks();
+
 function audited(type, data) {
-  if (!type.startsWith("approval/")) return false;
-  const here = card || turnCard(undefined);
-  const said = audit.row(type, data);
+  // Each tracker names the types it draws, so a type added to either family
+  // later is not claimed here - it falls through to the raw rendering every
+  // unrecognised durable type gets.
+  const tracker = [audit, hooked].find((one) => one.handles(type));
+  if (!tracker) return false;
+  const said = tracker.row(type, data);
   // `null` means the tracker completed a row already on the page rather than
-  // producing a new one. The event was handled either way, which is what the
+  // producing a new one. The event was drawn either way, which is what the
   // caller is asking.
-  if (said) here.el.append(said);
+  if (said) (card || turnCard(undefined)).el.append(said);
   return true;
 }
 
