@@ -74,6 +74,7 @@ async fn a_listener_that_answers_retry_gets_the_request_sent_again() {
                 code: "SERVER".to_string(),
                 message: "PROVIDER: 503 upstream is down".to_string(),
                 provider_retry_after_ms: None,
+                provider_request_id: None,
             }
         )]
     );
@@ -175,6 +176,7 @@ fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectH
                     status,
                     message: "upstream is down".into(),
                     retry_after_ms: None,
+                    request_id: None,
                 });
             }
             next.run(ev).await

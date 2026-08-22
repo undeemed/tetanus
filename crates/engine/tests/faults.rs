@@ -66,6 +66,7 @@ fn a_provider_answer_carries_its_status_and_exits_six() {
         status: 429,
         message: "rate limited".to_string(),
         retry_after_ms: None,
+        request_id: None,
     }));
 
     assert_eq!(fault.kind(), Some(ErrorCode::ProviderError));

@@ -146,6 +146,14 @@ pub struct RequestFailure {
     /// one, from [`LlmError::retry_after_ms`]. A failure that asked for
     /// nothing leaves a policy on its own backoff.
     pub provider_retry_after_ms: Option<f64>,
+    /// The provider's own id for the refused request, from
+    /// [`LlmError::request_id`].
+    ///
+    /// Carried to a listener because that is where it becomes useful: what a
+    /// person does with a refusal they cannot explain is quote this to the
+    /// provider, and by the time the failure reaches a log line the response
+    /// it came on is long gone.
+    pub provider_request_id: Option<String>,
 }
 
 impl From<&LlmError> for RequestFailure {
@@ -154,6 +162,7 @@ impl From<&LlmError> for RequestFailure {
             code: error.code().to_string(),
             message: error.to_string(),
             provider_retry_after_ms: error.retry_after_ms(),
+            provider_request_id: error.request_id().map(str::to_string),
         }
     }
 }

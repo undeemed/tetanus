@@ -221,6 +221,7 @@ fn classification_changes_the_code_and_nothing_else() {
         status: 429,
         message: "insufficient_quota: add credits to continue".to_string(),
         retry_after_ms: Some(1_500.0),
+        request_id: None,
     };
 
     assert_eq!(refused.code(), QUOTA);
@@ -240,5 +241,6 @@ fn provider(status: u16, message: &str) -> LlmError {
         status,
         message: message.to_string(),
         retry_after_ms: None,
+        request_id: None,
     }
 }

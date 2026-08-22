@@ -282,6 +282,7 @@ fn always_fails(bus: &EventBus) -> EffectHandle {
                 status: 503,
                 message: "upstream is down".into(),
                 retry_after_ms: None,
+                request_id: None,
             })
         })
     })

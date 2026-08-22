@@ -474,6 +474,7 @@ impl StreamDecoder {
                 // An in-band error arrives inside a stream that already
                 // answered 200, so there is no header left to ask in.
                 retry_after_ms: None,
+                request_id: None,
             });
         }
 
@@ -736,17 +737,25 @@ impl SseTransport for ReqwestTransport {
         let status = response.status();
         if !status.is_success() {
             // Read before the body: taking the text consumes the response,
-            // and the wait it asked for is in the headers.
+            // and both the wait it asked for and the id it refused under are
+            // in the headers.
             let asked = response
                 .headers()
                 .get(RETRY_AFTER_HEADER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| retry_after_ms(value, now_ms()));
+            let request_id = crate::llm::request_id_from(|name| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+            });
             let message = response.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
                 message,
                 retry_after_ms: asked,
+                request_id,
             });
         }
 

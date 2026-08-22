@@ -624,6 +624,7 @@ fn the_asked_wait_reaches_the_failure_a_policy_reads() {
         status: 429,
         message: "slow down".into(),
         retry_after_ms: Some(2_000.0),
+        request_id: None,
     };
     assert_eq!(
         RequestFailure::from(&asked).provider_retry_after_ms,
@@ -649,7 +650,8 @@ fn the_asked_wait_reaches_the_failure_a_policy_reads() {
 /// Environmental needs: a loopback port. No network and no credential.
 /// Input: `HTTP 429` with `retry-after: 2` and a JSON error body.
 /// Expected: `LlmError::Provider` with status 429, the body as the message,
-/// and `Some(2000.0)`.
+/// and `Some(2000.0)`. It carries no request id, because this answer sent no
+/// header naming one - TC-PORT-REQID-1 is the case where it does.
 #[tokio::test]
 async fn a_throttled_answer_carries_the_wait_it_asked_for() {
     let body = r#"{"error":{"message":"slow down"}}"#;
@@ -669,6 +671,7 @@ async fn a_throttled_answer_carries_the_wait_it_asked_for() {
         status,
         message,
         retry_after_ms,
+        request_id: None,
     } = err
     else {
         panic!("expected a provider failure, got {err}");
@@ -676,6 +679,96 @@ async fn a_throttled_answer_carries_the_wait_it_asked_for() {
     assert_eq!(status, 429);
     assert_eq!(message, body);
     assert_eq!(retry_after_ms, Some(2_000.0));
+}
+
+/// TC-PORT-REQID-1: a refusal carries the provider's own id for it, off the
+/// real transport.
+///
+/// Upstream: `adapter.spec.ts`, "retains status, Retry-After seconds, and
+/// provider request id as structured facts". The unit cases in
+/// `upstream_request_id.rs` pin the header rule; this is the one that proves
+/// the adapter reads a response rather than a fixture. It is the whole point
+/// of the field: the id exists only in the provider's logs, so if it is not
+/// taken off this response it is gone.
+///
+/// Environmental needs: a loopback port. No network and no credential.
+/// Input: `HTTP 429` carrying both `retry-after` and `x-request-id`.
+/// Expected: the failure carries the id verbatim, beside the wait, and the
+/// `RequestFailure` a listener sees carries it too.
+#[tokio::test]
+async fn a_refusal_carries_the_providers_own_id_for_it() {
+    let body = r#"{"error":{"message":"slow down"}}"#;
+    let url = one_shot(
+        "429 Too Many Requests",
+        "retry-after: 2\r\nx-request-id: req_01HZY8QK\r\n",
+        body,
+    )
+    .await;
+
+    let err = match ReqwestTransport::default()
+        .post_sse(&url, "test-key", serde_json::json!({}))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("the provider refused, so no stream should have opened"),
+    };
+
+    assert_eq!(
+        err.request_id(),
+        Some("req_01HZY8QK"),
+        "the id came off the response: {err}"
+    );
+    assert_eq!(err.retry_after_ms(), Some(2_000.0), "beside the wait");
+    assert_eq!(
+        tetanus_turn::events::RequestFailure::from(&err)
+            .provider_request_id
+            .as_deref(),
+        Some("req_01HZY8QK"),
+        "and reaches the listener that has to report it"
+    );
+}
+
+/// TC-PORT-REQID-2: the id is read from this provider's own spelling of the
+/// header too.
+///
+/// Upstream: `adapter.spec.ts`, "parses a future Retry-After HTTP date and the
+/// DeepSeek request-id fallback". The fallback is not hypothetical - it is
+/// what this provider sends when its gateway did not add the standard header -
+/// so a reader that knew only `x-request-id` would discard the id on exactly
+/// the responses the one adapter this build ships is talking to.
+///
+/// The `Retry-After` half of upstream's case is TC-DS-WAIT-4's; what is
+/// restated here is the header the same response carries beside it.
+///
+/// Environmental needs: a loopback port. No network and no credential.
+/// Input: `HTTP 503` carrying `x-deepseek-request-id` and no `x-request-id`.
+/// Expected: the failure carries that id, and the status and words with it.
+#[tokio::test]
+async fn the_id_is_read_from_this_providers_own_header() {
+    let url = one_shot(
+        "503 Service Unavailable",
+        "x-deepseek-request-id: deepseek-503\r\n",
+        "come back later",
+    )
+    .await;
+
+    let err = match ReqwestTransport::default()
+        .post_sse(&url, "test-key", serde_json::json!({}))
+        .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("the provider refused, so no stream should have opened"),
+    };
+
+    assert_eq!(
+        err.request_id(),
+        Some("deepseek-503"),
+        "the provider's own spelling was not read: {err}"
+    );
+    assert!(
+        matches!(err, LlmError::Provider { status: 503, .. }),
+        "the status the id belongs to is still reported: {err}"
+    );
 }
 
 /// TC-DS-WAIT-7: an answer that asked for nothing leaves the policy on its own

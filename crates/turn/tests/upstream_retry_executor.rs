@@ -326,6 +326,7 @@ fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectH
                     status,
                     message: "upstream is down".into(),
                     retry_after_ms: None,
+                    request_id: None,
                 });
             }
             next.run(ev).await

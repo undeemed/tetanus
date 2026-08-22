@@ -243,6 +243,7 @@ impl LlmAdapter for Flaky {
                 status: 503,
                 message: "the route is busy".to_string(),
                 retry_after_ms: None,
+                request_id: None,
             });
         }
         Ok(ModelResponse {

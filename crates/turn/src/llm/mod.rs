@@ -316,6 +316,18 @@ pub enum LlmError {
         /// `None` is "the provider asked for nothing", not "wait for no time":
         /// a policy that reads it falls back to its own backoff.
         retry_after_ms: Option<f64>,
+        /// The provider's own id for the request that was refused.
+        ///
+        /// It is the only thing a user can quote to a provider's support, and
+        /// it is the one fact about a refusal this harness cannot reconstruct:
+        /// the status is on the response, the message is in the body, and the
+        /// id exists only in the provider's logs. Discarding it makes "my
+        /// request failed and nobody can tell me why" unanswerable.
+        ///
+        /// `None` is "the provider named none", which is common and not a
+        /// fault: an error delivered inside an already-200 stream has no
+        /// header left to carry one.
+        request_id: Option<String>,
     },
     #[error("PROTOCOL: {0}")]
     Protocol(String),
@@ -387,6 +399,60 @@ impl LlmError {
             _ => None,
         }
     }
+
+    /// The provider's id for the refused request, when it named one.
+    ///
+    /// An accessor rather than a match, so a caller that wants the id does not
+    /// have to know which variants can carry one - the shape
+    /// [`LlmError::retry_after_ms`] already has.
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            LlmError::Provider { request_id, .. } => request_id.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// The response headers a provider names its request id in, lowercased and
+/// most specific first.
+///
+/// A list because there is no standard header and each provider picked its
+/// own. The first two are the pair upstream's DeepSeek adapter reads
+/// (`packages/llm/llm-deepseek/src/adapter.ts`); `request-id` is the same
+/// header without the `x-` that predates it.
+///
+/// `cf-ray` is last and is deliberately in the list: a refusal generated at a
+/// CDN edge never reached the provider, so it carries none of the others, and
+/// the ray id is then the only identifier that exists for it. It is the least
+/// specific answer, which is exactly why it is the last one tried.
+///
+/// Adding a provider means adding its spelling here, rather than teaching a
+/// second place in the workspace about headers.
+pub const REQUEST_ID_HEADERS: [&str; 5] = [
+    "x-request-id",
+    "x-deepseek-request-id",
+    "request-id",
+    "x-amzn-requestid",
+    "cf-ray",
+];
+
+/// The request id a set of response headers carries, if any.
+///
+/// Takes a lookup rather than a header map, so the rule can be stated and
+/// tested without a transport: what it is about is the preference order and
+/// the trimming, and neither needs a socket to be got wrong.
+pub fn request_id_from<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<String> {
+    REQUEST_ID_HEADERS
+        .iter()
+        .filter_map(|name| header(name))
+        .map(str::trim)
+        // A header present and empty is a provider that named nothing, which
+        // is the same fact as sending none - and an empty string quoted to
+        // support is worse than saying there was no id. The search continues
+        // past it rather than stopping: a blank `x-request-id` beside a real
+        // `cf-ray` is one usable id, and answering `None` would throw it away.
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Where an adapter delivers chunks as they arrive. The turn engine's sink
