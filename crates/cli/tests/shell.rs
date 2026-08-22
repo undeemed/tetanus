@@ -130,6 +130,64 @@ fn a_failing_command_is_reported_and_the_run_still_succeeds() {
     );
 }
 
+/// TC-CLI-SHELL-4: output too big for the result is kept beside the journal,
+/// and the model is told where.
+///
+/// The seam has had this since `crates/exec` learned to spill, but a seam
+/// nothing wires is a seam nobody has. This is the case that says the binary
+/// wires it, and that it puts artifacts where a reader is already looking:
+/// beside the journal, not in a temp directory the run forgets.
+///
+/// Expected: exit 0; the result the model read is bounded and names an
+/// artifact; the artifact is under the journal's own directory and holds the
+/// first line, which the bounded result no longer has.
+#[test]
+fn output_too_big_for_the_result_is_kept_beside_the_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let out = run(
+        dir.path(),
+        &[
+            "run",
+            "--prompt",
+            "!for i in $(seq 1 40000); do echo line-$i; done",
+            "--session",
+            "j.jsonl",
+            "--color",
+            "never",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let journal = std::fs::read_to_string(dir.path().join("j.jsonl")).expect("journal");
+    let results = records(&journal, "tool/result");
+    let content = results[0]["content"].as_str().expect("text");
+    let locator = content
+        .lines()
+        .find_map(|line| line.split("the whole stream is at ").nth(1))
+        .map(|rest| rest.trim_end_matches(']').to_string())
+        .unwrap_or_else(|| panic!("the result does not say where the output went: {content}"));
+
+    let artifact = std::path::Path::new(&locator);
+    assert!(
+        artifact.starts_with(dir.path()),
+        "an artifact belongs beside the journal, not somewhere the run forgets: {locator}"
+    );
+    let whole = std::fs::read_to_string(artifact).expect("the artifact is readable");
+    assert!(
+        whole.contains("line-1\n") && whole.contains("line-40000\n"),
+        "the artifact should be the whole stream"
+    );
+    assert!(
+        !content.contains("line-1\n"),
+        "the result itself is still bounded"
+    );
+}
+
 /// TC-CLI-SHELL-3: the tools page lists the shell tools the binary can call.
 ///
 /// A tool a run can call and the page does not list is a tool nobody can

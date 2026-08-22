@@ -61,7 +61,29 @@ pub trait Providers: Send + Sync {
 /// The registry it builds must hold the same tool names as `tools`, which is
 /// what a catalog advertises and what a configured tool order was read
 /// against.
-pub type SessionTools = Arc<dyn Fn(&Arc<Interrupt>) -> Arc<ToolRegistry> + Send + Sync>;
+pub type SessionTools =
+    Arc<dyn Fn(&ToolScope<'_>, &Arc<Interrupt>) -> Arc<ToolRegistry> + Send + Sync>;
+
+/// Which session a registry is being built for.
+///
+/// A tool that holds something outside the process needs to know whose it is.
+/// A terminal session belongs to the session that opened it, and a spilled
+/// build log belongs beside that session's journal: without a scope, a
+/// composition can only guess, and both facts become "the current one" - which
+/// is exactly the assumption that breaks the first time an engine serves two
+/// sessions at once.
+///
+/// Borrowed rather than owned because it is read while the registry is being
+/// built and never kept: a tool that needs the id past that point copies it.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolScope<'a> {
+    /// The session's own id, as its journal header records it.
+    pub session_id: &'a str,
+    /// Where this session's durable artifacts already live - the directory of
+    /// its journal - for a tool that has to put something on disk. `None` is a
+    /// session with no file behind it, and a tool that needs one keeps nothing.
+    pub artifacts: Option<&'a std::path::Path>,
+}
 
 /// The offline default: the deterministic mock adapter and nothing else, so a
 /// build with no configuration still runs a full turn with no key.
@@ -350,7 +372,13 @@ impl Runtime {
         // that session's commands and nobody else's.
         let interrupt = Interrupt::new();
         let base = match &self.session_tools {
-            Some(build) => build(&interrupt),
+            Some(build) => build(
+                &ToolScope {
+                    session_id: &session.header.session_id,
+                    artifacts: session.path.parent(),
+                },
+                &interrupt,
+            ),
             None => Arc::clone(&self.tools),
         };
         let composed = self.composed(session, &base)?;

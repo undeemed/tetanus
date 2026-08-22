@@ -29,7 +29,7 @@ use tetanus_ui::{
 
 use render::help;
 use render::live::Live;
-use tools::{catalog, registry, session_tools};
+use tools::{catalog, registry, registry_for, session_tools, Whose};
 
 #[derive(Parser)]
 #[command(
@@ -1780,7 +1780,12 @@ async fn run<W: std::io::Write>(
     let ctx = boot_with(
         bus,
         adapter,
-        Arc::new(registry(&interrupt)),
+        // The session that will call them: its terminals are owned by it, and
+        // anything it has to keep on disk lands beside its own journal.
+        Arc::new(registry_for(
+            &Whose::session(&opened.session_id, settled.journal.parent()),
+            &interrupt,
+        )),
         log.clone(),
         Arc::clone(&interrupt),
     )
