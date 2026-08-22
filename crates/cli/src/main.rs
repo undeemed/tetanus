@@ -197,6 +197,11 @@ struct RunArgs {
     /// settings document
     #[arg(long, value_name = "N", value_parser = step_budget)]
     max_steps: Option<u32>,
+    /// What every command, shell and terminal this run starts is confined to.
+    /// Defaults to `sandbox.mode` in the settings document, and to
+    /// `danger-full-access` when nothing sets it
+    #[arg(long, value_name = "MODE", value_parser = sandbox_mode)]
+    sandbox: Option<String>,
     /// Print the raw event sequence instead of the turn
     #[arg(long)]
     trace: bool,
@@ -315,6 +320,19 @@ fn named() -> clap::builder::NonEmptyStringValueParser {
 ///
 /// Only zero is refused. A budget of one is a real request - one step, no
 /// tool call answered - and the ceiling is `u32`'s, which no turn reaches.
+/// A sandbox mode clap will accept, refused here rather than at boot so a
+/// typed flag is answered the way every other bad argument is - with the list
+/// of what exists, before anything opens a journal.
+fn sandbox_mode(word: &str) -> Result<String, String> {
+    match tetanus_sandbox::Mode::parse(word) {
+        Some(mode) => Ok(mode.as_str().to_string()),
+        None => Err(format!(
+            "must be one of {}",
+            tetanus_sandbox::Mode::NAMES.join(", ")
+        )),
+    }
+}
+
 fn step_budget(text: &str) -> Result<u32, String> {
     match text.parse::<u32>() {
         Ok(0) => Err("expected a number greater than zero: a turn takes at least one step".into()),
@@ -1749,6 +1767,7 @@ async fn run<W: std::io::Write>(
             model: args.model,
             max_steps: args.max_steps,
             session: args.session,
+            sandbox: args.sandbox,
         },
         // A first run must need no credential, so an unconfigured `run` is
         // the mock adapter.

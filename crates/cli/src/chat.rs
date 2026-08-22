@@ -68,6 +68,11 @@ pub struct ChatArgs {
     /// settings document
     #[arg(long, value_name = "N", value_parser = crate::step_budget)]
     pub max_steps: Option<u32>,
+    /// What every command, shell and terminal this conversation starts is
+    /// confined to. Defaults to `sandbox.mode` in the settings document, and
+    /// to `danger-full-access` when nothing sets it
+    #[arg(long, value_name = "MODE", value_parser = crate::sandbox_mode)]
+    pub sandbox: Option<String>,
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
     pub think: bool,
@@ -209,6 +214,7 @@ pub async fn chat<W: Write>(
             model: args.model.clone(),
             max_steps: args.max_steps,
             session: args.session.clone(),
+            sandbox: args.sandbox.clone(),
         },
         // A conversation with the mock adapter is a demonstration rather than
         // a use, so an unconfigured chat is DeepSeek.

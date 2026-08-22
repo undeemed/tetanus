@@ -220,6 +220,9 @@ pub struct TurnFlags {
     pub model: Option<String>,
     pub max_steps: Option<u32>,
     pub session: Option<PathBuf>,
+    /// The confinement this run's children get, when the caller typed one.
+    /// A flag beats the document, as every flag here does.
+    pub sandbox: Option<String>,
 }
 
 /// What a turn will run on, once the document and the flags have both been
@@ -262,6 +265,9 @@ pub fn turn_settings(
     }
     if let Some(steps) = flags.max_steps {
         overrides.push((key::MAX_STEPS, serde_json::json!(steps)));
+    }
+    if let Some(mode) = &flags.sandbox {
+        overrides.push((key::SANDBOX_MODE, serde_json::json!(mode)));
     }
     let settings = booted(policy, document, &overrides)?;
 
