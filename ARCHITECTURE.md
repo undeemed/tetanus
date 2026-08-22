@@ -54,10 +54,13 @@ The one live case is the position of `system-prompt/assemble`
 ```text
 crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/turn     tetanus-turn      turn engine, events, LLM seam, tools, boot, trace
-       -> crates/session  tetanus-session   durable event vocabulary + JSONL journal
+       -> crates/session  tetanus-session   durable event vocabulary, JSONL and SQLite journals, projections
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
+  -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
+  -> crates/exec     tetanus-exec      subprocess seam, shell backends, persistent shells, shell tools
+       -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
                                        full-screen view loop
@@ -70,6 +73,12 @@ crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 It holds one document per layer rather than one folded map, because a layer that is re-read can
 *drop* a key and the value under it has to come back; a folded map has nothing to come back to
 ([crates/config/src/lib.rs](crates/config/src/lib.rs)).
+`tetanus-fs` depends on `tetanus-turn` and nothing depends on it: it is a *consumer* of the tool seam,
+not a layer under it, which is what keeps a harness composed without file tools a harness that still
+builds and runs.
+It reuses the containment walk `tetanus-turn` already carries rather than growing a second one
+([crates/fs/src/local.rs](crates/fs/src/local.rs)), so the fenced and unfenced backends differ only in
+which root a path is judged against.
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
@@ -167,6 +176,16 @@ payload, and `sourceEventSeqs` on the surface events that cite their inputs.
 `replay()` reads a journal back and verifies `seq` contiguity: a gap means the file is not a faithful
 copy of the log that produced it.
 
+`SessionLog` is a seam and not a description of that one writer.
+`SqliteSessionStore` ([crates/session/src/sqlite.rs](crates/session/src/sqlite.rs)) keeps every
+session of a deployment in one database behind the same trait, and `sessions.backend` picks between
+them at boot.
+Everything the JSONL journal promises is promised there, including per-append durability: each
+append is its own commit under `synchronous = FULL`, because a backend a caller cannot tell apart
+must not quietly promise less.
+`import_jsonl` and `export_jsonl` move a session between the two, losslessly in both directions -
+both writers serialize the same `SessionEvent`, so the round trip is byte-identical.
+
 Model history is *derived* from the log by `derive_messages`
 ([crates/turn/src/log.rs](crates/turn/src/log.rs)), never stored beside it.
 Model-visible means logged.
@@ -185,8 +204,64 @@ listener, because a listener registered later could be ordered ahead of a gate l
 first.
 It is also the one place `waterfall` is contained rather than loud: a question that cannot be
 answered has a defined answer, so a panicking answerer denies its call instead of failing the turn.
+
+The turn engine applies that seam between `tools/pre-execute` and the dispatch: a tool says whether
+one pending call needs deciding, and a call nobody granted is never dispatched at all - the step gets
+a `tool/result` with `ok: false` and a `code`, which is what §4.4.7 of the contract means by a denial
+being a result rather than a failure.
+After `tools/pre-execute`, deliberately, so that what is decided is what would actually run.
+Asking the user something ([crates/turn/src/questions.rs](crates/turn/src/questions.rs)) is the same
+shape for a different question, down to the durable pair and the enclosure rule, and differs in what
+counts as an answer: every question covered, every selection a label that was offered.
+Both are unbounded waits with exactly one way out, which is why an interrupt withdraws an outstanding
+question rather than only stopping the turn at its next step boundary.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
+
+Derivation is also where compaction happens
+([crates/turn/src/compaction.rs](crates/turn/src/compaction.rs)), and that is the whole design.
+A journal is append-only, so a conversation that has outgrown its context window cannot have its
+older span deleted or rewritten.
+Instead a `compaction/summary` record names the events it shadows and the surface event immediately
+after it stands in their place; `compaction::surface` applies that rule wherever history is derived.
+A replay therefore reproduces the compacted history from the same records rather than from a second
+stored copy that could disagree with them.
+The adjacency of a record and its replacement is contractual rather than tidy: it is what lets a
+consumer with bounded state price a replacement without keeping a price per message.
+A cut never separates a tool call from its result, judged over the current surface rather than over
+step markers, because compaction moves surface positions and step markers do not follow.
+
+The folds a reader wants over that log are projections
+([crates/session/src/projection.rs](crates/session/src/projection.rs)): a named `init`/`apply`/`view`
+per domain, driven forward as events commit.
+A unit contributes mathematics and nothing else - no clock, no subscription, JSON state - which is
+what lets a value be checkpointed at all, since anything a projection knows could have been
+recomputed rather than remembered.
+The two that price nothing are [crates/session/src/units.rs](crates/session/src/units.rs), so a
+listing that wants a title need not link a provider adapter; the three that do are
+[crates/turn/src/projections.rs](crates/turn/src/projections.rs), beside the estimator they share.
+Each step writes a `request/context` record before it dispatches, carrying the route, its window and
+what the system prompt and tool catalog cost, which is what the context breakdown anchors on and
+what lets a turn a provider failure ended still say what it tried to send.
+
+What a run *works out* rather than what happened to it goes in the key-value store
+([crates/core/src/storage.rs](crates/core/src/storage.rs)): declared tables of JSON in one file,
+replaced whole by an atomic rename.
+A projection checkpoint, a computed title and a cache each belong there - reproducible from the log,
+expensive enough to keep, and not facts, so not journal entries.
+A payload too large to carry goes to the spill store
+([crates/core/src/spill.rs](crates/core/src/spill.rs)), which keeps the whole thing in an owner-only
+file and hands the model a bounded preview and a locator.
+
+A credential goes in neither, and in particular not in the settings document
+([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).
+The document is read into layers, published by `config.dump`, quoted in diagnostics and pasted into
+bug reports; `crates/config/src/secret.rs` exists to redact values that should never have been there.
+The credential store is the process environment over an owner-only file, and its values never enter
+a layer at all, so there is nothing for a surface to forget to redact.
+The environment wins and is visibly read-only: a key supplied at launch is the run's explicit intent
+and nothing in the process can edit it, so a write against a reference it supplies is refused rather
+than accepted into a file that resolution would then ignore.
 
 The other durable record is the settings document: `settings.yaml` (or `.json`) under the harness
 home, which is `$TETANUS_HOME` or `~/.tetanus`
@@ -257,7 +332,8 @@ Two adapters ship:
 - [crates/turn/src/llm/mock.rs](crates/turn/src/llm/mock.rs) - deterministic and offline. It calls a
   tool on step 1 and answers on step 2, so one offline run covers the tool pipeline and the loop-back.
   Every turn runs that shape, not only the first: it reads this step's own messages, never the whole
-  conversation.
+  conversation. Which tool it calls is the prompt's to choose: a prompt opening with `!` asks for
+  `shell` with the rest as the command, so a build with no key still exercises the process seam.
 - [crates/turn/src/llm/deepseek.rs](crates/turn/src/llm/deepseek.rs) - DeepSeek chat completions
   behind an `SseTransport` seam, so the request body and the stream decoder are tested without
   network. Credentials are referenced by environment variable name; config never carries a literal
@@ -899,6 +975,79 @@ table too many, and an engine enum has no fallback arm, so a match on one outsid
 stops compiling the day the engine names a new case - after quietly deciding, until then, what that
 case means to a reader.
 
+### 4.9 Interface view - the process seam
+
+Everything that leaves the harness goes through `tetanus-exec`, in three layers.
+
+`proc::Command` ([crates/exec/src/proc.rs](crates/exec/src/proc.rs)) runs one command: an argv nothing
+re-splits, an environment the caller listed rather than one inherited and scrubbed, a bounded
+capture that keeps the tail, and a sink that is handed each piece of output as it arrives.
+Every child leads its own process group, so termination is a SIGTERM to the group, a grace period,
+then a SIGKILL to the group: a command that starts grandchildren and a command that traps SIGTERM
+both end. When the leader exits but something it started still holds the output pipe, the group is
+swept and the caller is told - otherwise an orphan would hold a turn open for ever.
+
+`backend::ShellBackend` ([crates/exec/src/backend.rs](crates/exec/src/backend.rs)) is which shell a
+command goes through. `Bash` and `PowerShell` ship; a backend whose binary is absent refuses,
+naming the program and where it looked, and never substitutes another shell - a bash script run
+under dash fails later, elsewhere, with a message about syntax.
+`shell::ShellExec` resolves a request against the deployment's defaults and caps before running it,
+and renders the result into upstream's markers (`[stderr]`, `[timed out after Nms]`,
+`[killed by signal: X]`, `[exit code: N]`), which `shell::parse_exit` reads back out of a replayed
+result.
+
+`session::ShellSessions` ([crates/exec/src/session.rs](crates/exec/src/session.rs)) is the
+persistent half: a long-lived shell reading commands from a pipe, with a per-command nonce marker
+around each one so its output and its exit status are exactly attributable. The working directory
+and the exported variables survive between tool calls because the process does. A shell that dies
+is reported and stays dead; nothing is restarted underneath the caller, because a fresh shell in a
+state the model did not create is worse than being told.
+
+`tools::ShellTools` ([crates/exec/src/tools.rs](crates/exec/src/tools.rs)) registers what the model
+calls: `shell`, and `shell_open`/`shell_run`/`shell_close`/`shell_list`. They run in the ordinary
+tool pipeline - `shell` and `shell_run` are barriers, `shell_list` is parallel-safe - and they hold
+the turn's own interrupt, so stopping a turn kills the command it started rather than only ending
+the loop. A composition supplies that switch through `boot_with`
+([crates/turn/src/boot.rs](crates/turn/src/boot.rs)); the engine mints one per session, because one
+switch shared across sessions would let an interrupt in one stop another.
+
+### 4.10 Interface view - the sandbox
+
+`tetanus_turn::fs` fences a *path* this process was asked to open, which is a complete answer while
+the code doing the opening is ours. A command a model wrote is not: it is arbitrary code, and only
+the kernel can tell it no. `crates/sandbox` is that boundary, and the two are complementary.
+
+`policy::Policy` ([crates/sandbox/src/policy.rs](crates/sandbox/src/policy.rs)) is upstream's mode
+vocabulary - `read-only`, `workspace-write`, `danger-full-access` - resolved once where a call
+enters and handed down whole. It carries the workspace root, the roots the mode makes writable
+(including the temp areas a build actually uses, derived here so two layers cannot disagree), a
+network decision, and whether partial enforcement is acceptable.
+
+`landlock` ([crates/sandbox/src/landlock.rs](crates/sandbox/src/landlock.rs)) is the Linux backend.
+The three system calls are made by hand because of the fork/exec split: the ruleset is built in the
+parent, where opening directories and allocating is safe, and the child's half between `fork` and
+`exec` is `prctl` plus two syscalls with no library code - after a fork in a threaded process, a
+child that allocates can deadlock on a lock another thread held. Deny-by-default is the ABI's own
+shape: the handled set is every right the running kernel knows, so anything no rule grants is
+denied, which is why creating, removing and renaming are governed and not only writing.
+
+Enforcement runs through both consumers of the policy. `crates/exec` applies it to processes:
+`Command::confined` for one command, and one boundary per persistent shell, inherited by every
+command that shell later runs. `crates/fs` applies it to the file service
+([crates/fs/src/kernel.rs](crates/fs/src/kernel.rs)): Landlock restricts a thread irreversibly and
+the harness must keep writing its own journal, so the boundary belongs to one worker thread that
+restricts itself before accepting work, and every file operation runs there. One `Policy` value
+feeds both, which is what stops "the write tool cannot write /tmp but bash can". A denial is
+rendered with upstream's marker naming the mode, so a model reads policy rather than a bug in its
+own command; on the file side it arrives as `FS_PERMISSION_DENIED`, the class that already meant
+"the operating system refused" rather than "this build decided".
+
+A host that cannot honour a policy refuses: `Unavailable` for a kernel without Landlock, `Degraded`
+for an ABI that cannot govern what was asked, and a compile-time refusal naming the missing backend
+on a platform that has none ([crates/sandbox/src/unsupported.rs](crates/sandbox/src/unsupported.rs)).
+There is no path where asking for confinement and getting none is a success; the one way to run
+unconfined is to write `danger-full-access`.
+
 ## 5. Verification - the conformance approach
 
 Parity with upstream is asserted, not asserted about.
@@ -947,7 +1096,14 @@ not protocol-level.
 
 ## 7. Not built yet
 
-A settings-file watcher, live subtree remount, the rest of the tool pipeline
-(permissions, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
+A settings-file watcher, live subtree remount, cancellation inside a step, further adapters, MCP,
+a PTY and the terminal tools that need one, background jobs, the web UI, and the WASM plugin host.
+Kernel sandboxing exists for processes and for the file service (§4.10); the approved-escalation
+retry is the remaining named follow-up in
+[docs/parity-updates/sandbox-policy-and-landlock.md](docs/parity-updates/sandbox-policy-and-landlock.md).
+The file tools exist and are composed by whoever builds a registry
+([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
+is the presentation lane's wiring, per §4.7's ownership table in
+[docs/interface-contract.md](docs/interface-contract.md).
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.

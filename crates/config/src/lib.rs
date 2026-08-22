@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub mod credentials;
 pub mod env;
 pub mod file;
 pub mod home;

@@ -113,6 +113,7 @@ async fn an_unoccupied_point_leaves_the_failure_alone() {
             "step/start",
             "user/message",
             "system-prompt/assemble",
+            "request/context",
             "agent/request",
             "llm/stream",
             "agent/request-error",

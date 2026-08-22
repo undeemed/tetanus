@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{AgentPromptParams, Engine, SessionCreateParams};
-use tetanus_session::SessionLog;
 use tetanus_turn::events::AgentRequest;
 use tetanus_turn::llm::{ModelRequest, Role};
 use tetanus_turn::log::topic;

@@ -22,7 +22,7 @@ use tempfile::TempDir;
 use tetanus_engine::session::{SessionHeader, SESSION_START};
 use tetanus_engine::{EngineConfig, HarnessEngine};
 use tetanus_protocol::methods::{Engine, SessionCreateParams};
-use tetanus_session::{SessionEvent, SessionEventDispatch, SessionLog};
+use tetanus_session::{SessionEvent, SessionEventDispatch};
 
 /// TC-PORT-STORE-1: a journal left on disk is continued, not started again.
 ///

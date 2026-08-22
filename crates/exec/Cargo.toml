@@ -1,0 +1,37 @@
+[package]
+name = "tetanus-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Process execution for tetanus: the subprocess seam, shell backends, persistent shells, and the terminal tools over them."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tetanus-turn = { path = "../turn" }
+tetanus-sandbox = { path = "../sandbox" }
+
+[target.'cfg(unix)'.dependencies]
+# The one thing the standard library will not do: signal a process *group*.
+# `killpg` is the whole reason this dependency exists, and it is why a
+# grandchild cannot outlive the command that started it.
+libc.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# The tool suites drive a real turn: a booted engine, a real journal, and a
+# scripted adapter standing in for the model.
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The suites ask the kernel whether a process is still there (signal zero),
+# because "the group is gone" is the claim under test.
+libc.workspace = true

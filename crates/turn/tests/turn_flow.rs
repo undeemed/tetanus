@@ -367,10 +367,14 @@ async fn a_second_turn_runs_the_same_sequence_as_the_first() {
     assert_eq!(second.content, "You said: second");
 }
 
+/// Which topics of [`MOCK_TURN_FLOW`] are durable session events rather than
+/// in-memory extension points. `request/context` is the request envelope a
+/// step writes before it dispatches, and it is on the journal like the rest.
 fn is_durable(topic: &str) -> bool {
     topic.starts_with("turn/")
         || topic.starts_with("step/")
         || topic == "user/message"
+        || topic == "request/context"
         || topic.starts_with("assistant/")
         || topic.starts_with("tool/")
 }

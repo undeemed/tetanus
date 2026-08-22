@@ -1514,7 +1514,9 @@ fn sessions_lists_what_the_runs_wrote() {
     assert!(rows[0].ends_with("idle  and again"), "{told}");
     assert!(rows[1].starts_with("a  "), "{told}");
     assert!(rows[1].ends_with("idle  echo this"), "{told}");
-    assert!(rows[0].contains("18 events"), "{told}");
+    // Twenty, not eighteen, since the context lane: each of the turn's two
+    // steps writes a `request/context` envelope before it dispatches.
+    assert!(rows[0].contains("20 events"), "{told}");
 }
 
 /// TC-CLI-SESS-14: the id the page prints against the journal it names.

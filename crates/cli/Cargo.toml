@@ -17,6 +17,7 @@ tokio.workspace = true
 tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-engine = { path = "../engine" }
+tetanus-exec = { path = "../exec" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 tetanus-protocol = { path = "../protocol" }

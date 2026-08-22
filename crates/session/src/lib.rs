@@ -13,6 +13,8 @@
 //! or a title does not recompute the whole journal to get it.
 
 pub mod projection;
+pub mod sqlite;
+pub mod units;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,6 +31,23 @@ pub enum SessionError {
     Corrupt(usize),
     #[error("event data for {0:?} is not JSON-serializable")]
     NotSerializable(String),
+    /// A backend refused. The message is the backend's own, because what a
+    /// caller can do about a locked database differs from a full disk and
+    /// only the backend knows which it met.
+    #[error("session store: {0}")]
+    Store(String),
+    /// A journal already exists under this id. Refused rather than appended
+    /// to, for [`seed`]'s reason.
+    #[error("session {0:?} already has a journal in this store")]
+    Exists(String),
+    #[error("{}: is not a tetanus session database (application id {found})", path.display())]
+    ForeignStore { path: PathBuf, found: i32 },
+    #[error(
+        "{}: is schema version {found}, and this build reads {}",
+        path.display(),
+        sqlite::SCHEMA_VERSION
+    )]
+    ForeignSchema { path: PathBuf, found: i32 },
 }
 
 /// One immutable entry in the session log.
@@ -296,7 +315,7 @@ fn scan(path: &Path) -> Result<Scan, SessionError> {
     Ok(found)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

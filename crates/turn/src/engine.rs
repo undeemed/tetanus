@@ -35,7 +35,9 @@ use tetanus_core::events::Terminal;
 use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
 use tetanus_session::{SessionError, SessionLog};
 
-use crate::boot::{LlmService, PromptService, SessionService, ToolsService};
+use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalService};
+use crate::boot::{InterruptService, LlmService, PromptService, SessionService, ToolsService};
+use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
     RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute, ToolsPostExecute,
@@ -47,7 +49,10 @@ use crate::llm::{
 };
 use crate::log::{derive_messages, topic, with_system};
 use crate::prompt::{AssembleAt, PromptError, PromptRegistry};
-use crate::tools::{ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema};
+use crate::prune::PruneBudget;
+use crate::tools::{
+    Permission, ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
@@ -77,6 +82,15 @@ pub enum TurnError {
     /// is closed the way section 4.4.2 says every failed turn closes.
     #[error("a plugin listener panicked: {0}")]
     Plugin(String),
+    /// A decision about whether a tool may run could not be put at all.
+    ///
+    /// Not a denial: a denial is an outcome, and an outcome is a `tool/result`
+    /// the model reads (contract section 4.4.7). This is the seam itself
+    /// failing - a journal that refused the audit pair, or an ask attempted
+    /// with no turn open - and a turn that cannot record what it decided must
+    /// not proceed as though it had decided nothing.
+    #[error(transparent)]
+    Approval(#[from] ApprovalError),
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +112,37 @@ pub struct TurnConfig {
     /// (lexicographic) order, which is what a harness that configured nothing
     /// gets; a [`ToolOrder`] was read against the registry it arranges.
     pub tool_order: Option<ToolOrder>,
+    /// The deployment's answer for a session whose journal holds no
+    /// `approval/policy`. Contract section 4.4.7: the journal's own switch wins
+    /// over this, and this wins over nothing else.
+    pub approval_policy: ApprovalPolicy,
+    /// The routed model's context window, when the deployment knows it.
+    ///
+    /// Recorded on every `request/context`, so a reader of the journal can
+    /// tell how close a request came to the limit without knowing the model's
+    /// catalog. It is also what a compaction budget is scaled against.
+    pub context_window: Option<u64>,
+    /// What to do when the next request would not fit. `None` never compacts,
+    /// which is what a deployment that has not set a window gets: a budget
+    /// with no window to scale against is a guess, and a guess that silently
+    /// rewrote a user's history would be the wrong kind of helpful.
+    pub compaction: Option<AutoCompaction>,
+}
+
+/// The compaction a turn performs for itself, before a request it can already
+/// see will not fit.
+///
+/// Doing it here rather than after a provider refusal is the whole point: a
+/// refused request costs a round trip, and a `CONTEXT_WINDOW_EXCEEDED` is
+/// terminal, so a turn that waited to be told would simply fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoCompaction {
+    /// When to act, and how much recent conversation to keep verbatim.
+    pub budget: CompactionBudget,
+    /// Shrink over-long tool results first, when set. It is model-free and
+    /// costs nothing, so it is worth trying before a summary that costs a
+    /// provider call - and it often makes the summary unnecessary.
+    pub prune: Option<PruneBudget>,
 }
 
 impl Default for TurnConfig {
@@ -111,6 +156,9 @@ impl Default for TurnConfig {
                     .to_string(),
             max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             tool_order: None,
+            approval_policy: ApprovalPolicy::Ask,
+            context_window: None,
+            compaction: None,
         }
     }
 }
@@ -156,6 +204,10 @@ pub struct TurnEngine {
     log: Arc<dyn SessionLog>,
     bus: EventBus,
     prompt: Arc<PromptRegistry>,
+    /// The seam that decides whether a gated call may run, and audits it. One
+    /// per engine, because the audit ids it mints must not collide and the
+    /// journal it writes to is this session's.
+    approvals: Arc<ApprovalService>,
     /// The engine's own section, held for as long as the engine: dropping the
     /// handle takes the base prompt back out of the registry.
     _base: EffectHandle,
@@ -183,17 +235,111 @@ impl TurnEngine {
             .count() as u64;
         let prompt = ctx.services.require::<PromptService>()?;
         let base = prompt.seed_base(config.base_prompt.clone());
+        let approvals =
+            ApprovalService::new(ctx.bus.clone(), Arc::clone(&log), config.approval_policy);
         Ok(Self {
             llm: ctx.services.require::<LlmService>()?,
             tools: ctx.services.require::<ToolsService>()?,
             log,
             bus: ctx.bus.clone(),
             prompt,
+            approvals,
             _base: base,
             config,
             turns: AtomicU64::new(turns),
-            interrupt: Interrupt::new(),
+            // The composition's switch when it provided one, so a tool holding
+            // a child process hears the same interrupt the loop does; a fresh
+            // one otherwise, which is every composition with nothing outside
+            // the process to stop.
+            interrupt: ctx.services.get::<InterruptService>().unwrap_or_default(),
         })
+    }
+
+    /// Run this engine's turns on an interrupt somebody else also holds.
+    ///
+    /// One flag, two holders. A tool that waits on something unbounded - a
+    /// question put to a person ([`crate::questions`]) - has to learn that the
+    /// turn was interrupted, and a tool body is handed nothing but its
+    /// arguments, so the seam it waits on must have been given the flag when it
+    /// was composed. Passing it here rather than reaching into a built engine
+    /// keeps the composition explicit: whoever wires the tool and the engine
+    /// together is the one place that knows they are the same turn.
+    ///
+    /// The engine still clears the flag as each turn starts, so an interrupt
+    /// that stopped nothing does not stop the turn that follows it.
+    pub fn sharing_interrupt(mut self, interrupt: Arc<Interrupt>) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+
+    /// Bring the next request inside its budget, if a budget was configured
+    /// and the request is over it.
+    ///
+    /// The cheap remedy first: shrinking over-long tool results needs no
+    /// provider, costs nothing and is often enough. A summary is asked for
+    /// only when the request is still over budget after that, because it costs
+    /// a provider call and it loses detail that pruning keeps.
+    ///
+    /// A compaction that cannot help - because the whole surface is the recent
+    /// tail, or because the summary came back no smaller - leaves the request
+    /// as it is rather than failing the turn. The provider may still accept it,
+    /// and a turn that refused to try would be strictly worse than one that
+    /// asked and was told no.
+    async fn fit_context(&self, envelope: u64) -> Result<(), TurnError> {
+        let Some(policy) = self.config.compaction else {
+            return Ok(());
+        };
+        if self.cost(envelope) < policy.budget.threshold_tokens {
+            return Ok(());
+        }
+
+        if let Some(budget) = policy.prune {
+            // A prune only ever appends, so the one failure it can meet is the
+            // journal refusing a write, and that is a failed turn either way.
+            if let Err(compaction::CompactionError::Log(error)) =
+                compaction::prune_results(self.log.as_ref(), budget)
+            {
+                return Err(error.into());
+            }
+            if self.cost(envelope) < policy.budget.threshold_tokens {
+                return Ok(());
+            }
+        }
+
+        let summarizer = self.summarizer();
+        match compaction::compact(
+            self.log.as_ref(),
+            summarizer.as_ref(),
+            &self.config.base_prompt,
+            policy.budget,
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            // A compaction that could not run is not a turn that must fail.
+            // The reason is on the journal, on the `compaction/end` the
+            // transaction wrote before it gave up.
+            Err(compaction::CompactionError::Log(error)) => Err(error.into()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// What the next request would cost: the envelope plus the surface.
+    fn cost(&self, envelope: u64) -> u64 {
+        envelope + crate::tokens::TokenSurface::of(&self.log.events()).total_tokens()
+    }
+
+    /// Who writes a checkpoint for this engine.
+    ///
+    /// The routed model, through the adapter the turn already holds, so the
+    /// summary is written by something that has seen this kind of work. There
+    /// is no second route to configure and no second credential to hold.
+    fn summarizer(&self) -> Arc<dyn Summarizer> {
+        Arc::new(compaction::LlmSummarizer::new(
+            Arc::clone(&self.llm),
+            self.config.model.clone(),
+            self.config.max_tokens,
+        ))
     }
 
     /// Ask the running turn to stop at its next step boundary. Answering
@@ -202,12 +348,28 @@ impl TurnEngine {
         self.interrupt.stop()
     }
 
+    /// The switch [`TurnEngine::cancel`] throws, for a composition that has to
+    /// hand it to something outside the loop.
+    pub fn interrupt(&self) -> &Arc<Interrupt> {
+        &self.interrupt
+    }
+
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
 
     pub fn log(&self) -> &Arc<dyn SessionLog> {
         &self.log
+    }
+
+    /// The decision seam this engine gates its tool calls on.
+    ///
+    /// Published so a surface can read the session's policy and switch it
+    /// (`approval.set`, contract section 4.4.7) against the same service the
+    /// gate consults - two services would be two policies, and the one a
+    /// caller set would not be the one the gate read.
+    pub fn approvals(&self) -> &Arc<ApprovalService> {
+        &self.approvals
     }
 
     /// The durability barrier a caller awaits when it needs the journal on disk
@@ -357,9 +519,6 @@ impl TurnEngine {
                 )?;
             }
 
-            // Model history is derived from the log, never stored beside it.
-            let history = derive_messages(&self.log.events());
-
             let at = AssembleAt { turn, step };
             let sections = self.prompt.assemble(&at);
             // A section registered as the whole prompt is kept aside here and
@@ -382,6 +541,35 @@ impl TurnEngine {
             if let Some(section) = complete {
                 prompt.sections = vec![section];
             }
+            let system = prompt.render()?;
+
+            // The envelope is priced once, here, because compaction is a
+            // decision about the whole request and not about the conversation
+            // alone: a large tool catalog leaves less room for history.
+            let envelope = crate::tokens::estimate_text_tokens(&system)
+                + crate::tokens::estimate_tools(&prompt.tools);
+            self.fit_context(envelope).await?;
+
+            // Model history is derived from the log, never stored beside it -
+            // and after a compaction that means the compacted history, from
+            // the same records a replay would read.
+            let history = derive_messages(&self.log.events());
+
+            // The request envelope, on the journal, before the request is
+            // sent. It is what `context.breakdown` anchors on, and a turn that
+            // then failed still says what it tried to send.
+            self.log.append(
+                compaction::topic::REQUEST_CONTEXT,
+                serde_json::json!({
+                    "turn": turn,
+                    "step": step,
+                    "provider": self.llm.provider(),
+                    "model": self.config.model,
+                    "context_window": self.config.context_window,
+                    "system_tokens": crate::tokens::estimate_text_tokens(&system),
+                    "tools_tokens": crate::tokens::estimate_tools(&prompt.tools),
+                }),
+            )?;
 
             let mut request = AgentRequest {
                 turn,
@@ -389,7 +577,7 @@ impl TurnEngine {
                 request: ModelRequest {
                     provider: self.llm.provider().to_string(),
                     model: self.config.model.clone(),
-                    messages: with_system(&prompt.render()?, history),
+                    messages: with_system(&system, history),
                     tools: prompt.tools.clone(),
                     max_tokens: self.config.max_tokens,
                 },
@@ -616,6 +804,24 @@ impl TurnEngine {
         };
         let call = self.bus.waterfall(&mut pre, pass_call()).await;
 
+        // The gate is here, after `tools/pre-execute` and before anything
+        // runs. After, because a listener may rewrite the call and what is
+        // decided must be what would actually run - approving one command and
+        // executing another is the whole failure mode a gate exists to
+        // prevent. Before, because a decision taken after the effect is not a
+        // decision.
+        if let Some(refusal) = self.decide(&call).await? {
+            return Ok((
+                index,
+                Settled {
+                    call,
+                    outcome: ToolOutcome::failed(refusal),
+                    call_seq: logged.seq,
+                    code: Some(crate::approval::TOOL_NOT_PERMITTED),
+                },
+            ));
+        }
+
         let mut execute = ToolsExecute {
             turn,
             call: call.clone(),
@@ -640,23 +846,57 @@ impl TurnEngine {
                 call,
                 outcome,
                 call_seq: logged.seq,
+                code: None,
             },
         ))
     }
 
+    /// Put the question one call needs, and answer with the refusal the model
+    /// should read - or `None` when the call may run.
+    ///
+    /// A call whose tool asks for nothing costs nothing: no question is put, no
+    /// audit pair is written, and the journal of a session that never gates a
+    /// call is byte-identical to the journal it had before this seam existed.
+    ///
+    /// Every way of not getting an answer denies, which is
+    /// [`ApprovalService`]'s promise rather than this function's. What is
+    /// decided here is only what the model is told, and that a denial is a
+    /// result rather than a failure of the turn.
+    async fn decide(&self, call: &ToolCall) -> Result<Option<String>, TurnError> {
+        let Permission::Ask { reason } = self.tools.permission(call) else {
+            return Ok(None);
+        };
+        let outcome = self
+            .approvals
+            .request(
+                ApprovalRequest::new(&call.name)
+                    .about_call(&call.id)
+                    .because(reason),
+                &self.interrupt,
+            )
+            .await?;
+        Ok(outcome.refusal(&call.name))
+    }
+
     /// Append one settled call's `tool/result`, citing the `tool/call` it
     /// answers.
+    ///
+    /// A result that carries a `code` is one nobody ran: contract section
+    /// 4.3.2 fixes that meaning, and the field is absent - not null - on the
+    /// results of calls that did run, so a reader tells the two apart by
+    /// presence rather than by value.
     fn commit_tool_result(&self, settled: Settled) -> Result<(), TurnError> {
-        self.log.append_with_sources(
-            topic::TOOL_RESULT,
-            serde_json::json!({
-                "call_id": settled.call.id,
-                "name": settled.call.name,
-                "ok": settled.outcome.ok,
-                "content": settled.outcome.content,
-            }),
-            vec![settled.call_seq],
-        )?;
+        let mut data = serde_json::json!({
+            "call_id": settled.call.id,
+            "name": settled.call.name,
+            "ok": settled.outcome.ok,
+            "content": settled.outcome.content,
+        });
+        if let Some(code) = settled.code {
+            data["code"] = serde_json::json!(code);
+        }
+        self.log
+            .append_with_sources(topic::TOOL_RESULT, data, vec![settled.call_seq])?;
         Ok(())
     }
 
@@ -688,6 +928,9 @@ struct Settled {
     outcome: ToolOutcome,
     /// The `tool/call` this result will cite.
     call_seq: u64,
+    /// Set on a result nobody ran, saying why there is no outcome to report.
+    /// `None` for every call that was actually dispatched.
+    code: Option<&'static str>,
 }
 
 fn enter_claimed() -> Terminal<PreStep> {

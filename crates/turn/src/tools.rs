@@ -75,6 +75,40 @@ pub enum ToolMode {
     Exclusive,
 }
 
+/// Whether one pending call may run without anybody deciding.
+///
+/// Per call and not per tool, for [`ToolMode`]'s reason: the same tool is
+/// unremarkable for one set of arguments and irreversible for another, and only
+/// the arguments say which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Permission {
+    /// Run it. What almost every call is: a gate on everything is a gate
+    /// nobody reads.
+    Allow,
+    /// Ask first, and run it only on a grant. The reason is the asker's own
+    /// words for a human, as contract section 4.4.7 fixes - text to read, not
+    /// a code to match on.
+    Ask { reason: String },
+}
+
+impl Permission {
+    /// Ask, in the asker's own words.
+    pub fn ask(reason: impl Into<String>) -> Self {
+        Self::Ask {
+            reason: reason.into(),
+        }
+    }
+
+    /// Whether this call has to be decided before it runs.
+    ///
+    /// A method rather than a `matches!` at the gate, for the reason
+    /// [`crate::approval::ApprovalOutcome::grants`] gives: a match that decides
+    /// permission is a match nobody should write twice.
+    pub fn needs_decision(&self) -> bool {
+        matches!(self, Self::Ask { .. })
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
@@ -85,6 +119,19 @@ pub trait Tool: Send + Sync {
     fn mode(&self, arguments: &serde_json::Value) -> ToolMode {
         let _ = arguments;
         ToolMode::Exclusive
+    }
+
+    /// Whether this call needs a decision before it runs.
+    ///
+    /// The default is [`Permission::Allow`], and that direction is deliberate
+    /// even though the rest of this file fails closed. A gate exists to make a
+    /// model stop at the calls a session cannot take back; a harness that
+    /// asked about every read would train whoever answers to approve without
+    /// reading, which is worse than not asking. The tools that need it say so,
+    /// and they are few enough to name.
+    fn permission(&self, arguments: &serde_json::Value) -> Permission {
+        let _ = arguments;
+        Permission::Allow
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
@@ -269,6 +316,36 @@ impl ToolRegistry {
                 let fault = panicked(payload);
                 tracing::error!(tool = call.name, %fault, "a tool's classifier panicked");
                 ToolMode::Exclusive
+            }
+        }
+    }
+
+    /// Decide whether one call may run unasked.
+    ///
+    /// A call naming no registered tool needs no decision: it is about to fail
+    /// as unknown, and putting a question about a tool that does not exist to
+    /// a human would be asking them to approve nothing.
+    ///
+    /// A classifier that panics fails *closed* here, unlike [`Self::mode`]'s,
+    /// and the two directions are consistent rather than contradictory: the
+    /// answer that cannot make things worse is the conservative one, and for
+    /// scheduling that is "overlap nothing", while for permission it is "ask".
+    /// The cost is a question; the alternative is running an irreversible call
+    /// because the code that decides whether to ask had a bug.
+    pub fn permission(&self, call: &ToolCall) -> Permission {
+        let Some(tool) = self.tools.get(&call.name) else {
+            return Permission::Allow;
+        };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| tool.permission(&call.arguments))) {
+            Ok(permission) => permission,
+            Err(payload) => {
+                let fault = panicked(payload);
+                tracing::error!(tool = call.name, %fault, "a tool's permission classifier panicked");
+                Permission::ask(format!(
+                    "the {:?} tool could not say whether this call needs approval: its permission \
+                     classifier panicked ({fault})",
+                    call.name
+                ))
             }
         }
     }

@@ -19,7 +19,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::boot_with;
+use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
@@ -650,8 +651,20 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 },
             )
             .ok();
-            let engine: Arc<dyn tetanus_protocol::methods::Engine> =
-                Arc::new(tetanus_engine::HarnessEngine::new(booted));
+            // What a session may call, and what `catalog.tools` advertises,
+            // are built from one function so the two cannot drift; each
+            // session's copy is bound to its own interrupt. Everything else
+            // came off the settings document, which is why the tools are set
+            // over `booted` rather than beside a `..Default::default()`: the
+            // provider, model and journal root a served session runs on are
+            // the document's answer and not this file's.
+            let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
+                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
+                    tools: Arc::new(registry(&Interrupt::new())),
+                    session_tools: Some(session_tools()),
+                    ..booted
+                }),
+            );
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
                 // the accept fails, so the interrupt is the shutdown and not
@@ -822,7 +835,9 @@ fn adapter(
 /// `catalog.tools`.
 fn catalog() -> ToolCatalogResult {
     ToolCatalogResult {
-        tools: registry()
+        // A catalog only reads schemas, so the switch it builds them against
+        // is one nothing will ever throw.
+        tools: registry(&Interrupt::new())
             .schemas()
             .into_iter()
             .map(|schema| protocol::ToolDescriptor {
@@ -835,8 +850,29 @@ fn catalog() -> ToolCatalogResult {
 }
 
 /// The one registry, so what is listed and what is callable are one thing.
-fn registry() -> ToolRegistry {
-    ToolRegistry::new().with(Arc::new(EchoTool))
+///
+/// The shell tools hold work outside this process, so they are built against
+/// the interrupt the turn they serve will run under: stopping a turn has to
+/// reach the command it started, not just the step boundary. A host with no
+/// shell still gets a `shell` tool - one that answers every call with the
+/// deployment fault, because a tool that quietly vanished would look to the
+/// model like a build that never had one.
+fn registry(interrupt: &Arc<Interrupt>) -> ToolRegistry {
+    let mut registry = ToolRegistry::new().with(Arc::new(EchoTool));
+    tetanus_exec::tools::ShellTools::register_or_explain(
+        &mut registry,
+        Arc::new(tetanus_exec::backend::Bash::new()),
+        tetanus_exec::shell::ShellConfig::default(),
+        tetanus_exec::session::SessionConfig::default(),
+        Arc::clone(interrupt),
+    );
+    registry
+}
+
+/// The tools one session runs with, for the engine that serves many sessions
+/// at once. Each session gets its own, because each has its own interrupt.
+fn session_tools() -> tetanus_engine::agent::SessionTools {
+    Arc::new(|interrupt: &Arc<Interrupt>| Arc::new(registry(interrupt)))
 }
 
 /// Ctrl-C, as a future that resolves when it arrives.
@@ -1784,8 +1820,17 @@ async fn run<W: std::io::Write>(
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
 
-    let ctx = boot(bus, adapter, Arc::new(registry()), log.clone())
-        .map_err(|err| report(policy, &err.to_string(), None))?;
+    // One switch for the loop and for the tools: an interrupt that does not
+    // reach a running command leaves it running after the turn is over.
+    let interrupt = Interrupt::new();
+    let ctx = boot_with(
+        bus,
+        adapter,
+        Arc::new(registry(&interrupt)),
+        log.clone(),
+        Arc::clone(&interrupt),
+    )
+    .map_err(|err| report(policy, &err.to_string(), None))?;
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {

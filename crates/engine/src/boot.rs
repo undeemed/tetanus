@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tetanus_config::{file, home, Config, ConfigError, Document, Layer};
 
 use crate::catalog::key;
+use crate::session::SessionBackend;
 use crate::EngineConfig;
 
 /// Read the settings document under the harness home, over the engine's own
@@ -48,6 +49,10 @@ pub fn defaults() -> Document {
         (
             key::SESSIONS_ROOT.to_string(),
             serde_json::json!(base.sessions_root.display().to_string()),
+        ),
+        (
+            key::SESSIONS_BACKEND.to_string(),
+            serde_json::json!(base.sessions_backend.name()),
         ),
         (
             key::PROVIDER.to_string(),
@@ -80,9 +85,11 @@ impl EngineConfig {
     /// document is the one place they said what they wanted.
     pub fn from_settings(settings: Config) -> Result<Self, ConfigError> {
         let base = Self::default();
+        let sessions_root =
+            text(&settings, key::SESSIONS_ROOT)?.map_or(base.sessions_root, PathBuf::from);
         Ok(Self {
-            sessions_root: text(&settings, key::SESSIONS_ROOT)?
-                .map_or(base.sessions_root, PathBuf::from),
+            sessions_backend: backend(&settings, &sessions_root)?,
+            sessions_root,
             default_provider: text(&settings, key::PROVIDER)?.unwrap_or(base.default_provider),
             default_model: text(&settings, key::MODEL)?.unwrap_or(base.default_model),
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
@@ -93,9 +100,29 @@ impl EngineConfig {
             provider_retry: crate::retry::provider_policies(&settings)?,
             providers: base.providers,
             tools: base.tools,
+            // A document names no tools, so a composer's own factory is
+            // carried through settings resolution untouched.
+            session_tools: base.session_tools,
             resolved: Arc::new(settings),
         })
     }
+}
+
+/// The artifact this deployment keeps its journals in.
+///
+/// A name this build does not serve, and a database it cannot open, are both
+/// refused here rather than at the first `session.create`: what a deployment
+/// asked for is not available, and running on the other backend would put a
+/// user's history somewhere they did not ask for it to go.
+fn backend(settings: &Config, root: &Path) -> Result<SessionBackend, ConfigError> {
+    let Some(name) = text(settings, key::SESSIONS_BACKEND)? else {
+        return Ok(SessionBackend::Jsonl);
+    };
+    SessionBackend::named(&name, root).map_err(|message| ConfigError::BadValue {
+        key: key::SESSIONS_BACKEND.to_string(),
+        expected: "a session backend this build can open".to_string(),
+        found: message,
+    })
 }
 
 /// A key that holds a name or a path. Empty is not a name, and a document that

@@ -92,6 +92,10 @@ cargo test -p tetanus-turn --test properties               # what holds for ever
 cargo test -p tetanus-turn --test properties_tools         # what holds for every tool schedule
 cargo test -p tetanus-turn --test upstream_approval        # whether a tool call may run
 cargo test -p tetanus-turn --test upstream_fs_containment  # a path the model chose
+cargo test -p tetanus-turn --test upstream_compaction      # a conversation that outgrew its window
+cargo test -p tetanus-turn --test upstream_projections     # the folds a reader asks a session for
+cargo test -p tetanus-session --test upstream_sqlite       # the second persistence backend
+cargo test -p tetanus-engine --test credential_containment # a secret in none of the artifacts
 ```
 
 Three rules keep it a gate rather than a formality.
