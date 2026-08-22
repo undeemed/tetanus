@@ -54,6 +54,7 @@ The one live case is the position of `system-prompt/assemble`
 ```text
 crates/cli      tetanus-hardness   the `tetanus` binary
   -> crates/toolset  tetanus-toolset   the one assembly of the tools this build offers
+       -> crates/fs, crates/exec, crates/features, crates/mcp, crates/web
   -> crates/turn     tetanus-turn      turn engine, events, LLM seam, tools, boot, trace
        -> crates/session  tetanus-session   durable event vocabulary, JSONL and SQLite journals, projections
        -> crates/core     tetanus-core      registry, services, event bus, effects
@@ -74,18 +75,27 @@ crates/web        tetanus-web        web_fetch and web_search over one transport
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 ```
 
+`tetanus-toolset` is the one place that says which tools this build offers. Every tool crate is a
+named *source* in `sources()` - one line each - and the binary composes that set for both the
+catalogue `tetanus tools` prints and the registry each session's turns dispatch from, so the two
+cannot disagree. A duplicate name across two sources is refused at composition naming both crates,
+rather than resolved by registration order, because the model would otherwise be offered one tool's
+schema and run another's body. A deployment selects by source (`tools.sources`), since a crate is
+what lands and what a user recognises.
+
+It is the *binary's* assembly and not the engine's on purpose. `tetanus-engine` keeps an offline
+minimum - the `builtin` source's tools - because it has no session to key the file tools'
+observations on or to fold the feature tools over, and because depending on the assembly would give
+it a dependency on every tool crate, which is the line the paragraph below draws. A case holds the
+engine's default against `builtin`, so neither may grow a private expression of the other's set.
+
 `tetanus-mcp` and `tetanus-web` are the two crates that leave the machine, and both are composed
 into a harness rather than depended on by one: each contributes `tetanus_turn::tools::Tool`
-implementations and reads its own section of the settings document. Everything either of them
+implementations and reads its own section of the settings document. Both are declared as sources
+and contribute nothing until the document names them. Everything either of them
 decides sits above a seam - a `Link` for a server on a pipe, an `HttpTransport` for a request - so
 the whole policy is asserted with no socket in the suite, and a failure out there is a failed tool
 call carrying a class rather than a turn that ended.
-
-`tetanus-toolset` is where a tool crate registers itself, and both the binary and the engine read it,
-so what `tetanus tools` lists and what a turn can dispatch are one list rather than two expressions
-that agree today ([crates/toolset/src/lib.rs](crates/toolset/src/lib.rs)).
-It refuses an assembly in which two sources offer one tool name, because a registry keyed by name
-would otherwise offer the model one tool's schema and run another's body.
 
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.
