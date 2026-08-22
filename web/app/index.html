@@ -100,6 +100,10 @@
  .hint { max-width:920px; margin:8px auto 0; color:var(--muted); font-size:12.5px;
    display:flex; gap:14px; flex-wrap:wrap; }
  .hint .fault { color:var(--red); }
+ /* The chord list is written by `keys.js`. Until it is - and on a page whose
+    script never loaded - it is an empty span, and a flex gap either side of
+    nothing reads as a missing word. */
+ .hint span:empty { display:none; }
  /* The workspace chooser. A dialog rather than a page of its own: picking a
     directory is a question asked in the middle of something else, and a
     reader who is answering it has not left the conversation behind. */
@@ -136,6 +140,9 @@
   <h1>tetanus chat</h1>
   <span class="meta" id="where">connecting…</span>
   <span class="meta" id="who"></span>
+  <!-- The Alt chord each of these answers to is set from `keys.js`, which is
+       also what listens for it: a shortcut named in one file and heard in
+       another is a shortcut that goes stale silently. -->
   <button id="catalogue-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
     models…
   </button>
@@ -204,6 +211,7 @@
   <p class="hint">
     <span id="hint">Waiting for the server.</span>
     <span>Enter sends · Shift+Enter is a new line</span>
+    <span id="chords"></span>
   </p>
 </footer>
 

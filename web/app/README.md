@@ -66,6 +66,21 @@ directory was touched. It consumes
 [docs/interface-contract.md](../../docs/interface-contract.md) and defines nothing of its own; a
 change to the boundary belongs in that document and in `crates/protocol`, never here.
 
+## The keyboard
+
+Every panel opens with Alt and a letter - `Alt+S` sessions, `Alt+T` trace, `Alt+M` models, `Alt+W`
+workspace - and closing one, however it closed, puts the caret back in the composer.
+
+The chord, the panel, the button it goes through and the words the footer prints are one row of
+`CHORDS` in [keys.js](keys.js); the footer line and each button's `aria-keyshortcuts` are written
+from that row rather than typed into the HTML, so a hint cannot name a key nothing listens for.
+A chord is matched on the physical key *or* the character it typed, because Alt is a dead key on
+macOS - `Alt+S` there types `ß` - and matching only the position would send a Dvorak reader to the
+wrong key.
+
+What the browser already does for a `<dialog>` opened with `showModal` is left to the browser:
+focus is trapped inside it, Escape closes it, and the rest of the page is inert.
+
 ## Choosing a workspace directory
 
 The **workspace…** button opens the chooser: two panes, the level and its

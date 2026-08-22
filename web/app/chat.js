@@ -7,6 +7,7 @@ import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
 import { models, tools } from "./catalogue.js";
 import { settings } from "./settings.js";
+import { keyboard } from "./keys.js";
 
 // The client half of the panel: a JSON-RPC 2.0 client over the WebSocket
 // carrier `tetanus serve` hosts, and a renderer for the events it pushes.
@@ -769,3 +770,7 @@ document.getElementById("catalogue-open").onclick = async () => {
   }
 };
 document.getElementById("catalogue-close").onclick = () => catalogueDialog.close();
+
+// Every panel above can now be opened from the keyboard, and closing one puts
+// the caret back in the composer where the reader left it.
+keyboard(document, () => view.asked.focus());
