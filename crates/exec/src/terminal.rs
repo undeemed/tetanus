@@ -612,6 +612,23 @@ impl TerminalSession {
         })
     }
 
+    /// Tell the terminal it is a different shape, the way a terminal emulator
+    /// does when its window is dragged.
+    ///
+    /// Not a tool: a model has no window, and a size it picked would be a
+    /// number it made up. It is here for the surface that *does* have one - a
+    /// presentation showing a live terminal has to be able to say how wide it
+    /// is, or every full-screen program in the session draws for the wrong
+    /// screen.
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
+        Ok(self.pty.resize(rows, cols)?)
+    }
+
+    /// The size the terminal currently reports.
+    pub fn size(&self) -> Result<(u16, u16), TerminalError> {
+        Ok(self.pty.size()?)
+    }
+
     /// Deliver a signal to whichever process group owns the terminal now.
     ///
     /// Answers the group it reached, because "the command was interrupted" and

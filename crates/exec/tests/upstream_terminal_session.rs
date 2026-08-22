@@ -141,6 +141,17 @@ async fn a_program_in_a_terminal_session_believes_it_has_one() {
         "the program read a different size from the one it was given: {:?}",
         seen.viewport
     );
+
+    // And the shape can change afterwards, which is what a surface showing a
+    // live terminal needs: a program that draws a full screen has to be told.
+    session.resize(24, 80).expect("resized");
+    assert_eq!(session.size().expect("measured"), (24, 80));
+    let resized = session.send("stty size", true, None).await.expect("sent");
+    assert!(
+        resized.viewport.contains("24 80"),
+        "the program did not see the resize: {:?}",
+        resized.viewport
+    );
     session.close().await;
 }
 
