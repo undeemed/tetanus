@@ -207,6 +207,26 @@
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
 
+/* --- a page fetched, and a search ---------------------------------------- */
+
+.web-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap;
+  margin-bottom:var(--gap-tight); font:var(--size-small)/1.6 var(--font-code); }
+.web-head a { color:var(--accent); overflow-wrap:anywhere; }
+.web-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-prose); color:var(--text); }
+.web-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.web-sources { margin:var(--gap) 0 0 0; padding-left:var(--gap-block);
+  font:var(--size-small)/1.6 var(--font-prose); }
+.web-sources li { margin:var(--gap-tight) 0; }
+.web-title { color:var(--text); }
+/* The host, beside the title. Muted but present: it is the fact that decides
+   whether to believe a claim, and burying it in the URL below makes a reader
+   parse one to find it. */
+.web-host { margin-left:var(--gap); color:var(--text-muted); font-family:var(--font-code); }
+.web-url { overflow-wrap:anywhere; }
+.web-url a { color:var(--accent); font:var(--size-small)/1.5 var(--font-code); }
+
 /* --- what the run is working toward -------------------------------------- */
 
 .feat, .feat-file { padding:var(--gap-tight) 0; }

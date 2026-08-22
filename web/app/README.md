@@ -113,6 +113,18 @@ The fold also carries a **summary** from the view, because a transcript of a doz
 labelled `read` says nothing about which file. A tool without a view shows its name alone - a
 summary this page invented from arguments it does not understand would be a guess printed as a fact.
 
+A tool bridged from an MCP server is called `mcp__<server>__<tool>`, and the fold spells that
+`<server> · <tool>` with the real name kept on the row's `title`. `crates/mcp` hashes a *server*
+whose own name contains the separator, precisely so that join has exactly one reading.
+
+[tool-web.js](tool-web.js) is `web_fetch` and `web_search`. Two facts are lifted out of the prose
+because a reader would otherwise skim them: **where a fetch ended** - the final URL after redirects,
+so a fetch that landed on a login wall says so on line one, and its `200` is deliberately not toned
+as good - and **which sources a search had**, folded from four prose lines into one row each with
+the host beside the title, since the host is what decides whether to believe a claim. Every URL goes
+through `markdown.js`'s `link`, which keeps the text and withholds the link for anything that is not
+http or https.
+
 [tool-shell.js](tool-shell.js) is the shell **and terminal** families from `crates/exec` - eleven
 tools over one marker table, because that crate says of the terminal family that "they are the same
 markers upstream renders, so a presentation that parses one parses both". Splitting them would

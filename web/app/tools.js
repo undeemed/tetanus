@@ -37,6 +37,7 @@
 import { disclosure, jsonTree, pill } from "./primitives.js";
 import { fileViews } from "./tool-files.js";
 import { shellViews } from "./tool-shell.js";
+import { webViews } from "./tool-web.js";
 
 /**
  * Views by tool name. Empty of everything but the tool this build has, and
@@ -74,6 +75,7 @@ export const views = {
   // one file and not to two.
   ...fileViews,
   ...shellViews,
+  ...webViews,
 };
 
 /**
@@ -148,8 +150,12 @@ export function toolResult(name, content, ok) {
  * screen.
  */
 function frame(kind, name, summary) {
-  const root = disclosure(name, { open: false, tone: kind === "failed" ? "bad" : undefined });
+  const called = bridged(name);
+  const root = disclosure(called.said, { open: false, tone: kind === "failed" ? "bad" : undefined });
   root.classList.add(`tool-${kind}`);
+  // The full name stays reachable: it is the identity the model called and the
+  // one a bug report needs, and only the spelling on the fold is this page's.
+  if (called.said !== name) root.head.title = name;
   if (summary) {
     const aside = document.createElement("span");
     aside.className = "tool-said";
@@ -157,6 +163,26 @@ function frame(kind, name, summary) {
     root.head.append(aside);
   }
   return root;
+}
+
+/**
+ * How a tool's name is spelled on the fold.
+ *
+ * A tool bridged from an MCP server is called `mcp__<server>__<tool>`, and the
+ * prefix exists so "a reader of a catalogue can tell at a glance which tools
+ * are not this harness's own" - which is worth saying once, at the top, rather
+ * than being read out of a mangled identifier on every row. So it is drawn as
+ * `<server> · <tool>`.
+ *
+ * Splitting on `__` is safe rather than convenient: `crates/mcp` hashes a
+ * *server* whose own name contains the separator, precisely so this join has
+ * exactly one reading. A tool name that contains it keeps it, which is why the
+ * tail is rejoined instead of taking the third field.
+ */
+function bridged(name) {
+  const parts = String(name ?? "").split("__");
+  if (parts.length < 3 || parts[0] !== "mcp" || parts[1] === "") return { said: name };
+  return { said: `${parts[1]} \u00b7 ${parts.slice(2).join("__")}` };
 }
 
 /** A block of text from a tool, drawn as text and never as markup. */
