@@ -39,12 +39,24 @@
 //! sessions; editor navigation; modes; plans; titles. Upstream's bridge omits
 //! them too, and each is a phase ②/③ line in `docs/parity.md`.
 
+//! ## Both halves
+//!
+//! [`AcpBridge`] is the agent; [`AcpClient`] is a peer that spawns one and
+//! drives it over real pipes. The client is here rather than in a suite
+//! because a protocol whose only consumer is a test double is a shape nobody
+//! has exercised: the failures that matter - an unanswered
+//! `session/request_permission`, a child that stops speaking, frames
+//! interleaved on one pipe - appear only when a second process is on the other
+//! end.
+
 pub mod bridge;
+pub mod client;
 pub mod content;
 pub mod updates;
 pub mod wire;
 
 pub use bridge::AcpBridge;
+pub use client::{AcpClient, ClientError, Launch, PermissionPolicy, PromptOutcome};
 pub use content::{admit, ContentError};
 pub use updates::updates_of;
 pub use wire::{ContentBlock, SessionUpdate, StopReason, PROTOCOL_VERSION};
