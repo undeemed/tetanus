@@ -73,6 +73,10 @@ crates/mcp        tetanus-mcp        an MCP server on stdio: client, tool bridge
 crates/web        tetanus-web        web_fetch and web_search over one transport seam
 
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
+
+crates/query      tetanus-query      a session journal read as data (§4.13)
+crates/sdk        tetanus-sdk        the in-process client and the request surface as a catalog (§4.13)
+crates/acp        tetanus-acp        the Agent Client Protocol, both halves, over the rpc carrier (§4.13)
 ```
 
 `tetanus-toolset` is the one place that says which tools this build offers. Every tool crate is a
@@ -121,6 +125,11 @@ shape with stable field names instead of this crate's own types.
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
 engine type, so it formats what it is given and the two lanes stay independently reviewable.
+`tetanus-query`, `tetanus-sdk` and `tetanus-acp` sit *above* the contract rather than inside it, and
+nothing in the harness depends on them: they are how something that is not the terminal drives or
+reads a session, so a build without them is the same harness with fewer front doors.
+`tetanus-acp` brings no carrier of its own - it is a `FrameHandler` on the one `tetanus-rpc` already
+serves.
 Nothing depends on `tetanus-hardness`.
 
 ### 4.3 Logical view - composition primitives
@@ -1221,6 +1230,55 @@ model is never offered a tool it may not call - being offered one and refused is
 refusal - and a preset naming a tool the harness does not have is refused where it is used rather
 than quietly narrowed. The persona is a prompt section of its own at order zero, beside what plugins
 contribute rather than replacing them.
+
+### 4.13 Interface view - the external contract surfaces
+
+Three crates are how a caller that is not the terminal drives or reads a session. Each is a
+*consumer* of the contract in §4.8, never a second definition of it, which is what keeps them from
+drifting from what a carrier serves.
+
+`tetanus-query` ([crates/query](crates/query)) reads a journal as data. `session.events` will hand
+any caller every line; what it will not do is answer a question about the lines, so every surface
+that wanted one paged the whole log and folded it by hand. The fold is written once here. Position
+is *derived*, not carried: contract section 4.3.1 puts `turn` and `step` on the structural events
+and on nothing else, so a `tool/call` names no turn, and one forward pass works the boundaries out
+and hangs them on every event ([crates/query/src/journal.rs](crates/query/src/journal.rs)). Adding
+the fields to the journal instead would be a wire change for something the order of the lines
+already implies. Filters AND their clauses and OR their values, an absent clause and an empty one
+ask different questions, and three aggregates are named because they are the questions asked most:
+every tool call paired to its result, every turn a named tool failed in, and what a range of turns
+cost. It opens no file: it reads through `EventSource`, which the engine already satisfies, so one
+query runs in process and over a carrier.
+
+`tetanus-sdk` ([crates/sdk](crates/sdk)) is the same operations, typed, with no process boundary in
+the way. `Client` is the protocol client - one method per contract call, the handshake enforced
+exactly as a carrier enforces it, subscriptions it closes on the way out. `Harness` is the owned-run
+API over it, and it exists for one ordering bug: the subscription has to be open *before* the
+prompt or the first events are already gone. `gateway`
+([crates/sdk/src/gateway.rs](crates/sdk/src/gateway.rs)) is the request surface as data - the
+codec's `match` over method names cannot be enumerated, so nothing else can answer "what calls are
+there and what arguments do they take" - and it validates a call's named arguments against that
+answer before dispatching. The SDK holds an `Arc<dyn Engine>` and calls it, so a test drives the
+code path a carrier drives and the two cannot serve different contracts.
+
+`tetanus-acp` ([crates/acp](crates/acp)) speaks the Agent Client Protocol, both halves.
+`AcpBridge` ([crates/acp/src/bridge.rs](crates/acp/src/bridge.rs)) is the agent: initialize,
+`session/new`, `session/prompt`, a one-way cancel, and the turn rendered as `session/update`
+notifications carrying committed assistant messages and tool activity. It is a
+`tetanus_rpc::FrameHandler`, not a carrier - ACP is JSON-RPC 2.0 over stdio, which is a carrier this
+workspace already has, and a second one would be a second place for framing to be wrong. The ACP
+session id *is* the engine's session id, so an operator holding one can find its journal and there
+is no mapping table to fall out of step. `AcpClient` ([crates/acp/src/client.rs](crates/acp/src/client.rs))
+is the peer that spawns an agent and drives it: it answers `session/request_permission` rather than
+only sending, because an agent that asked and got nothing waits for ever; it demultiplexes
+responses, notifications and inbound requests from one pipe with one reader; every call and the
+teardown carry a deadline, because a child that has stopped answering looks exactly like a model
+thinking; and closing walks stdin-EOF to kill so no child is left behind.
+
+What these do not cover is named rather than implied: image and audio prompts wait on the durable
+attachment store, ACP session load, fork and resume are unbuilt, and the bridge's permission channel
+has no engine-side approval seam to be driven from yet
+([docs/parity-updates/acp-surfaces.md](docs/parity-updates/acp-surfaces.md)).
 
 ## 5. Verification - the conformance approach
 

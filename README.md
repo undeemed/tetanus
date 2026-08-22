@@ -54,7 +54,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | --- | --- | --- |
 | Turn flow | The complete documented sequence, `turn/start` through `turn/end`, driven end to end | Continuation after a stop veto |
 | Extension points | Eight live extension points in a turn, over the four dispatch modes upstream documents | Capability seams (`fs/*`, telemetry) |
-| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited; a SQLite store behind the same seam, chosen by `sessions.backend`, with a lossless migration either way | Session query, telemetry |
+| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited; a SQLite store behind the same seam, chosen by `sessions.backend`, with a lossless migration either way; the journal read back as data - turn and step derived from the structural events, filters by turn, step, role, tool, time, outcome and text, paging by `seq`, and named aggregates for tool calls, a tool's failing turns and what a range of turns cost | Telemetry, full-text search and its cursors |
 | Context | A conversation that outgrows its window folds its older span into a summary recorded on the journal, so a replay derives the compacted history; over-long tool results shrink first, without a model | Manual compaction, per-model policy |
 | Projections | Named folds over the journal, driven as events commit and checkpointed: title, stats, token usage, context pressure, context breakdown | Telemetry, log export |
 | Secrets and spill | A credential store outside the settings document - the environment over an owner-only file - whose values reach no dump, log line or journal; oversized payloads spill to disk behind a bounded preview | Wiring spill into the tool pipeline |
@@ -70,6 +70,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home - or the one `--settings <path>` names - re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
 | Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal, and `tetanus chat --ui` for that conversation held on a screen of its own - transcript above, the line you type on pinned to the foot of it; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `tetanus serve --frontend`, the browser panel served by the harness's own HTTP host, with the protocol on the same address | A history to walk with the up and down keys; a turn stopped without leaving the chat |
+| Contract surfaces | An ACP bridge riding the JSON-RPC carrier - initialize, `session/new`, `session/prompt`, one-way cancel, the turn as `session/update` - and an ACP client that spawns one and drives a whole turn over pipes, answering its permission questions; an in-process SDK that drives the same turn with no CLI and no socket; the request surface as an enumerable catalog that validates named arguments before dispatch | Image and audio prompts, ACP session load/fork/resume, an engine-side approval seam for the permission channel |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -253,7 +254,7 @@ That server has no end of file to stop it, so Ctrl-C is the shutdown and it exit
 
 ## Workspace layout
 
-A Cargo workspace of nineteen crates.
+A Cargo workspace of twenty-two crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
@@ -275,6 +276,9 @@ A Cargo workspace of nineteen crates.
 | `tetanus-subagent` | [crates/subagent](crates/subagent) | Delegation: an agent that starts another, and the budget that stops the recursion |
 | `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, the whole-screen frame and the scrollable page on it, held terminal and loop a full-screen view runs in |
 | `tetanus-features` | [crates/features](crates/features) | The built-in feature tools: skill, todo, goal, plan, feedback, attachment and workspace |
+| `tetanus-query` | [crates/query](crates/query) | A session journal read as data: derived turn and step, filters, paging, and the named aggregates |
+| `tetanus-sdk` | [crates/sdk](crates/sdk) | The in-process client and owned-run API, and the request surface as an enumerable catalog |
+| `tetanus-acp` | [crates/acp](crates/acp) | The Agent Client Protocol, both halves - the bridge riding the JSON-RPC carrier, and the client that drives one |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |
 
 The binary is `tetanus`; the publishable umbrella crate is `tetanus-hardness`, because the bare

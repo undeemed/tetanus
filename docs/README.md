@@ -24,6 +24,9 @@ This directory holds the documents that go deeper than the root files.
 - *What is still missing against upstream, and when does it land?* -
   [parity.md](parity.md) sections 3 and 4.
 - *Which crate owns what?* - [ARCHITECTURE.md](../ARCHITECTURE.md) section 4.2.
+- *How does something that is not the terminal drive or read a session?* -
+  [ARCHITECTURE.md](../ARCHITECTURE.md) section 4.13, for the ACP bridge and its client, the
+  in-process SDK and the request catalog, and the journal read as data.
 - *What does "parity with upstream" mean here, and what is out of scope?* -
   [PLAN.md](PLAN.md) and [parity.md](parity.md) section 5, plus
   [ARCHITECTURE.md](../ARCHITECTURE.md) section 7.
