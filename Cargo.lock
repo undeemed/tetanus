@@ -1657,6 +1657,7 @@ dependencies = [
  "tempfile",
  "tetanus-core",
  "tetanus-session",
+ "tetanus-turn",
  "tokio",
 ]
 

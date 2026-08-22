@@ -9,6 +9,8 @@ regex.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 tetanus-session = { path = "../session" }
+tetanus-core = { path = "../core" }
+tetanus-turn = { path = "../turn" }
 
 [dev-dependencies]
 tetanus-core = { path = "../core" }

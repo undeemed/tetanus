@@ -1,0 +1,444 @@
+//! Registering the hook protocol against a running turn.
+//!
+//! Every other module in this crate is pure: it decides which hooks match,
+//! what is written to them, what they may write back, and how several answers
+//! combine. None of it knows a turn is happening. This is the part that does —
+//! it binds those decisions to `crates/turn`'s extension points, which is the
+//! whole of what upstream calls a bridge.
+//!
+//! # The two tool points, and why they are one hook run
+//!
+//! `PreToolUse` has two jobs that land at different places in the pipeline. A
+//! hook may **rewrite** the call, which belongs at `tools/pre-execute` because
+//! that event's answer *is* the call that then runs; and it may **forbid** the
+//! call, which belongs at `tools/permission`, the seam that can refuse one.
+//! The pipeline runs them in that order, `tools/pre-execute` then
+//! `tools/permission`, so that a decision is taken about what would actually
+//! run rather than about what the model first asked for.
+//!
+//! Running the hooks twice — once for the rewrite and once for the refusal —
+//! would be wrong twice over: a hook is a program with side effects, so a
+//! deployment's audit log would double, and the two runs could disagree, which
+//! would leave the call rewritten by one answer and judged by another. So the
+//! hooks run **once**, at `tools/pre-execute`, and the answer they gave is held
+//! for the `tools/permission` listener that immediately follows.
+//!
+//! [`PendingDecisions`] is that hold. It is keyed by call id, which is unique
+//! within a step, and each entry is taken exactly once by the listener that
+//! consumes it. A parallel group is safe because its calls have distinct ids.
+//! An entry that is never taken is a call that never reached the gate, which
+//! happens when an earlier call in the group faulted; those are swept when the
+//! turn ends rather than left to grow.
+//!
+//! # What a missing answer means
+//!
+//! Absent is not permissive. If the gate finds no held decision it leaves the
+//! declared permission exactly as it was, rather than treating the absence as
+//! an approval — a bridge that failed to run must not read as a bridge that
+//! allowed. The only thing that can lower a permission here is nothing at all:
+//! [`crate::types::MergedDecision::Allow`] leaves the declared answer alone,
+//! because a hook saying "I permit this" is not a hook saying "and nobody else
+//! may object".
+//!
+//! Parity: upstream `packages/hooks/hooks-claude-code/src/index.ts` and
+//! `packages/hooks/hooks-codex/src/index.ts`, the registration half.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tetanus_session::SessionLog;
+use tetanus_turn::events::{PostToolDecision, ToolsPermission, ToolsPostExecute, ToolsPreExecute};
+use tetanus_turn::llm::Message;
+use tetanus_turn::tools::{Permission, ToolCall};
+
+use crate::events::{
+    append_hook_invoked, append_hook_result, HookDialect, HookInvocation, HookResultRecord,
+};
+use crate::matcher::{matches_matcher, MatcherMode};
+use crate::merge::merge_hook_outputs;
+use crate::payload::{PayloadContext, ToolCallFacts};
+use crate::runner::{run_hook, HookExecutor, RunHookOptions, DEFAULT_HOOK_TIMEOUT_MS};
+use crate::types::{HookOutput, MergedDecision, MergedHookOutcome};
+use crate::MatcherGroup;
+
+/// The reference cap for a recorded stderr summary, when a deployment names
+/// none.
+pub const DEFAULT_STDERR_SUMMARY_MAX_CHARS: usize = 2000;
+
+/// What a bridge needs to run one dialect's hooks.
+pub struct BridgeConfig {
+    /// The dialect being spoken, which decides payload shape and whether
+    /// stdin ends with a newline.
+    pub dialect: HookDialect,
+    /// The `PreToolUse` groups, in configuration order.
+    pub pre_tool_use: Vec<MatcherGroup>,
+    /// The `PostToolUse` groups, in configuration order.
+    pub post_tool_use: Vec<MatcherGroup>,
+    /// The facts every payload is built from.
+    pub context: PayloadContext,
+    /// The model name, which only Codex payloads carry.
+    pub model: String,
+    /// How much of a hook's stderr is kept on `hook/result`.
+    pub stderr_summary_max_chars: usize,
+}
+
+impl BridgeConfig {
+    /// A config for one dialect with no hooks configured, to be filled in.
+    pub fn new(dialect: HookDialect, context: PayloadContext) -> Self {
+        Self {
+            dialect,
+            pre_tool_use: Vec::new(),
+            post_tool_use: Vec::new(),
+            context,
+            model: String::new(),
+            stderr_summary_max_chars: DEFAULT_STDERR_SUMMARY_MAX_CHARS,
+        }
+    }
+
+    /// Whether a hook's stdin ends with a newline. Claude Code sends one,
+    /// Codex does not, and this is the whole of that difference.
+    fn trailing_newline(&self) -> bool {
+        matches!(self.dialect, HookDialect::ClaudeCode)
+    }
+
+    /// How this dialect reads a matcher pattern. The two disagree, and
+    /// `crates/hooks/src/matcher.rs` says where.
+    fn matcher_mode(&self) -> MatcherMode {
+        match self.dialect {
+            HookDialect::ClaudeCode => MatcherMode::ClaudeCode,
+            HookDialect::Codex => MatcherMode::Codex,
+        }
+    }
+}
+
+/// One `PreToolUse` answer, held between the rewrite point and the gate.
+///
+/// See the module note: the hooks run once, and this is where their answer
+/// waits for the listener that can act on the forbidding half of it.
+#[derive(Debug, Default)]
+pub struct PendingDecisions {
+    by_call: Mutex<HashMap<String, MergedHookOutcome>>,
+}
+
+impl PendingDecisions {
+    /// Hold one call's answer, replacing any answer already held for it.
+    ///
+    /// Replacing rather than refusing: a retried call reuses its id, and the
+    /// later run is the one that describes what is about to happen.
+    pub fn put(&self, call_id: &str, outcome: MergedHookOutcome) {
+        self.by_call
+            .lock()
+            .expect("pending")
+            .insert(call_id.to_owned(), outcome);
+    }
+
+    /// Take one call's answer. A second take finds nothing, which is what
+    /// stops one hook run deciding two calls.
+    pub fn take(&self, call_id: &str) -> Option<MergedHookOutcome> {
+        self.by_call.lock().expect("pending").remove(call_id)
+    }
+
+    /// Drop every held answer. The turn is over, so a call that never reached
+    /// the gate never will.
+    pub fn clear(&self) {
+        self.by_call.lock().expect("pending").clear();
+    }
+
+    /// How many answers are held, for a caller checking nothing has leaked.
+    pub fn len(&self) -> usize {
+        self.by_call.lock().expect("pending").len()
+    }
+
+    /// Whether nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The hooks one point selects for one tool name, with the pattern that chose
+/// each - the pattern is part of the audit, so it travels with the hook.
+fn selected<'a>(
+    groups: &'a [MatcherGroup],
+    tool_name: &str,
+    mode: MatcherMode,
+) -> Vec<(&'a MatcherGroup, &'a crate::runner::CommandHook)> {
+    groups
+        .iter()
+        .filter(|group| matches_matcher(group.matcher.as_deref(), tool_name, mode))
+        .flat_map(|group| group.hooks.iter().map(move |hook| (group, hook)))
+        .collect()
+}
+
+/// Run every selected hook at one point and fold their answers into one.
+///
+/// The audit pair is written per hook and around the run, so a hook that
+/// never returns still leaves `hook/invoked` on the journal - which is the
+/// only way a reader can tell a hook that hung from a hook that was never
+/// selected.
+#[allow(clippy::too_many_arguments)]
+async fn run_point(
+    config: &BridgeConfig,
+    executor: &dyn HookExecutor,
+    log: &dyn SessionLog,
+    clock: &(dyn Fn() -> u64 + Send + Sync),
+    groups: &[MatcherGroup],
+    point: &str,
+    tool_name: &str,
+    payload: Value,
+    turn: u64,
+) -> (MergedHookOutcome, Vec<HookOutput>) {
+    let chosen = selected(groups, tool_name, config.matcher_mode());
+    if chosen.is_empty() {
+        return (MergedHookOutcome::default(), Vec::new());
+    }
+    let mut outputs = Vec::with_capacity(chosen.len());
+    for (index, (group, hook)) in chosen.iter().enumerate() {
+        let handler_id = format!("{point}-{turn}-{index}");
+        let invocation = HookInvocation {
+            turn,
+            point: point.to_owned(),
+            dialect: config.dialect,
+            handler_id: handler_id.clone(),
+            matcher: group.matcher.clone(),
+        };
+        // A journal that refuses the audit must not take the turn down: a
+        // hook is a deployment's configuration, and the loudest correct
+        // answer here is to run it anyway and let the result speak.
+        let _ = append_hook_invoked(log, &invocation);
+
+        let result = run_hook(
+            executor,
+            hook,
+            RunHookOptions {
+                payload: payload.clone(),
+                env: None,
+                cwd: Some(config.context.cwd.clone()),
+                trailing_newline: config.trailing_newline(),
+                default_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
+                expected_event: Some(point),
+            },
+            clock,
+        )
+        .await;
+
+        let _ = append_hook_result(
+            log,
+            &HookResultRecord {
+                turn,
+                point: point.to_owned(),
+                handler_id,
+                output: result.output.clone(),
+                stderr_summary_max_chars: config.stderr_summary_max_chars,
+                duration_ms: result.duration_ms,
+            },
+        );
+        outputs.push(result.output);
+    }
+    let merged = merge_hook_outputs(&outputs);
+    (merged, outputs)
+}
+
+/// The facts a tool payload is built from, taken off the call the pipeline
+/// holds.
+fn facts(call: &ToolCall) -> ToolCallFacts {
+    ToolCallFacts {
+        tool_name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        tool_use_id: call.id.clone(),
+    }
+}
+
+/// Apply a `PreToolUse` rewrite to the call that is about to run.
+///
+/// Taken from the individual answers rather than the merged one, because
+/// [`merge_hook_outputs`] deliberately has no opinion here: merging is
+/// most-restrictive-wins, and there is no such thing as a more restrictive
+/// rewrite. Two hooks rewriting one call is a configuration mistake either
+/// way, so the bridge has to state a rule rather than inherit one, and the
+/// rule is that the last hook to supply a rewrite wins - hooks run in
+/// configuration order, and a later entry overriding an earlier one is what
+/// every other layered configuration in this workspace does.
+///
+/// Only the rewrite half: the forbidding half is [`permission_from`], applied
+/// at the gate.
+pub fn apply_updated_input(call: &mut ToolCall, outputs: &[HookOutput]) {
+    if let Some(updated) = outputs
+        .iter()
+        .rev()
+        .find_map(|output| output.updated_input.as_ref())
+    {
+        call.arguments = Value::Object(updated.clone());
+    }
+}
+
+/// Turn a merged `PreToolUse` answer into the permission it implies.
+///
+/// `None` means the hooks said nothing about permission, and the declared
+/// answer stands unchanged. An `Allow` also leaves it unchanged: a hook
+/// saying "I permit this" is not a hook saying "and nobody else may object",
+/// and letting it lower the declared answer would let a hook un-gate a call a
+/// tool author deliberately gated.
+pub fn permission_from(outcome: &MergedHookOutcome) -> Option<Permission> {
+    let reason = outcome
+        .reason
+        .clone()
+        .unwrap_or_else(|| "a hook forbade this call".to_owned());
+    match outcome.decision {
+        MergedDecision::None | MergedDecision::Allow => None,
+        MergedDecision::Ask => Some(Permission::ask(reason)),
+        MergedDecision::Deny => Some(Permission::deny(reason)),
+    }
+}
+
+/// Turn a merged `PostToolUse` answer into the contexts it contributes.
+///
+/// Each hook's text becomes its own message rather than one joined blob: they
+/// came from different programs, and joining them would invent a single voice
+/// for several unrelated notes.
+pub fn contexts_from(outcome: &MergedHookOutcome) -> Vec<Message> {
+    outcome
+        .additional_context
+        .iter()
+        .filter(|text| !text.trim().is_empty())
+        .map(Message::user)
+        .collect()
+}
+
+/// Everything the two tool listeners share.
+pub struct ToolHooks {
+    pub config: BridgeConfig,
+    pub executor: Arc<dyn HookExecutor>,
+    pub log: Arc<dyn SessionLog>,
+    pub pending: Arc<PendingDecisions>,
+    /// The clock the audit's durations are measured on, injected so a case can
+    /// assert a duration rather than tolerate one.
+    pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl ToolHooks {
+    /// Run `PreToolUse` for one call: rewrite it, and hold the answer for the
+    /// gate that follows.
+    pub async fn pre_tool_use(&self, turn: u64, call: &mut ToolCall) {
+        let call_facts = facts(call);
+        let payload = match self.config.dialect {
+            HookDialect::ClaudeCode => {
+                crate::payload::claude_pre_tool(&self.config.context, &call_facts)
+            }
+            HookDialect::Codex => crate::payload::codex_pre_tool(
+                &self.config.context,
+                &self.config.model,
+                &call_facts,
+            ),
+        };
+        let outcome = run_point(
+            &self.config,
+            self.executor.as_ref(),
+            self.log.as_ref(),
+            self.clock.as_ref(),
+            &self.config.pre_tool_use,
+            "PreToolUse",
+            &call.name,
+            payload,
+            turn,
+        )
+        .await;
+        let (outcome, outputs) = outcome;
+        apply_updated_input(call, &outputs);
+        self.pending.put(&call.id, outcome);
+    }
+
+    /// The permission the held `PreToolUse` answer implies for one call.
+    pub fn gate(&self, call_id: &str, declared: Permission) -> Permission {
+        // Absent is not permissive: a bridge that did not run leaves the
+        // declared answer exactly as it was.
+        let Some(outcome) = self.pending.take(call_id) else {
+            return declared;
+        };
+        match permission_from(&outcome) {
+            Some(from_hook) => declared.most_restrictive(from_hook),
+            None => declared,
+        }
+    }
+
+    /// Run `PostToolUse` for one settled call and return the contexts it
+    /// contributed.
+    pub async fn post_tool_use(&self, turn: u64, call: &ToolCall, response: &str) -> Vec<Message> {
+        let call_facts = facts(call);
+        let payload = match self.config.dialect {
+            HookDialect::ClaudeCode => {
+                crate::payload::claude_post_tool(&self.config.context, &call_facts, response)
+            }
+            HookDialect::Codex => crate::payload::codex_post_tool(
+                &self.config.context,
+                &self.config.model,
+                &call_facts,
+                response,
+            ),
+        };
+        let outcome = run_point(
+            &self.config,
+            self.executor.as_ref(),
+            self.log.as_ref(),
+            self.clock.as_ref(),
+            &self.config.post_tool_use,
+            "PostToolUse",
+            &call.name,
+            payload,
+            turn,
+        )
+        .await;
+        contexts_from(&outcome.0)
+    }
+}
+
+/// Register the two tool points on a bus, returning the handles that keep them
+/// installed.
+///
+/// Dropping the handles takes the bridge back out, which is what makes a
+/// deployment able to reload its hook configuration without restarting.
+pub fn install_tool_hooks(
+    bus: &tetanus_core::EventBus,
+    hooks: Arc<ToolHooks>,
+) -> Vec<tetanus_core::EffectHandle> {
+    let rewrite = {
+        let hooks = Arc::clone(&hooks);
+        bus.on_waterfall::<ToolsPreExecute, _>(move |ev, next| {
+            let hooks = Arc::clone(&hooks);
+            Box::pin(async move {
+                let turn = ev.turn;
+                hooks.pre_tool_use(turn, &mut ev.call).await;
+                next.run(ev).await
+            })
+        })
+    };
+    let gate = {
+        let hooks = Arc::clone(&hooks);
+        bus.on_waterfall::<ToolsPermission, _>(move |ev, next| {
+            let hooks = Arc::clone(&hooks);
+            let call_id = ev.call.id.clone();
+            Box::pin(async move {
+                let downstream = next.run(ev).await;
+                hooks.gate(&call_id, downstream)
+            })
+        })
+    };
+    let after = {
+        let hooks = Arc::clone(&hooks);
+        bus.on_waterfall::<ToolsPostExecute, _>(move |ev, next| {
+            let hooks = Arc::clone(&hooks);
+            let turn = ev.turn;
+            let call = ev.call.clone();
+            Box::pin(async move {
+                let downstream: PostToolDecision = next.run(ev).await;
+                let content = downstream.outcome.content.clone();
+                let mut decision = downstream;
+                decision
+                    .additional_contexts
+                    .extend(hooks.post_tool_use(turn, &call, &content).await);
+                decision
+            })
+        })
+    };
+    vec![rewrite, gate, after]
+}

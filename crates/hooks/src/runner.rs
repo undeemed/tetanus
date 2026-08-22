@@ -123,7 +123,10 @@ pub async fn run_hook(
     executor: &dyn HookExecutor,
     hook: &CommandHook,
     options: RunHookOptions<'_>,
-    clock: &dyn Fn() -> u64,
+    // `Send + Sync` because a bridge calls this from inside a bus listener,
+    // whose future must be `Send`; a bare `dyn Fn` is neither, which made the
+    // runner unusable from the one caller it exists for.
+    clock: &(dyn Fn() -> u64 + Send + Sync),
 ) -> RunHookResult {
     let started = clock();
 
