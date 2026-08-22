@@ -1034,6 +1034,17 @@ the seam guarantees: the peer leads its own process group and is ended over that
 that starts helpers of its own does not leave them behind. `crates/mcp` starts its servers through
 it and keeps only the framing.
 
+`hooks::ShellHookExecutor` ([crates/exec/src/hooks.rs](crates/exec/src/hooks.rs)) is the third
+consumer of the same machinery, and it exists because
+[crates/hooks](crates/hooks) deliberately owns no process: that crate decides which hook fires and
+what its exit status means, and declares a narrow `HookExecutor` for the running. A hook is a
+deployment's program rather than a model's, which is what shapes the two defaults that differ from a
+tool call - the environment is a named list rather than a scrub, because nothing here is inherited
+and a denylist exposes every credential added after it was written; and the timeout ceiling is the
+hook protocol's ten minutes rather than the shell tool's, because clamping a configured hook to a
+model command's budget would shorten it silently. Where a hook fires is the hook protocol's own
+question and is not answered here.
+
 `backend::ShellBackend` ([crates/exec/src/backend.rs](crates/exec/src/backend.rs)) is which shell a
 command goes through. `Bash` and `PowerShell` ship; a backend whose binary is absent refuses,
 naming the program and where it looked, and never substitutes another shell - a bash script run

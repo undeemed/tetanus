@@ -264,7 +264,7 @@ A Cargo workspace of fifteen crates.
 | `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, the settings document it reads, and the credential store that deliberately is not in it |
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
-| `tetanus-exec` | [crates/exec](crates/exec) | Process execution: the subprocess seam and its process-group termination, the piped seam a protocol peer is started through, the shell backends, persistent shells and terminals, and the model-facing shell and terminal tools |
+| `tetanus-exec` | [crates/exec](crates/exec) | Process execution: the subprocess seam and its process-group termination, the piped seam a protocol peer is started through, the executor a configured hook runs through, the shell backends, persistent shells and terminals, and the model-facing shell and terminal tools |
 | `tetanus-sandbox` | [crates/sandbox](crates/sandbox) | The sandbox policy every surface applies, and the Landlock backend that enforces it |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
 | `tetanus-host` | [crates/host](crates/host) | The HTTP route carrier the web GUI rides on: named routes, one fallback seat, upgrade seats, and the directory picker behind them |
