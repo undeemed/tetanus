@@ -5,6 +5,8 @@
 //!   environment the caller listed, a working directory, captured stdio, an
 //!   exit status or a signal, incremental output, and a termination that
 //!   reaches the whole process group rather than one child.
+//! - [`hooks`] runs a deployment's configured hooks through the same seam, so
+//!   an out-of-process hook is a real child with a real process group.
 //! - [`piped`] is a child this process talks to rather than waits for: a
 //!   protocol peer on stdio, ended over its own process group so what it
 //!   started goes with it.
@@ -32,6 +34,7 @@
 //! what is served and what is not.
 
 pub mod backend;
+pub mod hooks;
 pub mod piped;
 pub mod proc;
 #[cfg(target_os = "linux")]

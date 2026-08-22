@@ -17,6 +17,9 @@ tetanus-turn = { path = "../turn" }
 # it. One store for the workspace, so an operator finds one kind of artifact.
 tetanus-core = { path = "../core" }
 tetanus-sandbox = { path = "../sandbox" }
+# The hook protocol owns which hook fires and what its exit code means, and
+# deliberately owns no process; `src/hooks.rs` is the executor it asks for.
+tetanus-hooks = { path = "../hooks" }
 
 [target.'cfg(unix)'.dependencies]
 # The one thing the standard library will not do: signal a process *group*.
@@ -32,6 +35,7 @@ serde_json = { workspace = true }
 # The tool suites drive a real turn: a booted engine, a real journal, and a
 # scripted adapter standing in for the model.
 tetanus-session = { path = "../session" }
+tetanus-core = { path = "../core" }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The suites ask the kernel whether a process is still there (signal zero),
