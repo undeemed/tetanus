@@ -226,6 +226,47 @@ impl Event for ToolsExecute {
     type Output = Result<ToolOutcome, ToolError>;
 }
 
+/// What a `tools/post-execute` listener leaves for the loop.
+///
+/// Two things, because a listener has two different things to say. The
+/// `outcome` is what the *model* reads as this call's result. The contexts are
+/// what the loop should put in front of the model *next*, which is not the
+/// same thing and must not be smuggled into the result: a guard that appended
+/// "you have called this five times" to a tool's output would be corrupting
+/// the tool's answer to make a point about the caller, and a tool author
+/// parsing that output back would find a sentence nobody wrote.
+///
+/// Parity: upstream's `PostToolDecision.additionalContexts`, which its
+/// repeat-tool guard and its hook bridges both write and nothing else reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostToolDecision {
+    pub outcome: ToolOutcome,
+    /// Messages to deliver at the next step boundary, in the order given.
+    ///
+    /// They ride the *decision* rather than being appended by the listener,
+    /// so a call whose result is never committed - one behind an earlier
+    /// call's fault - contributes no context either. A listener that wrote
+    /// straight to the journal could not be held to that.
+    pub additional_contexts: Vec<crate::llm::Message>,
+}
+
+impl PostToolDecision {
+    /// The decision that changes nothing: this outcome, no context.
+    pub fn keep(outcome: ToolOutcome) -> Self {
+        Self {
+            outcome,
+            additional_contexts: Vec::new(),
+        }
+    }
+
+    /// Put one message in front of the model at the next boundary, keeping
+    /// whatever a later listener already asked for.
+    pub fn with_context(mut self, message: crate::llm::Message) -> Self {
+        self.additional_contexts.push(message);
+        self
+    }
+}
+
 /// Accept, block, replace, or add context to the result before it is logged.
 pub struct ToolsPostExecute {
     pub turn: u64,
@@ -235,7 +276,7 @@ pub struct ToolsPostExecute {
 impl Event for ToolsPostExecute {
     const TOPIC: &'static str = "tools/post-execute";
     const MODE: DispatchMode = DispatchMode::Waterfall;
-    type Output = ToolOutcome;
+    type Output = PostToolDecision;
 }
 
 /// A listener bails here to hold a turn open. Phase ① records the veto on

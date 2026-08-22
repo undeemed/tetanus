@@ -480,6 +480,36 @@ pub struct Claimed {
     pub notifications: Vec<InboxNotification>,
 }
 
+/// The events a journal wrote itself, with any fork seed skipped.
+///
+/// A fork copies its parent's events in as a seed (contract section 4.4.6),
+/// and those include the parent's inbox splices. Folding them would put, in
+/// the child, prompts a person queued for the parent and may already have seen
+/// answered - and worse, those coordinates were normalized against the
+/// parent's queue, so the child would reconstruct a list neither session had.
+///
+/// The header's own layout is the authority: `seq 0` is the child's header,
+/// `seq 1 ..= fork_seq` are the copied events, and the child's own work starts
+/// after them. The `session/start` name is spelled here rather than imported
+/// because `crates/engine` owns that header type and depends on this crate,
+/// not the other way round; a journal whose first event is anything else has
+/// no seed to skip and is returned whole.
+pub fn own_suffix(events: &[SessionEvent]) -> &[SessionEvent] {
+    let Some(first) = events.first() else {
+        return events;
+    };
+    if first.ty != "session/start" {
+        return events;
+    }
+    let Some(fork_seq) = first.data.get("fork_seq").and_then(|v| v.as_u64()) else {
+        return events;
+    };
+    // Saturating rather than trusting the number: the boundary is read off a
+    // file, and one past the end must yield an empty suffix rather than panic.
+    let start = (fork_seq as usize).saturating_add(1).min(events.len());
+    &events[start..]
+}
+
 /// A negative start counts back from the end; anything past either end lands
 /// on it. Saturating, because a caller that computed `i64::MIN` still means
 /// "the front".

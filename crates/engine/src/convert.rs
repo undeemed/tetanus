@@ -11,6 +11,7 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as wire;
 use tetanus_session::SessionError;
 use tetanus_turn::approval::ApprovalError;
+use tetanus_turn::inbox::InboxError;
 use tetanus_turn::llm::LlmError;
 use tetanus_turn::TurnError;
 
@@ -134,6 +135,23 @@ pub fn turn_error(
         // question it had no right to ask, which §4.4.7 says is `Internal`.
         TurnError::Approval(ApprovalError::Log(e)) => journal_error(session_id, journal, e),
         TurnError::Approval(e) => internal(format!("a tool-call decision failed: {e}")),
+        // The queue of waiting input, and the same three-way split the rest of
+        // this table makes: what the reader does next differs by cause. A
+        // refused append is the journal failing and reads as one. A splice
+        // that does not apply is the journal *damaged*, so it takes the code a
+        // corrupt line takes and carries the seq for the same reason that one
+        // carries the line - it is the only place to look. A duplicate
+        // identity is neither: this build minted an id it had already used, so
+        // there is nothing for the reader to do but report it.
+        TurnError::Inbox(InboxError::Journal(message)) => RpcError::new(
+            ErrorCode::Io,
+            format!("the journal refused queued input: {message}"),
+        ),
+        TurnError::Inbox(e @ InboxError::InvalidPersisted { seq, .. }) => {
+            RpcError::new(ErrorCode::LogCorrupt, e.to_string())
+                .with_data(serde_json::json!({ "session_id": session_id, "seq": seq }))
+        }
+        TurnError::Inbox(e) => internal(format!("queued input could not be served: {e}")),
         TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
             RpcError::new(
                 ErrorCode::MissingCredential,

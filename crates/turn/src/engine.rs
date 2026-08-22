@@ -39,10 +39,11 @@ use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalSe
 use crate::boot::{InterruptService, LlmService, PromptService, SessionService, ToolsService};
 use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
-    AgentRequest, AssemblePrompt, LlmStream, PreStep, PreStepDecision, RequestError,
-    RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute, ToolsPostExecute,
-    ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
+    AgentRequest, AssemblePrompt, LlmStream, PostToolDecision, PreStep, PreStepDecision,
+    RequestError, RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute,
+    ToolsPostExecute, ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
 };
+use crate::inbox::{Inbox, InboxError, InboxTarget, PendingMessage};
 use crate::interrupt::Interrupt;
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, Message, ModelRequest, ModelResponse, StreamChunk,
@@ -58,6 +59,11 @@ use crate::tools::{
 pub enum TurnError {
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// The queue of waiting input would not fold, so this engine cannot say
+    /// what a person had already typed. Running with an empty queue would drop
+    /// it silently, which is the one outcome the queue exists to prevent.
+    #[error(transparent)]
+    Inbox(#[from] InboxError),
     /// The assembly could not be rendered, so the step never asked anything.
     /// A section named a variable this assembly could not give it, which is a
     /// mistake in what a plugin registered rather than anything the model or
@@ -219,6 +225,14 @@ pub struct TurnEngine {
     /// wait between attempts is the exception - it is cut short, because it
     /// is time the turn was spending on nothing.
     interrupt: Arc<Interrupt>,
+    /// The queue of input that arrived while a turn was running
+    /// ([`crate::inbox`]). One per engine, because it is this session's
+    /// journal it is folded from and this session's loop that claims it.
+    ///
+    /// Folded from the journal's own suffix at construction, so a resumed
+    /// session keeps what was waiting when it stopped - which is the whole
+    /// reason the queue is durable rather than a field on the running loop.
+    inbox: Mutex<Inbox>,
 }
 
 impl TurnEngine {
@@ -237,6 +251,11 @@ impl TurnEngine {
         let base = prompt.seed_base(config.base_prompt.clone());
         let approvals =
             ApprovalService::new(ctx.bus.clone(), Arc::clone(&log), config.approval_policy);
+        // A journal that will not fold is a journal this engine cannot serve:
+        // running with an empty queue would silently drop input a person is
+        // still waiting on, so the failure is reported rather than absorbed.
+        let events = log.events();
+        let inbox = Inbox::replay(crate::inbox::own_suffix(&events))?;
         Ok(Self {
             llm: ctx.services.require::<LlmService>()?,
             tools: ctx.services.require::<ToolsService>()?,
@@ -252,6 +271,7 @@ impl TurnEngine {
             // one otherwise, which is every composition with nothing outside
             // the process to stop.
             interrupt: ctx.services.get::<InterruptService>().unwrap_or_default(),
+            inbox: Mutex::new(inbox),
         })
     }
 
@@ -488,10 +508,25 @@ impl TurnEngine {
         loop {
             let step = progress.steps + 1;
 
+            // The step boundary is where waiting input joins the turn: a
+            // `tools/post-execute` context accepted while the last step ran,
+            // or steering a person typed. It goes behind the batch already
+            // claimed, because it arrived after it.
+            let mut messages = std::mem::take(&mut claimed);
+            messages.extend(
+                self.inbox
+                    .lock()
+                    .expect("inbox")
+                    .claim(self.log.as_ref(), InboxTarget::NextStep, turn)?
+                    .messages
+                    .into_iter()
+                    .map(|pending| pending.message),
+            );
+
             let mut pre_step = PreStep {
                 turn,
                 step,
-                messages: std::mem::take(&mut claimed),
+                messages,
             };
             let entered = match self.bus.waterfall(&mut pre_step, enter_claimed()).await {
                 PreStepDecision::Reject(_) => {
@@ -826,6 +861,7 @@ impl TurnEngine {
                 Settled {
                     call,
                     outcome: ToolOutcome::failed(refusal),
+                    additional_contexts: Vec::new(),
                     call_seq: logged.seq,
                     code: Some(crate::approval::TOOL_NOT_PERMITTED),
                 },
@@ -848,13 +884,14 @@ impl TurnEngine {
             call: call.clone(),
             outcome,
         };
-        let outcome = self.bus.waterfall(&mut post, pass_outcome()).await;
+        let decision = self.bus.waterfall(&mut post, pass_outcome()).await;
 
         Ok((
             index,
             Settled {
                 call,
-                outcome,
+                outcome: decision.outcome,
+                additional_contexts: decision.additional_contexts,
                 call_seq: logged.seq,
                 code: None,
             },
@@ -905,8 +942,25 @@ impl TurnEngine {
         if let Some(code) = settled.code {
             data["code"] = serde_json::json!(code);
         }
-        self.log
-            .append_with_sources(topic::TOOL_RESULT, data, vec![settled.call_seq])?;
+        let result =
+            self.log
+                .append_with_sources(topic::TOOL_RESULT, data, vec![settled.call_seq])?;
+
+        // After the result and never before it. A context saying "you have
+        // called this five times" that landed ahead of the fifth result would
+        // describe a journal that does not yet say so, and a reader replaying
+        // the two would see the complaint before the thing complained about.
+        for (index, message) in settled.additional_contexts.into_iter().enumerate() {
+            // Derived from the result's own seq, so the id is unique without a
+            // counter and reproducible on replay: two contexts from one call
+            // differ by their index, and two calls differ by their result.
+            let id = format!("ctx-{}-{index}", result.seq);
+            self.inbox.lock().expect("inbox").append(
+                self.log.as_ref(),
+                InboxTarget::NextStep,
+                PendingMessage { id, message },
+            )?;
+        }
         Ok(())
     }
 
@@ -936,6 +990,11 @@ struct Settled {
     /// it, and the result must name what actually ran.
     call: ToolCall,
     outcome: ToolOutcome,
+    /// What `tools/post-execute` asked the loop to put in front of the model
+    /// at the next boundary. Committed with the result and never before it,
+    /// so a context cannot arrive describing a result the journal does not
+    /// yet hold.
+    additional_contexts: Vec<Message>,
     /// The `tool/call` this result will cite.
     call_seq: u64,
     /// Set on a result nobody ran, saying why there is no outcome to report.
@@ -976,7 +1035,9 @@ fn pass_call() -> Terminal<ToolsPreExecute> {
 }
 
 fn pass_outcome() -> Terminal<ToolsPostExecute> {
-    Arc::new(|ev: &mut ToolsPostExecute| Box::pin(async move { ev.outcome.clone() }))
+    Arc::new(|ev: &mut ToolsPostExecute| {
+        Box::pin(async move { PostToolDecision::keep(ev.outcome.clone()) })
+    })
 }
 
 /// The sink the engine hands to the adapter: every chunk becomes a durable
