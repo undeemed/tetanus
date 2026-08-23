@@ -27,10 +27,15 @@
 //! request in a session, so an unbounded read is an unbounded bill as well as
 //! an unbounded prompt.
 //!
-//! Parity: upstream `packages/context/agent-instructions`, its discovery and
-//! rendering halves. Upstream also tracks edits to instruction files during a
-//! session and re-renders the changed ones; that needs the tool pipeline's
-//! post-execute seam and stays phase (2).
+//! **Instructions that change under a session are reported.** The block is
+//! rendered once and prepended to every request, so a tool that edits
+//! `AGENTS.md` - which is a thing an agent is routinely asked to do - would
+//! otherwise leave the model following conventions the repository no longer
+//! states. [`InstructionWatch`] is that half: it reports what changed at the
+//! next turn boundary, through the runtime-context seam.
+//!
+//! Parity: upstream `packages/context/agent-instructions`, its discovery,
+//! rendering and reconciliation halves.
 
 use std::path::{Path, PathBuf};
 
@@ -228,4 +233,167 @@ fn display_path(root: &Path, path: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// What happened to one instruction file since it was last rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstructionChange {
+    /// A file the model was given, whose content is now different.
+    Updated(Instructions),
+    /// A file that was not there when the block was rendered.
+    Added(Instructions),
+    /// A file the model was given that is gone.
+    Removed { display_path: String },
+}
+
+impl InstructionChange {
+    /// How the change is named to the model, for ordering and for messages.
+    pub fn display_path(&self) -> &str {
+        match self {
+            InstructionChange::Updated(file) | InstructionChange::Added(file) => &file.display_path,
+            InstructionChange::Removed { display_path } => display_path,
+        }
+    }
+}
+
+/// What the model is told when instructions changed under it.
+pub const CHANGED_PREAMBLE: &str = "Workspace instructions changed during this session. The \
+following supersede what you were given for the files named. Use them instead of the previously \
+loaded instructions from those files.";
+
+/// The instruction files a session has already shown the model, so a later
+/// turn can say what changed.
+///
+/// **Why this exists at all.** The block is rendered once and prepended to
+/// every request, so a tool that edits `AGENTS.md` - which is a thing an agent
+/// is routinely asked to do - leaves the model following conventions the
+/// repository no longer states. A model working from stale instructions is
+/// worse than one working from none, because it is confidently wrong and the
+/// transcript shows it being told the right thing.
+///
+/// **A turn boundary, not a tool boundary.** Upstream reconciles inside the
+/// step, off its file tools' post-execute. tetanus reports at the start of the
+/// next turn, through the runtime-context seam
+/// ([`crate::context`]), and the difference is deliberate: the reading is then
+/// one durable record with the rest of what the turn told the model, rather
+/// than a message injected mid-step whose position in the history depends on
+/// which tool ran. A step that edits instructions and then acts on them is
+/// acting on what it just wrote, which it already knows.
+///
+/// **The whole content, not a diff.** A diff of guidance is a puzzle; the file
+/// as it now reads is the instruction. It is bounded by the same budget and
+/// neutralised by the same rule as the original block, because it is the same
+/// untrusted text arriving by the same route.
+///
+/// Parity: upstream `packages/context/agent-instructions`, its `state.ts`
+/// reconciliation and the three sentences `render.ts` writes for a set, a
+/// change and a removal.
+pub struct InstructionWatch {
+    cwd: PathBuf,
+    search: Search,
+    seen: std::sync::Mutex<Vec<Instructions>>,
+}
+
+impl InstructionWatch {
+    /// Start watching, taking what is on disk now as what the model has been
+    /// given.
+    ///
+    /// Construction is the baseline because that is when the prompt section is
+    /// rendered from the same files. A watch that started empty would report
+    /// every instruction file as newly added on the first turn.
+    pub fn new(cwd: impl Into<PathBuf>, search: Search) -> Self {
+        let cwd = cwd.into();
+        let seen = discover(&cwd, &search);
+        Self {
+            cwd,
+            search,
+            seen: std::sync::Mutex::new(seen),
+        }
+    }
+
+    /// What changed since the last call, and take it as the new baseline.
+    ///
+    /// Answering and forgetting in one step is the point: a change reported
+    /// twice is a model told twice that a file it already re-read has changed,
+    /// which reads as a second edit that never happened.
+    pub fn take_changes(&self) -> Vec<InstructionChange> {
+        let current = discover(&self.cwd, &self.search);
+        let mut seen = self.seen.lock().expect("instruction watch");
+
+        let mut changes = Vec::new();
+        for file in &current {
+            match seen
+                .iter()
+                .find(|old| old.display_path == file.display_path)
+            {
+                Some(old) if old.content == file.content => {}
+                Some(_) => changes.push(InstructionChange::Updated(file.clone())),
+                None => changes.push(InstructionChange::Added(file.clone())),
+            }
+        }
+        for old in seen.iter() {
+            if !current
+                .iter()
+                .any(|file| file.display_path == old.display_path)
+            {
+                changes.push(InstructionChange::Removed {
+                    display_path: old.display_path.clone(),
+                });
+            }
+        }
+        *seen = current;
+        changes
+    }
+
+    /// The runtime-context part naming what changed, or nothing when nothing
+    /// did.
+    ///
+    /// Empty when there is nothing to say, so a composition can register this
+    /// unconditionally: an empty part contributes nothing to a snapshot, and a
+    /// snapshot of nothing is never written.
+    pub fn part(&self) -> String {
+        render_changes(&self.take_changes(), self.search.max_bytes)
+    }
+}
+
+/// Render one batch of changes into the block the model reads.
+///
+/// The same delimiter, the same escaping and the same whole-files-only budget
+/// rule as [`render`]: this is the same untrusted text from the same place,
+/// and a second set of rules for it would be a second thing to get wrong.
+pub fn render_changes(changes: &[InstructionChange], max_bytes: usize) -> String {
+    let mut body = String::new();
+    let mut spent = 0usize;
+
+    for change in changes {
+        let section = match change {
+            InstructionChange::Updated(file) => format!(
+                "\nUpdated instructions from: {}\n\n{}\n",
+                neutralize(&file.display_path),
+                neutralize(&file.content)
+            ),
+            InstructionChange::Added(file) => format!(
+                "\nAdditional instructions from: {}\n\n{}\n",
+                neutralize(&file.display_path),
+                neutralize(&file.content)
+            ),
+            // No content, because there is none: the file is gone, and the
+            // only thing to say is that what it said no longer applies.
+            InstructionChange::Removed { display_path } => format!(
+                "\nInstructions removed: {}\n\nThe previously loaded instructions from this file \
+                 no longer apply.\n",
+                neutralize(display_path)
+            ),
+        };
+        if spent + section.len() > max_bytes {
+            continue;
+        }
+        spent += section.len();
+        body.push_str(&section);
+    }
+
+    match body.is_empty() {
+        true => String::new(),
+        false => format!("{OPEN}\n{CHANGED_PREAMBLE}\n{body}{CLOSE}"),
+    }
 }

@@ -209,6 +209,12 @@ dependencies, so a missing provider fails at boot naming `agent-loop` rather tha
 `ContextService` is the one a turn runs happily without: it is provided empty, and an empty one
 writes nothing.
 
+One provider is worth naming because it is not a reading of the world but a correction: an
+`InstructionWatch` ([crates/turn/src/instructions.rs](crates/turn/src/instructions.rs)) reports the
+workspace instruction files a tool edited, added or deleted since the last turn, with the new
+content, so a session whose own tools rewrite `AGENTS.md` stops following the version it read at
+startup. A change is reported once, at a turn boundary rather than inside the step that made it.
+
 `ContextRegistry` ([crates/turn/src/context.rs](crates/turn/src/context.rs)) is what a turn tells
 the model about the world outside the conversation - the date now, the working directory and the
 branch later. It is gathered once, between `turn/start` and the first `step/start`, and recorded as
