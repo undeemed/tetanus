@@ -161,6 +161,49 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
 }
 
+/// Whether a program's last output looks like it is asking for a password.
+///
+/// The rule is `sudo`'s, deliberately. `sudo` had every opportunity to use the
+/// terminal's own `ECHO` flag - its manual opens the subject with "most
+/// programs that require a user's password will disable echo before reading
+/// it" - and built a regex over the program's *output* instead, because the
+/// echo signal is unusable through an interactive shell. tetanus measured the
+/// same thing for its own sessions, twice: readline keeps echo off at its own
+/// prompt, and `crates/exec`'s bash backend pins it off for the whole session.
+/// A constant is not a signal.
+///
+/// It is here rather than in the tool that uses it because the *rule* is the
+/// engine's: what counts as a credential prompt should be one answer for the
+/// whole harness, testable on its own, and reusable by the next tool that
+/// types into something. The *evidence* - what a terminal last printed - stays
+/// with the terminal, which is the only thing that has it.
+///
+/// The match is on the last non-empty line, not anywhere in the output, and
+/// that is the one place this parts from `sudo`. A prompt is by definition the
+/// last thing written before a program waits; matching anywhere makes a `grep`
+/// hit for the word "password" arm the filter, which `sudo`'s own manual
+/// accepts and its maintainers have no published false-positive rate for.
+/// Narrowing it keeps every real prompt - `sudo`, `ssh`, `su`, `passwd` all
+/// print theirs last - and drops the commonest false one.
+pub fn looks_like_a_password_prompt(output: &str) -> bool {
+    let Some(last) = output.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let last = last.trim_end().to_ascii_lowercase();
+    // `sudo`'s default is `[Pp]assword[: ]*`; this is that, plus the
+    // passphrase wording `ssh` and `gpg` use, and it requires the prompt's own
+    // punctuation so a sentence *about* a password is not a prompt for one.
+    ["password", "passphrase"]
+        .iter()
+        .any(|word| match last.rfind(word) {
+            None => false,
+            Some(at) => {
+                let after = last[at + word.len()..].trim_end();
+                after.is_empty() || after.ends_with(':') || after.ends_with('?')
+            }
+        })
+}
+
 /// What stands in the journal for a value a tool withheld.
 ///
 /// The same string the boundary publishes for a withheld configuration value

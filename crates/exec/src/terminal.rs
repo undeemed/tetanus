@@ -332,6 +332,14 @@ impl TerminalSignal {
 /// a reader wants both at one instant: "what has been printed" and "has the
 /// shell finished" are one question asked twice.
 struct Watched {
+    /// Whether the program on this terminal has just asked for a password.
+    ///
+    /// `sudo`'s two-state filter, over this crate's sanitized stream: every
+    /// new chunk of output clears it, and a chunk whose last line looks like a
+    /// credential prompt arms it again. What it guards is the *record* - a
+    /// send made into an armed terminal is journalled redacted whether or not
+    /// the model remembered to say so.
+    prompting: AtomicBool,
     text: Arc<Transcript>,
     /// How many prompt markers the shell has printed since it started.
     prompts: AtomicUsize,
@@ -344,6 +352,7 @@ struct Watched {
 impl Watched {
     fn new(bound: usize) -> Self {
         Self {
+            prompting: AtomicBool::new(false),
             text: Arc::new(Transcript::new(bound)),
             prompts: AtomicUsize::new(0),
             last_status: AtomicI64::new(i64::MIN),
@@ -570,6 +579,12 @@ impl TerminalSession {
         if !typed.is_empty() {
             self.pty.write(&typed).await?;
         }
+        // The window closes when the answer is submitted, as `sudo`'s does at
+        // the newline: whatever the program prints next decides whether a new
+        // one opens.
+        if submit {
+            self.watched.prompting.store(false, Ordering::Release);
+        }
 
         let settled = self
             .wait_for_readiness(prompts_before, within, interrupt)
@@ -700,6 +715,16 @@ impl TerminalSession {
     /// Everything the terminal has printed that is still retained.
     pub fn scrollback(&self) -> String {
         self.watched.text.snapshot().text()
+    }
+
+    /// Whether the program on this terminal is asking for a password *now*.
+    ///
+    /// Read at record time by [`crate::terminal_tools`], which is why it is
+    /// free of side effects: the same send is recorded three times - the
+    /// streamed chunk, the assistant message, and the call - and all three
+    /// have to agree.
+    pub fn is_prompting_for_a_password(&self) -> bool {
+        self.watched.prompting.load(Ordering::Acquire)
     }
 
     /// The status the last prompt marker carried.
@@ -850,6 +875,13 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
 /// shell announced in it.
 fn publish(watched: &Arc<Watched>, chunk: crate::sanitize::Sanitized) {
     if !chunk.text.is_empty() {
+        // `sudo`'s order, and the order matters: any new output ends the
+        // previous password window before this chunk is asked whether it opens
+        // one. A prompt that has been answered, or scrolled past, is over.
+        watched.prompting.store(
+            tetanus_turn::tools::looks_like_a_password_prompt(&chunk.text),
+            Ordering::Release,
+        );
         watched.text.push(&chunk.text);
         watched.printed();
     }

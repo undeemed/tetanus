@@ -233,11 +233,27 @@ impl Tool for SendTool {
     /// terminal at that moment - which is what an audit needs and what a
     /// blanket redaction would destroy.
     fn recorded(&self, arguments: &Value) -> Value {
-        if !arguments
+        let declared = arguments
             .get("secret")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        // The backstop: a terminal that has just printed a credential prompt
+        // withholds what is typed into it whether or not the model said so.
+        // Published measurement says a model follows a rule of this shape
+        // inconsistently across repeated trials, so a flag alone is a control
+        // that fails open on the run where it matters.
+        let prompted = || {
+            optional_text(arguments, "session_id", TERMINAL_SEND)
+                .ok()
+                .flatten()
+                .and_then(|id| self.0.terminals.get(&self.0.owner, &id).ok())
+                .is_some_and(|session| session.is_prompting_for_a_password())
+        };
+        // Union, never override, which is the direction the contract already
+        // fixes for the two config-redaction rules (§4.3): either says secret,
+        // it is secret, and neither can un-say it. A rule that could un-redact
+        // would make adding one a way to start publishing.
+        if !declared && !prompted() {
             return arguments.clone();
         }
         let mut recorded = arguments.clone();

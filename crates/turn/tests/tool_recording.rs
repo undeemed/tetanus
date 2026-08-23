@@ -114,6 +114,53 @@ fn a_call_naming_no_tool_is_recorded_as_it_was_sent() {
     );
 }
 
+/// TC-TOOL-RECORD-5: what counts as a credential prompt.
+///
+/// The rule behind the backstop, pinned on its own because it is the half that
+/// can be wrong in two directions and the expensive direction is silent. A
+/// miss leaks a password; a false positive costs the auditability of one
+/// command, which is why the rule is allowed to be generous but not arbitrary.
+///
+/// It is `sudo`'s mechanism - `sudo` had full access to the terminal's `ECHO`
+/// flag and chose a regex over the program's output instead - narrowed to the
+/// last non-empty line, because a prompt is by definition the last thing
+/// written before a program waits, and matching anywhere makes a `grep` hit
+/// for the word arm the filter.
+///
+/// Input: the prompts `sudo`, `ssh`, `su` and `passwd` actually print; then
+/// output that merely mentions a password, and output that mentioned one
+/// several lines ago.
+/// Expected: every real prompt matches; neither of the others does.
+#[test]
+fn what_counts_as_a_credential_prompt() {
+    use tetanus_turn::tools::looks_like_a_password_prompt as prompt;
+
+    for real in [
+        "[sudo] password for ci:",
+        "[sudo] password for ci: ",
+        "Password:",
+        "password: ",
+        "Enter passphrase for key '/root/.ssh/id_rsa':",
+        "ci@10.0.0.4's password:",
+        "Enter new UNIX password:",
+        "Repeat password?",
+        "some output first\n[sudo] password for ci: ",
+    ] {
+        assert!(prompt(real), "should be read as a prompt: {real:?}");
+    }
+
+    for not in [
+        "",
+        "\n\n",
+        "the password was wrong, try again with -v",
+        "grep: config.yml: password: hunter2",
+        "[sudo] password for ci:\nauthentication failed\n$ ",
+        "Password saved to the keychain, you are logged in",
+    ] {
+        assert!(!prompt(not), "should not be read as a prompt: {not:?}");
+    }
+}
+
 // ---------------------------------------------------------------- fixtures
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {

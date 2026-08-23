@@ -685,6 +685,120 @@ async fn a_password_typed_at_a_terminal_does_not_reach_the_journal() {
     let _ = script_for_send;
 }
 
+/// TC-PORT-TERM-43: a password is withheld even when the model forgets to say
+/// it is one.
+///
+/// The backstop, and the reason the flag alone is not a control. Published
+/// measurement of agents following policy rules of this shape - "set this
+/// optional flag when the situation calls for it" - shows they do it
+/// inconsistently across repeated trials, and the run where the flag is
+/// forgotten is the run that writes a credential into a permanent file.
+///
+/// The mechanism is `sudo`'s: the terminal arms a window when a program's last
+/// output line looks like a credential prompt, and what is typed into an armed
+/// terminal is recorded withheld. `sudo` built exactly this for exactly this,
+/// having measured that the terminal's own `ECHO` flag - the intuitive signal -
+/// is unusable through an interactive shell, which this crate then measured
+/// again for itself.
+///
+/// Input: a session; a command that prints a `sudo`-style prompt and reads an
+/// answer; the answer sent with **no** `secret` flag; then an ordinary command.
+/// Expected: the answer is `<redacted>` in the journal anyway, the program
+/// received the real text, and the ordinary command that follows is recorded
+/// in full - the window closes when the prompt is answered.
+#[tokio::test]
+async fn a_password_is_withheld_even_when_the_model_forgets_to_say_so() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let seen = workspace.path().join("what-it-read.txt");
+    let asking = format!(
+        "read -s -p '[sudo] password for ci: ' answer; printf '%s' \"$answer\" > {}; echo",
+        seen.display()
+    );
+
+    let harness = Harness::new(
+        "terminal-backstop",
+        workspace.path(),
+        Script::new(vec![
+            Step::Call(call("c1", TERMINAL_OPEN, json!({}))),
+            Step::CallFrom(Box::new(move |earlier| {
+                call(
+                    "c2",
+                    TERMINAL_SEND,
+                    json!({ "session_id": session_id(earlier), "text": asking, "wait_ms": 500 }),
+                )
+            })),
+            // No `secret` here: this is the model getting it wrong.
+            Step::CallFrom(Box::new(|earlier| {
+                call(
+                    "c3",
+                    TERMINAL_SEND,
+                    json!({ "session_id": session_id(earlier), "text": "forgot-to-flag-this" }),
+                )
+            })),
+            Step::CallFrom(Box::new(|earlier| {
+                call(
+                    "c4",
+                    TERMINAL_SEND,
+                    json!({ "session_id": session_id(earlier), "text": "echo after-the-prompt" }),
+                )
+            })),
+        ]),
+    )
+    .await;
+
+    harness
+        .engine
+        .run_turn("answer the prompt without saying it is a password")
+        .await
+        .expect("the turn ran");
+
+    let calls = harness.calls();
+    let answered = calls
+        .iter()
+        .find(|call| call["id"] == json!("c3"))
+        .expect("the send was recorded");
+    assert_eq!(
+        answered["arguments"]["text"],
+        json!("<redacted>"),
+        "the terminal was asking for a password, so the record withholds it: {answered:#?}"
+    );
+    assert!(
+        !harness.journal().contains("forgot-to-flag-this"),
+        "the password survived somewhere on the journal"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap_or_default().trim(),
+        "forgot-to-flag-this",
+        "the program still has to receive what was typed"
+    );
+
+    // The command that *asked* for the password is itself auditable: the
+    // window is armed by what the terminal printed, not by what the argument
+    // says, and at the moment that send was recorded nothing had been printed
+    // yet.
+    let asked = calls
+        .iter()
+        .find(|call| call["id"] == json!("c2"))
+        .expect("the asking send was recorded");
+    assert!(
+        asked["arguments"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("read -s -p")),
+        "the command that opens a prompt must stay on the record: {asked:#?}"
+    );
+
+    let ordinary = calls
+        .iter()
+        .find(|call| call["id"] == json!("c4"))
+        .expect("the ordinary send was recorded");
+    assert_eq!(
+        ordinary["arguments"]["text"],
+        json!("echo after-the-prompt"),
+        "the window closes once the prompt is answered, or every later command is unauditable: \
+         {ordinary:#?}"
+    );
+}
+
 // ---------------------------------------------------------------- fixtures
 
 /// The whole retained page of one session, through the tool a model would use.
