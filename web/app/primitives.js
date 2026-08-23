@@ -236,5 +236,5 @@ export function jsonBlock(value, summaryText = "arguments") {
  * `*hello*` meant the asterisks.
  */
 export function messageText(text) {
-  return make("div", "said", text);
+  return make("div", "message", text);
 }

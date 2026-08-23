@@ -139,7 +139,9 @@
    padding:7px 12px; font:13px ui-monospace,monospace; background:transparent; color:var(--text); }
  .choice:hover:not(:disabled) { background:#22353a; }
  .choice.here { background:#24424a; }
- .choice.dot { color:var(--muted); }
+ /* `.quiet`, not `.dot`: the primitives already own `.dot` for the state
+    indicator, and a control carrying both matched two unrelated rules. */
+ .choice.quiet { color:var(--muted); }
  .pick-foot { display:flex; gap:10px; align-items:center; padding:11px 14px;
    border-top:1px solid var(--line); }
  .pick-foot .grow { margin-left:auto; }

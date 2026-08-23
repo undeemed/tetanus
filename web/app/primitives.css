@@ -99,7 +99,11 @@
 
 /* --- text a person wrote --------------------------------------------- */
 
-.said { white-space:pre-wrap; overflow-wrap:anywhere;
+/* `.message`, not `.said`. It was `.said`, and the page's transcript rows have
+   a `.said` of their own in a monospace row - so this rule reached inside them
+   and drew every message in a proportional font, because a direct rule beats
+   an inherited one. One name, two meanings, and the transcript lost silently. */
+.message { white-space:pre-wrap; overflow-wrap:anywhere;
   font:var(--size-body)/1.55 var(--font-prose); color:var(--text); }
 
 /* --- a tool's call and result ---------------------------------------- */

@@ -6,10 +6,12 @@ hosts.
 It is a page, not a program: `index.html` and `chat.js`, no build step, no framework and no
 dependency, so the thing a reviewer opens is the file in this directory.
 
-Two row-like things have two names on purpose. `.row` is a line of the transcript - a `who` column,
-a mark and what was said. `.choice` is a control you pick: a directory in the chooser, a button in
-the header. They were both called `.row` once, and the later definition quietly won `display:block`
-for the whole conversation.
+Three pairs of names are kept apart on purpose, because a stylesheet has one namespace and no
+compiler: `.row` is a line of the transcript and `.choice` is a control you pick; `.said` is a
+transcript row's text and `.message` is what `messageText` draws; `.dot` is the state indicator and
+`.quiet` is a hidden entry in the chooser. Each pair shared a name once, and each time the rule that
+lost was silent and order-dependent. A probe case now refuses any class defined by both
+`primitives.css` and the page's own `<style>`.
 
 ## Running it
 

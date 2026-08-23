@@ -802,14 +802,14 @@ function fill(pane, listing, mark) {
   const rows = listing.entries.filter((row) => dots.checked || !row.hidden);
   if (rows.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "choice dot";
+    empty.className = "choice quiet";
     empty.textContent = listing.entries.length ? "· every entry here is hidden" : "· nothing here";
     pane.replaceChildren(empty);
     return;
   }
   pane.replaceChildren(...rows.map((row) => {
     const go = document.createElement("button");
-    go.className = "choice" + (row.hidden ? " dot" : "") + (row.path === mark ? " here" : "");
+    go.className = "choice" + (row.hidden ? " quiet" : "") + (row.path === mark ? " here" : "");
     go.textContent = row.name;
     go.onclick = () => walk(row.path);
     return go;
