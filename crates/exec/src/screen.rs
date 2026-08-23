@@ -213,6 +213,12 @@ impl Grid {
     }
 
     /// A CSI sequence: `ESC [ params final`.
+    ///
+    /// The parse is here and the *meaning* is in the three functions below,
+    /// split by the question each answers - which mode, where the cursor, what
+    /// changes on the grid. They were one `match` until the structural gate
+    /// charged for it, and the split is an improvement on its own terms: the
+    /// mode arms and the editing arms have nothing to say to each other.
     fn csi(&mut self, text: &str) -> Option<usize> {
         let body = &text[2..];
         let end = body.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c))?;
@@ -224,20 +230,36 @@ impl Grid {
             .split(';')
             .map(|value| value.trim().parse::<usize>().unwrap_or(0))
             .collect();
-        let first = numbers.first().copied().unwrap_or(0);
-        let count = first.max(1);
 
-        match (private, final_byte) {
-            // The alternate screen. `?1049` saves the cursor and switches;
-            // `?47` is the older spelling of the same idea.
-            (true, 'h') if matches!(first, 1049 | 47 | 1047) => self.enter_alternate(),
-            (true, 'l') if matches!(first, 1049 | 47 | 1047) => self.leave_alternate(),
-            (true, 'h') if first == 7 => self.autowrap = true,
-            (true, 'l') if first == 7 => self.autowrap = false,
-            // Everything else private - bracketed paste, cursor visibility,
-            // mouse reporting - changes nothing this model keeps.
-            (true, _) => {}
-            (false, 'H' | 'f') => {
+        if private {
+            self.private_mode(numbers.first().copied().unwrap_or(0), final_byte);
+        } else if !self.moved(&numbers, final_byte) {
+            self.changed(&numbers, final_byte);
+        }
+        Some(2 + end + final_byte.len_utf8())
+    }
+
+    /// The `?`-prefixed modes. Only two matter to a model of text: whether the
+    /// program is drawing on the alternate screen, and whether writing past
+    /// the last column wraps.
+    fn private_mode(&mut self, mode: usize, final_byte: char) {
+        match (mode, final_byte) {
+            (1049 | 47 | 1047, 'h') => self.enter_alternate(),
+            (1049 | 47 | 1047, 'l') => self.leave_alternate(),
+            (7, 'h') => self.autowrap = true,
+            (7, 'l') => self.autowrap = false,
+            // Bracketed paste, cursor visibility, mouse reporting: nothing
+            // this model keeps.
+            _ => {}
+        }
+    }
+
+    /// Everything that only moves the cursor. Answers whether it handled the
+    /// sequence, so the caller can try the other half.
+    fn moved(&mut self, numbers: &[usize], final_byte: char) -> bool {
+        let count = numbers.first().copied().unwrap_or(0).max(1);
+        match final_byte {
+            'H' | 'f' => {
                 let row = numbers.first().copied().unwrap_or(1).max(1) - 1;
                 let col = numbers.get(1).copied().unwrap_or(1).max(1) - 1;
                 self.cursor = Cursor {
@@ -245,28 +267,41 @@ impl Grid {
                     col: col.min(self.cols - 1),
                 };
             }
-            (false, 'A') => self.cursor.row = self.cursor.row.saturating_sub(count),
-            (false, 'B') => self.cursor.row = (self.cursor.row + count).min(self.rows - 1),
-            (false, 'C') => self.cursor.col = (self.cursor.col + count).min(self.cols - 1),
-            (false, 'D') => self.cursor.col = self.cursor.col.saturating_sub(count),
-            (false, 'G') => self.cursor.col = (count - 1).min(self.cols - 1),
-            (false, 'd') => self.cursor.row = (count - 1).min(self.rows - 1),
-            (false, 'E') => {
+            'A' => self.cursor.row = self.cursor.row.saturating_sub(count),
+            'B' => self.cursor.row = (self.cursor.row + count).min(self.rows - 1),
+            'C' => self.cursor.col = (self.cursor.col + count).min(self.cols - 1),
+            'D' => self.cursor.col = self.cursor.col.saturating_sub(count),
+            'G' => self.cursor.col = (count - 1).min(self.cols - 1),
+            'd' => self.cursor.row = (count - 1).min(self.rows - 1),
+            'E' => {
                 self.cursor.row = (self.cursor.row + count).min(self.rows - 1);
                 self.cursor.col = 0;
             }
-            (false, 'F') => {
+            'F' => {
                 self.cursor.row = self.cursor.row.saturating_sub(count);
                 self.cursor.col = 0;
             }
-            (false, 'J') => self.erase_display(first),
-            (false, 'K') => self.erase_line(first),
-            (false, 'L') => self.insert_lines(count),
-            (false, 'M') => self.delete_lines(count),
-            (false, '@') => self.insert_cells(count),
-            (false, 'P') => self.delete_cells(count),
-            (false, 'X') => self.erase_cells(count),
-            (false, 'r') => {
+            's' => self.saved = self.cursor,
+            'u' => self.cursor = self.saved,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Everything that changes what is on the grid, and the scrolling region,
+    /// which decides what a line feed moves.
+    fn changed(&mut self, numbers: &[usize], final_byte: char) {
+        let first = numbers.first().copied().unwrap_or(0);
+        let count = first.max(1);
+        match final_byte {
+            'J' => self.erase_display(first),
+            'K' => self.erase_line(first),
+            'L' => self.insert_lines(count),
+            'M' => self.delete_lines(count),
+            '@' => self.insert_cells(count),
+            'P' => self.delete_cells(count),
+            'X' => self.erase_cells(count),
+            'r' => {
                 let top = numbers.first().copied().unwrap_or(1).max(1) - 1;
                 let bottom = numbers
                     .get(1)
@@ -280,13 +315,10 @@ impl Grid {
                 }
                 self.cursor = Cursor { row: 0, col: 0 };
             }
-            (false, 's') => self.saved = self.cursor,
-            (false, 'u') => self.cursor = self.saved,
             // `m` is colour and attributes, which this model does not keep;
             // the rest are reports and modes nothing here answers.
-            (false, _) => {}
+            _ => {}
         }
-        Some(2 + end + final_byte.len_utf8())
     }
 
     /// An OSC sequence, which sets a title or talks to the host. Nothing here
