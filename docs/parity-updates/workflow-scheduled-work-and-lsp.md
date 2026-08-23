@@ -171,3 +171,42 @@ than rewrites.
 | 2026-08-21 | Time-triggered work (`crates/core/src/schedule.rs`, TC-PORT-SCHED-1..12), opening the `schedule/*` row. The clock is an argument to every call rather than a global, which is what lets the whole suite move time instead of sleeping - no case waits for anything - and what makes a restart honest, since a process that comes back asks what is due now and gets the answer the dead one would have given. A missed recurrence fires once and realigns to its anchor: a harness down for a day owes one sweep, not twenty-four, because catching up floods a session with stale work the moment it returns, and drifting the anchor lets a job set for the top of the hour wander off it. The overlap policy is an addition rather than a port - upstream has no answer for a fire landing on a run still going - and it deliberately omits the accidental behaviour, firing anyway and letting two copies race, which is what a scheduler with no opinion does. `Queue` holds at most one, because a backlog of identical work is the thing a scheduler must not build. Whether the previous run is still going is the caller's to supply: only the caller knows when its own work ended. |
 | 2026-08-21 | Workflow runs (`crates/turn/src/workflow.rs`, TC-PORT-FLOW-1..10), opening the `workflow/*` row for everything that is not upstream's script runtime. A turn is one exchange with a model; a migration or a sweep is a sequence of named steps that outlives one, and has to survive a restart in the middle. The journal is the progress record rather than a status field, so what a surface renders, what a restart reads and what a case asserts are the same events - progress in memory is progress a crash erases, and the work a crash must not erase is what a workflow is for. Cancellation lands at the next step boundary, the turn engine's rule for the same reason: abandoning a running step would leave the journal claiming work that neither finished nor failed. Resuming is re-reading, so a completed step is never run twice - the steps are not assumed idempotent, because most useful ones are not. The port found one design flaw: `resume` refused any run with an end on the journal, which is precisely the cancelled and failed runs it exists to continue, since both write an end too. Only completion refuses now. |
 | 2026-08-21 | A language-server client and its tool (`crates/turn/src/lsp/`, TC-PORT-LSP-1..16), opening the `lsp/*` row. Textual search finds every `foo` and a language server knows which one, which is worth a subprocess before a change and worth nothing for ordinary navigation - so the tool says which is which rather than leaving the model to guess. The rule the module is arranged around is that a server which dies is a failed tool call and never a dead turn: a language server is a large third-party program that crashes, hangs and gets OOM-killed, and every one of those becomes a `ToolError` carrying the server's own dying words, because "install the toolchain" and "the tool failed" are different things to tell a user. Every wait is bounded, since a server that accepts a request and goes quiet is this class of program's ordinary failure and an unbounded wait is a hung turn. The framing decoder bounds the header and the body, because a decoder that trusts a length field is one a corrupt stream can take the harness down with. Diagnostics are pushed rather than requested, so silence about a file reads as nothing wrong instead of as a timeout - the case treating every operation as a round trip gets wrong. The suite's server is a script in the test file, offline and deterministic; one case runs against real rust-analyzer to stop that mock becoming the specification, and asserts the lifecycle rather than the answer, because requiring a hit would make it a test of a third-party program's indexing speed under load. |
+
+---
+
+## 5. Written two days later, when this branch was rescued
+
+This note was written against a master that has since moved 200 commits. Three
+things it says need a sentence each, and one row edit changes.
+
+**The `lsp` tool is composed now, and was not when this was written.**
+`crates/toolset` did not exist then, so the tool was reachable only by a
+composer writing Rust - the same state every tool crate was in before the
+assembly landed. It is now one entry in `sources()`, declared and empty unless
+a document names `lsp.server`, because the client drives any server that speaks
+the protocol and which one belongs to the project rather than to the harness
+(TC-TOOLSET-11). The `lsp/*` row's **Today** should therefore end: *and the
+tool composed into the shipped binary when a document names the server to run*.
+
+**The job store has a named consumer waiting on it, and this does not wire
+it.** The process lane closed its own row leaving exactly one clause open:
+`run_in_background` for the one-shot `shell` tool, which it declined to build
+because "a second store built here would leave that row with two to reconcile".
+That store is this one. The wiring is the exec lane's - a `run_in_background`
+argument that starts the same `proc::Command` without awaiting it and hands the
+group id to the store - and the `shell/*` row's gap clause should now name this
+store rather than a store that does not exist.
+
+**Delivering a fired schedule into a session is no longer blocked.** The gap
+clause above says a fire cannot reach a session as a prompt; the queue it
+needed landed in the meantime (`crates/turn/src/inbox.rs`, TC-INBOX-1..16),
+which holds a message until a boundary claims it. So that clause changes from a
+missing mechanism to an unwired one: what is left is the caller that puts a
+fired schedule on the inbox, and the question of which session a schedule
+belongs to, which nothing yet answers.
+
+**Nothing in the five commits stopped fitting.** The client, the stores and the
+workflow runs all compile and pass against this master unchanged - 50 cases,
+`crates/core/tests/{jobs,schedule}.rs` and `crates/turn/tests/{upstream_workflow,upstream_lsp}.rs` -
+and the only edits the rescue needed were three module lists and three
+documentation tables that had grown new rows underneath it.
