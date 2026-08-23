@@ -66,6 +66,13 @@ pub mod key {
     pub const SANDBOX_MODE: &str = "sandbox.mode";
     pub const SANDBOX_WORKSPACE: &str = "sandbox.workspace";
     pub const SANDBOX_NETWORK: &str = "sandbox.network";
+    /// The language server the `lsp` tool drives, and the arguments it takes.
+    ///
+    /// There is no default: "which language server" is a fact about the
+    /// project, not about the harness, and a tool that guessed would answer a
+    /// model's first question by starting the wrong program.
+    pub const LSP_SERVER: &str = "lsp.server";
+    pub const LSP_ARGS: &str = "lsp.args";
 }
 
 /// Every source this build ships, in the order a reader meets them.
@@ -149,11 +156,45 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                 .unwrap_or_default(),
         ),
         Source::new(
+            "lsp",
+            "Asking a language server what a symbol is and where it is used.",
+            lsp(cx),
+        ),
+        Source::new(
             "mcp",
             "Tools an MCP server offers, discovered at boot.",
             cx.mcp.clone(),
         ),
     ]
+}
+
+/// The language-server tool, if this deployment named a server to run.
+///
+/// Declared and empty otherwise, for the reason the `web` source is: a source
+/// that appears only on the hosts that configured it makes `tools.sources`
+/// mean something different on every machine. Empty is also the honest answer
+/// here - the client can drive any server that speaks the protocol, and which
+/// one belongs to the project rather than to the harness, so a default would
+/// be the harness guessing at somebody's toolchain.
+fn lsp(cx: &Composition) -> Vec<Arc<dyn Tool>> {
+    let Some(program) = cx
+        .settings
+        .get(key::LSP_SERVER)
+        .and_then(|resolved| resolved.value.as_str().map(str::to_owned))
+        .filter(|program| !program.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let args: Vec<String> = cx
+        .settings
+        .get(key::LSP_ARGS)
+        .and_then(|resolved| resolved.value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    let config = tetanus_turn::lsp::LspConfig::new(program, cx.workspace.clone()).with_args(args);
+    vec![Arc::new(tetanus_turn::lsp::tool::LspTool::new(config))]
 }
 
 /// Where this session's oversized command output is kept, when it has a place

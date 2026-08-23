@@ -131,10 +131,10 @@ fn the_shipped_sources_compose_and_every_tool_has_one_owner() {
 /// asks why the model cannot read a file.
 ///
 /// Input: the shipped roster.
-/// Expected: every landed source present, each carrying the tool named. `web`
-/// and `mcp` are declared but empty, because both are opt-in: a source that
-/// vanished when a deployment had not configured it would make `tools.sources`
-/// mean something different on every host.
+/// Expected: every landed source present, each carrying the tool named. `web`,
+/// `lsp` and `mcp` are declared but empty, because all three are opt-in: a
+/// source that vanished when a deployment had not configured it would make
+/// `tools.sources` mean something different on every host.
 #[test]
 fn every_landed_tool_crate_is_in_the_shipped_set() {
     let (_root, cx) = shipped();
@@ -154,7 +154,47 @@ fn every_landed_tool_crate_is_in_the_shipped_set() {
     assert!(of("features").contains(&"todo_write".to_string()));
     // Declared and empty until the document says otherwise.
     assert_eq!(of("web"), Vec::<String>::new());
+    assert_eq!(of("lsp"), Vec::<String>::new());
     assert_eq!(of("mcp"), Vec::<String>::new());
+}
+
+/// TC-TOOLSET-11: a document that names a language server gets the `lsp` tool,
+/// and one that does not gets a source with nothing in it.
+///
+/// The `lsp` client can drive any server that speaks the protocol, so which one
+/// to run is a fact about the project rather than about the harness. A default
+/// would answer a model's first question by starting the wrong program, and an
+/// absent source would make `tools.sources` mean something different on a host
+/// that had configured one.
+///
+/// Input: the shipped assembly, then the same with `lsp.server` set.
+/// Expected: no tools, then exactly `lsp`.
+#[test]
+fn the_language_server_tool_appears_when_a_document_names_a_server() {
+    let (_root, bare) = shipped();
+    let (_root2, mut configured) = shipped();
+    let mut document = Config::default();
+    document.load(
+        Layer::File,
+        Document::from([(
+            key::LSP_SERVER.to_string(),
+            serde_json::Value::String("rust-analyzer".into()),
+        )]),
+    );
+    configured.settings = Arc::new(document);
+
+    let without = Assembly::stock(&bare).roster();
+    let with = Assembly::stock(&configured).roster();
+
+    let of = |roster: &Vec<(&'static str, &'static str, Vec<String>)>, name: &str| {
+        roster
+            .iter()
+            .find(|(source, _, _)| *source == name)
+            .map(|(_, _, tools)| tools.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(of(&without, "lsp"), Vec::<String>::new());
+    assert_eq!(of(&with, "lsp"), vec!["lsp".to_string()]);
 }
 
 /// TC-TOOLSET-1c: a session's registry offers what the catalogue advertised.
