@@ -221,6 +221,25 @@
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
 
+/* --- what the model can still see --------------------------------------- */
+
+.ctx { margin:var(--gap-tight) 0; padding-left:var(--gap);
+  border-left:2px solid var(--state-busy); }
+/* A compaction that failed is the one that needs a different colour: the
+   window is still full and the next request is the one that does not fit. */
+.ctx-bad { border-left-color:var(--state-bad); }
+.ctx-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap; }
+.ctx-said { margin:0; color:var(--text);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.ctx-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+/* The summary itself is what the model now reads in place of the history, so
+   it is shown in full rather than folded: a reader checking whether the model
+   still knows something needs to read it, not to be told it exists. */
+.ctx-summary { margin:var(--gap-tight) 0 0 0; white-space:pre-wrap;
+  overflow-wrap:anywhere; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-code); }
+
 /* --- what a deployment's own hooks did ----------------------------------- */
 
 .hook-fact { margin:0; color:var(--text-muted);

@@ -4,6 +4,7 @@ import { sessionList } from "./sidebar.js";
 import { askCard, audit } from "./questions.js";
 import { hooks } from "./tool-hooks.js";
 import { help, parse, stats, told } from "./commands.js";
+import { context } from "./context.js";
 import { CHORDS } from "./keys.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
@@ -38,7 +39,7 @@ const at = (id) => document.getElementById(id);
 const view = {
   where: at("where"), who: at("who"), state: at("state"), turns: at("turns"),
   scroll: at("scroll"), asked: at("asked"), send: at("send"), hint: at("hint"),
-  form: at("composer"), stop: at("stop"),
+  form: at("composer"), stop: at("stop"), window: at("window"),
 };
 
 const query = new URLSearchParams(location.search);
@@ -305,7 +306,7 @@ function drawn(event) {
     boundary(event.type, data) ||
     conversation(event.type, data) ||
     toolWork(event.type, data) ||
-    audited(event.type, data);
+    tracked(event.type, data);
   // A durable type nobody has taken yet is drawn raw, which is what §4.3.2
   // asks of a surface and what makes a landed event visible on day one.
   if (!drew) row("other", null, `${event.type}  ${JSON.stringify(data)}`);
@@ -449,16 +450,32 @@ const decisions = audit();
  */
 const hooked = hooks();
 
-function audited(type, data) {
-  // Each tracker names the types it draws, so a type added to either family
-  // later is not claimed here - it falls through to the raw rendering every
-  // unrecognised durable type gets.
-  const tracker = [decisions, hooked].find((one) => one.handles(type));
+/**
+ * The context family: how full the window is, and what the model can no longer
+ * see.
+ *
+ * The meter goes in the header because it is a fact that is *current* rather
+ * than an event - a reader wants to know how full the window is now, not what
+ * it was five steps ago - and the transcript stops carrying one copy of it per
+ * request.
+ */
+const windowed = context((shown) => view.window.replaceChildren(...(shown ? [shown] : [])));
+
+/**
+ * The durable records a tracker has taken: decisions, hooks, and the context.
+ *
+ * Each tracker names the types it draws, so a type added to any of those
+ * families later is not claimed here - it falls through to the raw rendering
+ * every unrecognised durable type gets, which is what §4.3.2 asks for and what
+ * kept `question/asked` visible for the weeks before anything drew it.
+ */
+function tracked(type, data) {
+  const tracker = [decisions, hooked, windowed].find((one) => one.handles(type));
   if (!tracker) return false;
   const said = tracker.row(type, data);
-  // `null` means the tracker completed a row already on the page rather than
-  // producing a new one. The event was drawn either way, which is what the
-  // caller is asking.
+  // `null` means the tracker completed a row already on the page, or decided
+  // the record belongs somewhere other than the transcript. The event was
+  // taken either way, which is what the caller is asking.
   if (said) (card || turnCard(undefined)).el.append(said);
   return true;
 }

@@ -192,6 +192,28 @@ a *reader* of a format the engine owns and can change - which is why a row that 
 printed exactly as it arrived rather than dropped or guessed at, and why a failed result is never
 handed to a view at all.
 
+## What the model can still see
+
+[context.js](context.js) draws the five records in the context family, and the one that matters is
+`compaction/summary`: it says the older half of the history has been replaced by a summary. A reader
+who does not know that reads an answer that ignores something they said and concludes the model is
+stupid - it is not, it cannot see it. So the row says how many events and roughly how many tokens
+are now shadowed, which model wrote the summary, and shows the summary in full.
+
+`compaction/end` draws only when it carries an error, because a clean end has nothing to add to the
+summary above it and a failed one changes what happens next: the window is still full. A
+`compaction/prune` is quieter - an over-long tool result was shortened - and `compaction/start` says
+nothing at all, since its partner says everything.
+
+`request/context` leaves the transcript entirely. It is written before every request, so a five-step
+turn printed five near-identical lines of JSON into the middle of the conversation. It is a fact
+that is *current* rather than an event, so it goes in the header as a meter, the way upstream's
+`ContextMeter` does. A route that declares no window gets **no meter**, not a meter reading zero:
+"nobody said how big it is" and "it is empty" are different, and only one is a reason to relax. The
+meter reports what the envelope actually carries - the system prompt and the tool catalogue - and
+does not add this page's own estimate of the conversation on top, because that would be a guess
+standing next to a measurement.
+
 ## What you can type that is not a question
 
 [commands.js](commands.js) is the command line, matching `tetanus chat`'s. `/help`, `/stats`,
