@@ -552,13 +552,26 @@ async fn long_work_is_started_and_collected_later() {
         stopped.content
     );
 
-    let after = read_page(&registry, &id).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let later = read_page(&registry, &id).await;
-    assert_eq!(
-        ticks(&after),
-        ticks(&later),
-        "the command was stopped, so nothing more should arrive"
+    // Quiescence, not a fixed sleep. `SIGINT` reaches the loop's current
+    // `sleep`, and whether bash abandons the loop or runs one more iteration
+    // depends on where the signal landed - so what is asserted is that the
+    // output *stops*, within a bound, rather than that it stopped by the time
+    // an arbitrary 400ms was up. The old shape failed only on a busy machine,
+    // which is the failure that reaches a user rather than a suite.
+    let mut settled = ticks(&read_page(&registry, &id).await);
+    let mut stopped = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let now = ticks(&read_page(&registry, &id).await);
+        if now == settled {
+            stopped = true;
+            break;
+        }
+        settled = now;
+    }
+    assert!(
+        stopped,
+        "the command was signalled, so its output has to stop: still at {settled} ticks"
     );
     tools.terminals().close_all().await;
 }

@@ -159,6 +159,13 @@ impl PipedCommand {
         // Its own process group, so what it starts can be ended with it.
         #[cfg(unix)]
         command.process_group(0);
+        // As everywhere in this crate: a peer that inherited an ignored
+        // `SIGTERM` would not answer the stop ladder either.
+        // Safety: system calls only.
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(crate::signals::reset_for_child);
+        }
 
         let mut child = command.spawn()?;
         Ok(PipedChild {

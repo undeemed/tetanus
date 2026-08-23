@@ -583,6 +583,27 @@ async fn a_signal_goes_to_the_foreground_group_and_a_shell_killer_is_refused() {
     let interrupted = running.await.expect("the task").expect("the send");
     assert_eq!(interrupted.status, Status::Running);
 
+    // The second half asserts what happens when the *shell* owns the terminal,
+    // so wait until it does rather than assuming the interrupt was instant. It
+    // is not: `SIGINT` reaches the command, the command dies, and bash
+    // reclaims the terminal some microseconds later - a gap the machine widens
+    // whenever it is busy. Asserting through it made this case fail only under
+    // load, which is the worst kind of case to own.
+    for _ in 0..400 {
+        if session
+            .foreground_group()
+            .is_ok_and(|group| group == session.pid())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        session.foreground_group().ok(),
+        Some(session.pid()),
+        "the shell should have the terminal back once its command is gone"
+    );
+
     match session.signal(TerminalSignal::Kill) {
         Err(TerminalError::WouldKillShell { id, signal }) => {
             assert_eq!(id, session.id());

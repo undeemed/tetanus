@@ -613,6 +613,13 @@ async fn start(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    // The signal disposition a child should start with, for the reason
+    // `crate::signals` gives: an ignored signal is inherited across `exec`.
+    // Safety: system calls only, which is what `pre_exec` allows.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(crate::signals::reset_for_child);
+    }
     // A session outlives one command, so its boundary is applied once, to the
     // shell itself: every command it later runs is a child of a restricted
     // process and inherits the restriction, which is the property that makes a

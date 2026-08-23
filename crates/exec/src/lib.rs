@@ -7,6 +7,9 @@
 //!   reaches the whole process group rather than one child.
 //! - [`hooks`] runs a deployment's configured hooks through the same seam, so
 //!   an out-of-process hook is a real child with a real process group.
+//! - [`signals`] is the disposition every child here is started with, because
+//!   an ignored signal is inherited across `exec` and a harness launched in
+//!   the background would otherwise start shells that cannot be interrupted.
 //! - [`piped`] is a child this process talks to rather than waits for: a
 //!   protocol peer on stdio, ended over its own process group so what it
 //!   started goes with it.
@@ -42,6 +45,7 @@ pub mod pty;
 pub mod sanitize;
 pub mod session;
 pub mod shell;
+pub mod signals;
 #[cfg(target_os = "linux")]
 pub mod terminal;
 #[cfg(target_os = "linux")]

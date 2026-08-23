@@ -426,6 +426,13 @@ impl Command {
         // group and signalling that group would kill the harness too.
         #[cfg(unix)]
         command.process_group(0);
+        // Safety: one system call per signal and one `sigprocmask`, which is
+        // all `crate::signals` does - no allocation, no locks, which is the
+        // whole requirement between `fork` and `exec`.
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(crate::signals::reset_for_child);
+        }
         #[cfg(target_os = "linux")]
         confine(&mut command, self.confinement.as_ref())?;
 

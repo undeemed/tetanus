@@ -343,6 +343,16 @@ struct Watched {
     text: Arc<Transcript>,
     /// How many prompt markers the shell has printed since it started.
     prompts: AtomicUsize,
+    /// How many of those are still owed by a command nobody waited for.
+    ///
+    /// A send that settled on anything but a prompt left a command running,
+    /// and that command will print its prompt eventually - after this send
+    /// answered. Counting the debt is what stops the *next* send settling on
+    /// it: without this, a send would return instantly with an empty viewport
+    /// and report a command it never ran as finished. It used to be a bounded
+    /// wait at the end of the interrupt path, which is a race the machine wins
+    /// whenever it is busy.
+    owed: AtomicUsize,
     /// The status the last one carried, or `i64::MIN` for none yet.
     last_status: AtomicI64,
     /// When something was last printed, for the silence fallback.
@@ -355,6 +365,7 @@ impl Watched {
             prompting: AtomicBool::new(false),
             text: Arc::new(Transcript::new(bound)),
             prompts: AtomicUsize::new(0),
+            owed: AtomicUsize::new(0),
             last_status: AtomicI64::new(i64::MIN),
             quiet_since: Mutex::new(Instant::now()),
         }
@@ -566,7 +577,10 @@ impl TerminalSession {
         }
 
         let from = self.watched.text.len();
-        let prompts_before = self.watched.prompts.load(Ordering::Acquire);
+        // Everything the shell owes from earlier sends has to arrive before a
+        // marker means *this* command finished.
+        let prompts_before = self.watched.prompts.load(Ordering::Acquire)
+            + self.watched.owed.load(Ordering::Acquire);
         self.watched.printed();
         let typed = if submit {
             // Carriage return, not newline: a terminal in its ordinary mode
@@ -589,6 +603,17 @@ impl TerminalSession {
         let settled = self
             .wait_for_readiness(prompts_before, within, interrupt)
             .await;
+        // A send that did not settle on a prompt left a command running, so
+        // the shell now owes one more than it did. A send that *did* settle on
+        // one has collected every marker up to and including its own, so the
+        // debt is clear.
+        match settled {
+            WaitReason::StdinRead => self.watched.owed.store(0, Ordering::Release),
+            WaitReason::SessionExit => {}
+            _ => {
+                self.watched.owed.fetch_add(1, Ordering::AcqRel);
+            }
+        }
         let snapshot = self.watched.text.snapshot();
         let seen = without_prompt_furniture(&snapshot.since(from));
         Ok(SendOutcome {
@@ -670,11 +695,45 @@ impl TerminalSession {
         Ok(self.pty.size()?)
     }
 
-    /// Deliver a signal to whichever process group owns the terminal now.
+    /// Which process group owns the terminal now.
     ///
-    /// Answers the group it reached, because "the command was interrupted" and
-    /// "the shell was interrupted" are different outcomes and a caller
-    /// reporting one should not have to guess.
+    /// Published because it is the difference between "the command is running"
+    /// and "the shell is waiting", and a caller that has just interrupted
+    /// something needs to know which it is looking at. `signal` asks the same
+    /// question before it decides what a signal would hit.
+    pub fn foreground_group(&self) -> Result<i32, TerminalError> {
+        self.pty
+            .foreground_group()
+            .map_err(|source| TerminalError::NotSignalled {
+                id: self.id.clone(),
+                source,
+            })
+    }
+
+    /// Interrupt what this terminal is running.
+    ///
+    /// Answers the foreground group it reached, because "the command was
+    /// interrupted" and "the shell was interrupted" are different outcomes and
+    /// a caller reporting one should not have to guess.
+    ///
+    /// **An interrupt goes to the shell as well, and that is the whole
+    /// difference between this working and appearing to.** A shell running a
+    /// *list* - a `for` loop, `a && b`, a script - forks each command as a job
+    /// of its own, so the foreground group is one `sleep` out of a hundred.
+    /// Signalling only that group kills that one `sleep`; the shell, which
+    /// never saw the signal, starts the next one. The work continues and the
+    /// caller has been told it was stopped.
+    ///
+    /// Measured, not reasoned: under load this case failed three times out of
+    /// three with the loop still printing eight seconds later, and it passed
+    /// on an idle machine *by accident* - because idle timing happened to
+    /// catch the shell between jobs, which is the case where the shell does
+    /// get the signal and does abandon the rest of the list.
+    ///
+    /// Only the interrupt class does this. `SIGTERM`, `SIGKILL` and `SIGHUP`
+    /// stay on the foreground group, because a shell that received one of
+    /// those would end the session - which is [`TerminalSession::close`], and
+    /// a caller that meant it says so.
     pub fn signal(&self, signal: TerminalSignal) -> Result<i32, TerminalError> {
         let foreground =
             self.pty
@@ -694,11 +753,19 @@ impl TerminalSession {
             });
         }
         self.pty
-            .signal_foreground(signal.number())
+            .signal_group(foreground, signal.number())
             .map_err(|source| TerminalError::NotSignalled {
                 id: self.id.clone(),
                 source,
-            })
+            })?;
+        if signal == TerminalSignal::Int && foreground != self.pty.leader() {
+            // Interactive bash ignores `SIGINT` at its own prompt, so a shell
+            // that was between commands shrugs this off; a shell that was
+            // working through a list abandons the rest of it, which is what
+            // the caller asked for.
+            let _ = self.pty.signal_group(self.pty.leader(), signal.number());
+        }
+        Ok(foreground)
     }
 
     /// End the session and everything on it, and wait until it is gone.
@@ -758,30 +825,6 @@ impl TerminalSession {
         }
     }
 
-    /// Wait, briefly, for the prompt an interrupted command still owes.
-    ///
-    /// A shell prints its marker when the command it was running dies, and
-    /// that happens a few milliseconds after the signal - after this send has
-    /// already answered. Left there, it would settle the *next* send the
-    /// instant it started, and that send would report a command it never ran
-    /// as finished with an empty viewport. Consuming it here costs the
-    /// interrupt path a moment it is already spending on killing something.
-    ///
-    /// Bounded, because a command that ignores `SIGINT` owes a prompt that may
-    /// never come, and the interrupt has to answer either way.
-    async fn drain_prompt(&self, prompts_before: usize) {
-        let deadline = Instant::now() + self.config.grace;
-        while Instant::now() < deadline {
-            if self.watched.prompts.load(Ordering::Acquire) > prompts_before
-                || self.pty.exit().is_some()
-            {
-                return;
-            }
-            let _ =
-                tokio::time::timeout(self.config.poll, self.watched.text.changed.notified()).await;
-        }
-    }
-
     /// Watch the terminal until one of the four things that end a wait
     /// happens.
     async fn wait_for_readiness(
@@ -806,8 +849,15 @@ impl TerminalSession {
                 // `^C`, aimed the way a person's is: at whatever owns the
                 // terminal. A shell that was only waiting for input shrugs it
                 // off, which is why the session survives its own interrupt.
-                let _ = self.pty.signal_foreground(libc::SIGINT);
-                self.drain_prompt(prompts_before).await;
+                // The same two targets as `signal`, for the same reason: a
+                // stopped turn has to stop the *work*, and killing one child
+                // of a command list leaves the shell running the rest.
+                if let Ok(foreground) = self.pty.foreground_group() {
+                    let _ = self.pty.signal_group(foreground, libc::SIGINT);
+                    if foreground != self.pty.leader() {
+                        let _ = self.pty.signal_group(self.pty.leader(), libc::SIGINT);
+                    }
+                }
                 return WaitReason::Interrupted;
             }
             // A caller waiting deliberately for a short time means the

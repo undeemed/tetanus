@@ -211,7 +211,10 @@ impl PtySession {
                 if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(())
+                // A shell that inherited `SIGINT` as ignored is a shell no
+                // interrupt can reach, and so is everything it runs. See
+                // `crate::signals`.
+                crate::signals::reset_for_child()
             });
         }
         // After the terminal is taken, never before: Landlock forbids nothing
@@ -383,6 +386,22 @@ impl PtySession {
             return Err(PtyError::NoForeground);
         }
         Ok(group)
+    }
+
+    /// Deliver a signal to one named process group on this terminal.
+    ///
+    /// Separate from [`PtySession::signal_foreground`] because "what owns the
+    /// terminal" and "the shell that started it" are different targets and a
+    /// caller sometimes means both.
+    pub fn signal_group(&self, group: i32, signal: i32) -> Result<(), PtyError> {
+        // Safety: a plain `killpg` on a group this caller named.
+        if unsafe { libc::killpg(group, signal) } != 0 {
+            return Err(PtyError::Terminal {
+                what: "signalled",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        Ok(())
     }
 
     /// Deliver a signal to whichever group owns the terminal now.
