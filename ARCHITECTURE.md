@@ -1060,6 +1060,16 @@ the seam guarantees: the peer leads its own process group and is ended over that
 that starts helpers of its own does not leave them behind. `crates/mcp` starts its servers through
 it and keeps only the framing.
 
+Every child of every one of these seams is started with a signal disposition of its own
+([crates/exec/src/signals.rs](crates/exec/src/signals.rs)): the ignorable signals reset to
+`SIG_DFL` and the mask emptied, between `fork` and `exec`, in system calls only. It is not a
+nicety. A `SIG_IGN` disposition survives `exec`, and a shell running a command in the background
+ignores `SIGINT` for it - so a harness started with `&`, by a unit file or by CI handed every shell
+it opened an interrupt that could not be delivered, while `killpg` reported success and the tool
+reported `delivered`. Stopping a turn silently did nothing in every backgrounded deployment. The
+rule it leaves behind is worth more than the fix: what the harness inherits, its children inherit,
+so any promise a tool makes about a child is a promise about inherited state as much as about code.
+
 `hooks::ShellHookExecutor` ([crates/exec/src/hooks.rs](crates/exec/src/hooks.rs)) is the third
 consumer of the same machinery, and it exists because
 [crates/hooks](crates/hooks) deliberately owns no process: that crate decides which hook fires and
