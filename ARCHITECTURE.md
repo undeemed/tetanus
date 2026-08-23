@@ -1118,11 +1118,15 @@ and the journal is forever. `Tool::recorded`
 before it appends: `terminal_send` withholds its `text` when the call sets
 `secret`, `shell` and `shell_run` withhold their command line on the same flag,
 and the substitution happens in all three places a call is recorded - the call,
-the assistant message that carried it, and the streamed chunk. What is *not*
-marked is still recorded, and no automatic detection stands behind it: the
-signal that would carry one is the tty's `ECHO` state, which is not readable
-from the master here. So the floor is a statement rather than a mechanism, and
-it is in the tool descriptions where the model reads it.
+the assistant message that carried it, and the streamed chunk. A send the model does not mark is caught by a backstop when the terminal's last
+output line asked for a password: `sudo`'s mechanism, chosen for `sudo`'s
+reason - it had the tty's `ECHO` flag available and built a regex over the
+program's output instead, because an interactive shell holds echo off anyway
+and this crate's own `stty -echo` pins it off for the session. The two rules
+compose by union, never override, as the contract fixes for its own pair of
+redaction rules. Neither catches a prompt worded some other way, so the floor
+is also a statement, and it is in the tool descriptions where the model reads
+it.
 
 The two persistent families are not redundant. A pipe-backed session ends when a turn is stopped,
 because a shell reading a pipe has nothing to interrupt; a terminal-backed one interrupts the

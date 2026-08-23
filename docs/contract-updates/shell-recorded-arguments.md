@@ -7,12 +7,41 @@ here edits that file.
 
 ## What was built
 
-Their shape (1). A tool declares what the journal may keep of one call's
-arguments (`Tool::recorded`), the engine asks before it appends, and the tool
-still receives what the model actually sent. `terminal_send` withholds `text`
-when the call carries `secret: true`; `shell` and `shell_run` withhold
-`command` on the same flag, because a command line carries credentials just as
-often and a fix that stopped at the terminal would have been a half fix.
+The hybrid the captain decided from the scout's report
+(`data/tetanus-secrets-scout/report.md`): a caller flag and a runtime backstop,
+composed by union, plus the documentation half.
+
+**The flag.** A tool declares what the journal may keep of one call's arguments
+(`Tool::recorded`), the engine asks before it appends, and the tool still
+receives what the model actually sent. `terminal_send` withholds `text` when
+the call carries `secret: true`; `shell` and `shell_run` withhold `command` on
+the same flag, because a command line carries credentials just as often and a
+fix that stopped at the terminal would have been a half fix.
+
+**The backstop.** A terminal arms a window when a program's last output line
+looks like a credential prompt, and a send into an armed terminal is recorded
+withheld whether or not the model set the flag. The mechanism is `sudo`'s,
+shipped in 1.9.10 for this exact problem; the rule
+(`tetanus_turn::tools::looks_like_a_password_prompt`) is one answer for the
+whole harness, and the evidence stays with the terminal because nothing else
+has it.
+
+**Union, never override**, which is the direction §4.3 already fixes for the
+two config-redaction rules: either says secret, it is secret; neither can
+un-say it. A rule that could un-redact would make adding one a way to start
+publishing, silently and permanently.
+
+Two mechanisms were considered and are **not** built, both measured dead rather
+than argued away: inferring from the `[wait: stdin_read]` sequence, whose
+premise is inverted here - that is the *ordinary* settle reason for every
+command that finishes, while a program stopping to ask for a password emits no
+prompt marker at all - and `ECHO`-off detection, which readline and this
+crate's own `stty -echo` both pin to a constant.
+
+## A citation correction
+
+The note that raised this cited the sentinel as §4.6. It is **§4.3** (lines
+340-364); §4.6 is "State dynamics". Everything below cites §4.3.
 
 ## What the contract has to say, and why it is not just "reuse §4.3's sentinel"
 
@@ -70,10 +99,10 @@ credential in the record.
   password typed at `sudo` does not come back in the viewport - but a program
   that echoes what it is given (a REPL taking a token) puts it in the result,
   and nothing withholds it.
-- **A model that does not set the flag.** Detection is not available: the
-  reliable signal is the tty's `ECHO` state, and it is not readable from the
-  master in this arrangement (measured, not assumed - a real `read -s` prompt
-  reads identically before, during and after). So the floor stands: **a
+- **A model that does not set the flag, at a prompt the backstop does not
+  recognise.** The window arms on `password` and `passphrase` wording; a
+  program that asks for a "PIN", a "one-time code" or nothing at all leaves it
+  closed. The floor therefore stands whatever the mechanisms catch: **a
   terminal session's journal holds anything typed into it, and is to be treated
   as a credential store.** That sentence is in the tool descriptions and in the
   operator docs, and it is the part a surface should not soften.

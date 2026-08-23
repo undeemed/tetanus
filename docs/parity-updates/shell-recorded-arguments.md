@@ -11,15 +11,20 @@ Written by the process-execution lane, for the reconciliation slice to fold into
 > `secret` flag, the terminal receives the real text, and the journal keeps the
 > `<redacted>` sentinel in place of it - in the call, in the assistant message
 > that carried it, and in the streamed chunk, because the model said it too.
-> `shell` and `shell_run` take the same flag over their command line.
+> `shell` and `shell_run` take the same flag over their command line. A
+> `sudo`-style backstop withholds a send made into a terminal whose last output
+> line asked for a password, whether or not the model set the flag, and the two
+> rules compose by union as contract §4.3 fixes for its own pair.
 
 **Gap** gains:
 
-> A password the model does not flag is still recorded. The reliable signal is
-> the terminal's `ECHO` state and it is not readable from the pty master in
-> this arrangement, so there is no automatic detection to build on; the tool
-> descriptions and the operator docs say plainly that a terminal journal holds
-> whatever was typed into it.
+> A prompt the backstop does not recognise - a "PIN", a one-time code, a
+> program that asks for nothing in words - still records what the model typed
+> unless it set the flag. `ECHO`-off detection cannot close that gap here and
+> was measured rather than assumed: readline holds echo off at its own prompt,
+> and this crate's `stty -echo` pins it off for the session. The tool
+> descriptions and the operator docs therefore say plainly that a terminal
+> journal holds whatever was typed into it.
 
 ## Why not upstream's shape
 
@@ -35,4 +40,4 @@ Add:
 
 | Upstream spec | Ports to | Asserts | State |
 | --- | --- | --- | --- |
-| — (raised by the presentation lane, no upstream counterpart) | `crates/turn/tests/tool_recording.rs`, `crates/exec/tests/upstream_terminal_tools.rs` | What the journal keeps of a call's arguments | TC-TOOL-RECORD-1..4, TC-PORT-TERM-42. The exec case asserts on the *whole journal* rather than on `tool/call`, which is how it caught the two records the first fix would have missed |
+| — (raised by the presentation lane, no upstream counterpart; mechanism after `sudo` 1.9.10) | `crates/turn/tests/tool_recording.rs`, `crates/exec/tests/upstream_terminal_tools.rs` | What the journal keeps of a call's arguments | TC-TOOL-RECORD-1..5, TC-PORT-TERM-42..43. The exec cases assert on the *whole journal* rather than on `tool/call`, which is how they caught the two records a fix aimed at the obvious site would have missed; TC-PORT-TERM-43 answers a real `[sudo] password for ci:` prompt with no flag set |
