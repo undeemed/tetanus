@@ -63,12 +63,12 @@ async fn run(registry: &ToolRegistry, name: &str, arguments: serde_json::Value) 
 /// parameters.
 ///
 /// Input: a registry with the suite composed.
-/// Expected: exactly the seven names, each with an object schema that declares
+/// Expected: exactly the eight names, each with an object schema that declares
 /// the arguments the tool actually reads. The roster is asserted whole so a
 /// tool added or renamed is a decision somebody made rather than a change that
 /// slipped in.
 #[tokio::test]
-async fn the_suite_offers_seven_named_tools_with_declared_arguments() {
+async fn the_suite_offers_eight_named_tools_with_declared_arguments() {
     let fixture = Fixture::new();
     let registry = registry(&fixture);
 
@@ -77,7 +77,7 @@ async fn the_suite_offers_seven_named_tools_with_declared_arguments() {
     let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        ["delete", "edit", "glob", "list", "read", "stat", "write"]
+        ["delete", "edit", "glob", "list", "read", "search", "stat", "write"]
     );
     assert_eq!(names, FsTools::NAMES);
     for schema in &schemas {
@@ -438,4 +438,231 @@ async fn a_write_and_a_delete_report_what_they_did() {
     assert_eq!(updated.content, "updated notes.md (1 lines, 4 bytes)");
     assert_eq!(deleted.content, "deleted notes.md");
     assert!(!fixture.exists("notes.md"));
+}
+
+/// TC-PORT-FS-51: a search answers with the matching lines, each named by its
+/// file and line number.
+///
+/// Input: three files, two of which contain the word searched for.
+/// Expected: one line per match, `path:line: text`, with a header counting the
+/// lines and the files. Upstream's `grep` shells out to `ripgrep` and renders
+/// the same three facts; what is restated is the answer, not the mechanism.
+#[tokio::test]
+async fn a_search_answers_with_the_lines_that_match_and_where_they_are() {
+    let fixture = Fixture::new();
+    fixture.write("src/one.rs", "fn alpha() {}\nfn beta() {}\n");
+    fixture.write("src/two.rs", "// nothing here\n");
+    fixture.write("src/three.rs", "fn gamma() {}\n");
+    let registry = registry(&fixture);
+
+    let found = run(&registry, "search", json!({ "pattern": r"fn \w+" })).await;
+
+    assert!(found.ok, "{}", found.content);
+    let lines: Vec<&str> = found.content.lines().collect();
+    assert_eq!(lines[0], "3 matching lines in 2 files");
+    assert!(lines.contains(&"src/one.rs:1: fn alpha() {}"), "{lines:?}");
+    assert!(lines.contains(&"src/one.rs:2: fn beta() {}"), "{lines:?}");
+    assert!(
+        lines.contains(&"src/three.rs:1: fn gamma() {}"),
+        "{lines:?}"
+    );
+    assert!(
+        !found.content.contains("two.rs"),
+        "a file with no match is not named: {}",
+        found.content
+    );
+}
+
+/// TC-PORT-FS-52: the glob narrows what a search opens, and no match is an
+/// answer rather than a failure.
+///
+/// Input: the same word in two file types, searched under one glob; then a
+/// pattern nothing matches.
+/// Expected: only the globbed file is reported; the empty search is `ok` and
+/// says so in words, because "I looked and there is nothing" is a result a
+/// model acts on and a failure is something it retries.
+#[tokio::test]
+async fn a_glob_narrows_the_search_and_no_match_is_still_an_answer() {
+    let fixture = Fixture::new();
+    fixture.write("keep.rs", "target\n");
+    fixture.write("skip.md", "target\n");
+    let registry = registry(&fixture);
+
+    let narrowed = run(
+        &registry,
+        "search",
+        json!({ "pattern": "target", "glob": "**/*.rs" }),
+    )
+    .await;
+    let missing = run(&registry, "search", json!({ "pattern": "absent" })).await;
+
+    assert!(narrowed.content.contains("keep.rs:1: target"));
+    assert!(
+        !narrowed.content.contains("skip.md"),
+        "{}",
+        narrowed.content
+    );
+    assert!(missing.ok, "an empty search is not a failure");
+    assert!(
+        missing.content.starts_with("no line under"),
+        "{}",
+        missing.content
+    );
+}
+
+/// TC-PORT-FS-53: case folding is the default, and the argument turns it off.
+///
+/// Input: `Target` searched for as `target`, with and without
+/// `case_sensitive`.
+/// Expected: found by default, not found when the case must match. The default
+/// is the forgiving one because a model that wanted exactness can ask for it,
+/// while a model that missed a match learns nothing from the miss.
+#[tokio::test]
+async fn a_search_folds_case_unless_it_is_told_not_to() {
+    let fixture = Fixture::new();
+    fixture.write("notes.md", "Target acquired\n");
+    let registry = registry(&fixture);
+
+    let folded = run(&registry, "search", json!({ "pattern": "target" })).await;
+    let exact = run(
+        &registry,
+        "search",
+        json!({ "pattern": "target", "case_sensitive": true }),
+    )
+    .await;
+
+    assert!(folded.content.contains("notes.md:1: Target acquired"));
+    assert!(
+        exact.content.starts_with("no line under"),
+        "{}",
+        exact.content
+    );
+}
+
+/// TC-PORT-FS-54: a file the search cannot read is skipped, counted and
+/// reported - never fatal, and never silent.
+///
+/// Input: a text file that matches beside a file of bytes that are not UTF-8.
+/// Expected: the match is answered, the call is `ok`, and the answer says one
+/// file was skipped. Silence is the failure mode this case exists for: a
+/// search that quietly steps over a file has answered "no matches" about
+/// something it never looked at.
+#[tokio::test]
+async fn a_binary_file_is_skipped_and_the_answer_says_so() {
+    let fixture = Fixture::new();
+    fixture.write("readable.txt", "needle\n");
+    std::fs::write(fixture.root().join("blob.bin"), [0xff, 0xfe, 0x00, 0x01])
+        .expect("write the binary file");
+    let registry = registry(&fixture);
+
+    let found = run(&registry, "search", json!({ "pattern": "needle" })).await;
+
+    assert!(found.ok, "{}", found.content);
+    assert!(found.content.contains("readable.txt:1: needle"));
+    assert!(
+        found
+            .content
+            .contains("1 unreadable or non-text file skipped"),
+        "{}",
+        found.content
+    );
+}
+
+/// TC-PORT-FS-55: a pattern that is not a regular expression is the model's
+/// mistake, answered with the reason and not with a panic.
+///
+/// Input: an unclosed group.
+/// Expected: `ok: false`, the class first, and the regex engine's own
+/// explanation after it - which names the offset, and is what makes the next
+/// attempt different from this one.
+#[tokio::test]
+async fn a_malformed_pattern_is_refused_in_words() {
+    let fixture = Fixture::new();
+    fixture.write("file.txt", "text\n");
+    let registry = registry(&fixture);
+
+    let refused = run(&registry, "search", json!({ "pattern": "fn (" })).await;
+
+    assert!(!refused.ok);
+    assert!(
+        refused.content.starts_with("FS_BAD_PATTERN:"),
+        "{}",
+        refused.content
+    );
+}
+
+/// TC-PORT-FS-56: a search is bounded, and says that it stopped.
+///
+/// Input: more matching lines than the bound.
+/// Expected: exactly the bound is returned and the last line says the search
+/// stopped. A search whose whole point is to be cheaper than reading the files
+/// must not answer with more text than the files.
+#[tokio::test]
+async fn a_search_stops_at_its_bound_and_says_so() {
+    let fixture = Fixture::new();
+    let many: String = (0..tetanus_fs::tools::MAX_SEARCH_MATCHES + 40)
+        .map(|n| format!("hit {n}\n"))
+        .collect();
+    fixture.write("many.txt", &many);
+    let registry = registry(&fixture);
+
+    let found = run(&registry, "search", json!({ "pattern": "^hit" })).await;
+
+    let lines: Vec<&str> = found.content.lines().collect();
+    assert_eq!(
+        lines.len(),
+        tetanus_fs::tools::MAX_SEARCH_MATCHES + 2,
+        "a header, the bound in matches, and the notice"
+    );
+    assert!(
+        lines.last().expect("a last line").contains("stopped at"),
+        "{:?}",
+        lines.last()
+    );
+}
+
+/// TC-PORT-FS-57: the fence judges a search, and a search does not license a
+/// write.
+///
+/// Input: a search under a path outside the workspace; then a search that
+/// matches a file, followed by a write to that file.
+/// Expected: the outside search is refused by the fence like any other
+/// resolution, and the write is still refused as unobserved. The second half
+/// is the decision worth pinning: a search shows a model a handful of lines
+/// out of a file it has otherwise never seen, so letting that count as reading
+/// would let a model grep for one word and then replace everything.
+#[tokio::test]
+async fn the_fence_judges_a_search_and_a_search_is_not_a_read() {
+    let fixture = Fixture::new();
+    fixture.write("owned.txt", "needle\nrest\n");
+    let registry = registry(&fixture);
+
+    let outside = run(
+        &registry,
+        "search",
+        json!({ "pattern": "needle", "path": fixture.outside().display().to_string() }),
+    )
+    .await;
+    let found = run(&registry, "search", json!({ "pattern": "needle" })).await;
+    let overwrite = run(
+        &registry,
+        "write",
+        json!({ "path": "owned.txt", "content": "replaced\n" }),
+    )
+    .await;
+
+    assert!(!outside.ok, "{}", outside.content);
+    assert!(
+        outside.content.starts_with("FS_SANDBOX_DENIED:"),
+        "{}",
+        outside.content
+    );
+    assert!(found.content.contains("owned.txt:1: needle"));
+    assert!(!overwrite.ok, "a search must not license an overwrite");
+    assert!(
+        overwrite.content.starts_with("FS_NOT_OBSERVED:"),
+        "{}",
+        overwrite.content
+    );
+    assert_eq!(fixture.read("owned.txt"), "needle\nrest\n");
 }
