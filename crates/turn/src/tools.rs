@@ -134,8 +134,40 @@ pub trait Tool: Send + Sync {
         Permission::Allow
     }
 
+    /// The arguments as the journal may keep them.
+    ///
+    /// A tool call is recorded before it runs, so what a tool is *given* and
+    /// what is *written down* are two different things - and for one family of
+    /// arguments they have to be. `terminal_send` is how a model answers
+    /// `[sudo] password for ci:`, and the password is an ordinary argument: it
+    /// lands in the journal in plain text, permanently, and every surface that
+    /// draws a tool call draws it.
+    ///
+    /// The default keeps everything, which is right for almost every tool: an
+    /// argument nobody can read is an audit trail nobody can follow. A tool
+    /// that can carry a credential overrides this and substitutes
+    /// [`REDACTED`] for that argument alone, so the call, its name and its
+    /// other arguments stay on the record.
+    ///
+    /// It is asked of the tool rather than decided by the engine because the
+    /// engine must not know what any particular tool's arguments mean; and it
+    /// is asked at *record* time rather than at render time because a surface
+    /// that hid what the journal keeps would be lying about the risk instead
+    /// of removing it.
+    fn recorded(&self, arguments: &serde_json::Value) -> serde_json::Value {
+        arguments.clone()
+    }
+
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
 }
+
+/// What stands in the journal for a value a tool withheld.
+///
+/// The same string the boundary publishes for a withheld configuration value
+/// (`tetanus_protocol::types::REDACTED`), because a surface that already draws
+/// one as "withheld, not empty" should not need a second vocabulary. The two
+/// constants are asserted equal where both crates are in scope.
+pub const REDACTED: &str = "<redacted>";
 
 /// The reserved entry in a configured tool order: the one place every tool the
 /// order does not name is inserted, in canonical order.
@@ -318,6 +350,46 @@ impl ToolRegistry {
                 ToolMode::Exclusive
             }
         }
+    }
+
+    /// One call's arguments, as the journal may keep them.
+    ///
+    /// A classifier that panics fails *closed* here, and closed means silent:
+    /// the tool was the only thing that knew which of its arguments was a
+    /// secret, so a panic loses that knowledge and the safe answer is to keep
+    /// none of them. The alternative - record everything because the redactor
+    /// broke - writes the credential down at exactly the moment the code
+    /// meant to protect it stopped working.
+    pub fn recorded(&self, call: &ToolCall) -> serde_json::Value {
+        let Some(tool) = self.tools.get(&call.name) else {
+            // No tool claimed these arguments, and the call is about to fail
+            // as unknown. Recording what the model actually sent is what makes
+            // that failure diagnosable.
+            return call.arguments.clone();
+        };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| tool.recorded(&call.arguments))) {
+            Ok(recorded) => recorded,
+            Err(payload) => {
+                let fault = panicked(payload);
+                tracing::error!(tool = call.name, %fault, "a tool's redactor panicked");
+                serde_json::json!(REDACTED)
+            }
+        }
+    }
+
+    /// Several calls, as the journal may keep them.
+    ///
+    /// The assistant message that carried them is recorded once, so the whole
+    /// list is redacted together rather than one call at a time by a caller
+    /// that might forget one.
+    pub fn recorded_calls(&self, calls: &[ToolCall]) -> Vec<ToolCall> {
+        calls
+            .iter()
+            .map(|call| ToolCall {
+                arguments: self.recorded(call),
+                ..call.clone()
+            })
+            .collect()
     }
 
     /// Decide whether one call may run unasked.

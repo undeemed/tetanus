@@ -31,7 +31,7 @@ use serde_json::Value;
 use tetanus_sandbox::Mode;
 use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::tools::{
-    Permission, Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema,
+    Permission, Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema, REDACTED,
 };
 
 use crate::backend::ShellBackend;
@@ -309,6 +309,10 @@ impl Tool for ShellTool {
                     "minimum": 1,
                     "description": "How long the command may run before it and everything it started are killed. The deployment caps this.",
                 },
+                "secret": {
+                    "type": "boolean",
+                    "description": "Set this when the command line itself carries a credential - a password in a flag, a token in a header. The command still runs as written; the session journal keeps `<redacted>` in place of it. Prefer a command that reads the secret from a file or the environment, because a redacted command line is one nobody can audit either.",
+                },
             },
             "required": ["command"],
             "additionalProperties": false,
@@ -336,6 +340,21 @@ impl Tool for ShellTool {
     /// is done.
     fn mode(&self, _arguments: &Value) -> ToolMode {
         ToolMode::Exclusive
+    }
+
+    /// A command line can carry a credential - `mysql -pSECRET`, a token in a
+    /// header - and the journal is forever. When the model says so, the whole
+    /// command is withheld rather than the flag inside it: this seam does not
+    /// parse command lines, and a redactor that tried to find the secret part
+    /// would be a parser for every shell syntax there is, wrong in the
+    /// direction that publishes the password.
+    ///
+    /// That is a real cost, and the schema says so: a withheld command is one
+    /// an auditor cannot read either. The better shape is a command that reads
+    /// its secret from a file or the environment, and the description says
+    /// that first.
+    fn recorded(&self, arguments: &Value) -> Value {
+        withheld_when_secret(arguments, "command")
     }
 
     /// An ordinary command runs; a command asking for a wider sandbox is
@@ -480,6 +499,10 @@ impl Tool for ShellRunTool {
                         "type": "string",
                         "description": "The command line to run in that session.",
                     },
+                    "secret": {
+                        "type": "boolean",
+                        "description": "Set this when the command line carries a credential. It still runs as written; the journal keeps `<redacted>` in place of it.",
+                    },
                 },
                 "required": ["session_id", "command"],
                 "additionalProperties": false,
@@ -491,6 +514,12 @@ impl Tool for ShellRunTool {
     /// a command in a shell can write anything: a barrier, like `shell`.
     fn mode(&self, _arguments: &Value) -> ToolMode {
         ToolMode::Exclusive
+    }
+
+    /// As `shell`: a command line that carries a credential is withheld whole
+    /// when the model says it carries one.
+    fn recorded(&self, arguments: &Value) -> Value {
+        withheld_when_secret(arguments, "command")
     }
 
     async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
@@ -650,6 +679,24 @@ impl Tool for MissingShell {
     async fn execute(&self, _arguments: &Value) -> Result<ToolOutcome, ToolError> {
         Err(ToolError::Failed(SHELL.into(), self.0.clone()))
     }
+}
+
+/// One argument replaced by the sentinel, when the call said it holds a
+/// secret. Shared by the two tools that take a command line, so both answer
+/// the flag the same way.
+fn withheld_when_secret(arguments: &Value, field: &str) -> Value {
+    if !arguments
+        .get("secret")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return arguments.clone();
+    }
+    let mut recorded = arguments.clone();
+    if let Some(object) = recorded.as_object_mut() {
+        object.insert(field.to_string(), Value::String(REDACTED.to_string()));
+    }
+    recorded
 }
 
 /// Put the exit marker back on a session result, which has no renderer of its

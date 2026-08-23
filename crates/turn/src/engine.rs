@@ -592,6 +592,7 @@ impl TurnEngine {
                     turn,
                     step,
                     seqs: Arc::clone(&chunks),
+                    tools: Arc::clone(&self.tools),
                 }),
             };
             // A failed call is offered to `agent/request-error` before it ends
@@ -637,7 +638,11 @@ impl TurnEngine {
                 serde_json::json!({
                     "content": response.content,
                     "reasoning": response.reasoning,
-                    "tool_calls": asked,
+                    // The model *said* the credential, so the journal holds it
+                    // here too unless the same redaction applies. Withholding
+                    // it from `tool/call` and keeping it in the message the
+                    // call came from would be a fix that fixed nothing.
+                    "tool_calls": self.tools.recorded_calls(asked),
                     "finish_reason": response.finish_reason,
                     "usage": response.usage,
                 }),
@@ -794,7 +799,12 @@ impl TurnEngine {
             serde_json::json!({
                 "id": call.id,
                 "name": call.name,
-                "arguments": call.arguments,
+                // What the journal may keep, which is not always what the tool
+                // is given: a `terminal_send` answering a password prompt
+                // carries a credential, and the journal is forever. The tool
+                // decides, because the engine must not know what any
+                // particular argument means.
+                "arguments": self.tools.recorded(call),
             }),
         )?;
 
@@ -971,16 +981,31 @@ fn pass_outcome() -> Terminal<ToolsPostExecute> {
 
 /// The sink the engine hands to the adapter: every chunk becomes a durable
 /// `assistant/chunk`, so the log keeps the raw stream a replay or a UI needs.
+///
+/// "Raw" has one exception, and it is the same one the journal makes
+/// everywhere else: a streamed tool call carries the arguments the model
+/// wrote, and one of those can be a password. The registry is here so the
+/// chunk is written the way the call will be.
 struct LogSink {
     log: Arc<dyn SessionLog>,
     turn: u64,
     step: u32,
     seqs: Arc<Mutex<Vec<u64>>>,
+    tools: Arc<ToolRegistry>,
 }
 
 #[async_trait::async_trait]
 impl ChunkSink for LogSink {
     async fn chunk(&mut self, chunk: StreamChunk) -> Result<(), LlmError> {
+        let chunk = match chunk {
+            StreamChunk::ToolCall { call } => StreamChunk::ToolCall {
+                call: ToolCall {
+                    arguments: self.tools.recorded(&call),
+                    ..call
+                },
+            },
+            other => other,
+        };
         let mut data = serde_json::to_value(&chunk)
             .map_err(|e| LlmError::Sink(format!("chunk is not serializable: {e}")))?;
         if let Some(object) = data.as_object_mut() {

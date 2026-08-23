@@ -563,6 +563,128 @@ async fn long_work_is_started_and_collected_later() {
     tools.terminals().close_all().await;
 }
 
+/// TC-PORT-TERM-42: a password typed at a terminal does not reach the journal,
+/// and the terminal still receives it.
+///
+/// Raised by the presentation lane
+/// (`docs/contract-updates/ui-terminal-send-secrets.md`): `terminal_send` is
+/// how a model answers `[sudo] password for ci:`, and its arguments are
+/// recorded like any other call - so the credential was in
+/// `sessions/<id>.jsonl` in plain text, permanently, and every surface that
+/// draws a tool call drew it.
+///
+/// The two halves have to hold together, which is why one case asserts both:
+/// withholding the text from the journal is worthless if the program never
+/// gets the password, and sending it is a leak if the journal keeps it.
+///
+/// Input: a session; a send carrying a password with `secret`, whose command
+/// writes what it read to a file; then an ordinary send.
+/// Expected: the journal's `tool/call` holds `<redacted>` in place of the
+/// text while keeping the session id and the tool's name; the file holds the
+/// real password, so the terminal got it; and the ordinary send is recorded in
+/// full, because withholding everything would leave nothing to audit.
+#[tokio::test]
+async fn a_password_typed_at_a_terminal_does_not_reach_the_journal() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let seen = workspace.path().join("what-it-read.txt");
+    let script = format!(
+        "read -r answer; printf '%s' \"$answer\" > {}",
+        seen.display()
+    );
+    let script_for_model = script.clone();
+    let script_for_send = script.clone();
+
+    let harness = Harness::new(
+        "terminal-secret",
+        workspace.path(),
+        Script::new(vec![
+            Step::Call(call("c1", TERMINAL_OPEN, json!({}))),
+            Step::CallFrom(Box::new(move |earlier| {
+                call(
+                    "c2",
+                    TERMINAL_SEND,
+                    json!({
+                        "session_id": session_id(earlier),
+                        "text": script_for_model,
+                        "wait_ms": 300,
+                    }),
+                )
+            })),
+            Step::CallFrom(Box::new(|earlier| {
+                call(
+                    "c3",
+                    TERMINAL_SEND,
+                    json!({
+                        "session_id": session_id(earlier),
+                        "text": "hunter2-the-password",
+                        "secret": true,
+                    }),
+                )
+            })),
+            Step::CallFrom(Box::new(|earlier| {
+                call(
+                    "c4",
+                    TERMINAL_SEND,
+                    json!({ "session_id": session_id(earlier), "text": "echo ordinary" }),
+                )
+            })),
+        ]),
+    )
+    .await;
+
+    harness
+        .engine
+        .run_turn("answer the prompt")
+        .await
+        .expect("the turn ran");
+
+    let calls = harness.calls();
+    let secret = calls
+        .iter()
+        .find(|call| call["id"] == json!("c3"))
+        .expect("the secret send was recorded");
+    assert_eq!(
+        secret["arguments"]["text"],
+        json!("<redacted>"),
+        "the journal kept the password: {secret:#?}"
+    );
+    assert!(
+        secret["arguments"]["session_id"].is_string() && secret["name"] == json!(TERMINAL_SEND),
+        "the record still says a secret was typed at that terminal: {secret:#?}"
+    );
+
+    let whole = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert_eq!(
+        whole.trim(),
+        "hunter2-the-password",
+        "the terminal has to receive the real password; the journal is what does not"
+    );
+
+    let ordinary = calls
+        .iter()
+        .find(|call| call["id"] == json!("c4"))
+        .expect("the ordinary send was recorded");
+    assert_eq!(
+        ordinary["arguments"]["text"],
+        json!("echo ordinary"),
+        "an ordinary send is recorded in full: {ordinary:#?}"
+    );
+
+    // Nothing anywhere on the journal holds it - not the call, not the result,
+    // not a surface event. This is the assertion the note actually asked for.
+    let journal = harness.journal();
+    assert!(
+        !journal.contains("hunter2-the-password"),
+        "the password is somewhere on the journal: {}",
+        journal
+            .lines()
+            .filter(|line| line.contains("hunter2-the-password"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let _ = script_for_send;
+}
+
 // ---------------------------------------------------------------- fixtures
 
 /// The whole retained page of one session, through the tool a model would use.
@@ -722,6 +844,33 @@ impl Harness {
             log,
             _dir: dir,
         }
+    }
+
+    /// Every `tool/call` on the journal, as it was recorded.
+    fn calls(&self) -> Vec<Value> {
+        self.log
+            .events()
+            .iter()
+            .filter(|event| event.ty == "tool/call")
+            .map(|event| event.data.clone())
+            .collect()
+    }
+
+    /// The whole journal as text, for a case asserting something is *not* on
+    /// it anywhere.
+    fn journal(&self) -> String {
+        self.log
+            .events()
+            .iter()
+            .map(|event| {
+                format!(
+                    "{} {}",
+                    event.ty,
+                    serde_json::to_string(&event.data).unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Every `tool/result` on the journal, in the order it was committed.

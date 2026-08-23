@@ -31,7 +31,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tetanus_turn::interrupt::Interrupt;
-use tetanus_turn::tools::{Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema};
+use tetanus_turn::tools::{
+    Tool, ToolError, ToolMode, ToolOutcome, ToolRegistry, ToolSchema, REDACTED,
+};
 
 use crate::terminal::{Status, TerminalError, TerminalSession, TerminalSignal, WaitReason};
 use crate::terminals::{Closed, OpenRequest, Owner, Terminals};
@@ -203,6 +205,10 @@ impl Tool for SendTool {
                         "minimum": 1,
                         "description": "How long to wait for an answer before returning and leaving the command running. Defaults to the deployment's own bound, which also caps this.",
                     },
+                    "secret": {
+                        "type": "boolean",
+                        "description": "Set this when the text is a password, a token or anything else that must not be written down. The terminal still receives it; the session journal keeps `<redacted>` in its place. Set it whenever you are answering a prompt that is not echoing what you type.",
+                    },
                 },
                 "required": ["session_id", "text"],
                 "additionalProperties": false,
@@ -214,6 +220,31 @@ impl Tool for SendTool {
     /// anything: a barrier, like `shell`.
     fn mode(&self, _arguments: &Value) -> ToolMode {
         ToolMode::Exclusive
+    }
+
+    /// The text of a send is the one argument in this crate that routinely
+    /// carries a credential: this tool exists so a model can drive `ssh`,
+    /// `sudo` and anything else that asks for a password, and the answer is an
+    /// ordinary string argument. When the model says so, the journal keeps the
+    /// sentinel and the terminal still gets the password.
+    ///
+    /// Only `text` is withheld. The session id, the flags and the tool's own
+    /// name stay, so the record still says that a secret was typed at that
+    /// terminal at that moment - which is what an audit needs and what a
+    /// blanket redaction would destroy.
+    fn recorded(&self, arguments: &Value) -> Value {
+        if !arguments
+            .get("secret")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return arguments.clone();
+        }
+        let mut recorded = arguments.clone();
+        if let Some(object) = recorded.as_object_mut() {
+            object.insert("text".to_string(), Value::String(REDACTED.to_string()));
+        }
+        recorded
     }
 
     async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
