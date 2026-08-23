@@ -164,6 +164,13 @@ found the defect runs first from then on.
 - A change to the engine/presentation boundary is its own PR. It touches
   [docs/interface-contract.md](docs/interface-contract.md) and `crates/protocol` together, adds a
   changelog row, and lands before anything that depends on it.
+- **If your change moves a row in [docs/parity.md](docs/parity.md) or the boundary document and you
+  cannot edit them without colliding, write a note under `docs/parity-updates/` or
+  `docs/contract-updates/` and say so where your work is reported.** Those files are how a lane in
+  flight records a row it cannot land, and a reconciliation slice folds them in and deletes them.
+  Until it does, the note is the only copy of what it knows, and one nobody has been told about is
+  knowledge that is not in the project. Write the row you want, in the words you want it in: the
+  fold restates as little as it can.
 
 ## Commit hygiene
 
