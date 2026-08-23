@@ -58,6 +58,13 @@
  .row.wide { gap:0; }
  .row .mark { flex:0 0 auto; font-weight:400; white-space:pre; }
  .row .said { flex:1 1 auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+ /* A tool call puts its fold on the row, beside the mark. The row is a flex
+    line, so the fold has to be told to take the space - and the empty text
+    span beside it has to be told not to, or it claims the width and pushes the
+    fold to the right margin. Both only became visible once `.row` was a flex
+    row again; while it was a block the fold fell onto its own line. */
+ .row .said:empty { flex:0 0 auto; }
+ .row > .disclose { flex:1 1 auto; min-width:0; }
  .row.you .who { color:var(--bright); font-weight:600; }
  .row.ai .who { color:var(--cyan); }
  .row.think .said { color:var(--muted); }
@@ -142,13 +149,30 @@
  /* `.quiet`, not `.dot`: the primitives already own `.dot` for the state
     indicator, and a control carrying both matched two unrelated rules. */
  .choice.quiet { color:var(--muted); }
- .pick-foot { display:flex; gap:10px; align-items:center; padding:11px 14px;
+ .pick-foot { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:11px 14px;
    border-top:1px solid var(--line); }
  .pick-foot .grow { margin-left:auto; }
- .pick-note { font:12.5px ui-monospace,monospace; color:var(--muted); }
+ /* The note says how many directories there are, and what a refusal was. It
+    wraps rather than being clipped: a chooser that cut "57 directories" to
+    "57 director" was clipping the half of the sentence that is the number. */
+ .pick-note { font:12.5px ui-monospace,monospace; color:var(--muted);
+   overflow-wrap:anywhere; }
  .pick-note.fault { color:var(--red); }
  /* Wrapped onto its own line, the state has no row to sit at the end of. */
  @media (max-width:620px) { .state { margin-left:0; } }
+ /* On a narrow screen the two panes are two half-widths of nothing. The
+    parent pane exists so stepping back does not lose the reader's place, and
+    at 190px per column it loses it a different way - so below this width the
+    level being chosen gets the whole dialog, and the crumb trail above is
+    what steps back. */
+ @media (max-width:560px) {
+   .panes { grid-template-columns:1fr; }
+   #parent { display:none; }
+   /* The chooser's own controls stop sharing a line with the note, which at
+      this width leaves each of them a few characters wide. */
+   .pick-foot .grow { display:none; }
+   .pick-foot button { flex:1 1 auto; }
+ }
 </style>
 </head>
 <body>

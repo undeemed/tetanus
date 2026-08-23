@@ -10,8 +10,13 @@ Three pairs of names are kept apart on purpose, because a stylesheet has one nam
 compiler: `.row` is a line of the transcript and `.choice` is a control you pick; `.said` is a
 transcript row's text and `.message` is what `messageText` draws; `.dot` is the state indicator and
 `.quiet` is a hidden entry in the chooser. Each pair shared a name once, and each time the rule that
-lost was silent and order-dependent. A probe case now refuses any class defined by both
-`primitives.css` and the page's own `<style>`.
+lost was silent and order-dependent.
+
+Three probe cases hold that line now: no class is *defined bare* by both `primitives.css` and the
+page's own `<style>`; no element wears a page class and a primitives class at once; and every id a
+script reaches for is an id the page has. A page rule that scopes a primitive on purpose -
+`.row > .disclose` - is allowed, because that is the cascade being used rather than a second
+definition.
 
 ## Running it
 
@@ -194,6 +199,13 @@ command and not a message.
 event for event. That is a **second implementation of one fold**, said out loud rather than left to
 be discovered: there is no `session.stats` on the boundary, so the choice was to fold or to not have
 the figures. If the two ever disagree, the terminal is right and this is the copy to fix.
+
+## At the width of a phone
+
+The transcript wraps and the chooser does not stay in two columns. Below 560px the level being
+chosen takes the whole dialog and the crumb trail above it is what steps back - the parent pane
+exists so that stepping back does not lose the reader's place, and at 190px a column it loses it a
+different way.
 
 ## Stopping a turn
 
