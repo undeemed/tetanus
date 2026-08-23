@@ -33,8 +33,10 @@
 //! Pass criteria: each case's stated expected result holds exactly.
 //! Fail criteria: any other observed value, or a panic.
 
+use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, ChildStderr, Command, Stdio};
 
 /// A correct MCP server: it answers the handshake, advertises one tool, and
 /// answers a call to it. Small on purpose - what is under test is the binary
@@ -306,4 +308,137 @@ fn the_page_and_a_turn_are_offered_the_same_mcp_tools() {
         String::from_utf8_lossy(&turned.stderr)
     );
     assert_eq!(running(dir.path()), 0, "and left nothing behind");
+}
+
+/// TC-CLI-MCP-7: every carrier is offered the declared server's tools.
+///
+/// TC-CLI-CAT-12 holds the surfaces of one build to the same toolbox, but it
+/// runs with no server declared, so a build that wired MCP into one carrier
+/// and not another would pass it: both would answer twenty-six and agree.
+/// This is the same question asked with a server in the document, which is the
+/// axis the MCP source actually varies on - it is composed at boot, per
+/// surface, from a process that has to be started.
+///
+/// It is not hypothetical either. The first cut of this slice wired `serve`,
+/// `run`, `chat` and the catalogue by hand and left `serve --frontend` out -
+/// the same surface, and the same omission, as the defect TC-CLI-CAT-12 exists
+/// for.
+///
+/// Input: a document declaring one working server, asked of the tools page and
+/// of the frontend's carrier.
+/// Expected: both offer `mcp__probe__ping`, and both name the same set.
+#[test]
+fn every_carrier_is_offered_the_declared_servers_tools() {
+    let dir = home(&declaring("probe"));
+    let frontend = dir.path().join("frontend");
+    std::fs::create_dir_all(&frontend).expect("a frontend directory");
+    std::fs::write(frontend.join("index.html"), "<html></html>").expect("an index");
+
+    let page: BTreeSet<String> = offered(dir.path()).into_iter().collect();
+    assert!(
+        page.contains("mcp__probe__ping"),
+        "the page does not have it to compare: {page:?}"
+    );
+
+    let (mut server, _banner, address) = listening(
+        dir.path(),
+        &[
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--frontend",
+            frontend.to_str().expect("utf-8"),
+            "--token",
+            TOKEN,
+        ],
+    );
+    let carried = over_websocket(&address, &format!("/api/ws?token={TOKEN}"));
+    let _ = server.kill();
+    let _ = server.wait();
+
+    assert_eq!(
+        page, carried,
+        "the tools page and the frontend's carrier disagree with a server declared"
+    );
+}
+
+const TOKEN: &str = "a-token-this-case-states";
+const HELLO: &str = r#"{"jsonrpc":"2.0","id":1,"method":"rpc.hello","params":{"protocol_version":"1.0","client":{"name":"probe","version":"0.1.0"}}}"#;
+const CATALOG: &str = r#"{"jsonrpc":"2.0","id":2,"method":"catalog.tools","params":{}}"#;
+
+/// A server on a port the operating system chose, read far enough to learn
+/// which one. Only the authority is wanted: the frontend's banner names a URL
+/// with a token on it, so it is cut out of the line rather than trimmed off.
+fn listening(dir: &Path, args: &[&str]) -> (Child, BufReader<ChildStderr>, String) {
+    let mut server = Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir)
+        .env("TETANUS_HOME", dir)
+        .env_remove("DEEPSEEK_API_KEY")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the server starts");
+    let mut page = BufReader::new(server.stderr.take().expect("stderr is piped"));
+    let mut address = None;
+    let mut line = String::new();
+    while address.is_none() {
+        line.clear();
+        if page.read_line(&mut line).expect("stderr reads") == 0 {
+            break;
+        }
+        address = line.split_whitespace().find_map(|word| {
+            let start = word.find("127.0.0.1:")?;
+            let rest = &word[start..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ':'))
+                .unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        });
+    }
+    match address {
+        Some(address) => (server, page, address),
+        None => {
+            let _ = server.kill();
+            let _ = server.wait();
+            panic!("the banner never named an address");
+        }
+    }
+}
+
+/// The tool names `catalog.tools` answers with over a WebSocket carrier.
+fn over_websocket(address: &str, path: &str) -> BTreeSet<String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}{path}"))
+                .await
+                .expect("the server accepts a handshake");
+            for frame in [HELLO, CATALOG] {
+                socket.send(Message::text(frame)).await.expect("writes");
+                let answer = loop {
+                    let message = socket.next().await.expect("answers").expect("a frame");
+                    if let Message::Text(text) = message {
+                        break text.to_string();
+                    }
+                };
+                if frame == CATALOG {
+                    let message: serde_json::Value =
+                        serde_json::from_str(&answer).expect("a JSON answer");
+                    return message["result"]["tools"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("no tools in {answer}"))
+                        .iter()
+                        .map(|tool| tool["name"].as_str().expect("a name").to_string())
+                        .collect();
+                }
+            }
+            unreachable!("the catalogue frame is always sent")
+        })
 }
