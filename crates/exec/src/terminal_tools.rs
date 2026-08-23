@@ -317,10 +317,12 @@ impl Tool for ReadTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: TERMINAL_READ.into(),
-            description: "Read a page of what a terminal session has printed, without typing \
-                          anything at it. Lines are counted back from the newest, so `offset` 0 \
-                          is the end of the transcript and `offset` 100 is the hundred lines \
-                          before that."
+            description: "Read what a terminal session shows. For a program that prints and \
+                          moves on you get a page of the transcript, counted back from the newest \
+                          line - `offset` 0 is the end, `offset` 100 is the hundred lines before \
+                          that. For a program that *draws* - an editor, a pager, `htop` - you get \
+                          the screen it is showing, because its transcript is every frame at once \
+                          and only the last one is true. The answer says which you got."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -337,7 +339,12 @@ impl Tool for ReadTool {
                     "count": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "How many lines to read. Defaults to 500; long pages are cut to their tail.",
+                        "description": "How many lines to read. Defaults to 500; long pages are cut to their tail. Ignored when the session is showing a screen.",
+                    },
+                    "as": {
+                        "type": "string",
+                        "enum": ["screen", "scrollback"],
+                        "description": "Force one of the two readings. Leave it out and the session picks: the screen when a program is drawing on one, the scrollback otherwise.",
                     },
                 },
                 "required": ["session_id"],
@@ -354,6 +361,40 @@ impl Tool for ReadTool {
 
     async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
         let session = self.0.session(TERMINAL_READ, arguments)?;
+        // Which of the two readings. A program on the alternate screen is
+        // drawing, and its transcript is every frame concatenated - handing
+        // that to a model is handing it a thousand lines of which only the
+        // last forty are true. A caller that knows better says so.
+        let asked = optional_text(arguments, "as", TERMINAL_READ)?;
+        let screen = match asked.as_deref() {
+            Some("screen") => true,
+            Some("scrollback") => false,
+            Some(other) => {
+                return Err(ToolError::InvalidArguments(
+                    TERMINAL_READ.into(),
+                    format!("`as` must be \"screen\" or \"scrollback\", not {other:?}"),
+                ))
+            }
+            None => session.is_drawing(),
+        };
+        if screen {
+            let shown = session.screen();
+            let cursor = session.cursor();
+            let text = if shown.trim().is_empty() {
+                "(the screen is blank)".to_string()
+            } else {
+                shown
+            };
+            return Ok(ToolOutcome::ok(bounded(
+                format!(
+                    "{text}\n[screen: {rows} lines, cursor at row {row} column {col}]",
+                    rows = text.lines().count(),
+                    row = cursor.row + 1,
+                    col = cursor.col + 1
+                ),
+                self.0.max_result_bytes,
+            )));
+        }
         let offset = optional_count(arguments, "offset", TERMINAL_READ)?.unwrap_or(0);
         let count = optional_count(arguments, "count", TERMINAL_READ)?;
         let page = session

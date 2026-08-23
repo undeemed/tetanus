@@ -55,7 +55,17 @@ use tetanus_turn::interrupt::Interrupt;
 use crate::backend::{BackendError, ShellBackend};
 use crate::pty::{PtyConfig, PtyError, PtySession};
 use crate::sanitize::Sanitizer;
+use crate::screen::Screen;
 use crate::transcript::Transcript;
+
+/// What a program on one of these terminals is told it is talking to.
+///
+/// Not `dumb`, which is the right answer for a pipe and the wrong one here:
+/// this layer exists so a program that needs a terminal can have one, and the
+/// first thing such a program does is ask what kind. `xterm-256color` is the
+/// safe lingua franca - what a modern terminal emulator claims, and what
+/// `crate::screen` models enough of to read back.
+pub const TERM: &str = "xterm-256color";
 
 /// How a terminal session is configured.
 #[derive(Debug, Clone)]
@@ -81,6 +91,22 @@ pub struct TerminalConfig {
     pub grace: Duration,
     /// Extra environment, over the backend's own.
     pub env: BTreeMap<String, String>,
+    /// Variables taken from this process's environment where they are set.
+    ///
+    /// Nothing is inherited in this crate - a child gets what the caller
+    /// listed - and for a one-shot command that is exactly right. A terminal
+    /// session is where it stops being right on its own: the programs this
+    /// layer exists to run are the interactive ones, and an interactive
+    /// program with no `HOME` is a `git` with no configuration, an `ssh` with
+    /// no keys, a `vim` that cannot write its own state file. Measured, not
+    /// assumed: `vim` on a terminal with no `HOME` paints its status line and
+    /// nothing else.
+    ///
+    /// So this is the same shape as `crate::hooks::HookEnv`: a list of names
+    /// that pass, not a denylist of names that do not. An operator can read it
+    /// and see that `PATH` reaches a session and `AWS_SECRET_ACCESS_KEY` does
+    /// not.
+    pub passed: Vec<String>,
     /// The kernel boundary the shell and everything it starts run behind.
     pub sandbox: tetanus_sandbox::Policy,
 }
@@ -102,6 +128,12 @@ impl Default for TerminalConfig {
             timeout: Duration::from_secs(30),
             grace: Duration::from_secs(3),
             env: BTreeMap::new(),
+            // What an interactive program cannot work without, and nothing
+            // else. `TERM` is not here because this layer sets it itself.
+            passed: ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "USER", "SHELL"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             sandbox: tetanus_sandbox::Policy::danger_full_access(cwd),
         }
     }
@@ -332,6 +364,10 @@ impl TerminalSignal {
 /// a reader wants both at one instant: "what has been printed" and "has the
 /// shell finished" are one question asked twice.
 struct Watched {
+    /// What a person looking at this terminal would see, which is a different
+    /// question from what was printed on it and the only useful answer for a
+    /// program that draws.
+    screen: Screen,
     /// Whether the program on this terminal has just asked for a password.
     ///
     /// `sudo`'s two-state filter, over this crate's sanitized stream: every
@@ -360,8 +396,9 @@ struct Watched {
 }
 
 impl Watched {
-    fn new(bound: usize) -> Self {
+    fn new(bound: usize, rows: u16, cols: u16) -> Self {
         Self {
+            screen: Screen::new(rows, cols),
             prompting: AtomicBool::new(false),
             text: Arc::new(Transcript::new(bound)),
             prompts: AtomicUsize::new(0),
@@ -429,6 +466,19 @@ impl TerminalSession {
     ) -> Result<Self, TerminalError> {
         let resolved = backend.resolve()?;
         let mut env = backend.environment();
+        for name in &config.passed {
+            if let Ok(value) = std::env::var(name) {
+                env.insert(name.clone(), value);
+            }
+        }
+        // The backend's own default is `TERM=dumb`, which is right for a
+        // command whose output is a pipe and wrong for everything this layer
+        // exists to run: with `dumb` a program is being told there is no
+        // screen, so `vim` refuses to start, `htop` exits, and every
+        // full-screen program the terminal family was built for degrades to
+        // the batch behaviour a pipe would already have given. A caller that
+        // names its own `TERM` still wins.
+        env.insert("TERM".to_string(), TERM.to_string());
         env.extend(backend.prompt_environment());
         env.extend(config.env.clone());
         let env: Vec<(String, String)> = env.into_iter().collect();
@@ -455,7 +505,11 @@ impl TerminalSession {
             .await?,
         );
 
-        let watched = Arc::new(Watched::new(config.scrollback_bytes));
+        let watched = Arc::new(Watched::new(
+            config.scrollback_bytes,
+            config.rows,
+            config.cols,
+        ));
         tokio::spawn(sanitize_into(
             Arc::clone(&pty),
             Arc::clone(&watched),
@@ -678,6 +732,32 @@ impl TerminalSession {
         })
     }
 
+    /// What a person looking at this terminal would see right now.
+    ///
+    /// The answer for a program that *draws*: `htop` overwrites its cells
+    /// rather than printing new ones, so its transcript is every frame at once
+    /// and its screen is the one frame that is current.
+    pub fn screen(&self) -> String {
+        self.watched.screen.text()
+    }
+
+    /// Where the cursor is on that screen, which is how a reader knows which
+    /// field a form is asking about.
+    pub fn cursor(&self) -> crate::screen::Cursor {
+        self.watched.screen.cursor()
+    }
+
+    /// Whether the program on this terminal has switched to the alternate
+    /// screen.
+    ///
+    /// The most useful single bit this crate has about what a program is
+    /// doing: entering it is how a program says, in the only way a terminal
+    /// has, that it is drawing rather than printing. `vim`, `htop`, `less` and
+    /// `git rebase -i` all do; `ls` and `cargo build` do not.
+    pub fn is_drawing(&self) -> bool {
+        self.watched.screen.is_alternate()
+    }
+
     /// Tell the terminal it is a different shape, the way a terminal emulator
     /// does when its window is dragged.
     ///
@@ -687,7 +767,12 @@ impl TerminalSession {
     /// is, or every full-screen program in the session draws for the wrong
     /// screen.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
-        Ok(self.pty.resize(rows, cols)?)
+        self.pty.resize(rows, cols)?;
+        // The screen is the same shape as the terminal or it is describing a
+        // different one: a program told to redraw for 24 rows would be read
+        // back through a 40-row grid.
+        self.watched.screen.resize(rows, cols);
+        Ok(())
     }
 
     /// The size the terminal currently reports.
@@ -899,6 +984,11 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
         let (raw, end) = pty.since(cursor);
         if !raw.is_empty() {
             cursor = end;
+            // The screen is fed the raw bytes, escapes and all - they are the
+            // drawing instructions, and the sanitizer's whole job is to throw
+            // them away. Two models of one stream, neither derivable from the
+            // other.
+            watched.screen.feed(&raw);
             publish(&watched, sanitizer.push(&raw));
         }
         if pty.exit().is_some() {
@@ -908,6 +998,7 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
             pty.wait().await;
             let (raw, _) = pty.since(cursor);
             if !raw.is_empty() {
+                watched.screen.feed(&raw);
                 publish(&watched, sanitizer.push(&raw));
             }
             let last = sanitizer.flush();
