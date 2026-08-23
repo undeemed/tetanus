@@ -345,6 +345,16 @@ uses follows from who holds the bytes: a finished payload is `save`d, while a pr
 *dropping* bytes as it goes - `crates/exec` bounding a command's output - `open`s a writer and
 streams into it, because by the time a result exists what it dropped is gone.
 
+What leaves the process for a collector goes through
+[crates/session/src/telemetry.rs](crates/session/src/telemetry.rs), which is the capture half only:
+a ledger record mirrors one journal event and carries its seq, an ops record carries a signal with
+no home on the log and deliberately carries none, severity is mapped where the outcome is still
+visible, and one redaction seam - shipping no rules of its own - is where a deployment says what may
+not leave. Everything downstream of `TelemetrySink::emit` is a reporting SDK's, which is why this
+layer needs no dependency; the OpenTelemetry exporter upstream ships separately stays a dependency
+decision. Redaction touches the exported copy only: a journal rewritten to satisfy an exporter is no
+longer a record of what happened.
+
 A credential goes in neither, and in particular not in the settings document
 ([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).
 The document is read into layers, published by `config.dump`, quoted in diagnostics and pasted into
