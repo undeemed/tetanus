@@ -48,7 +48,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tetanus_session::SessionLog;
-use tetanus_turn::events::{PostToolDecision, ToolsPermission, ToolsPostExecute, ToolsPreExecute};
+use tetanus_turn::events::{
+    PostToolDecision, PreStepDecision, ToolsPermission, ToolsPostExecute, ToolsPreExecute,
+    TurnStopVeto,
+};
 use tetanus_turn::llm::Message;
 use tetanus_turn::tools::{Permission, ToolCall};
 
@@ -93,6 +96,21 @@ impl BridgeConfig {
             context,
             model: String::new(),
             stderr_summary_max_chars: DEFAULT_STDERR_SUMMARY_MAX_CHARS,
+        }
+    }
+
+    /// This bridge's context with the live turn written into it.
+    ///
+    /// The stored context is built once, when the bridge is composed, and its
+    /// `turn` is a placeholder from that moment. Codex's turn-scoped payloads
+    /// carry `turn_id`, so serving the stored value would tell every hook that
+    /// every event happened in the same turn - and a hook correlating a
+    /// `PreToolUse` with the `Stop` that followed would pair them across
+    /// unrelated turns.
+    fn context_at(&self, turn: u64) -> PayloadContext {
+        PayloadContext {
+            turn,
+            ..self.context.clone()
         }
     }
 
@@ -365,16 +383,14 @@ impl ToolHooks {
     /// contributed.
     pub async fn post_tool_use(&self, turn: u64, call: &ToolCall, response: &str) -> Vec<Message> {
         let call_facts = facts(call);
+        let context = self.config.context_at(turn);
         let payload = match self.config.dialect {
             HookDialect::ClaudeCode => {
-                crate::payload::claude_post_tool(&self.config.context, &call_facts, response)
+                crate::payload::claude_post_tool(&context, &call_facts, response)
             }
-            HookDialect::Codex => crate::payload::codex_post_tool(
-                &self.config.context,
-                &self.config.model,
-                &call_facts,
-                response,
-            ),
+            HookDialect::Codex => {
+                crate::payload::codex_post_tool(&context, &self.config.model, &call_facts, response)
+            }
         };
         let outcome = run_point(
             &self.config,
@@ -441,4 +457,225 @@ pub fn install_tool_hooks(
         })
     };
     vec![rewrite, gate, after]
+}
+
+// ----------------------------------------------------- the observation points
+
+/// The three points that watch rather than gate.
+///
+/// `SessionStart`, `UserPromptSubmit` and `Stop` carry no permission answer in
+/// either dialect, so none of them can refuse a tool call. Two of them can
+/// still change what happens, and the difference is worth stating because it
+/// decides where each one registers.
+///
+/// `UserPromptSubmit` may add context to the prompt, and may refuse the prompt
+/// outright. Both land at `agent/pre-step`, whose decision is exactly those
+/// two options - enter with these messages, or reject.
+///
+/// `Stop` may ask that the turn *not* end. That is a veto on stopping, which
+/// `agent/turn-stopping` already takes, so a hook wanting more work maps onto
+/// the same seam a plugin uses for it. It is the one place where a hook's
+/// `continue: false` means "keep going" rather than "halt": at every other
+/// point the turn is running and halting is the exceptional request, whereas
+/// here the turn is ending and continuing is.
+///
+/// `SessionStart` can only observe. Its context has nowhere to go that is not
+/// the turn's own queue, and the queue belongs to the engine; contributing to
+/// it from here would need a seam this crate does not have. That is recorded
+/// as a gap rather than approximated, because a hook whose `additionalContext`
+/// was silently dropped is worse than one that was never run.
+pub struct WatchHooks {
+    pub config: BridgeConfig,
+    pub executor: Arc<dyn HookExecutor>,
+    pub log: Arc<dyn SessionLog>,
+    pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The `SessionStart` groups.
+    pub session_start: Vec<MatcherGroup>,
+    /// The `UserPromptSubmit` groups.
+    pub user_prompt_submit: Vec<MatcherGroup>,
+    /// The `Stop` groups.
+    pub stop: Vec<MatcherGroup>,
+}
+
+/// What a watch point answered.
+pub struct Watched {
+    /// Text the hooks contributed, one message per hook.
+    pub contexts: Vec<Message>,
+    /// The merged answer, for a caller that needs more than the contexts.
+    pub outcome: MergedHookOutcome,
+}
+
+impl WatchHooks {
+    /// Run one point whose selection is not about a tool.
+    ///
+    /// The matcher is tested against the *event name* rather than a tool name,
+    /// because there is no tool here and a group configured with a pattern has
+    /// to be given something to match; upstream does the same, which is why a
+    /// match-all group is the ordinary configuration at these points.
+    async fn watch(
+        &self,
+        groups: &[MatcherGroup],
+        point: &str,
+        payload: Value,
+        turn: u64,
+    ) -> Watched {
+        let (outcome, _outputs) = run_point(
+            &self.config,
+            self.executor.as_ref(),
+            self.log.as_ref(),
+            self.clock.as_ref(),
+            groups,
+            point,
+            point,
+            payload,
+            turn,
+        )
+        .await;
+        Watched {
+            contexts: contexts_from(&outcome),
+            outcome,
+        }
+    }
+
+    /// `SessionStart`: a session opened.
+    ///
+    /// `source` is Claude Code's word for why the session exists - `startup`,
+    /// `resume`, `clear`. Codex's payload carries no such field, which is why
+    /// it is a parameter here rather than part of the shared context.
+    pub async fn session_start(&self, source: &str) -> Watched {
+        let context = self.config.context_at(0);
+        let payload = match self.config.dialect {
+            HookDialect::ClaudeCode => crate::payload::claude_session_start(&context, source),
+            HookDialect::Codex => crate::payload::codex_session_start(&context, &self.config.model),
+        };
+        let groups = self.session_start.clone();
+        self.watch(&groups, "SessionStart", payload, 0).await
+    }
+
+    /// `UserPromptSubmit`: the person said something, before the model sees it.
+    pub async fn user_prompt_submit(&self, turn: u64, prompt: &str) -> Watched {
+        let context = self.config.context_at(turn);
+        let payload = match self.config.dialect {
+            HookDialect::ClaudeCode => crate::payload::claude_prompt(&context, prompt),
+            HookDialect::Codex => {
+                crate::payload::codex_prompt(&context, &self.config.model, prompt)
+            }
+        };
+        let groups = self.user_prompt_submit.clone();
+        self.watch(&groups, "UserPromptSubmit", payload, turn).await
+    }
+
+    /// `Stop`: the turn is about to end.
+    pub async fn stop(&self, turn: u64) -> Watched {
+        let context = self.config.context_at(turn);
+        let payload = match self.config.dialect {
+            HookDialect::ClaudeCode => crate::payload::claude_stop(&context),
+            HookDialect::Codex => crate::payload::codex_stop(&context, &self.config.model),
+        };
+        let groups = self.stop.clone();
+        self.watch(&groups, "Stop", payload, turn).await
+    }
+}
+
+/// Whether a `UserPromptSubmit` answer refuses the prompt, and why.
+///
+/// A hook blocks a prompt by denying it or by asking the turn not to proceed;
+/// both mean the model never sees what was typed. The words are the hook's,
+/// because a person told only "blocked" cannot tell a policy from a fault.
+pub fn prompt_refusal(outcome: &MergedHookOutcome) -> Option<String> {
+    if outcome.decision == MergedDecision::Deny {
+        return Some(
+            outcome
+                .reason
+                .clone()
+                .unwrap_or_else(|| "a hook refused this prompt".to_owned()),
+        );
+    }
+    if outcome.stop {
+        return Some(
+            outcome
+                .stop_reason
+                .clone()
+                .unwrap_or_else(|| "a hook stopped this prompt".to_owned()),
+        );
+    }
+    None
+}
+
+/// Whether a `Stop` answer asks the turn to keep going, and why.
+///
+/// The inverted point. Everywhere else `continue: false` asks the turn to
+/// halt; here the turn is already ending, so the same field is the only way a
+/// hook can ask for more work - upstream's `decision: block` at `Stop` means
+/// "do not stop yet".
+pub fn stop_veto(outcome: &MergedHookOutcome) -> Option<String> {
+    let blocked = outcome.decision == MergedDecision::Deny;
+    if !blocked && !outcome.stop {
+        return None;
+    }
+    Some(
+        outcome
+            .reason
+            .clone()
+            .or_else(|| outcome.stop_reason.clone())
+            .unwrap_or_else(|| "a hook asked the turn to continue".to_owned()),
+    )
+}
+
+/// Register `UserPromptSubmit` and `Stop` on a bus.
+///
+/// `SessionStart` is not here: it fires when a session opens rather than
+/// inside a turn, so it is the composition's to call once, and there is no
+/// turn event that means it.
+pub fn install_watch_hooks(
+    bus: &tetanus_core::EventBus,
+    hooks: Arc<WatchHooks>,
+) -> Vec<tetanus_core::EffectHandle> {
+    let prompt = {
+        let hooks = Arc::clone(&hooks);
+        bus.on_waterfall::<tetanus_turn::events::PreStep, _>(move |ev, next| {
+            let hooks = Arc::clone(&hooks);
+            // Only the claim that carries what a person typed. A later step's
+            // claim is the loop's own bookkeeping, and running a prompt hook
+            // over it would tell the hook a user said something they did not.
+            let typed: Option<String> = (ev.step == 1)
+                .then(|| {
+                    ev.messages
+                        .iter()
+                        .map(|m| m.content.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|text| !text.is_empty());
+            let turn = ev.turn;
+            Box::pin(async move {
+                let Some(prompt) = typed else {
+                    return next.run(ev).await;
+                };
+                let watched = hooks.user_prompt_submit(turn, &prompt).await;
+                if let Some(reason) = prompt_refusal(&watched.outcome) {
+                    return PreStepDecision::Reject(reason);
+                }
+                match next.run(ev).await {
+                    PreStepDecision::Enter(mut messages) => {
+                        messages.extend(watched.contexts);
+                        PreStepDecision::Enter(messages)
+                    }
+                    reject => reject,
+                }
+            })
+        })
+    };
+    let ending = {
+        let hooks = Arc::clone(&hooks);
+        bus.on_serial::<tetanus_turn::events::TurnStopping, _>(move |ev| {
+            let hooks = Arc::clone(&hooks);
+            let turn = ev.turn;
+            Box::pin(async move {
+                let watched = hooks.stop(turn).await;
+                stop_veto(&watched.outcome).map(|reason| TurnStopVeto { reason })
+            })
+        })
+    };
+    vec![prompt, ending]
 }

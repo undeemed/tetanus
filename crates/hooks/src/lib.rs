@@ -24,7 +24,9 @@ pub mod payload;
 pub mod runner;
 pub mod types;
 
-pub use bridge::{install_tool_hooks, BridgeConfig, PendingDecisions, ToolHooks};
+pub use bridge::{
+    install_tool_hooks, install_watch_hooks, BridgeConfig, PendingDecisions, ToolHooks, WatchHooks,
+};
 pub use claude_code::{parse_claude_code_config, MatcherGroup};
 pub use codec::parse_hook_output;
 pub use codex::parse_codex_config;
