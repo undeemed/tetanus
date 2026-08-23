@@ -174,13 +174,19 @@ pub fn web(
     )
     .ok();
 
+    // The declared MCP servers, started once for this process. This surface
+    // gets them because it goes through `tools::served` like the others, which
+    // is the point of that function: a capability added to the served engine
+    // reaches every carrier, rather than the one whose call site was edited.
+    let servers = runtime.block_on(crate::tools::servers(policy, document, &booted.resolved))?;
     // Through `tools::served`, like the stdio and WebSocket carriers: this is
     // the surface that got it wrong by building from `booted` alone, and every
     // client behind it - the browser panel, anything on `/api/` - was offered
     // one tool on a build with twenty-six.
-    let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-        tetanus_engine::HarnessEngine::new(crate::tools::served(policy, document, booted)?),
-    );
+    let engine: Arc<dyn tetanus_protocol::methods::Engine> =
+        Arc::new(tetanus_engine::HarnessEngine::new(crate::tools::served(
+            policy, document, booted, &servers,
+        )?));
     // The other door onto the same room: `POST /api/<method>`, for a client
     // that cannot hold a socket. Same engine, same dispatch table, same
     // contract; what differs is only how a frame arrives.
@@ -238,6 +244,9 @@ pub fn web(
         });
         page.clone().serve(pages).await
     });
+    // Before the status is reported, so a server that has to be killed is
+    // killed while this process is still here to do it.
+    runtime.block_on(servers.shutdown());
     served.map_err(|broken| fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string())))?;
     render::web::stopped(&mut err).ok();
     Ok(())

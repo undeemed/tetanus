@@ -50,9 +50,11 @@ use tetanus_turn::tools::{EchoTool, Tool, ToolRegistry};
 
 mod assembly;
 mod composition;
+pub mod servers;
 
 pub use assembly::{Assembly, AssemblyError, Source};
 pub use composition::{workspace_root, Composition};
+pub use servers::Servers;
 
 /// The settings keys a deployment composes with.
 pub mod key {

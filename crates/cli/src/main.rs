@@ -414,7 +414,16 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
         }
         Cmd::Tools { json } => {
             let booted = settings::booted(policy, &document, &[])?;
-            let catalog = catalog(policy, &document, &booted.resolved)?;
+            // A listing starts the declared servers, because a page that left
+            // them out would advertise a set no run offers - and stops them
+            // again, because a listing is not a session.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let servers = runtime.block_on(tools::servers(policy, &document, &booted.resolved))?;
+            let catalog = catalog(policy, &document, &booted.resolved, &servers)?;
+            runtime.block_on(servers.shutdown());
             if json {
                 return render::json::line(&mut out, &catalog)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -669,12 +678,18 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 },
             )
             .ok();
+            // The declared MCP servers, started once for this process and
+            // shared by every session it serves: an MCP tool belongs to its
+            // supervisor, so a server per session would multiply the child
+            // processes by the number of conversations.
+            let servers = runtime.block_on(tools::servers(policy, &document, &booted.resolved))?;
             // Through `tools::served`, which is the only place that says what
             // a served engine's tools are - so this carrier and the frontend's
             // cannot answer `catalog.tools` differently.
-            let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-                tetanus_engine::HarnessEngine::new(tools::served(policy, &document, booted)?),
-            );
+            let engine: Arc<dyn tetanus_protocol::methods::Engine> =
+                Arc::new(tetanus_engine::HarnessEngine::new(tools::served(
+                    policy, &document, booted, &servers,
+                )?));
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
                 // the accept fails, so the interrupt is the shutdown and not
@@ -694,6 +709,9 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                     tokio::io::stdout(),
                 )),
             };
+            // Before the status is reported, so a server that has to be
+            // killed is killed while this process is still here to do it.
+            runtime.block_on(servers.shutdown());
             served.map_err(|broken| {
                 fail(policy, &RpcError::new(ErrorCode::Io, broken.to_string()))
             })?;
@@ -707,13 +725,20 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: tetanus_protocol::PROTOCOL_VERSION,
                 providers: providers().providers.len(),
-                tools: catalog(
-                    policy,
-                    &document,
-                    &settings::booted(policy, &document, &[])?.resolved,
-                )?
-                .tools
-                .len(),
+                tools: {
+                    let booted = settings::booted(policy, &document, &[])?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|err| report(policy, &err.to_string(), None))?;
+                    let servers =
+                        runtime.block_on(tools::servers(policy, &document, &booted.resolved))?;
+                    let counted = catalog(policy, &document, &booted.resolved, &servers)?
+                        .tools
+                        .len();
+                    runtime.block_on(servers.shutdown());
+                    counted
+                },
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
             };
@@ -1792,6 +1817,9 @@ async fn run<W: std::io::Write>(
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
 
+    // The MCP servers this document declares, started for this run.
+    let servers = tools::servers(policy, document, &settled.settings.resolved).await?;
+
     // One switch for the loop and for the tools: an interrupt that does not
     // reach a running command leaves it running after the turn is over.
     let interrupt = Interrupt::new();
@@ -1805,6 +1833,7 @@ async fn run<W: std::io::Write>(
             document,
             &whose(
                 &settled.settings.resolved,
+                &servers.tools,
                 &opened.session_id,
                 log.clone(),
                 settled.journal.parent(),
@@ -1867,6 +1896,12 @@ async fn run<W: std::io::Write>(
         }
         return Err(stopped(policy));
     };
+    // Over the ladder, before this run reports anything: a turn that is over
+    // has no more use for a server, and the process is about to leave. The
+    // failure paths below fall back on `kill_on_drop`, which is what it is
+    // for.
+    servers.shutdown().await;
+
     let outcome = outcome.map_err(|err| {
         fail(
             policy,
