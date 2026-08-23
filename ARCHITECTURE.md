@@ -1111,6 +1111,19 @@ foreground group, so a stopped turn costs the command and not the session. `term
 calls - `terminal_open`, `terminal_send`, `terminal_read`, `terminal_signal`, `terminal_close`,
 `terminal_list` - with typing as a barrier and reading, listing and signalling parallel-safe.
 
+**A terminal journal is a credential store.** A model answers `[sudo] password
+for ci:` with an ordinary `terminal_send`, so the answer is an ordinary argument
+and the journal is forever. `Tool::recorded`
+([crates/turn/src/tools.rs](crates/turn/src/tools.rs)) is what the engine asks
+before it appends: `terminal_send` withholds its `text` when the call sets
+`secret`, `shell` and `shell_run` withhold their command line on the same flag,
+and the substitution happens in all three places a call is recorded - the call,
+the assistant message that carried it, and the streamed chunk. What is *not*
+marked is still recorded, and no automatic detection stands behind it: the
+signal that would carry one is the tty's `ECHO` state, which is not readable
+from the master here. So the floor is a statement rather than a mechanism, and
+it is in the tool descriptions where the model reads it.
+
 The two persistent families are not redundant. A pipe-backed session ends when a turn is stopped,
 because a shell reading a pipe has nothing to interrupt; a terminal-backed one interrupts the
 command and stays open. Most work wants the first, which is cheaper and needs no session to close;
