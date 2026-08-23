@@ -272,6 +272,27 @@ This one, "another process holds the journal" (§4.4.13), "the server is stoppin
 Each is deferred because a surface's `ErrorCode` match is exhaustive, so any one of them breaks the presentation lane's build - and four separate breaks is four times the disruption of one.
 When the lanes coordinate, they land as a single change, and a reader meeting `LogCorrupt` for a foreign format until then is being told the truth coarsely rather than a lie precisely.
 
+#### 4.3.4 A `terminal_send` that types a password is on the journal in plain text
+
+Raised by the presentation lane while building the terminal views, and recorded here because it is a question for whoever owns `crates/exec` and this vocabulary rather than one a surface can answer.
+
+`terminal_send` exists so a model can drive a program that will not run without a real terminal, and one of those programs asks for a password.
+A send that answers `[sudo] password for ci:` is an ordinary tool call, so its arguments go on the journal like any other, and every surface that draws a tool call draws it - the browser panel most vividly, with a copy control beside it, but `tetanus run --ui`, `tetanus chat`, a replay and anything reading the file show it too.
+
+**The obvious fix is available and it is wrong.** `submit: false` is not a password signal: it means a control character or half a line to a REPL, so masking on it would hide `Ctrl-C` and still show every password sent the ordinary way, with Enter.
+The reliable signal is engine-side - the send that carries a credential is almost always the one after a result that came back `[wait: stdin_read]` - and a surface acting on it would be a page deciding what is secret by pattern-matching prose, failing in the direction that looks safe: a mask that makes a reader believe something is protected that is written in full a directory away.
+Redaction on screen alone would be exactly that, because the journal is the durable record.
+
+Three shapes could close it, in the order the presentation lane prefers them:
+
+1. **`secret: true` on the send**, honoured at record time: the argument is replaced by the `<redacted>` sentinel §4.3 already defines before it reaches the journal, and the terminal still receives the real text. The model has just read the prompt, so it is the party that can say so. One optional field and one branch at the append.
+2. **Redaction at record time decided by the engine**, off the same `[wait: stdin_read]` sequence. No new field, but the decision sits where the terminal state is, and a false negative is a leak rather than a cosmetic slip.
+3. **Nothing, said out loud.**
+
+Until one of the first two lands, this document takes the third and says it here: **a terminal session's journal contains anything typed into it, including credentials, so it is to be treated as a credential store.**
+That is the honest floor and it is better than the silence it replaces.
+Nothing about how the text is drawn changes in the meantime: while the journal holds the credential, drawing it faithfully is the accurate rendering of what happened, and the copy control is not the leak - it is a control over text already on screen and already on disk.
+
 #### 4.3.2 Types that are durable but not yet parsed
 
 `KnownEvent` has no fallback variant, deliberately: `parse()` returns `Option`, so an unknown type is `None` rather than a variant to match.
@@ -297,6 +318,12 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 | `question/answered` | `id`, `answers`, `answered` |
 | `permission/preset` | `preset` |
 | `hook/invoked` | `turn`, `point`, `dialect`, `handlerId`, plus `matcher` when the hook was selected by a pattern |
+| `todo/write` | `todos` (each `content` and `status`) |
+| `goal/changed` | `operation`, plus `goal` on a create or an update, plus `cleared` (`revision`, `objective`) on a clear |
+| `plan/mode` | `active` |
+| `plan/presented` | `plan` |
+| `feedback/recorded` | the entry itself: `text`, plus `author` where one was given |
+| `attachment/added` | `id`, `name`, `media_type`, `bytes`, plus `dimensions` for a picture whose header the build could read |
 | `hook/result` | `turn`, `point`, `handlerId`, `decision`, `durationMs`, plus `exitCode` when the process ran, plus `stderrSummary` when it printed anything |
 | `fs/mode` | `mode` (`read-only`, `workspace-write`, `danger-full-access`) |
 
@@ -314,6 +341,12 @@ The three `approval/*` types are §4.4.7's audit.
 They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: their place is their position between the boundaries of the step that asked.
 
 `question/asked` and `question/answered` are written by the engine today, with the payloads this table fixes; they are staged rather than parsed for the reason above.
+
+The six feature types are what the built-in tools keep their state in, and a surface folds them because there is no call for that state yet (§5.1).
+Two shapes cost the presentation lane a second reading and are stated here so the next author does not pay it again.
+**`goal/changed` carries two shapes**: a create or an update writes `goal`, and a clear writes `cleared` with no `goal` key at all - the tombstone is deliberate, because it is what lets "no goal yet" and "the goal was put down" be told apart, and a consumer reading `data.goal` on a clear draws nothing.
+**`feedback/recorded` is the entry itself** rather than the entry under a key, where its neighbours all wrap.
+And `todo/write` carries only the list, so a surface folding events counts the statuses itself - the counts `SessionView` carries exist to keep that arithmetic in one place, which is an argument for the call in §5.1 rather than a defect here.
 
 The two `hook/*` types are log-only: nothing in a turn reads them back, neither carries `sourceEventSeqs`, and they exist so that "why was my tool call denied" has an answer on the journal.
 They are turn-enclosed and appear as an invoked/result pair correlated by `handlerId`.
@@ -1253,6 +1286,14 @@ They are Rust types inside this workspace and nothing on this boundary carries t
 
 Publishing them is three changes and they land together, in a version both lanes take: two calls in §4.2's table, `session.view` and `workspace.view`, both reads and both idempotent by §4.4.12; the structs in `crates/protocol::types`, which is minor by §5 for a client that matches with a rest pattern and a build break for one that does not; and a push, only if a panel is to be live rather than polled - and the honest cheaper answer is that a client already receives `session/event` and can re-fold, so a push should wait until somebody has measured the polling.
 
+**The presentation lane has answered, and it changes the order.** It built all six feature panels by the route above - subscribe from seq 0, receive `session/event`, re-fold - so nothing is blocked. But `workspace.view` is the call it would take *first*, ahead of `session.view`, because `session.view` has a working alternative and this has none: `WorkspaceView` is read from the filesystem rather than folded, a browser cannot read the project's directory, and `host.listDirectory` is a directory chooser that cannot say which marker identified the root, whether the listing was truncated, or which instruction files the project keeps - the three facts that tell a reader "this is a project" from "this is a directory". Skills are in the same position for the same reason.
+
+**A push is now measured rather than assumed.** The page re-folds all six panels over the whole journal on every open and it is not perceptible, so a push for these types would be a mechanism maintained for something nothing is waiting on. That answers the question §5.1 left open in the direction it guessed.
+
+**`as_of_seq` is what a page cannot reconstruct.** A page folding events knows the seq it last applied, so while re-folding is the only route the field is redundant; the moment `session.view` lands beside that route, a page holding both needs it to order them. It is recorded here so it is not discovered then.
+
+**The rename risk runs the other way in JavaScript.** §5's rest-pattern rule costs a page nothing - it reads the fields it knows - but a *renamed* field fails silently there, drawing an empty panel rather than breaking a build. The six the presentation lane would notice are `goal.objective`, `goal.phase`, `goal.blocker.message`, `todo.content`, `todo.status` and `attachment.name`.
+
 Two properties of those types are settled now so that publishing them changes nothing but the address.
 A view carries no bytes: an attachment is named, measured and content-addressed, and the content is fetched by id, because base64 in a fold is a frame nobody can read, a log line nobody can grep and a memory spike on every subscriber.
 And a view says how far it folded, so a surface receiving two folds out of order can tell which is newer.
@@ -1514,4 +1555,6 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | Names, in a new §5.1, the boundary types that are deliberately not here yet: `SessionView` and `WorkspaceView`, the folded feature state a panel reads. They live in `crates/features` and nothing on this boundary carries them, so this records what publishing them costs - two idempotent read calls in §4.2, the structs in `crates/protocol::types`, and a push only if polling has been measured and found wanting - and settles the two properties that make the eventual move an address change and nothing else: a view carries no bytes, and it says how far it folded. Written down now because a type the presentation lane constructs lands when both lanes take it, and the other lane should be able to say what it needs before that is settled. No type changes. |
 | 1.0 | Publishes the provider's own id for a refused request in the two places a refusal is reported (§4.5, §4.3.2): `request_id` on `ProviderError.data` when the provider named one, and on the `llm/retry` record for a refusal a policy recovered from. Additive and minor by §5 - both are `serde_json` payloads, no Rust type in `crates/protocol` changes, no code is added and nothing is renamed. The id is `data` and not part of the message because §4.5 already lets a surface replace the message with its own wording keyed on the code, so a fact carried in the sentence is a fact a conforming surface may delete - and this is the one fact about a refusal nobody can reconstruct, since the status is on the response and the words are in the body but the id exists only in the provider's logs. It is also the only thing a user can quote to a provider's support, which the harness discarded until now. The wait a throttled provider asks for stays unpublished, and the contrast is the argument: a surface can say "retrying" from what it already has. Two spellings on purpose - the durable record carries `null` for a provider that named none, following `max_retries`, and the error object omits the key, following `status`, because one is folded by a reader of many records and the other is rendered as one failure. Rendering the id is the presentation lane's change and is not asked for here. |
 | 1.0 | Publishes the two `hook/*` journal types (§4.3.1, §4.3.2), written when an out-of-process hook runs: `hook/invoked` and `hook/result`, turn-enclosed, log-only and correlated by `handlerId`, so that "why was my tool call denied" has an answer on the journal. Nothing in `crates/protocol` changes - these are journal types the contract describes by name and payload - and nothing in a turn reads them back. Three fields are omitted rather than null, each because absent and empty are different facts: `matcher` for a match-all hook, `exitCode` for a hook that could not be run, and `stderrSummary` for one that printed nothing. `decision` is always present, so a reader never has to infer "nothing happened" from a missing field. Additive under all four §5 rules: no existing payload changes, no enum gains a variant, an unknown journal type is already rendered raw, and nothing destructures these because nothing produced them until now. |
+| 1.0 | Publishes the six durable types the built-in feature tools write (§4.3.2): `todo/write`, `goal/changed`, `plan/mode`, `plan/presented`, `feedback/recorded` and `attachment/added`. The presentation lane had been folding them out of prose and the Rust, which is how the two shapes now stated here cost it a second reading: `goal/changed` writes `goal` on a create or an update and `cleared` on a clear, with no `goal` key at all, because the tombstone is what lets "no goal yet" and "the goal was put down" be told apart; and `feedback/recorded` is the entry itself where its neighbours all wrap. Staged rather than parsed, by §4.3.2's two-step rule. §5.1 records that lane's reply to the deferred view types, which changes the order they should land in: `workspace.view` first, because `session.view` has a working alternative - subscribe from seq 0 and re-fold - and a browser cannot read the project's directory at all. It also answers the push question with a measurement rather than a guess: re-folding six panels over a whole journal on every open is not perceptible, so a push is a mechanism nothing is waiting on. |
+| 1.0 | Records, in a new §4.3.4, that a `terminal_send` answering a password prompt puts the credential on the journal in plain text, and that every surface drawing tool calls draws it. No change is made to how it is drawn, deliberately: while the journal holds the credential, drawing it faithfully is the accurate rendering, and hiding it on screen would make a reader believe something is protected that is written in full a directory away. The two fixes that would work are named with what each costs - an optional `secret: true` honoured at record time, or redaction the engine decides from the `[wait: stdin_read]` sequence - and both belong to whoever owns `crates/exec` and this vocabulary. Until one lands the document takes the honest floor and says the thing nothing anywhere said before: a terminal session's journal is to be treated as a credential store. |
 | 1.0 | No boundary change. Folds every note under `docs/contract-updates/` into this document and deletes them: the notes existed because lanes in flight collide on this file, and a note nobody has folded is a contract change nobody can read here. |
