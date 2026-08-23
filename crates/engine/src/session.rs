@@ -62,6 +62,15 @@ pub struct SessionHeader {
     /// before presets existed, which is why it is optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    /// The working directory the session was opened in (contract section
+    /// 4.4.9).
+    ///
+    /// Where it was opened, never where it is now: a tool may change directory
+    /// and this header is not rewritten. It is recorded because a journal full
+    /// of relative paths cannot be read without it - the section's own argument
+    /// for the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// The session that **started** this one as a subagent (contract
     /// section 4.4.9).
     ///
@@ -178,10 +187,36 @@ pub struct SessionDefaults {
     pub presets: crate::preset::Roster,
 }
 
+/// Where a session came from, as the process that opens it knows it.
+///
+/// Contract section 4.4.9 names four origin facts. Two of them - the directory
+/// and whatever delegation started this run - are known to whoever composes
+/// the engine and to nobody below it, so they arrive here rather than being
+/// discovered. The other two, `parent_session` and `fork_seq`, are a fork's
+/// own and are never supplied.
+///
+/// Deliberately *not* on `SessionCreateParams`. Section 5's rule is that a
+/// field added to a type the presentation lane constructs is not the free
+/// addition it looks like, and no surface has asked to set these: the process
+/// that spawns a subagent will.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionOrigin {
+    /// The directory to record. `None` asks the store to read the process's
+    /// own, which is what an ordinary run wants.
+    pub cwd: Option<PathBuf>,
+    /// The session that started this one as a subagent.
+    pub spawned_by: Option<String>,
+    /// How deep this one is. A root session leaves it absent rather than zero:
+    /// "absent means absent" is the rule the wire cases already pin, and a zero
+    /// would be a level.
+    pub depth: Option<u32>,
+}
+
 pub struct SessionStore {
     root: PathBuf,
     defaults: SessionDefaults,
     backend: SessionBackend,
+    origin: SessionOrigin,
     live: Mutex<BTreeMap<String, Arc<LiveSession>>>,
     counter: AtomicU64,
 }
@@ -196,10 +231,21 @@ impl SessionStore {
         defaults: SessionDefaults,
         backend: SessionBackend,
     ) -> Self {
+        Self::with_origin(root, defaults, backend, SessionOrigin::default())
+    }
+
+    /// A store whose new journals record where this run came from.
+    pub fn with_origin(
+        root: impl Into<PathBuf>,
+        defaults: SessionDefaults,
+        backend: SessionBackend,
+        origin: SessionOrigin,
+    ) -> Self {
         Self {
             root: root.into(),
             defaults,
             backend,
+            origin,
             live: Mutex::new(BTreeMap::new()),
             counter: AtomicU64::new(0),
         }
@@ -234,6 +280,21 @@ impl SessionStore {
             SessionBackend::Sqlite(store) => store.seed(id, events),
         }
         .map_err(|e| session_error(id, e))
+    }
+
+    /// The directory a new journal records as the one it was opened in.
+    ///
+    /// A configured one wins, so a container and a case can both state an
+    /// answer; otherwise the process's own. A directory that cannot be read is
+    /// recorded as absent rather than guessed at: "absent means absent", and an
+    /// invented path is worse than no path in exactly the situation this field
+    /// exists for.
+    fn opened_in(&self) -> Option<String> {
+        self.origin
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|path| path.display().to_string())
     }
 
     /// Open a session, creating its journal when the id is new. An id that
@@ -320,8 +381,9 @@ impl SessionStore {
                     parent_session: None,
                     fork_seq: None,
                     preset: preset_id,
-                    spawned_by: None,
-                    depth: None,
+                    cwd: self.opened_in(),
+                    spawned_by: self.origin.spawned_by.clone(),
+                    depth: self.origin.depth,
                 };
                 let value = serde_json::to_value(&header).map_err(crate::convert::internal)?;
                 log.append(SESSION_START, value)
@@ -401,6 +463,11 @@ impl SessionStore {
             max_steps: parent.max_steps,
             parent_session: Some(parent.session_id),
             fork_seq: Some(boundary),
+            // Section 4.4.9: a fork inherits the directory it is a copy of.
+            // The same work taken a second way was opened where the original
+            // was, and re-reading this process's directory would relabel a
+            // journal that has nothing to do with it.
+            cwd: parent.cwd,
             // A fork continues one conversation, so it continues it as the
             // same agent: the preset is inherited rather than re-resolved.
             preset: parent.preset,

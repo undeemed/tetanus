@@ -127,9 +127,14 @@ async fn an_empty_parent_forks_into_an_empty_child_that_knows_its_parent() {
             "max_steps": 8,
             "parent_session": "empty-parent",
             "fork_seq": 0,
-            // No `spawned_by` and no `depth`: contract section 4.4.9 says a
-            // fork inherits the origin facts it is a copy of, and a root
-            // parent has none to inherit. A fork is not itself delegation.
+            // Inherited from the parent, which recorded it at creation
+            // (contract section 4.4.9). Read from the parent rather than
+            // written out, because what this asserts is that the child carries
+            // the parent's value, not that either is a particular path.
+            "cwd": header(&engine, "empty-parent")["cwd"],
+            // No `spawned_by` and no `depth`: section 4.4.9 says a fork
+            // inherits the origin facts it is a copy of, and a root parent has
+            // none to inherit. A fork is not itself delegation.
         })
     );
 }
