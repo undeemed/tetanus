@@ -96,6 +96,15 @@ Both trackers name the types they draw rather than matching a prefix, so a type 
 family later is not claimed and silently dropped - it falls through to the raw rendering §4.3.2 asks
 for.
 
+There are **two** durable pairs and the audit draws both: `approval/asked`/`approval/decided` for
+whether a tool may run, and `question/asked`/`question/answered` for what a person said when the
+harness asked them something. A question record carries a *batch*, each question with an id its
+answer echoes, so the answers are written onto the questions they belong to rather than listed under
+them. `answered: false` says **no answer reached the tool** - `crates/turn` uses it for nobody
+listening, a partial answer, an answer outside the options, a panicking answerer and an interrupt,
+and that sentence is the one thing true of all five. An answer with no labels is a different thing
+again and says *nothing chosen*: that is what Dismiss sends, and §4.4.3 reads it as a refusal.
+
 `approval/asked` and `approval/decided` are "one pair per question, sharing an `id`", and the audit
 is a **tracker** rather than a function per event for that reason: the two halves are separated on
 the journal by everything that happened while somebody was deciding, and drawn independently the

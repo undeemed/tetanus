@@ -1,7 +1,7 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
-import { approvals, askCard } from "./questions.js";
+import { askCard, audit } from "./questions.js";
 import { hooks } from "./tool-hooks.js";
 import { help, parse, stats, told } from "./commands.js";
 import { CHORDS } from "./keys.js";
@@ -434,13 +434,14 @@ function toolWork(type, data) {
 }
 
 /**
- * The durable audit of a decision about whether a tool may run (§4.3.2).
+ * The durable audit of what was decided (§4.3.2): whether a tool may run, and
+ * what a person answered when the harness asked them something.
  *
- * One tracker for the page and not one per turn: an approval asked in one turn
- * can be decided in the next, and a tracker that was thrown away at the turn
+ * One tracker for the page and not one per turn: a question asked in one turn
+ * can be answered in the next, and a tracker that was thrown away at the turn
  * boundary would lose exactly the pairs that took longest to settle.
  */
-const audit = approvals();
+const decisions = audit();
 
 /**
  * The same, for the deployment's own hooks - and one tracker for the page for
@@ -452,7 +453,7 @@ function audited(type, data) {
   // Each tracker names the types it draws, so a type added to either family
   // later is not claimed here - it falls through to the raw rendering every
   // unrecognised durable type gets.
-  const tracker = [audit, hooked].find((one) => one.handles(type));
+  const tracker = [decisions, hooked].find((one) => one.handles(type));
   if (!tracker) return false;
   const said = tracker.row(type, data);
   // `null` means the tracker completed a row already on the page rather than
