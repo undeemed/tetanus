@@ -147,3 +147,38 @@ pub fn session_tools(
         },
     ))
 }
+
+/// The engine configuration every surface that serves the contract must use.
+///
+/// `catalog.tools` is answered out of [`tetanus_engine::EngineConfig::tools`],
+/// and a session's turns dispatch from what `session_tools` builds. A surface
+/// that handed the engine a bare `booted` therefore advertises the engine's
+/// *offline minimum* - one tool - to every client on a build that offers
+/// twenty-six, and dispatches from it too.
+///
+/// That is not hypothetical, and it is why this exists rather than the four
+/// lines it wraps. The composition was written out at the `tetanus serve` call
+/// site and nowhere else, so `tetanus serve --frontend` - a second surface,
+/// added by another lane, doing the obviously reasonable thing with `booted` -
+/// served one tool while `tetanus serve` on the same binary served
+/// twenty-six. Two comments in this crate and one in `crates/toolset` said the
+/// two could not disagree. They could, because agreeing was a property of one
+/// call site rather than of a function both surfaces had to go through.
+///
+/// A surface that only asks the engine something toolless - `session.list`,
+/// `config.dump` - does not need this and does not use it.
+pub fn served(
+    policy: &Policy,
+    document: &Path,
+    booted: tetanus_engine::EngineConfig,
+) -> Result<tetanus_engine::EngineConfig, Reported> {
+    Ok(tetanus_engine::EngineConfig {
+        tools: Arc::new(registry(policy, document, &listing(&booted.resolved))?),
+        session_tools: Some(session_tools(policy, document, &booted.resolved)?),
+        // Everything else is what the document settled: the provider, model
+        // and journal root a served session runs on are its answer and not
+        // this file's, which is why the two fields above are set *over*
+        // `booted` rather than beside a `..Default::default()`.
+        ..booted
+    })
+}

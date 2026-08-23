@@ -174,8 +174,13 @@ pub fn web(
     )
     .ok();
 
-    let engine: Arc<dyn tetanus_protocol::methods::Engine> =
-        Arc::new(tetanus_engine::HarnessEngine::new(booted));
+    // Through `tools::served`, like the stdio and WebSocket carriers: this is
+    // the surface that got it wrong by building from `booted` alone, and every
+    // client behind it - the browser panel, anything on `/api/` - was offered
+    // one tool on a build with twenty-six.
+    let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
+        tetanus_engine::HarnessEngine::new(crate::tools::served(policy, document, booted)?),
+    );
     // The other door onto the same room: `POST /api/<method>`, for a client
     // that cannot hold a socket. Same engine, same dispatch table, same
     // contract; what differs is only how a frame arrives.

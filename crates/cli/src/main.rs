@@ -29,7 +29,7 @@ use tetanus_ui::{
 
 use render::help;
 use render::live::Live;
-use tools::{catalog, listing, registry, session_tools, whose};
+use tools::{catalog, registry, whose};
 
 #[derive(Parser)]
 #[command(
@@ -669,19 +669,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 },
             )
             .ok();
-            // What a session may call, and what `catalog.tools` advertises,
-            // are built from one function so the two cannot drift; each
-            // session's copy is bound to its own interrupt. Everything else
-            // came off the settings document, which is why the tools are set
-            // over `booted` rather than beside a `..Default::default()`: the
-            // provider, model and journal root a served session runs on are
-            // the document's answer and not this file's.
+            // Through `tools::served`, which is the only place that says what
+            // a served engine's tools are - so this carrier and the frontend's
+            // cannot answer `catalog.tools` differently.
             let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                    tools: Arc::new(registry(policy, &document, &listing(&booted.resolved))?),
-                    session_tools: Some(session_tools(policy, &document, &booted.resolved)?),
-                    ..booted
-                }),
+                tetanus_engine::HarnessEngine::new(tools::served(policy, &document, booted)?),
             );
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
