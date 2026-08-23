@@ -3,6 +3,8 @@ import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
 import { approvals, askCard } from "./questions.js";
 import { hooks } from "./tool-hooks.js";
+import { help, parse, stats, told } from "./commands.js";
+import { CHORDS } from "./keys.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
@@ -636,10 +638,83 @@ function grow() {
   view.asked.style.height = `${Math.min(view.asked.scrollHeight, 180)}px`;
 }
 
-view.form.addEventListener("submit", (typed) => {
-  typed.preventDefault();
-  const said = view.asked.value.trim();
-  if (said && !busy) ask(said);
+// ---------------------------------------------------------------------------
+// What you can type that is not a question.
+//
+// The parser is in `commands.js` and every kind it answers is handled here.
+// A line that reaches `ask` has been decided to be a question; nothing falls
+// through, which is the property that keeps `/stats` from ever being sent to a
+// model.
+// ---------------------------------------------------------------------------
+
+/** Say something to the reader, on the transcript, in this page's own voice. */
+function told_(said) {
+  row("note", "·", said);
+  toBottom();
+}
+
+function ran(name) {
+  switch (name) {
+    case "/help":
+      told_(help());
+      return;
+    case "/stats":
+      told_(told(stats(seen)));
+      return;
+    case "/keys":
+      told_(
+        ["Enter sends · Shift+Enter is a new line"]
+          .concat(CHORDS.map((chord) => `Alt+${chord.letter.toUpperCase()} - ${chord.says}`))
+          .join("\n"),
+      );
+      return;
+    case "/clear":
+      // The screen, not the conversation. Said out loud, because a reader who
+      // thought this deleted the journal would be wrong in the direction that
+      // matters, and a reload brings all of it back.
+      view.turns.replaceChildren();
+      card = null;
+      told_("Cleared the screen. The journal keeps every turn; reload to read them again.");
+      return;
+    default:
+      return;
+  }
+}
+
+function typed(line) {
+  const read = parse(line);
+  switch (read.kind) {
+    case "blank":
+      return;
+    case "ask":
+      if (!busy) ask(read.said);
+      return;
+    case "run":
+      view.asked.value = "";
+      grow();
+      told_(read.said);
+      ran(read.name);
+      return;
+    case "elsewhere":
+      view.asked.value = "";
+      grow();
+      told_(read.said);
+      return;
+    case "unknown":
+      view.asked.value = "";
+      grow();
+      // The word, not the line: a reader who typed `/statss` needs to see
+      // which word was not understood, and `/help` is the way out.
+      told_(`${read.name} is not a command here. Type /help for the ones that are.`);
+      return;
+    default:
+      return;
+  }
+}
+
+view.form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  typed(view.asked.value);
 });
 view.asked.addEventListener("input", grow);
 view.asked.addEventListener("keydown", (key) => {

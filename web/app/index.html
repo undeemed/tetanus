@@ -67,6 +67,10 @@
  .row.bad .mark { color:var(--red); }
  .row.fault .mark { color:var(--red); }
  .row.fault .said { color:var(--red); }
+ /* The page answering the reader rather than the model. Muted, because it is
+    this panel talking about itself and must not be mistaken for something
+    the conversation produced. */
+ .row.note .who, .row.note .said { color:var(--muted); }
  .empty { color:var(--muted); text-align:center; margin:34px 0; font-size:13.5px; }
  .end { color:var(--muted); font:12.5px ui-monospace,monospace; margin-top:8px; }
  /* The answer being typed. One glyph, no animation: a spinner beside text that

@@ -171,6 +171,23 @@ a *reader* of a format the engine owns and can change - which is why a row that 
 printed exactly as it arrived rather than dropped or guessed at, and why a failed result is never
 handed to a view at all.
 
+## What you can type that is not a question
+
+[commands.js](commands.js) is the command line, matching `tetanus chat`'s. `/help`, `/stats`,
+`/keys` and `/clear` run here; `/find`, `/exit`, `/think` and `/more` **answer** by saying where they
+went, because the failure to avoid is a reader typing a command they know from the terminal and
+watching it go to the model as a question. `/find` points at Ctrl-F: re-implementing find-in-page
+inside a page that has it would be worse at it.
+
+`//` is the escape, and it is not optional - the moment a leading slash means something, a message
+that starts with one needs a way through. The command is the first word, so `/stats now` is that
+command and not a message.
+
+`/stats` folds the journal the page already holds, by `crates/cli/src/render/timeline.rs`'s rules,
+event for event. That is a **second implementation of one fold**, said out loud rather than left to
+be discovered: there is no `session.stats` on the boundary, so the choice was to fold or to not have
+the figures. If the two ever disagree, the terminal is right and this is the copy to fix.
+
 ## Stopping a turn
 
 **Stop** takes Send's seat while a turn runs - beside it, it would move Send under the cursor the
