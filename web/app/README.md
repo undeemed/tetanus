@@ -6,6 +6,11 @@ hosts.
 It is a page, not a program: `index.html` and `chat.js`, no build step, no framework and no
 dependency, so the thing a reviewer opens is the file in this directory.
 
+Two row-like things have two names on purpose. `.row` is a line of the transcript - a `who` column,
+a mark and what was said. `.choice` is a control you pick: a directory in the chooser, a button in
+the header. They were both called `.row` once, and the later definition quietly won `display:block`
+for the whole conversation.
+
 ## Running it
 
 ```sh

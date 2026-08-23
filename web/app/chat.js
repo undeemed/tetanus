@@ -777,7 +777,7 @@ async function walk(path) {
 function draw(listing, above) {
   crumbsBar.replaceChildren(...listing.crumbs.map((crumb) => {
     const jump = document.createElement("button");
-    jump.className = "row";
+    jump.className = "choice";
     jump.style.width = "auto";
     jump.textContent = crumb.name;
     jump.onclick = () => walk(crumb.path);
@@ -802,14 +802,14 @@ function fill(pane, listing, mark) {
   const rows = listing.entries.filter((row) => dots.checked || !row.hidden);
   if (rows.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "row dot";
+    empty.className = "choice dot";
     empty.textContent = listing.entries.length ? "· every entry here is hidden" : "· nothing here";
     pane.replaceChildren(empty);
     return;
   }
   pane.replaceChildren(...rows.map((row) => {
     const go = document.createElement("button");
-    go.className = "row" + (row.hidden ? " dot" : "") + (row.path === mark ? " here" : "");
+    go.className = "choice" + (row.hidden ? " dot" : "") + (row.path === mark ? " here" : "");
     go.textContent = row.name;
     go.onclick = () => walk(row.path);
     return go;

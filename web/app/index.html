@@ -130,11 +130,16 @@
  /* One pane when there is one level to show, two when the parent is worth
     seeing beside it: stepping back should not make the view collapse. */
  .panes.alone { grid-template-columns:1fr; }
- .row { display:block; width:100%; text-align:left; border:0; border-radius:0;
+ /* A control you pick, not a transcript row. It was called `.row` too, and
+    the two definitions collided: this one is later in the file, so it won
+    `display:block` for every row of the conversation and collapsed the `who`
+    column into the message - `youhello there`. One name, two meanings, and
+    the surface that lost was the main one. */
+ .choice { display:block; width:100%; text-align:left; border:0; border-radius:0;
    padding:7px 12px; font:13px ui-monospace,monospace; background:transparent; color:var(--text); }
- .row:hover:not(:disabled) { background:#22353a; }
- .row.here { background:#24424a; }
- .row.dot { color:var(--muted); }
+ .choice:hover:not(:disabled) { background:#22353a; }
+ .choice.here { background:#24424a; }
+ .choice.dot { color:var(--muted); }
  .pick-foot { display:flex; gap:10px; align-items:center; padding:11px 14px;
    border-top:1px solid var(--line); }
  .pick-foot .grow { margin-left:auto; }
@@ -152,16 +157,16 @@
   <!-- The Alt chord each of these answers to is set from `keys.js`, which is
        also what listens for it: a shortcut named in one file and heard in
        another is a shortcut that goes stale silently. -->
-  <button id="catalogue-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+  <button id="catalogue-open" type="button" class="choice" style="width:auto;border:1px solid var(--line);border-radius:8px">
     models…
   </button>
-  <button id="trace-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+  <button id="trace-open" type="button" class="choice" style="width:auto;border:1px solid var(--line);border-radius:8px">
     trace…
   </button>
-  <button id="sessions-open" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+  <button id="sessions-open" type="button" class="choice" style="width:auto;border:1px solid var(--line);border-radius:8px">
     sessions…
   </button>
-  <button id="pick" type="button" class="row" style="width:auto;border:1px solid var(--line);border-radius:8px">
+  <button id="pick" type="button" class="choice" style="width:auto;border:1px solid var(--line);border-radius:8px">
     workspace…
   </button>
   <span class="state" id="state">offline</span>
