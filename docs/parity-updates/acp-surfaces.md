@@ -22,7 +22,7 @@ After:
 
 | Upstream area | Specs | Today | Gap | Closes in |
 | --- | ---: | --- | --- | --- |
-| `acp/*`, `sdk/*`, `api/*` | 17 | Own JSON-RPC contract in `crates/protocol` and both carriers; an ACP bridge riding that carrier - initialize, session/new, session/prompt, one-way cancel, committed assistant messages and tool calls as `session/update`, one-shot fail-closed permission requests - and the client half that spawns an agent process and drives it over real pipes, answering its permission questions under a policy, demultiplexing one stream, bounding every wait and reaping the child; an in-process SDK client and owned-run API that drives a whole turn with no CLI and no socket, enforcing the handshake exactly as a carrier does and closing its own subscriptions; the request surface as an enumerable descriptor catalog validating exact named arguments before dispatch | Image and audio prompts (they need the durable attachment store phase ② brings), session load/list/resume/fork over ACP, editor navigation, modes, plans and titles, upstream's generated Typert codecs and its client-side remote projection, an approval seam the engine can drive the bridge's permission channel from | ③ for the rest |
+| `acp/*`, `sdk/*`, `api/*` | 17 | Own JSON-RPC contract in `crates/protocol` and both carriers; an ACP bridge riding that carrier - initialize, session/new, session/prompt, one-way cancel, committed assistant messages and tool calls as `session/update`, one-shot fail-closed permission requests, and `session/load`, which re-opens a session by replaying its journal as `session/update` frames before it answers, advertised as `loadSession` and usable afterwards rather than read-only - and the client half that spawns an agent process and drives it over real pipes, answering its permission questions under a policy, demultiplexing one stream, bounding every wait and reaping the child; an in-process SDK client and owned-run API that drives a whole turn with no CLI and no socket, enforcing the handshake exactly as a carrier does and closing its own subscriptions; the request surface as an enumerable descriptor catalog validating exact named arguments before dispatch | Image and audio prompts, which wait on `tetanus_turn::llm::Message::content` carrying parts rather than a `String` - not on storage, which `crates/features` now has - session list and fork, which the ACP revision this speaks has no call for at all, editor navigation, modes, plans and titles, upstream's generated Typert codecs and its client-side remote projection, an approval seam the engine can drive the bridge's permission channel from | ③ for the rest |
 
 ### `session/*`, `session-query/*`
 
@@ -41,7 +41,7 @@ gains, and the `Gap` column loses, the query clause:
 
 ## Cases
 
-`TC-PORT-ACP-1..24`, `TC-PORT-SDK-1..12`, `TC-PORT-API-1..14`, `TC-PORT-QUERY-1..19`.
+`TC-PORT-ACP-1..31`, `TC-PORT-SDK-1..12`, `TC-PORT-API-1..14`, `TC-PORT-QUERY-1..19`.
 All offline; none needs a key, a network, or the binary.
 
 `TC-PORT-ACP-17..24` are the client half, and every one of them spawns a second process: the test
@@ -113,6 +113,56 @@ written its own wording for the same fix, the fold would have had to adjudicate 
 one decision.
 
 Whichever branch lands second contributes nothing here. That is the intended outcome.
+
+## What is left in the row, and precisely what each waits on
+
+The row's gap column was three words - "ACP bridge, SDK client, gateway" - and all three are
+served. What remains is written as clauses rather than as a list, because a gap nobody can name the
+blocker for is a gap the next sweep re-derives from scratch.
+
+1. **Image and audio prompts.** *Not* waiting on storage any more, and the earlier note in this file
+   saying so was overtaken: `crates/features` has had a content-addressed attachment store since the
+   feature-tools slice landed. The actual blocker is one field. The model-visible message this
+   workspace sends is `tetanus_turn::llm::Message`, whose `content` is a `String`; until that seam
+   carries parts rather than a string, an admitted image has nowhere to go in the request, and
+   storing the bytes would be keeping something no turn can refer to. `PromptCapabilities` therefore
+   still advertises `image: false`, which is the honest answer and the one a client can adapt to.
+   Audio is further back still: no adapter here speaks it.
+
+2. **The permission channel is built, pinned on both sides, and still not driven by a turn.**
+   `AcpBridge::request_permission` maps ACP's two one-shot options onto `ApprovalOutcome` and every
+   other answer onto a denial (TC-PORT-ACP-13, and the client's half in TC-PORT-ACP-21). What is
+   missing is the engine-side seam that would raise the question: `EventSink` carries exactly two
+   pushes, `session_event` and `agent_status`, and neither is a *request* the client answers.
+   `tetanus_protocol::methods::push` already names `ui/ask` and `ui/approve` for this, so the
+   vocabulary is agreed and the carrier is not: adding a server-to-client request to `EventSink` is
+   a change to the published boundary, which is its own pull request touching
+   `docs/interface-contract.md` and `crates/protocol` together, never a line inside this lane.
+
+3. **`agent.steer` is declared, routed, capability-named, reserved - and missing from
+   `method::ALL`.** Still true on this master. It is one line in an engine-lane file, so it stays a
+   proposal (`docs/contract-updates/acp-gateway.md`) and TC-PORT-API-3 pins the omission so that
+   fixing it upstream of this lane cannot go unnoticed.
+
+4. **Session fork and session list are not ACP gaps.** The revision this bridge speaks has exactly
+   two ways to obtain a session - `session/new` and `session/load` - and no call for forking one or
+   for listing what exists. The engine serves both (`session.fork`, `session.list`) and
+   `tetanus_sdk::Client` exposes them typed, so the capability is present and it is ACP that has
+   nowhere to put it. Inventing `session/fork` here would be this bridge extending someone else's
+   protocol, which is the one thing a bridge must not do.
+
+5. **Editor navigation, modes, plans and titles** stay out for the same reason and a second one:
+   each is a surface concern whose tetanus half is owned by the presentation lane, and `crates/acp`
+   holds no engine type and writes no user-facing copy.
+
+## A probe that stopped being a probe
+
+Worth recording because it is the same trap `AGENTS.md` already names for `TC-ENG-4`/`TC-RPC-12`.
+TC-PORT-ACP-16 asserted that an unknown method is refused rather than ignored, and the method it
+used to prove it was `session/load` - which this slice now serves. The case would have gone on
+passing right up until it did not, and then failed for a reason that had nothing to do with what it
+was written to check. It now probes with a method ACP does not define at all, and says in the case
+why that distinction matters.
 
 ## Related proposals
 

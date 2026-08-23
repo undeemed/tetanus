@@ -42,9 +42,10 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::wire::{
-    agent, method, ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOutcome, PromptRequest, PromptResponse, RequestPermissionRequest,
-    SessionNotification, SessionUpdate, StopReason, ALLOW_ONCE, PROTOCOL_VERSION, REJECT_ONCE,
+    agent, method, ContentBlock, InitializeRequest, InitializeResponse, LoadSessionRequest,
+    NewSessionRequest, NewSessionResponse, PermissionOutcome, PromptRequest, PromptResponse,
+    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, ALLOW_ONCE,
+    PROTOCOL_VERSION, REJECT_ONCE,
 };
 
 /// How long any one call waits before it is a hang rather than slow work.
@@ -311,12 +312,7 @@ impl AcpClient {
     /// Open a session. `cwd` must be absolute; ACP says so and the agent
     /// checks, so this checks too rather than paying a round trip to be told.
     pub async fn new_session(&mut self, cwd: &Path) -> Result<String, ClientError> {
-        if !cwd.is_absolute() {
-            return Err(ClientError::Protocol(format!(
-                "`cwd` is an absolute path, and `{}` is not",
-                cwd.display()
-            )));
-        }
+        Self::admit_cwd(cwd)?;
         let answered = self
             .call(
                 method::SESSION_NEW,
@@ -328,6 +324,52 @@ impl AcpClient {
             .await?;
         let created: NewSessionResponse = decode(answered)?;
         Ok(created.session_id)
+    }
+
+    /// Re-open a session the agent already has, and collect its history.
+    ///
+    /// The history arrives as `session/update` notifications *before* the
+    /// answer, exactly as a turn's updates do, so the drain-then-collect shape
+    /// is the same one [`Self::prompt`] uses and for the same reason: once the
+    /// answer is in hand the notifications are already queued.
+    pub async fn load_session(
+        &mut self,
+        session_id: &str,
+        cwd: &Path,
+    ) -> Result<Vec<SessionUpdate>, ClientError> {
+        Self::admit_cwd(cwd)?;
+        while self.updates.try_recv().is_ok() {}
+
+        self.call(
+            method::SESSION_LOAD,
+            LoadSessionRequest {
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await?;
+
+        let mut history = Vec::new();
+        while let Ok(notification) = self.updates.try_recv() {
+            if notification.session_id == session_id {
+                history.push(notification.update);
+            }
+        }
+        Ok(history)
+    }
+
+    /// ACP requires an absolute `cwd`, and the agent checks it too; checking
+    /// here as well means a caller learns of its own mistake without paying a
+    /// round trip, and the agent's check remains the one that binds.
+    fn admit_cwd(cwd: &Path) -> Result<(), ClientError> {
+        if cwd.is_absolute() {
+            return Ok(());
+        }
+        Err(ClientError::Protocol(format!(
+            "`cwd` is an absolute path, and `{}` is not",
+            cwd.display()
+        )))
     }
 
     /// Send a prompt and collect the turn.

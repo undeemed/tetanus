@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tetanus_protocol::methods::{
     AgentPromptParams, AgentStatusPush, Engine, EventSink, SessionCreateParams, SessionEventPush,
-    SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
+    SessionEventsParams, SessionRef, SessionSubscribeParams, SessionUnsubscribeParams,
 };
 use tetanus_protocol::rpc::{
     ErrorCode, Id, Message, Notification, Payload, Request, Response, RpcError, V2,
@@ -19,10 +19,10 @@ use crate::content::admit;
 use crate::updates::updates_of;
 use crate::wire::{
     agent, method, AgentCapabilities, AgentInfo, CancelNotification, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOutcome,
-    PermissionToolCall, PromptCapabilities, PromptRequest, PromptResponse,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, StopReason,
-    AGENT_NAME, ALLOW_ONCE, PROTOCOL_VERSION, REJECT_ONCE,
+    InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOutcome, PermissionToolCall, PromptCapabilities, PromptRequest,
+    PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
+    SessionUpdate, StopReason, AGENT_NAME, ALLOW_ONCE, PROTOCOL_VERSION, REJECT_ONCE,
 };
 
 /// One ACP session this bridge owns.
@@ -203,6 +203,12 @@ impl AcpBridge {
             // a client that is being polite.
             method::AUTHENTICATE => Ok(serde_json::json!({})),
             method::SESSION_NEW => encode(self.new_session(typed(params)?).await?),
+            method::SESSION_LOAD => {
+                self.load_session(typed(params)?, out).await?;
+                // ACP answers a load with an empty result: what the client is
+                // buying is the replay that came before this frame.
+                Ok(serde_json::json!({}))
+            }
             method::SESSION_PROMPT => encode(self.prompt(typed(params)?, out).await?),
             unknown => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
@@ -225,6 +231,7 @@ impl AcpBridge {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             agent_capabilities: AgentCapabilities {
+                load_session: true,
                 prompt_capabilities: PromptCapabilities {
                     image: false,
                     audio: false,
@@ -239,23 +246,7 @@ impl AcpBridge {
         &self,
         request: NewSessionRequest,
     ) -> Result<NewSessionResponse, RpcError> {
-        // ACP requires an absolute `cwd`. Checked rather than trusted because
-        // a relative one resolves against *this* process's directory, which is
-        // not the one the client meant, and the mistake is invisible until a
-        // tool reads the wrong file.
-        if request.cwd.is_empty() || !std::path::Path::new(&request.cwd).is_absolute() {
-            return Err(
-                RpcError::new(ErrorCode::InvalidParams, "`cwd` is an absolute path")
-                    .with_data(serde_json::json!({ "field": "cwd" })),
-            );
-        }
-        if !request.mcp_servers.is_empty() {
-            return Err(RpcError::new(
-                ErrorCode::InvalidParams,
-                "this agent mounts no MCP servers",
-            )
-            .with_data(serde_json::json!({ "field": "mcpServers" })));
-        }
+        Self::admit_workspace(&request.cwd, &request.mcp_servers)?;
 
         let info = self
             .engine
@@ -274,6 +265,96 @@ impl AcpBridge {
             // means there is no mapping table to fall out of step.
             session_id: info.session_id,
         })
+    }
+
+    /// Re-open a session and replay it, oldest first.
+    ///
+    /// The replay is the whole point of the call: ACP answers it with an empty
+    /// result, and what the client actually receives is every `session/update`
+    /// this journal produces, written before that answer. Nothing is stored to
+    /// make this work - the journal already *is* the history, so re-opening a
+    /// session is a paged read rather than a second copy this bridge would
+    /// have to keep in step.
+    ///
+    /// The page loop is bounded by the engine's own contract: a page reports
+    /// `eof` and the seq the next page starts at, and a page that neither
+    /// advances nor ends would spin, so that case stops rather than looping.
+    async fn load_session(
+        &self,
+        request: LoadSessionRequest,
+        out: &Arc<dyn FrameSink>,
+    ) -> Result<(), RpcError> {
+        Self::admit_workspace(&request.cwd, &request.mcp_servers)?;
+        if request.session_id.is_empty() {
+            return Err(
+                RpcError::new(ErrorCode::InvalidParams, "`sessionId` is required")
+                    .with_data(serde_json::json!({ "field": "sessionId" })),
+            );
+        }
+
+        let mut from_seq = 0;
+        loop {
+            // An unknown session is the engine's refusal, carried whole rather
+            // than re-worded: it already says which id it could not find, and
+            // this bridge inventing a second sentence for it would give an
+            // operator two spellings of one fault to search for.
+            let page = self
+                .engine
+                .session_events(SessionEventsParams {
+                    session_id: request.session_id.clone(),
+                    from_seq,
+                    limit: None,
+                })
+                .await?;
+
+            for event in &page.events {
+                for update in updates_of(event) {
+                    notify(out, &request.session_id, update);
+                }
+            }
+
+            if page.eof || page.next_seq <= from_seq {
+                break;
+            }
+            from_seq = page.next_seq;
+        }
+
+        // Registered only once the replay succeeded. A session this bridge
+        // recorded but never replayed would take a prompt while the client
+        // still had no history for it, which is the one state a load exists to
+        // prevent.
+        self.state.lock().expect("state").sessions.insert(
+            request.session_id,
+            Record {
+                inflight: false,
+                cancelled: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// The two checks `session/new` and `session/load` both make on the
+    /// workspace they are handed.
+    ///
+    /// Shared rather than written twice because they are one decision: a
+    /// relative `cwd` resolves against *this* process's directory, which is not
+    /// the one the client meant, and the mistake is invisible until a tool
+    /// reads the wrong file.
+    fn admit_workspace(cwd: &str, mcp_servers: &[serde_json::Value]) -> Result<(), RpcError> {
+        if cwd.is_empty() || !std::path::Path::new(cwd).is_absolute() {
+            return Err(
+                RpcError::new(ErrorCode::InvalidParams, "`cwd` is an absolute path")
+                    .with_data(serde_json::json!({ "field": "cwd" })),
+            );
+        }
+        if !mcp_servers.is_empty() {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "this agent mounts no MCP servers",
+            )
+            .with_data(serde_json::json!({ "field": "mcpServers" })));
+        }
+        Ok(())
     }
 
     async fn prompt(
@@ -478,19 +559,7 @@ struct Updates {
 impl EventSink for Updates {
     fn session_event(&self, push: SessionEventPush) {
         for update in updates_of(&push.event) {
-            let frame = Notification {
-                jsonrpc: V2,
-                method: agent::SESSION_UPDATE.to_string(),
-                params: Some(
-                    serde_json::to_value(SessionNotification {
-                        session_id: self.session_id.clone(),
-                        update,
-                    })
-                    .expect("an update serializes"),
-                ),
-            };
-            self.out
-                .send_frame(serde_json::to_string(&frame).expect("a frame serializes"));
+            notify(&self.out, &self.session_id, update);
         }
     }
 
@@ -500,6 +569,28 @@ impl EventSink for Updates {
 }
 
 /// The question, as a frame.
+/// Write one `session/update` notification.
+///
+/// One function for both producers on purpose. A turn in flight pushes through
+/// [`Updates`] and a `session/load` replays through the page loop, and the
+/// client cannot be allowed to tell which it is reading: two framings of the
+/// same notification is the kind of difference that shows up as a panel that
+/// renders live turns and not resumed ones.
+fn notify(out: &Arc<dyn FrameSink>, session_id: &str, update: SessionUpdate) {
+    let frame = Notification {
+        jsonrpc: V2,
+        method: agent::SESSION_UPDATE.to_string(),
+        params: Some(
+            serde_json::to_value(SessionNotification {
+                session_id: session_id.to_string(),
+                update,
+            })
+            .expect("an update serializes"),
+        ),
+    };
+    out.send_frame(serde_json::to_string(&frame).expect("a frame serializes"));
+}
+
 fn permission_request(id: &str, session_id: &str, tool_call_id: &str) -> Request {
     Request {
         jsonrpc: V2,
