@@ -28,6 +28,11 @@
 
 #![cfg(target_os = "linux")]
 
+/// The terminal every case here opens. Named because the `htop` case asserts
+/// against it: a screen that is one frame can never be taller than the screen
+/// it is drawn on.
+const ROWS: u16 = 40;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -259,9 +264,19 @@ async fn vim_is_readable() {
 /// every frame concatenated, and its screen is the current one.
 ///
 /// Input: `htop` for a second or so on a real terminal.
-/// Expected: the session says it is drawing, the screen holds one frame's
-/// worth of rows, and the transcript holds several times more - so a reader
-/// handed the transcript would be reading frames that are no longer true.
+/// Expected: the session says it is drawing; the screen is one frame - never
+/// taller than the terminal, and holding the header `htop` paints; and the
+/// transcript keeps *growing* while the screen does not, which is the property
+/// that makes one of them readable and the other not.
+///
+/// The measure is bytes and boundedness, not line counts, and that is a
+/// correction: this case first asserted the transcript had more *lines* than
+/// the screen, which held on the machine it was written on and failed on CI
+/// with "transcript 14 lines, screen 40 lines". Both numbers were right. A
+/// repaint addresses the cursor instead of printing newlines, so how many
+/// lines a transcript ends up with is a fact about the `htop` build and the
+/// terminfo it chose, not about this crate. What is true everywhere is that
+/// frames accumulate in the transcript and cannot accumulate in a grid.
 #[tokio::test]
 async fn htop_is_readable_and_its_transcript_is_not() {
     let workspace = tempfile::tempdir().expect("temp dir");
@@ -277,25 +292,57 @@ async fn htop_is_readable_and_its_transcript_is_not() {
         .send_waiting("htop -d 2", true, Some(Duration::from_millis(2000)), None)
         .await
         .expect("sent");
-    settle(&session, "Tasks").await;
-
-    let screen = session.screen();
-    let transcript = session.scrollback();
+    // Wait for the program to say it is drawing rather than for a word it
+    // might spell differently between versions.
+    for _ in 0..300 {
+        if session.is_drawing() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         session.is_drawing(),
         "htop draws, so the session should say so"
     );
+
+    let screen = session.screen();
     assert!(
-        screen.lines().count() <= 45,
-        "the screen is one frame, not every frame: {} lines",
+        screen.lines().count() <= ROWS as usize,
+        "the screen is one frame, so it cannot be taller than the terminal: {} lines of {ROWS}",
         screen.lines().count()
     );
     assert!(
-        transcript.lines().count() > screen.lines().count(),
-        "the transcript should be the longer of the two, or this case proves nothing: \
-         transcript {} lines, screen {} lines",
-        transcript.lines().count(),
-        screen.lines().count()
+        // Any of the words every `htop` frame carries somewhere - the column
+        // headers, the meters, or the function-key footer. A wide list on
+        // purpose: which of them a frame shows depends on the version and the
+        // window, and this case is about the grid holding *a frame*, not about
+        // one release's wording.
+        ["PID", "CPU", "Mem", "Tasks", "Load", "Swap", "F10", "Quit"]
+            .iter()
+            .any(|header| screen.contains(header)),
+        "the screen should hold a frame `htop` painted, not fragments:\n{screen}"
+    );
+
+    // The property, measured over time rather than guessed from one sample:
+    // the transcript accumulates frames and the grid cannot.
+    let first = session.scrollback().len();
+    let mut grew = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if session.scrollback().len() > first {
+            grew = true;
+            break;
+        }
+    }
+    assert!(
+        grew,
+        "htop repaints, so its transcript has to keep growing: still {first} bytes"
+    );
+    assert!(
+        session.screen().lines().count() <= ROWS as usize,
+        "and the screen still cannot outgrow the terminal, which is what makes it the \
+         readable one: {} lines",
+        session.screen().lines().count()
     );
 
     session
@@ -317,6 +364,7 @@ async fn terminal(workspace: &std::path::Path) -> Option<TerminalSession> {
         Arc::new(Bash::new()),
         TerminalConfig {
             cwd: workspace.to_path_buf(),
+            rows: ROWS,
             idle_silence: Duration::from_secs(5),
             timeout: Duration::from_secs(20),
             grace: Duration::from_millis(200),
