@@ -115,6 +115,10 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                     tetanus_exec::session::SessionConfig {
                         cwd: sandbox.workspace_root().to_path_buf(),
                         sandbox: sandbox.clone(),
+                        // The same store the one-shot executor gets: a
+                        // persistent shell drops output for the same reason
+                        // and the artifacts belong in one place.
+                        spill: spill_to(cx),
                         ..tetanus_exec::session::SessionConfig::default()
                     },
                     Arc::clone(&cx.interrupt),

@@ -64,6 +64,15 @@ pub struct SessionConfig {
     pub grace: Duration,
     /// Extra environment for the shell, over the backend's own overrides.
     pub env: BTreeMap<String, String>,
+    /// Where the whole of a command's output goes when the scrollback bound
+    /// drops part of it.
+    ///
+    /// The same trade `crate::shell` makes for a one-shot command, for the
+    /// same reason: only the producer holds the bytes it is dropping. A
+    /// session's bound is reached by exactly the commands whose output matters
+    /// most - a build, a test run, a log tail - and until this existed, what
+    /// scrolled past was gone while the result said only that it had been cut.
+    pub spill: Option<crate::shell::SpillTo>,
     /// The kernel boundary the shell and everything it starts run behind.
     /// Default `danger-full-access`, spelled out for the reason
     /// [`crate::shell::ShellConfig`] gives.
@@ -79,6 +88,7 @@ impl Default for SessionConfig {
             max_scrollback: 256 * 1024,
             grace: Duration::from_secs(3),
             env: BTreeMap::new(),
+            spill: None,
             sandbox: tetanus_sandbox::Policy::danger_full_access(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ),
@@ -131,6 +141,11 @@ pub struct SessionRun {
     pub code: i32,
     /// Whether the scrollback bound dropped part of this command's output.
     pub truncated: bool,
+    /// Where the whole of it was kept, when the caller asked for a spill and
+    /// the bound dropped something. `None` covers the three cases that read
+    /// the same to a caller: nothing was dropped, nobody asked, or the spill
+    /// failed - and a failed spill is never a failed command.
+    pub spilled: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -212,6 +227,9 @@ pub struct ShellSession {
     /// interleave their markers, and neither could be attributed.
     running: tokio::sync::Mutex<()>,
     nonces: AtomicU64,
+    /// How many commands this session has run, so two spilled artifacts have
+    /// different names and a reader can see which came first.
+    runs: AtomicU64,
 }
 
 impl std::fmt::Debug for ShellSession {
@@ -307,6 +325,12 @@ impl ShellSession {
 
         let deadline = tokio::time::Instant::now() + self.config.timeout;
         let mut delivered = from;
+        // Installed for the length of this command only: what the bound
+        // forgets while it runs is this command's, and what it forgets
+        // afterwards is not.
+        let keeping = Keeping::new(self.spill_for(command), from, markers.clone());
+        self.transcript.watch_overflow(Some(keeping.overflow()));
+        let _forget_after = OverflowGuard(&self.transcript);
         loop {
             let woken = self.transcript.changed.notified();
             let snapshot = self.transcript.snapshot();
@@ -315,12 +339,16 @@ impl ShellSession {
             if let Some(sink) = &sink {
                 delivered = self.deliver(sink, &snapshot, delivered, &markers);
             }
-
+            // Before the bound is asked to drop anything, and every time round
+            // after: the transcript still holds this command's whole output at
+            // the moment it first overflows, which is what makes the artifact
+            // the complete stream rather than the tail of it.
             if let Some(complete) = between(seen, &markers) {
                 return Ok(SessionRun {
                     text: complete.text,
                     code: complete.code,
                     truncated: snapshot.dropped > from,
+                    spilled: keeping.finish(&snapshot),
                 });
             }
 
@@ -425,6 +453,32 @@ impl ShellSession {
         snapshot.len()
     }
 
+    /// Where this command's output would go, if the bound drops any of it.
+    ///
+    /// The tool is what a reader will see in the result, and the number is
+    /// what keeps two commands in one session apart - a session runs many, and
+    /// `Tool::execute` is handed arguments rather than the call that carried
+    /// them, so nothing here has a model-issued id to use.
+    fn spill_for(
+        &self,
+        command: &str,
+    ) -> Option<(
+        Arc<tetanus_core::spill::SpillStore>,
+        tetanus_core::spill::SpillSource,
+    )> {
+        let spill = self.config.spill.as_ref()?;
+        let run = self.runs.fetch_add(1, Ordering::Relaxed);
+        let _ = command;
+        Some((
+            Arc::clone(&spill.store),
+            tetanus_core::spill::SpillSource {
+                session_id: spill.session.clone(),
+                tool: format!("shell_run-{}", self.id),
+                call_id: format!("run-{run}"),
+            },
+        ))
+    }
+
     fn wrap(&self, command: &str, markers: &Markers) -> String {
         self.backend.wrap(command, markers)
     }
@@ -442,6 +496,153 @@ impl ShellSession {
             .await
             .map_err(SessionError::Input)?;
         handle.flush().await.map_err(SessionError::Input)
+    }
+}
+
+/// One command's output on its way to disk, when the bound drops part of it.
+///
+/// Assembled from the two halves that exist at different times: the bytes the
+/// transcript is *about* to forget, handed over inside `push` because that is
+/// the only moment they exist, and the tail still retained when the command
+/// ends. Together they are the command's whole output, in order.
+///
+/// The file is opened at the first overflow and never before, so a session
+/// whose commands fit costs no filesystem at all.
+struct Keeping {
+    inner: Arc<Mutex<KeepingState>>,
+}
+
+struct KeepingState {
+    spill: Option<(
+        Arc<tetanus_core::spill::SpillStore>,
+        tetanus_core::spill::SpillSource,
+    )>,
+    writing: Option<tetanus_core::spill::SpillWriter>,
+    /// Where this command's output starts in the transcript, so a drop that
+    /// belongs to an earlier command is not filed under this one.
+    from: usize,
+    /// How far has been written, as an absolute transcript position.
+    written: usize,
+    locator: Option<String>,
+    markers: Markers,
+}
+
+impl KeepingState {
+    /// Write what the bound is forgetting, opening the artifact if this is the
+    /// first time.
+    fn forget(&mut self, at: usize, text: &str) {
+        if self.spill.is_none() {
+            return;
+        }
+        // A drop that begins before this command did belongs to an earlier
+        // one; keep only the part from here on.
+        let text = match self.from.saturating_sub(at) {
+            0 => text,
+            skip if skip < text.len() => &text[skip..],
+            _ => return,
+        };
+        if self.writing.is_none() {
+            let Some((store, source)) = self.spill.as_ref() else {
+                return;
+            };
+            match store.open(source) {
+                Ok(writing) => self.writing = Some(writing),
+                Err(refused) => {
+                    tracing::warn!(%refused, "a session's output could not be spilled");
+                    self.spill = None;
+                    return;
+                }
+            }
+            self.written = self.from;
+        }
+        self.append(text, at.max(self.from) + text.len());
+    }
+
+    /// Append the retained tail once the command has finished.
+    fn keep_the_rest(&mut self, snapshot: &Snapshot) {
+        if self.writing.is_none() {
+            return;
+        }
+        let fresh = snapshot.since(self.written);
+        if !fresh.is_empty() {
+            self.append(&fresh, snapshot.len());
+        }
+    }
+
+    fn append(&mut self, text: &str, now_at: usize) {
+        // The markers are this module's protocol rather than the command's
+        // output, and an artifact is for a person to read.
+        let text = strip_markers(text, &self.markers);
+        if !text.is_empty() {
+            if let Some(writing) = self.writing.as_mut() {
+                if let Err(refused) = writing.write(text.as_bytes()) {
+                    tracing::warn!(%refused, "a session's output could not be spilled");
+                    self.writing = None;
+                    self.spill = None;
+                    return;
+                }
+            }
+        }
+        self.written = now_at;
+    }
+}
+
+impl Keeping {
+    fn new(
+        spill: Option<(
+            Arc<tetanus_core::spill::SpillStore>,
+            tetanus_core::spill::SpillSource,
+        )>,
+        from: usize,
+        markers: Markers,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(KeepingState {
+                spill,
+                writing: None,
+                from,
+                written: from,
+                locator: None,
+                markers,
+            })),
+        }
+    }
+
+    /// The handle the transcript calls as it forgets things.
+    fn overflow(&self) -> crate::transcript::Overflow {
+        let inner = Arc::clone(&self.inner);
+        Arc::new(move |at, text| {
+            inner
+                .lock()
+                .expect("no panic holds this lock")
+                .forget(at, text)
+        })
+    }
+
+    /// Close the artifact and answer where it went.
+    fn finish(&self, snapshot: &Snapshot) -> Option<String> {
+        let mut state = self.inner.lock().expect("no panic holds this lock");
+        state.keep_the_rest(snapshot);
+        if let Some(writing) = state.writing.take() {
+            match writing.finish() {
+                Ok(kept) => state.locator = Some(kept.locator),
+                Err(refused) => {
+                    tracing::warn!(%refused, "a session's spilled output could not be closed")
+                }
+            }
+        }
+        state.locator.clone()
+    }
+}
+
+/// Takes the overflow handle away when a command ends, however it ends - a
+/// return, a timeout, a shell that died. A handle left installed would file
+/// the *next* command's dropped output under this one's artifact.
+struct OverflowGuard<'a>(&'a Transcript);
+
+impl Drop for OverflowGuard<'_> {
+    fn drop(&mut self) {
+        self.0.watch_overflow(None);
     }
 }
 
@@ -690,6 +891,7 @@ async fn start(
         life: Mutex::new(None),
         running: tokio::sync::Mutex::new(()),
         nonces: AtomicU64::new(0),
+        runs: AtomicU64::new(0),
         backend,
     };
 

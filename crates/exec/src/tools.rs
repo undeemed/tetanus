@@ -538,9 +538,19 @@ impl Tool for ShellRunTool {
             Ok(run) => {
                 let mut text = run.text;
                 if run.truncated {
-                    text = format!(
-                        "[output truncated; the beginning was dropped to fit the session's scrollback]\n{text}"
-                    );
+                    // The locator when the deployment kept the rest, and the
+                    // plain notice when it did not: a marker naming nowhere is
+                    // worse than no marker.
+                    text = match &run.spilled {
+                        Some(locator) => format!(
+                            "[output truncated; the beginning was dropped to fit the session's \
+                             scrollback; the whole of this command's output is at {locator}]\n{text}"
+                        ),
+                        None => format!(
+                            "[output truncated; the beginning was dropped to fit the session's \
+                             scrollback]\n{text}"
+                        ),
+                    };
                 }
                 if run.code == 0 {
                     Ok(ToolOutcome::ok(text))
