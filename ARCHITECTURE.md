@@ -71,6 +71,7 @@ crates/cli      tetanus-hardness   the `tetanus` binary
 
 crates/mcp        tetanus-mcp        an MCP server on stdio: client, tool bridge, reconnect supervisor
 crates/web        tetanus-web        web_fetch and web_search over one transport seam
+crates/coderuntime tetanus-coderuntime  a model-written program, evaluated under a budget
 
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
 
@@ -100,6 +101,16 @@ and contribute nothing until the document names them. Everything either of them
 decides sits above a seam - a `Link` for a server on a pipe, an `HttpTransport` for a request - so
 the whole policy is asserted with no socket in the suite, and a failure out there is a failed tool
 call carrying a class rather than a turn that ended.
+
+`tetanus-coderuntime` is the third crate composed into a harness rather than
+depended on by one. It runs a program the model wrote, and the one design fact
+worth knowing is why the language is its own: a Rust thread cannot be
+terminated, so a runaway program can only be stopped by an evaluator that
+agrees to stop, and that evaluator has to be code this workspace owns. It
+reaches no file, no socket and no subprocess, so nothing in it needs the path
+fence or the sandbox modes; a backend that handed a program to a real
+interpreter would, and `docs/parity-updates/coderuntime-backends.md` names that
+as a follow-up on the shell lane rather than guessing at it.
 
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.

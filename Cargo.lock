@@ -1528,6 +1528,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetanus-coderuntime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tetanus-config",
+ "tetanus-core",
+ "tetanus-session",
+ "tetanus-turn",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tetanus-config"
 version = "0.1.0"
 dependencies = [

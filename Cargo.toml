@@ -23,6 +23,7 @@ members = [
   "crates/query",
   "crates/sdk",
   "crates/acp",
+  "crates/coderuntime",
 ]
 
 [workspace.package]
