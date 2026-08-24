@@ -189,6 +189,12 @@ function drawn(type, event) {
 }
 
 // --- the views --------------------------------------------------------------
+//
+// Three of these are exported. They are the same facts a *tool call* carries -
+// `todo_write` sends the list this panel folds, `exit_plan_mode` sends the plan
+// it draws - so `tool-features.js` renders the transcript's copy with these
+// rather than with a second reading of the same shape. One fact, one renderer,
+// two callers.
 
 /** How a phase reads as a state, with an unknown one drawn as itself. */
 const PHASES = {
@@ -206,7 +212,7 @@ const PHASES = {
  * put down" can be told apart, and only one of the two means somebody decided
  * something.
  */
-function goalView(data) {
+export function goalView(data) {
   if (data.operation === "clear" && data.cleared) {
     const root = block();
     root.append(line(`cleared - it was "${data.cleared.objective}"`, "feat-quiet"));
@@ -255,7 +261,7 @@ function planModeView(data) {
  * exactly as written, because the engine does not know the width or the theme
  * and this page does.
  */
-function planView(data) {
+export function planView(data) {
   if (typeof data.plan !== "string" || data.plan.trim() === "") return null;
   const root = block();
   root.append(markdown(data.plan));
@@ -263,7 +269,7 @@ function planView(data) {
 }
 
 /** The task list, in the model's own order, with the counts over it. */
-function todosView(data) {
+export function todosView(data) {
   if (!Array.isArray(data.todos)) return null;
   const root = block();
   const counts = { pending: 0, in_progress: 0, completed: 0 };

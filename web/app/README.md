@@ -158,6 +158,14 @@ the host beside the title, since the host is what decides whether to believe a c
 through `markdown.js`'s `link`, which keeps the text and withholds the link for anything that is not
 http or https.
 
+[tool-features.js](tool-features.js) is the feature family - `todo_write`, `update_goal`,
+`get_goal`, `exit_plan_mode`, `report_feedback`, `skill`, `tools`. It **imports the panel's own
+renderers** rather than writing second ones: `todo_write`'s arguments *are* `todo/write`'s payload,
+and `exit_plan_mode`'s argument is `plan/presented`'s, so two readings of those shapes would be two
+places deciding what a task list looks like. A result these tools serialised is drawn only if it
+parses to the shape expected; their `"{}"` fallback prints as `{}` rather than as an emptied list,
+which is the opposite of what happened.
+
 [tool-shell.js](tool-shell.js) is the shell **and terminal** families from `crates/exec` - eleven
 tools over one marker table, because that crate says of the terminal family that "they are the same
 markers upstream renders, so a presentation that parses one parses both". Splitting them would
