@@ -374,6 +374,35 @@ impl ShellBackend for PowerShell {
         vec![PWSH_ENCODING_PREAMBLE.trim_end().to_string()]
     }
 
+    fn terminal_setup(&self) -> Vec<String> {
+        // The prompt marker, defined by typing it at the REPL.
+        //
+        // bash gets this through `PROMPT_COMMAND`, an environment variable, so
+        // `prompt_environment` can hand it over before the shell starts.
+        // PowerShell has no equivalent: its prompt is a *function*, `prompt`,
+        // and the only place to define one before the session begins is the
+        // `$PROFILE` that `-NoProfile` deliberately does not load - which is
+        // why `docs/parity.md` carried this as a gap.
+        //
+        // A terminal can type, so it types. `terminal_setup` runs once the
+        // session has reached its first prompt, which is exactly when a REPL
+        // is ready to be told something, and from then on every prompt carries
+        // the OSC 133 marker and this command's status. The definition is one
+        // line because a REPL runs a line at a time.
+        //
+        // `$?` is a boolean in PowerShell and `$LASTEXITCODE` is only set by a
+        // native program, so the status is read the way `wrap` reads it: the
+        // exit code where there is one, and the boolean otherwise.
+        vec![
+            format!(
+                "function prompt {{ $s = if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; \
+                 $e = [char]27; $b = [char]7; Write-Host -NoNewline \"$e]{prefix}$s$b\"; \"{text}\" }}",
+                prefix = crate::sanitize::PROMPT_MARKER_PREFIX,
+                text = crate::sanitize::PROMPT_TEXT,
+            ),
+        ]
+    }
+
     fn wrap(&self, command: &str, markers: &Markers) -> String {
         // `$global:LASTEXITCODE` is only set by a native program, so a failing
         // cmdlet is read off `$?` instead; between them they say what a model

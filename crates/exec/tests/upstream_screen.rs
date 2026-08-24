@@ -54,9 +54,9 @@ use tetanus_exec::terminal::{TerminalConfig, TerminalError, TerminalSession};
 fn a_cell_written_twice_reads_as_what_is_there_now() {
     let screen = Screen::new(4, 20);
 
-    screen.feed("hello world");
-    screen.feed("\r");
-    screen.feed("goodbye");
+    feed(&screen, "hello world");
+    feed(&screen, "\r");
+    feed(&screen, "goodbye");
 
     // "hello w" is what the seven characters landed on, so "orld" is what is
     // left of the first write: a screen keeps cells, not writes.
@@ -79,20 +79,20 @@ fn the_cursor_and_erase_family_put_text_where_a_program_meant_it() {
     let screen = Screen::new(5, 12);
 
     // Row 3, column 5, counted from one as the sequence counts.
-    screen.feed("\u{1b}[3;5Hmarker");
+    feed(&screen, "\u{1b}[3;5Hmarker");
     assert_eq!(screen.text(), "\n\n    marker");
 
     // Back up two rows and write: a relative move from where it left off.
-    screen.feed("\u{1b}[2A\u{1b}[1Gtop");
+    feed(&screen, "\u{1b}[2A\u{1b}[1Gtop");
     assert_eq!(screen.text(), "top\n\n    marker");
 
     // Erase to the end of the line, from the middle of `marker`.
-    screen.feed("\u{1b}[3;8H\u{1b}[K");
+    feed(&screen, "\u{1b}[3;8H\u{1b}[K");
     assert_eq!(screen.text(), "top\n\n    mar");
 
     // And the whole screen, which is what a program clears with before its
     // first frame.
-    screen.feed("\u{1b}[2J");
+    feed(&screen, "\u{1b}[2J");
     assert_eq!(screen.text(), "");
 }
 
@@ -112,13 +112,13 @@ fn the_cursor_and_erase_family_put_text_where_a_program_meant_it() {
 fn a_scrolling_region_scrolls_and_the_rest_stays() {
     let screen = Screen::new(5, 10);
 
-    screen.feed("\u{1b}[1;1Hheader");
-    screen.feed("\u{1b}[5;1Hfooter");
-    screen.feed("\u{1b}[2;4r"); // rows 2 to 4 scroll
-    screen.feed("\u{1b}[2;1Hone\u{1b}[3;1Htwo\u{1b}[4;1Hthree");
+    feed(&screen, "\u{1b}[1;1Hheader");
+    feed(&screen, "\u{1b}[5;1Hfooter");
+    feed(&screen, "\u{1b}[2;4r"); // rows 2 to 4 scroll
+    feed(&screen, "\u{1b}[2;1Hone\u{1b}[3;1Htwo\u{1b}[4;1Hthree");
 
     // At the foot of the region, a line feed scrolls the region only.
-    screen.feed("\u{1b}[4;1H\nfour");
+    feed(&screen, "\u{1b}[4;1H\nfour");
 
     assert_eq!(screen.text(), "header\ntwo\nthree\nfour\nfooter");
 }
@@ -138,14 +138,17 @@ fn a_scrolling_region_scrolls_and_the_rest_stays() {
 #[test]
 fn the_alternate_screen_is_entered_drawn_on_and_given_back() {
     let screen = Screen::new(4, 20);
-    screen.feed("$ vim notes.txt\r\n");
+    feed(&screen, "$ vim notes.txt\r\n");
     assert!(!screen.is_alternate());
 
-    screen.feed("\u{1b}[?1049h\u{1b}[2J\u{1b}[1;1Hthe editor's frame");
+    feed(
+        &screen,
+        "\u{1b}[?1049h\u{1b}[2J\u{1b}[1;1Hthe editor's frame",
+    );
     assert!(screen.is_alternate(), "the program said it is drawing");
     assert_eq!(screen.text(), "the editor's frame");
 
-    screen.feed("\u{1b}[?1049l");
+    feed(&screen, "\u{1b}[?1049l");
     assert!(!screen.is_alternate());
     assert_eq!(
         screen.text(),
@@ -167,14 +170,14 @@ fn the_alternate_screen_is_entered_drawn_on_and_given_back() {
 fn a_sequence_split_across_two_reads_is_one_sequence() {
     let screen = Screen::new(3, 12);
 
-    screen.feed("\u{1b}[2;");
-    screen.feed("3Hhere");
+    feed(&screen, "\u{1b}[2;");
+    feed(&screen, "3Hhere");
     assert_eq!(screen.text(), "\n  here");
     assert!(!screen.text().contains('['), "half a sequence was printed");
 
-    screen.feed("\u{1b}[?10");
+    feed(&screen, "\u{1b}[?10");
     assert!(!screen.is_alternate(), "it has not finished arriving");
-    screen.feed("49h");
+    feed(&screen, "49h");
     assert!(screen.is_alternate());
 }
 
@@ -352,7 +355,62 @@ async fn htop_is_readable_and_its_transcript_is_not() {
     session.close().await;
 }
 
+/// TC-PORT-SCREEN-8: the terminal answers the questions a program asks it.
+///
+/// A terminal is not only a screen: it is asked things, and a program that
+/// asks *waits*. PowerShell's line editor asks for the cursor position before
+/// it prints its first prompt; against a terminal that never answers it does
+/// not start at all - measured, against a bare pseudo-terminal and against
+/// `script`, both of which produce a PSReadLine bug report instead of a shell.
+///
+/// The screen is the only thing here that knows where the cursor is, so it is
+/// what answers, and it answers truthfully rather than flatteringly: a VT100
+/// with the advanced video option is the honest floor for what this file
+/// implements.
+///
+/// Input: a cursor-position request after the cursor has been moved, a device
+/// status request, and both device-attribute requests.
+/// Expected: the position reported is where the cursor actually is, counted
+/// from one; the status is the terminal saying it is there; the attributes are
+/// the two constants; and none of the requests leaves anything on the screen.
+#[test]
+fn the_terminal_answers_the_questions_a_program_asks_it() {
+    let screen = Screen::new(10, 40);
+
+    assert!(screen.feed("hello").is_empty(), "printing asks nothing");
+    // Cursor is at row 1, column 6 after five characters.
+    assert_eq!(screen.feed("\u{1b}[6n"), vec!["\u{1b}[1;6R".to_string()]);
+
+    feed(&screen, "\u{1b}[4;9H");
+    assert_eq!(screen.feed("\u{1b}[6n"), vec!["\u{1b}[4;9R".to_string()]);
+    assert_eq!(screen.feed("\u{1b}[5n"), vec!["\u{1b}[0n".to_string()]);
+    assert_eq!(screen.feed("\u{1b}[c"), vec!["\u{1b}[?1;2c".to_string()]);
+    assert_eq!(
+        screen.feed("\u{1b}[>c"),
+        vec!["\u{1b}[>0;10;1c".to_string()]
+    );
+
+    assert_eq!(
+        screen.text(),
+        "hello",
+        "a question is not text, and must not print"
+    );
+}
+
 // ---------------------------------------------------------------- fixtures
+
+/// Feed printable output, asserting the program asked the terminal nothing.
+///
+/// `Screen::feed` is `#[must_use]` because an unanswered question hangs the
+/// program that asked it, and these cases would otherwise be the place that
+/// habit is learned wrongly. So the ignored value becomes a claim: ordinary
+/// output asks for nothing back.
+fn feed(screen: &Screen, bytes: &str) {
+    assert!(
+        screen.feed(bytes).is_empty(),
+        "this output asked the terminal a question, which the case then dropped: {bytes:?}"
+    );
+}
 
 /// A terminal session rooted at `workspace`, or `None` after reporting the
 /// case skipped where this host has no terminal to allocate.

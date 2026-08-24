@@ -988,7 +988,7 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
             // drawing instructions, and the sanitizer's whole job is to throw
             // them away. Two models of one stream, neither derivable from the
             // other.
-            watched.screen.feed(&raw);
+            answer(&pty, watched.screen.feed(&raw)).await;
             publish(&watched, sanitizer.push(&raw));
         }
         if pty.exit().is_some() {
@@ -998,7 +998,7 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
             pty.wait().await;
             let (raw, _) = pty.since(cursor);
             if !raw.is_empty() {
-                watched.screen.feed(&raw);
+                answer(&pty, watched.screen.feed(&raw)).await;
                 publish(&watched, sanitizer.push(&raw));
             }
             let last = sanitizer.flush();
@@ -1009,6 +1009,17 @@ async fn sanitize_into(pty: Arc<PtySession>, watched: Arc<Watched>, poll: Durati
             return;
         }
         pty.changed(poll).await;
+    }
+}
+
+/// Write back whatever the program asked the terminal for.
+///
+/// A failure is dropped rather than raised: the session is a terminal, and a
+/// terminal whose reply could not be written is one whose program has gone -
+/// which the drain loop is about to notice by itself.
+async fn answer(pty: &Arc<PtySession>, replies: Vec<String>) {
+    for reply in replies {
+        let _ = pty.write(&reply).await;
     }
 }
 
