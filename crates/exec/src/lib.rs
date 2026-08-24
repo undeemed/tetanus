@@ -22,6 +22,8 @@
 //!   that is reported rather than restarted underneath the caller.
 //! - [`pty`] is a real pseudo-terminal: the thing an interactive program
 //!   needs and a pipe cannot give.
+//! - [`screen`] is what a terminal would be *showing*, for a program that
+//!   draws with cursor movement rather than printing and moving on.
 //! - [`terminal`] is a persistent terminal over one: a shell driven one send
 //!   at a time, with a viewport, a bounded scrollback it can page back
 //!   through, and a `^C` that reaches the command rather than the shell.
@@ -43,6 +45,7 @@ pub mod proc;
 #[cfg(target_os = "linux")]
 pub mod pty;
 pub mod sanitize;
+pub mod screen;
 pub mod session;
 pub mod shell;
 pub mod signals;

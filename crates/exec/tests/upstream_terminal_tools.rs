@@ -812,7 +812,109 @@ async fn a_password_is_withheld_even_when_the_model_forgets_to_say_so() {
     );
 }
 
+/// TC-PORT-TERM-45: a model reading a terminal that is drawing gets the
+/// screen, and one reading a terminal that printed gets the transcript.
+///
+/// The model-facing half of the screen model. The seam can keep both readings
+/// and it buys a reader nothing unless the tool hands over the right one
+/// without being told: a model that opened an editor and called
+/// `terminal_read` should not have to know that its transcript is a thousand
+/// lines of superseded frames.
+///
+/// Input: a session; an ordinary command, read; then `htop`, read; then the
+/// same session read with `as: "scrollback"` while it is still drawing.
+/// Expected: the first read is a page of transcript with its line markers; the
+/// second is the screen, marked as one, with the cursor; and the third is the
+/// transcript again, because a caller that asks for it gets it.
+#[tokio::test]
+async fn a_terminal_that_draws_is_read_as_a_screen() {
+    if which("htop").is_none() {
+        eprintln!("skipped: no htop on this host");
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let interrupt = Interrupt::new();
+    let (_dir, tools) = terminal_tools_in(workspace.path(), interrupt);
+    let session = tools
+        .terminals()
+        .open(&Owner::new("session"), Default::default())
+        .await
+        .expect("a terminal");
+    let registry = tools.registry();
+    let id = session.id().to_string();
+
+    session
+        .send("echo an-ordinary-line", true, None)
+        .await
+        .expect("sent");
+    let printed = read_with(&registry, &id, json!({})).await;
+    assert!(
+        printed.contains("an-ordinary-line") && printed.contains("[lines:"),
+        "a printing terminal reads as its transcript: {printed:?}"
+    );
+
+    session
+        .send_waiting("htop -d 2", true, Some(Duration::from_millis(2000)), None)
+        .await
+        .expect("sent");
+    for _ in 0..60 {
+        if session.is_drawing() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let drawn = read_with(&registry, &id, json!({})).await;
+    assert!(
+        drawn.contains("[screen:") && drawn.contains("cursor at row"),
+        "a drawing terminal reads as its screen, and says so: {}",
+        &drawn[..drawn.len().min(200)]
+    );
+    assert!(
+        !drawn.contains("[lines:"),
+        "one reading or the other, not both: {}",
+        &drawn[..drawn.len().min(200)]
+    );
+
+    let forced = read_with(&registry, &id, json!({ "as": "scrollback" })).await;
+    assert!(
+        forced.contains("[lines:"),
+        "a caller that asks for the transcript gets it: {}",
+        &forced[..forced.len().min(200)]
+    );
+
+    session
+        .send_waiting("q", false, Some(Duration::from_millis(1000)), None)
+        .await
+        .expect("sent");
+    tools.terminals().close_all().await;
+}
+
 // ---------------------------------------------------------------- fixtures
+
+/// One `terminal_read`, with whatever arguments a case wants over the session.
+async fn read_with(registry: &tetanus_turn::tools::ToolRegistry, id: &str, extra: Value) -> String {
+    let mut arguments = json!({ "session_id": id });
+    if let (Some(target), Some(more)) = (arguments.as_object_mut(), extra.as_object()) {
+        for (key, value) in more {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    registry
+        .execute(&call("read", TERMINAL_READ, arguments))
+        .await
+        .expect("the call answered")
+        .content
+}
+
+/// Where a program is, if it is anywhere on this host's PATH.
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+    })
+}
 
 /// The whole retained page of one session, through the tool a model would use.
 async fn read_page(registry: &tetanus_turn::tools::ToolRegistry, id: &str) -> String {
