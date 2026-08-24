@@ -457,3 +457,93 @@ async fn a_relative_cwd_is_refused_before_it_is_sent() {
 
     client.close().await.expect("close");
 }
+
+/// TC-PORT-ACP-30: a client re-opens a session on a second connection to the
+/// same agent process and is handed the first connection's work.
+///
+/// Input: one turn on a session, the client closed, a second client connected
+/// to a *new* agent process over the same journal root, and `session/load`.
+/// Expected: the load answers, and the history it returns carries the first
+/// turn's committed messages and its tool call. This is the claim a resume is
+/// for: the conversation outlives the connection that started it, and outlives
+/// the process too, because the journal and not the connection is where it
+/// lives.
+#[tokio::test]
+async fn a_session_survives_the_connection_that_opened_it() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let session = {
+        let mut first = connect(&dir, PermissionPolicy::Reject).await;
+        first.initialize().await.expect("initialize");
+        let session = first.new_session(dir.path()).await.expect("session/new");
+        let outcome = first
+            .prompt(&session, vec![ContentBlock::text("remember this")])
+            .await
+            .expect("prompt");
+        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+        first.close().await.expect("close");
+        session
+    };
+
+    // A second agent process entirely: same journal root, no shared memory.
+    let mut second = connect(&dir, PermissionPolicy::Reject).await;
+    let hello = second.initialize().await.expect("initialize");
+    assert!(
+        hello.agent_capabilities.load_session,
+        "the agent says it can do this before we ask it to",
+    );
+
+    let history = second
+        .load_session(&session, dir.path())
+        .await
+        .expect("session/load");
+
+    let said: Vec<String> = history
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        said,
+        vec!["Let me echo that back.", "You said: remember this"],
+        "the earlier turn crossed a process boundary: {history:?}",
+    );
+    assert!(
+        history
+            .iter()
+            .any(|update| matches!(update, SessionUpdate::ToolCall { .. })),
+        "including its tool call: {history:?}",
+    );
+
+    second.close().await.expect("close");
+}
+
+/// TC-PORT-ACP-31: a relative working directory is refused by the client on a
+/// load too, without a round trip.
+///
+/// Input: `session/load` with a relative path.
+/// Expected: `Protocol`, raised locally. The check is the same one
+/// `session/new` makes (TC-PORT-ACP-24), and it is shared rather than written
+/// twice, because a rule enforced in two places is a rule that will be enforced
+/// in one of them after the next edit.
+#[tokio::test]
+async fn a_relative_cwd_is_refused_on_a_load_too() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut client = connect(&dir, PermissionPolicy::Reject).await;
+    client.initialize().await.expect("initialize");
+
+    let refused = client
+        .load_session("whatever", &PathBuf::from("workspace"))
+        .await
+        .expect_err("a relative cwd");
+    assert!(
+        matches!(refused, ClientError::Protocol(_)),
+        "raised locally, got {refused:?}",
+    );
+
+    client.close().await.expect("close");
+}

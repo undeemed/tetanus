@@ -29,6 +29,9 @@ pub mod method {
     pub const INITIALIZE: &str = "initialize";
     pub const AUTHENTICATE: &str = "authenticate";
     pub const SESSION_NEW: &str = "session/new";
+    /// Re-open a session this agent already has a journal for, replaying its
+    /// history to the client before answering.
+    pub const SESSION_LOAD: &str = "session/load";
     pub const SESSION_PROMPT: &str = "session/prompt";
     /// A notification, not a call: ACP's cancel is one-way.
     pub const SESSION_CANCEL: &str = "session/cancel";
@@ -71,17 +74,26 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
+    /// Whether `session/load` is served. True here: the journal is the whole
+    /// truth of a session and is already replayable, so re-opening one costs a
+    /// paged read rather than a store this bridge would have to keep.
+    pub load_session: bool,
     pub prompt_capabilities: PromptCapabilities,
 }
 
 /// What a prompt may contain.
 ///
 /// All three are false, and each for its own reason rather than as a blanket
-/// stance. An image or an embedded resource has to be stored somewhere durable
-/// before a turn can refer to it, and this workspace has no attachment store
-/// yet (`docs/parity.md`, phase ②). Audio has no model behind it here at all.
-/// Advertising a capability the bridge cannot honour would move the failure
-/// from `initialize`, where a client can adapt, to the middle of a prompt.
+/// stance. The blocker for an image or an embedded resource is *not* storage -
+/// `crates/features` has had a content-addressed attachment store since the
+/// feature-tools slice landed - it is that the model-visible message this
+/// workspace sends is `tetanus_turn::llm::Message`, whose `content` is a
+/// `String`. Until that seam carries parts rather than a string, an admitted
+/// image has nowhere to go in the request, and the durable half would be
+/// storing bytes no turn can refer to. Audio has no model behind it here at
+/// all. Advertising a capability the bridge cannot honour would move the
+/// failure from `initialize`, where a client can adapt, to the middle of a
+/// prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptCapabilities {
@@ -104,6 +116,23 @@ pub struct NewSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionResponse {
     pub session_id: String,
+}
+
+/// Re-open an existing session.
+///
+/// The same shape as [`NewSessionRequest`] with the id of the session to
+/// re-open. ACP answers this with an empty result: what the client is really
+/// buying is the `session/update` replay that precedes the answer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionRequest {
+    #[serde(default)]
+    pub session_id: String,
+    /// The workspace root, which ACP requires to be absolute here too.
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

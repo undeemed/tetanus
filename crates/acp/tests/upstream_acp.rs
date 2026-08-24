@@ -497,6 +497,12 @@ async fn initialize_states_one_version_and_no_capabilities() {
         result["agentCapabilities"]["promptCapabilities"],
         json!({ "image": false, "audio": false, "embeddedContext": false }),
     );
+    assert_eq!(
+        result["agentCapabilities"]["loadSession"],
+        json!(true),
+        "`session/load` is served, so it is advertised: a client that reads \
+         this false will never offer to resume a session it could have",
+    );
 }
 
 /// TC-PORT-ACP-3: every call but `initialize` is refused before it.
@@ -1064,11 +1070,226 @@ async fn malformed_frames_are_answered_and_unknown_notifications_ignored() {
         assert_eq!(answered["error"]["code"], json!(code.code()));
     }
 
-    let unknown = client.call("session/load", json!({})).await;
+    // Deliberately a method ACP does not define, and not merely one this
+    // bridge has not served yet. This probe used to be `session/load`, which
+    // stopped being unknown the moment that call was served (TC-PORT-ACP-25),
+    // and a probe that quietly becomes a test of something else is worse than
+    // no probe: it passes for a while and then fails for the wrong reason.
+    let unknown = client.call("session/hologram", json!({})).await;
     assert_eq!(
         error_of(&unknown)["code"],
         json!(ErrorCode::MethodNotFound.code()),
     );
 
-    client.notify("session/hologram", json!({})).await;
+    client.notify("session/apparition", json!({})).await;
+}
+
+/// TC-PORT-ACP-25: a client re-opens an existing session and is handed its
+/// whole history before the call answers.
+///
+/// Input: one connection runs a turn on a session; a second connection to the
+/// same engine calls `session/load` for that id.
+/// Expected: the second connection receives the first turn's `session/update`
+/// frames - the assistant's messages and the `echo` call with its result - and
+/// only then the empty answer to the load. The replay is the entire product of
+/// the call: ACP answers a load with `{}`, so a client that received the answer
+/// before the history would have been told "done" about work it cannot see.
+#[tokio::test]
+async fn a_loaded_session_replays_its_history_before_it_answers() {
+    let dir = TempDir::new().expect("temp dir");
+    let shared = engine(&dir);
+
+    let first = Client::with(Arc::clone(&shared));
+    first.initialize().await;
+    let session_id = first.new_session().await;
+    let ran = first
+        .call(method::SESSION_PROMPT, prompt_of(&session_id, "hello"))
+        .await;
+    assert_eq!(ran["result"]["stopReason"], json!("end_turn"), "{ran}");
+
+    // A second connection, which has never seen this session.
+    let second = Client::with(Arc::clone(&shared));
+    second.initialize().await;
+    assert_eq!(second.written.count(), 0, "nothing written yet");
+
+    let loaded = second
+        .call(
+            method::SESSION_LOAD,
+            json!({ "sessionId": session_id, "cwd": "/tmp", "mcpServers": [] }),
+        )
+        .await;
+    assert_eq!(loaded["result"], json!({}), "ACP answers a load empty");
+
+    let replayed = second.written.updates();
+    let said: Vec<&str> = replayed
+        .iter()
+        .filter(|update| update["sessionUpdate"] == json!("agent_message_chunk"))
+        .filter_map(|update| update["content"]["text"].as_str())
+        .collect();
+    assert_eq!(
+        said,
+        vec!["Let me echo that back.", "You said: hello"],
+        "the committed messages, in order: {replayed:?}",
+    );
+    assert!(
+        replayed
+            .iter()
+            .any(|update| update["sessionUpdate"] == json!("tool_call")),
+        "the tool call crossed too: {replayed:?}",
+    );
+    assert!(
+        replayed
+            .iter()
+            .any(|update| update["sessionUpdate"] == json!("tool_call_update")),
+        "and its result: {replayed:?}",
+    );
+
+    // Every replayed frame names the session it belongs to, exactly as a live
+    // push does: a client holding two sessions open routes on this field.
+    for frame in second.written.frames() {
+        if frame["method"] == json!("session/update") {
+            assert_eq!(frame["params"]["sessionId"], json!(session_id));
+        }
+    }
+}
+
+/// TC-PORT-ACP-26: a loaded session can then be prompted, and continues the
+/// conversation it inherited.
+///
+/// Input: load a session on a fresh connection, then prompt it.
+/// Expected: the prompt is accepted rather than refused as unknown, and answers
+/// `end_turn`. Replaying history without making the session usable would be a
+/// read-only view wearing the name of a resume - the point of re-opening a
+/// session is to carry on with it.
+#[tokio::test]
+async fn a_loaded_session_can_be_prompted() {
+    let dir = TempDir::new().expect("temp dir");
+    let shared = engine(&dir);
+
+    let first = Client::with(Arc::clone(&shared));
+    first.initialize().await;
+    let session_id = first.new_session().await;
+    first
+        .call(method::SESSION_PROMPT, prompt_of(&session_id, "first"))
+        .await;
+
+    let second = Client::with(Arc::clone(&shared));
+    second.initialize().await;
+    second
+        .call(
+            method::SESSION_LOAD,
+            json!({ "sessionId": session_id, "cwd": "/tmp", "mcpServers": [] }),
+        )
+        .await;
+
+    let ran = second
+        .call(method::SESSION_PROMPT, prompt_of(&session_id, "second"))
+        .await;
+    assert_eq!(ran["result"]["stopReason"], json!("end_turn"), "{ran}");
+}
+
+/// TC-PORT-ACP-27: loading a session that does not exist is refused, and
+/// leaves nothing behind.
+///
+/// Input: `session/load` for an id nobody minted, then a prompt for that id.
+/// Expected: the load is refused, and the prompt after it is still refused as
+/// an unknown session. The second assertion is the one worth having: the
+/// bridge registers a session only after its replay succeeded, so a failed load
+/// cannot leave a usable handle to a session that is not there.
+#[tokio::test]
+async fn loading_a_session_that_does_not_exist_registers_nothing() {
+    let dir = TempDir::new().expect("temp dir");
+    let client = Client::new(&dir);
+    client.initialize().await;
+
+    let refused = client
+        .call(
+            method::SESSION_LOAD,
+            json!({ "sessionId": "never-minted", "cwd": "/tmp", "mcpServers": [] }),
+        )
+        .await;
+    assert!(
+        refused.get("error").is_some(),
+        "a session nobody opened cannot be loaded: {refused}",
+    );
+
+    let after = client
+        .call(method::SESSION_PROMPT, prompt_of("never-minted", "hi"))
+        .await;
+    let error = error_of(&after);
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("a message")
+            .contains("unknown session"),
+        "the failed load left no handle behind: {error}",
+    );
+}
+
+/// TC-PORT-ACP-28: a load is admitted on the same terms as a new session.
+///
+/// Input: `session/load` with a relative `cwd`, with a non-empty `mcpServers`,
+/// and with no `sessionId`.
+/// Expected: each is refused naming its own field. The two workspace checks are
+/// one decision shared with `session/new` rather than a second copy: a rule
+/// enforced in two places is a rule that will be enforced in one of them after
+/// the next edit.
+#[tokio::test]
+async fn a_load_is_admitted_on_the_same_terms_as_a_new_session() {
+    let dir = TempDir::new().expect("temp dir");
+    let client = Client::new(&dir);
+    client.initialize().await;
+
+    for (params, field) in [
+        (json!({ "sessionId": "s", "cwd": "workspace" }), "cwd"),
+        (
+            json!({ "sessionId": "s", "cwd": "/tmp", "mcpServers": [{ "name": "x" }] }),
+            "mcpServers",
+        ),
+        (json!({ "cwd": "/tmp" }), "sessionId"),
+    ] {
+        let refused = client.call(method::SESSION_LOAD, params).await;
+        let error = error_of(&refused);
+        assert_eq!(error["code"], json!(ErrorCode::InvalidParams.code()));
+        assert_eq!(error["data"], json!({ "field": field }), "{error}");
+    }
+}
+
+/// TC-PORT-ACP-29: a session with nothing to say still loads.
+///
+/// Input: a session created and never prompted, then loaded on a fresh
+/// connection.
+/// Expected: the load succeeds and produces no `session/update` frames, and the
+/// session is then promptable. An empty journal is a legitimate history, and a
+/// bridge that treated "no updates" as a fault would refuse every session a
+/// client opened and came back to before saying anything.
+#[tokio::test]
+async fn a_session_with_no_history_loads_and_is_usable() {
+    let dir = TempDir::new().expect("temp dir");
+    let shared = engine(&dir);
+
+    let first = Client::with(Arc::clone(&shared));
+    first.initialize().await;
+    let session_id = first.new_session().await;
+
+    let second = Client::with(Arc::clone(&shared));
+    second.initialize().await;
+    let loaded = second
+        .call(
+            method::SESSION_LOAD,
+            json!({ "sessionId": session_id, "cwd": "/tmp", "mcpServers": [] }),
+        )
+        .await;
+
+    assert_eq!(loaded["result"], json!({}));
+    assert!(
+        second.written.updates().is_empty(),
+        "a session that has said nothing replays nothing: {:?}",
+        second.written.updates(),
+    );
+
+    let ran = second
+        .call(method::SESSION_PROMPT, prompt_of(&session_id, "now then"))
+        .await;
+    assert_eq!(ran["result"]["stopReason"], json!("end_turn"), "{ran}");
 }
