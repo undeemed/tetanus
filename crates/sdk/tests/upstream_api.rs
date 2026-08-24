@@ -90,23 +90,68 @@ async fn nothing_is_described_that_is_not_routed() {
     }
 }
 
-/// TC-PORT-API-3: `agent.steer` is described and routed although the
-/// contract's own `method::ALL` omits it.
+/// TC-PORT-API-3: the contract document's method table and `method::ALL` name
+/// exactly the same calls.
 ///
-/// Input: the `agent.steer` descriptor, and the contract's list.
-/// Expected: a descriptor exists and the call is routed to its reserved
-/// answer, while `method::ALL` does not name it. The omission is a defect in
-/// the shared contract crate, which this lane does not edit; it is proposed in
-/// `docs/contract-updates/acp-gateway.md` and pinned here so that fixing it
-/// there does not go unnoticed.
+/// Input: section 4.2's table, parsed out of `docs/interface-contract.md`, and
+/// the constant.
+/// Expected: the two sets are equal, in both directions.
+///
+/// This case exists because the document says of that table, in words, "The
+/// table above is `methods::ALL` in code, and a case iterates it" - and until
+/// now nothing checked that claim. The constant's own doc comment names the
+/// resulting hole precisely: "Adding a constant above and not adding it here is
+/// the single mistake this cannot catch, which is why the two sit together."
+/// Sitting together is a convention, and a convention is what this defect got
+/// through: `agent.steer` was declared, routed, capability-named, listed in the
+/// document as `Reserved`, and absent from `ALL`.
+///
+/// So the mistake is now catchable, and in both directions - a constant with no
+/// row is as wrong as a row with no constant, because the document is the
+/// specification and the crate is what the lanes compile against. Parsing a
+/// document in a test is unusual and is the point: the two artefacts are one
+/// contract, and nothing else was holding them together.
 #[test]
-fn the_reserved_steer_call_is_described_despite_its_absence_from_the_contract_list() {
-    let descriptor = describe(method::AGENT_STEER).expect("described");
-    assert!(descriptor.reserved);
+fn the_contract_documents_method_table_and_the_constant_agree() {
+    let doc = include_str!("../../../docs/interface-contract.md");
+
+    // Section 4.2's table, and no other: the document has further tables whose
+    // first column is also a method name (§4.4.12's idempotency list), and a
+    // parse that swept those up would compare the constant against a set it was
+    // never meant to equal.
+    let header = "| Method | Params | Result | Capability | Status |";
+    let start = doc
+        .find(header)
+        .expect("section 4.2's method table, by its header row");
+    let table = &doc[start + header.len()..];
+    let end = table
+        .find("\n\n")
+        .expect("a table is followed by a blank line");
+
+    let mut documented: Vec<String> = table[..end]
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| line.split('`').nth(1))
+        .map(str::to_string)
+        .collect();
+    documented.sort();
+    documented.dedup();
     assert!(
-        !method::ALL.contains(&method::AGENT_STEER),
-        "`method::ALL` now names `agent.steer`; \
-         retire the proposal in docs/contract-updates/acp-gateway.md",
+        documented.len() > 10,
+        "the table parsed as {documented:?}, which is not a method table - the \
+         document's shape changed and this case has to be taught the new one",
+    );
+
+    let mut declared: Vec<String> = method::ALL.iter().map(|name| name.to_string()).collect();
+    declared.sort();
+
+    assert_eq!(
+        documented, declared,
+        "`docs/interface-contract.md` section 4.2 and \
+         `tetanus_protocol::methods::method::ALL` disagree. The document is the \
+         specification: a call it lists and the constant omits is invisible to \
+         every consumer that iterates the constant, and a constant entry with no \
+         row is a call nobody agreed to serve",
     );
 }
 
