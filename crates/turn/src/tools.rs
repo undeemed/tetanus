@@ -75,6 +75,89 @@ pub enum ToolMode {
     Exclusive,
 }
 
+/// Whether one pending call may run without anybody deciding.
+///
+/// Per call and not per tool, for [`ToolMode`]'s reason: the same tool is
+/// unremarkable for one set of arguments and irreversible for another, and only
+/// the arguments say which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Permission {
+    /// Run it. What almost every call is: a gate on everything is a gate
+    /// nobody reads.
+    Allow,
+    /// Ask first, and run it only on a grant. The reason is the asker's own
+    /// words for a human, as contract section 4.4.7 fixes - text to read, not
+    /// a code to match on.
+    Ask { reason: String },
+    /// Do not run it, and do not put a question either.
+    ///
+    /// Distinct from `Ask` answered no, and the distinction is the point: a
+    /// policy that already knows the answer must not stage a decision nobody
+    /// is going to take. An out-of-process hook forbidding a call is the case
+    /// this exists for - there is no human in that loop, so a question would
+    /// hang or fail closed on a decision that had already been made.
+    Deny { reason: String },
+}
+
+impl Permission {
+    /// Ask, in the asker's own words.
+    pub fn ask(reason: impl Into<String>) -> Self {
+        Self::Ask {
+            reason: reason.into(),
+        }
+    }
+
+    /// Refuse, in the refuser's own words.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny {
+            reason: reason.into(),
+        }
+    }
+
+    /// How restrictive this is, least first.
+    ///
+    /// An order rather than a comparison written at each site, so
+    /// "most restrictive wins" is a property of the type. `crates/hooks`
+    /// folds several hooks' answers the same way and for the same reason.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Allow => 0,
+            Self::Ask { .. } => 1,
+            Self::Deny { .. } => 2,
+        }
+    }
+
+    /// The stricter of two answers, keeping the stricter one's words.
+    ///
+    /// Ties keep the left, which is the earlier answer: two listeners that
+    /// both deny leave the first one's reason, so a chain of policies reads in
+    /// the order it ran rather than reporting whichever spoke last.
+    pub fn most_restrictive(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// Whether this call has to be decided before it runs.
+    ///
+    /// A method rather than a `matches!` at the gate, for the reason
+    /// [`crate::approval::ApprovalOutcome::grants`] gives: a match that decides
+    /// permission is a match nobody should write twice.
+    pub fn needs_decision(&self) -> bool {
+        matches!(self, Self::Ask { .. })
+    }
+
+    /// The words a refusal shows, for the answers that carry any.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Allow => None,
+            Self::Ask { reason } | Self::Deny { reason } => Some(reason),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
@@ -87,8 +170,96 @@ pub trait Tool: Send + Sync {
         ToolMode::Exclusive
     }
 
+    /// Whether this call needs a decision before it runs.
+    ///
+    /// The default is [`Permission::Allow`], and that direction is deliberate
+    /// even though the rest of this file fails closed. A gate exists to make a
+    /// model stop at the calls a session cannot take back; a harness that
+    /// asked about every read would train whoever answers to approve without
+    /// reading, which is worse than not asking. The tools that need it say so,
+    /// and they are few enough to name.
+    fn permission(&self, arguments: &serde_json::Value) -> Permission {
+        let _ = arguments;
+        Permission::Allow
+    }
+
+    /// The arguments as the journal may keep them.
+    ///
+    /// A tool call is recorded before it runs, so what a tool is *given* and
+    /// what is *written down* are two different things - and for one family of
+    /// arguments they have to be. `terminal_send` is how a model answers
+    /// `[sudo] password for ci:`, and the password is an ordinary argument: it
+    /// lands in the journal in plain text, permanently, and every surface that
+    /// draws a tool call draws it.
+    ///
+    /// The default keeps everything, which is right for almost every tool: an
+    /// argument nobody can read is an audit trail nobody can follow. A tool
+    /// that can carry a credential overrides this and substitutes
+    /// [`REDACTED`] for that argument alone, so the call, its name and its
+    /// other arguments stay on the record.
+    ///
+    /// It is asked of the tool rather than decided by the engine because the
+    /// engine must not know what any particular tool's arguments mean; and it
+    /// is asked at *record* time rather than at render time because a surface
+    /// that hid what the journal keeps would be lying about the risk instead
+    /// of removing it.
+    fn recorded(&self, arguments: &serde_json::Value) -> serde_json::Value {
+        arguments.clone()
+    }
+
     async fn execute(&self, arguments: &serde_json::Value) -> Result<ToolOutcome, ToolError>;
 }
+
+/// Whether a program's last output looks like it is asking for a password.
+///
+/// The rule is `sudo`'s, deliberately. `sudo` had every opportunity to use the
+/// terminal's own `ECHO` flag - its manual opens the subject with "most
+/// programs that require a user's password will disable echo before reading
+/// it" - and built a regex over the program's *output* instead, because the
+/// echo signal is unusable through an interactive shell. tetanus measured the
+/// same thing for its own sessions, twice: readline keeps echo off at its own
+/// prompt, and `crates/exec`'s bash backend pins it off for the whole session.
+/// A constant is not a signal.
+///
+/// It is here rather than in the tool that uses it because the *rule* is the
+/// engine's: what counts as a credential prompt should be one answer for the
+/// whole harness, testable on its own, and reusable by the next tool that
+/// types into something. The *evidence* - what a terminal last printed - stays
+/// with the terminal, which is the only thing that has it.
+///
+/// The match is on the last non-empty line, not anywhere in the output, and
+/// that is the one place this parts from `sudo`. A prompt is by definition the
+/// last thing written before a program waits; matching anywhere makes a `grep`
+/// hit for the word "password" arm the filter, which `sudo`'s own manual
+/// accepts and its maintainers have no published false-positive rate for.
+/// Narrowing it keeps every real prompt - `sudo`, `ssh`, `su`, `passwd` all
+/// print theirs last - and drops the commonest false one.
+pub fn looks_like_a_password_prompt(output: &str) -> bool {
+    let Some(last) = output.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let last = last.trim_end().to_ascii_lowercase();
+    // `sudo`'s default is `[Pp]assword[: ]*`; this is that, plus the
+    // passphrase wording `ssh` and `gpg` use, and it requires the prompt's own
+    // punctuation so a sentence *about* a password is not a prompt for one.
+    ["password", "passphrase"]
+        .iter()
+        .any(|word| match last.rfind(word) {
+            None => false,
+            Some(at) => {
+                let after = last[at + word.len()..].trim_end();
+                after.is_empty() || after.ends_with(':') || after.ends_with('?')
+            }
+        })
+}
+
+/// What stands in the journal for a value a tool withheld.
+///
+/// The same string the boundary publishes for a withheld configuration value
+/// (`tetanus_protocol::types::REDACTED`), because a surface that already draws
+/// one as "withheld, not empty" should not need a second vocabulary. The two
+/// constants are asserted equal where both crates are in scope.
+pub const REDACTED: &str = "<redacted>";
 
 /// The reserved entry in a configured tool order: the one place every tool the
 /// order does not name is inserted, in canonical order.
@@ -273,6 +444,76 @@ impl ToolRegistry {
         }
     }
 
+    /// One call's arguments, as the journal may keep them.
+    ///
+    /// A classifier that panics fails *closed* here, and closed means silent:
+    /// the tool was the only thing that knew which of its arguments was a
+    /// secret, so a panic loses that knowledge and the safe answer is to keep
+    /// none of them. The alternative - record everything because the redactor
+    /// broke - writes the credential down at exactly the moment the code
+    /// meant to protect it stopped working.
+    pub fn recorded(&self, call: &ToolCall) -> serde_json::Value {
+        let Some(tool) = self.tools.get(&call.name) else {
+            // No tool claimed these arguments, and the call is about to fail
+            // as unknown. Recording what the model actually sent is what makes
+            // that failure diagnosable.
+            return call.arguments.clone();
+        };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| tool.recorded(&call.arguments))) {
+            Ok(recorded) => recorded,
+            Err(payload) => {
+                let fault = panicked(payload);
+                tracing::error!(tool = call.name, %fault, "a tool's redactor panicked");
+                serde_json::json!(REDACTED)
+            }
+        }
+    }
+
+    /// Several calls, as the journal may keep them.
+    ///
+    /// The assistant message that carried them is recorded once, so the whole
+    /// list is redacted together rather than one call at a time by a caller
+    /// that might forget one.
+    pub fn recorded_calls(&self, calls: &[ToolCall]) -> Vec<ToolCall> {
+        calls
+            .iter()
+            .map(|call| ToolCall {
+                arguments: self.recorded(call),
+                ..call.clone()
+            })
+            .collect()
+    }
+
+    /// Decide whether one call may run unasked.
+    ///
+    /// A call naming no registered tool needs no decision: it is about to fail
+    /// as unknown, and putting a question about a tool that does not exist to
+    /// a human would be asking them to approve nothing.
+    ///
+    /// A classifier that panics fails *closed* here, unlike [`Self::mode`]'s,
+    /// and the two directions are consistent rather than contradictory: the
+    /// answer that cannot make things worse is the conservative one, and for
+    /// scheduling that is "overlap nothing", while for permission it is "ask".
+    /// The cost is a question; the alternative is running an irreversible call
+    /// because the code that decides whether to ask had a bug.
+    pub fn permission(&self, call: &ToolCall) -> Permission {
+        let Some(tool) = self.tools.get(&call.name) else {
+            return Permission::Allow;
+        };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| tool.permission(&call.arguments))) {
+            Ok(permission) => permission,
+            Err(payload) => {
+                let fault = panicked(payload);
+                tracing::error!(tool = call.name, %fault, "a tool's permission classifier panicked");
+                Permission::ask(format!(
+                    "the {:?} tool could not say whether this call needs approval: its permission \
+                     classifier panicked ({fault})",
+                    call.name
+                ))
+            }
+        }
+    }
+
     /// Run one call. A tool that fails, and a call naming no tool at all, both
     /// come back as a [`ToolError`] the engine turns into a failed result the
     /// model reads.
@@ -310,7 +551,7 @@ async fn contained(
 }
 
 /// What a caught panic was about, as far as the payload says.
-fn panicked(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panicked(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_string();
     }
@@ -353,4 +594,48 @@ impl Tool for EchoTool {
             )),
         }
     }
+}
+
+impl ToolRegistry {
+    /// One registered tool by name, for a caller composing a smaller registry
+    /// out of a larger one.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
+    /// A registry holding only the named tools, sharing the tools themselves.
+    ///
+    /// This is how a preset narrows what one session may call. A name this
+    /// registry does not hold is reported rather than skipped: a preset that
+    /// silently offered fewer tools than it lists would be a preset whose
+    /// typo nobody ever sees.
+    pub fn subset<'a, I>(&self, names: I) -> Result<Self, ToolSubsetError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut kept = Self::new();
+        let mut missing: Vec<String> = Vec::new();
+        for name in names {
+            match self.get(name) {
+                Some(tool) => kept.register(tool),
+                None => missing.push(name.to_string()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ToolSubsetError::Unregistered {
+                missing,
+                registered: self.names().cloned().collect(),
+            });
+        }
+        Ok(kept)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolSubsetError {
+    #[error("no such {}: {}; registered: {}", plural(.missing), quoted(.missing), listed(.registered))]
+    Unregistered {
+        missing: Vec<String>,
+        registered: Vec<String>,
+    },
 }

@@ -20,6 +20,38 @@ pub mod topic {
     pub const TOOL_RESULT: &str = "tool/result";
     pub const STEP_END: &str = "step/end";
     pub const TURN_END: &str = "turn/end";
+
+    /// The decision audit of contract section 4.4.7. `approval/asked` and
+    /// `approval/decided` are one pair per question, sharing an `id`;
+    /// `approval/policy` is a switch, and the last one is the session's.
+    ///
+    /// None of the three derives to a message: what the model learns about a
+    /// denial is the `tool/result` it gets, not the audit of how that was
+    /// decided.
+    pub const APPROVAL_ASKED: &str = "approval/asked";
+    pub const APPROVAL_DECIDED: &str = "approval/decided";
+    pub const APPROVAL_POLICY: &str = "approval/policy";
+
+    /// The user-question audit of contract section 4.4.3, and the same pair
+    /// rule: one `question/asked` and exactly one `question/answered` sharing
+    /// an `id`, inside the turn that needed the answer.
+    ///
+    /// Neither derives to a message. What the model learns is the `tool/result`
+    /// the asking tool produced, and a transcript that showed it the audit
+    /// would be feeding it the harness's own bookkeeping as conversation.
+    pub const QUESTION_ASKED: &str = "question/asked";
+    pub const QUESTION_ANSWERED: &str = "question/answered";
+
+    /// One mutation of the queue of input waiting for a boundary the loop has
+    /// not reached yet ([`crate::inbox`]). The queues are a replay-once fold
+    /// of these, so the record carries normalized coordinates rather than what
+    /// a caller asked for.
+    ///
+    /// It does not derive to a message. What the model sees is the
+    /// `user/message` written when a claimed prompt enters a turn; deriving
+    /// the queue as well would show it every message twice, once while it was
+    /// still waiting.
+    pub const INBOX_SPLICED: &str = "agent/inbox/spliced";
 }
 
 /// Derive the model history from the log. Replay is re-derivation from the
@@ -29,9 +61,18 @@ pub mod topic {
 /// fidelity but are not part of history - the `assistant/message` that cites
 /// them is. An `assistant/message` with empty content and no tool calls stays
 /// out of derived history while its durable event keeps usage and sources.
+///
+/// A compaction on the log is honoured here rather than anywhere else, which
+/// is what makes a replayed journal derive the compacted history: the events a
+/// `compaction/summary` or `compaction/prune` shadows are not part of the
+/// derivation, and the replacement stands in their place
+/// ([`crate::compaction::surface`]). A log with no compaction on it derives
+/// exactly as it always did, because its surface is every surface event in log
+/// order.
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
     let mut out = Vec::new();
-    for event in events {
+    for index in crate::compaction::surface(events) {
+        let event = &events[index];
         match event.ty.as_str() {
             topic::USER_MESSAGE => {
                 out.push(Message::user(string_field(event, "content")));

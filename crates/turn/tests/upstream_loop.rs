@@ -322,6 +322,7 @@ async fn a_provider_failure_ends_the_turn_not_the_engine() {
                     status: 503,
                     message: "upstream is down".into(),
                     retry_after_ms: None,
+                    request_id: None,
                 });
             }
             next.run(ev).await

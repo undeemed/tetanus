@@ -37,22 +37,32 @@ const DOCUMENTED: &[&str] = &[
     "turn/end",
 ];
 
-/// TC-CONTRACT-1: every event a real turn writes is one the contract
-/// describes, and the turn writes all ten.
+/// TC-CONTRACT-1: every documented event a real turn writes parses, and the
+/// turn writes all ten.
 ///
 /// Section 4.3.1: `SessionEvent::parse()` returns `KnownEvent` for the
-/// documented types. A `None` here means the engine wrote a payload the
-/// published boundary type cannot read - a renamed or dropped field - which is
-/// a major change made by accident.
+/// documented types. A `None` on one of those means the engine wrote a payload
+/// the published boundary type cannot read - a renamed or dropped field -
+/// which is a major change made by accident.
 ///
-/// Expected: no event parses to `None`, and every one of the ten types is
-/// present, so the case cannot pass by writing nothing.
+/// The claim is stated over the documented types rather than over every event
+/// the turn wrote, because section 4.3.2 says the durable vocabulary grows: a
+/// new type is a free string that a surface passes through, and its
+/// `KnownEvent` variant follows later. Asserting that *nothing* is unparsed
+/// would make adding a durable type impossible without a boundary change in
+/// the same commit, which is the opposite of what that section promises.
+/// TC-CONTRACT-1b holds the other half - that an undocumented type is passed
+/// through and not dropped.
+///
+/// Expected: no documented event parses to `None`, and every one of the ten
+/// types is present, so the case cannot pass by writing nothing.
 #[tokio::test]
 async fn every_event_a_turn_writes_is_one_the_contract_describes() {
     let (_engine, events) = one_turn("contract-parses").await;
 
     let unparsed: Vec<&str> = events
         .iter()
+        .filter(|event| DOCUMENTED.contains(&event.ty.as_str()))
         .filter(|event| event.parse().is_none())
         .map(|event| event.ty.as_str())
         .collect();
@@ -67,6 +77,45 @@ async fn every_event_a_turn_writes_is_one_the_contract_describes() {
             "a documented type never appeared, so the case proves nothing: {ty}"
         );
     }
+}
+
+/// TC-CONTRACT-1b: a durable type the boundary has not learned still reaches a
+/// surface whole.
+///
+/// Section 4.3.2: the vocabulary grows, `type` stays a free string, and a
+/// surface passes an unknown type through rather than dropping it. The engine
+/// writes one such type today - `request/context`, the request envelope the
+/// token projections anchor on - so the promise is checkable against a real
+/// turn rather than against a fixture.
+///
+/// Expected: the event is on the journal `session.events` serves, it parses to
+/// no `KnownEvent`, and its payload arrives intact.
+#[tokio::test]
+async fn an_undocumented_type_reaches_a_surface_whole() {
+    let (_engine, events) = one_turn("contract-grows").await;
+
+    let envelope = events
+        .iter()
+        .find(|event| event.ty == "request/context")
+        .expect("the turn wrote a request envelope");
+
+    assert!(
+        envelope.parse().is_none(),
+        "a type the boundary has not learned has no KnownEvent variant yet"
+    );
+    assert!(
+        envelope.data.get("provider").is_some_and(|p| p.is_string()),
+        "the payload arrived whole: {}",
+        envelope.data
+    );
+    assert!(
+        envelope
+            .data
+            .get("system_tokens")
+            .is_some_and(|t| t.is_u64()),
+        "the payload arrived whole: {}",
+        envelope.data
+    );
 }
 
 /// TC-CONTRACT-2: a result is paired to its call by id, and the pairing
@@ -242,4 +291,83 @@ async fn run(name: &str) -> (TurnSummary, Vec<SessionEvent>, Held) {
             _dir: dir,
         },
     )
+}
+
+/// TC-CONTRACT-5: a pushed event is byte-identical to the line on disk.
+///
+/// The contract says this twice - section 4.3 calls `SessionEvent` "byte-
+/// identical to one line of the JSONL journal", and section 4.7 says dropping
+/// the push envelope "makes the stream byte-identical to the journal on disk"
+/// - and until now nothing checked it anywhere.
+///
+/// Section 7.6 said TC-PROTO-5 did. It cannot: that case lives in
+/// `crates/protocol`, which deliberately does not depend on the crate owning
+/// the journal type, so it compares the wire type against a hand-written
+/// literal. A literal is a copy of the journal's shape and goes stale exactly
+/// when the shape changes, which is the moment the check was for. It also
+/// compares through `serde_json::to_value`, which is a structural comparison
+/// and blind to field order - so even "identical" was being read loosely.
+///
+/// This is the case that can make the claim, because `crates/engine` is where
+/// both types exist. It compares the two serialized *strings*, so a reordered
+/// field, a changed rename, or a differing `skip_serializing_if` all fail here
+/// while every existing suite stays green.
+#[tokio::test]
+async fn a_pushed_event_is_byte_identical_to_the_line_on_disk() {
+    let dir = TempDir::new().expect("temp dir");
+    let engine = HarnessEngine::new(EngineConfig {
+        sessions_root: dir.path().to_path_buf(),
+        ..EngineConfig::default()
+    });
+
+    let info = engine
+        .session_create(SessionCreateParams::default())
+        .await
+        .expect("session.create");
+    engine
+        .agent_prompt(AgentPromptParams {
+            session_id: info.session_id.clone(),
+            content: "write a line to the journal".into(),
+        })
+        .await
+        .expect("agent.prompt");
+
+    // What the journal holds, through the crate that owns it.
+    let on_disk =
+        tetanus_session::replay(std::path::Path::new(&info.path)).expect("the journal replays");
+    assert!(!on_disk.is_empty(), "a turn wrote something");
+
+    // What the boundary carries, through the call a surface makes.
+    let served = engine
+        .session_events(SessionEventsParams {
+            session_id: info.session_id,
+            from_seq: 0,
+            limit: None,
+        })
+        .await
+        .expect("session.events")
+        .events;
+
+    assert_eq!(
+        served.len(),
+        on_disk.len(),
+        "the boundary serves every line the journal holds"
+    );
+
+    for (wire, line) in served.iter().zip(&on_disk) {
+        let wire_json = serde_json::to_string(wire).expect("serialize the wire event");
+        let line_json = serde_json::to_string(line).expect("serialize the journal event");
+        assert_eq!(
+            wire_json, line_json,
+            "byte-identical is a claim about bytes: `{}` differs from the line at seq {}",
+            wire.ty, line.seq
+        );
+    }
+
+    // And at least one event carries `sourceEventSeqs`, so the case covers the
+    // field whose rename and omission are the likeliest thing to drift.
+    assert!(
+        on_disk.iter().any(|e| e.source_event_seqs.is_some()),
+        "a turn writes at least one surface event, which is where the camel-case field lives"
+    );
 }

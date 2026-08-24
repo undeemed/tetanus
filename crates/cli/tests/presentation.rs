@@ -4,25 +4,30 @@
 //! Features tested: that the resolved palette reaches clap's own rendering as
 //! well as the lines this crate writes itself; that a colour-hostile
 //! environment cannot change the bytes of plain output; the shape and exit
-//! status of a reported failure; that a bad `--color` value and an empty
-//! value for any flag that takes one are usage errors;
-//! which of the two views - the turn, or the raw sequence - a command prints;
-//! that a model's thinking stays folded until it is asked for; that the
-//! journal a run leaves behind says what it ran under; that the session list
-//! finds those journals and names each by the id its store answers to; that a
-//! journal read full-screen is refused where there is no screen; that a model
-//! named from outside is drawn and not obeyed on the line that says it; and
-//! the shape of the machine-readable output the interface contract fixes. NOT tested
-//! here: the resolution rules themselves (owned by
-//! `tetanus-ui`'s `color_policy.rs`), what a full-screen view draws once it
-//! has a terminal (owned by `render::browse` and `tetanus_ui::Page`, neither
-//! of which needs one), and the turn flow (owned by the
-//! conformance suite in `tetanus-turn`).
+//! status of a reported failure; that a failure about a file names the file
+//! and reads in one voice whichever view opened it; that a bad `--color` value
+//! and an empty value for any flag that takes one are usage errors; that a
+//! redirected stderr is told a turn is running whichever view stdout was asked
+//! for; which of the two views - the turn, or the raw sequence - a command
+//! prints; that a model's thinking stays folded until it is asked for; that
+//! the journal a run leaves behind says what it ran under; that the session
+//! list finds those journals and names each by the id its store answers to;
+//! that a journal read full-screen is refused where there is no screen; that a
+//! model named from outside is drawn and not obeyed on the line that says it;
+//! which settings document a command boots from, what it does when the one it
+//! was told to read is not there, and the page that reads none at all; that
+//! the config page and the session list each name the place they read, in
+//! full and marked when nothing is there yet; and the shape of the
+//! machine-readable output the interface contract fixes. NOT
+//! tested here: the resolution rules themselves (owned by `tetanus-ui`'s
+//! `color_policy.rs`), what a full-screen view draws once it has a terminal
+//! (owned by `render::browse` and `tetanus_ui::Page`, neither of which needs
+//! one), and the turn flow (owned by the conformance suite in `tetanus-turn`).
 //!
 //! Environmental needs: none. Every case runs offline, and every case states
 //! the colour-related variables it depends on rather than inheriting them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
@@ -44,11 +49,29 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     ] {
         cmd.env_remove(name);
     }
-    cmd.env("TERM", "xterm-256color").env("COLUMNS", "100");
+    // Every subcommand that builds an engine now reads the settings document
+    // under the harness home, so the home is the case's own directory and
+    // never the one the person running the suite happens to have configured.
+    // A case that is about a document names a home of its own below, and that
+    // one wins because it is applied last.
+    cmd.env("TETANUS_HOME", dir)
+        .env("TERM", "xterm-256color")
+        .env("COLUMNS", "100");
     for (name, value) in env {
         cmd.env(name, value);
     }
     cmd.output().expect("the binary runs")
+}
+
+/// The directory a run started in, as the run itself sees it.
+///
+/// A page that names a relative path absolutely resolves it against the
+/// working directory the process was given, and the process asks the
+/// operating system for that - which answers with symbolic links already
+/// followed. `tempfile` may hand back a path that goes through one, so a case
+/// comparing the two has to follow them here too.
+fn here(dir: &tempfile::TempDir) -> PathBuf {
+    dir.path().canonicalize().expect("the directory is there")
 }
 
 fn stdout(out: &Output) -> String {
@@ -57,6 +80,15 @@ fn stdout(out: &Output) -> String {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8(out.stderr.clone()).expect("utf-8")
+}
+
+/// The same, as one line per diagnostic rather than per row.
+///
+/// A note longer than the terminal folds under its own tag, so a sentence a
+/// case is looking for can arrive across two rows. What the case means is the
+/// sentence, not the rows it was drawn on.
+fn said(out: &Output) -> String {
+    stderr(out).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// TC-CLI-UI-1: `tetanus --help` into a pipe.
@@ -286,18 +318,637 @@ fn a_run_reads_as_a_conversation_unless_a_trace_is_asked_for() {
     assert!(traced.contains("You said: echo this\n"), "{traced}");
 }
 
-/// TC-CLI-UI-10: `tetanus config` end to end.
-/// Expected: one row per resolved key, carrying the value without its JSON
-/// quotes and the layer that settled it. The provenance column is the reason
-/// the command exists, so a build that printed the values alone has failed
-/// even though it printed something.
+/// The `key  value  layer` rows of a `tetanus config` page, as pairs of key
+/// and the layer that settled it.
+///
+/// Read as rows rather than compared whole: the engine owns which keys exist,
+/// and a case that asserted the whole table by equality would fail on the
+/// engine adding one - which is a change in another lane, not a fault in this
+/// one. What this lane owns is that every key it is handed is printed with
+/// where it came from.
+fn layers(page: &str) -> Vec<(String, String)> {
+    page.lines()
+        // The heading is `config` alone or `config  <document>`, so it is
+        // recognised by its first word rather than by the whole line.
+        .skip_while(|line| line.split_whitespace().next() != Some("config"))
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let key = columns.next().unwrap_or_default().to_string();
+            let layer = columns.last().unwrap_or_default().to_string();
+            (key, layer)
+        })
+        .collect()
+}
+
+/// TC-CLI-UI-10: `tetanus config` with no settings document.
+/// Expected: one row per key the engine settles, carrying the value without
+/// its JSON quotes and the layer that settled it - `default` for every one of
+/// them, because nothing has been configured. The provenance column is the
+/// reason the command exists, so a build that printed the values alone has
+/// failed even though it printed something.
+///
+/// Environmental needs: `TETANUS_HOME` names an empty directory, so the home
+/// of whoever runs the suite cannot decide what the case sees.
 #[test]
 fn config_shows_what_set_each_key() {
+    let home = tempfile::tempdir().expect("temp dir");
     let dir = tempfile::tempdir().expect("temp dir");
-    let out = run(dir.path(), &["config", "--color", "never"], &[]);
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
 
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "\nconfig\nlog.level  info  default\n");
+    let page = stdout(&out);
+    assert!(page.starts_with("\nconfig  "), "{page}");
+    let rows = layers(&page);
+    assert!(
+        rows.iter().all(|(_, layer)| layer == "default"),
+        "a key came from somewhere with no document to come from:\n{page}"
+    );
+    for key in ["sessions.root", "agent.max_steps", "provider.default"] {
+        assert!(
+            rows.iter().any(|(name, _)| name == key),
+            "{key} is not on the page:\n{page}"
+        );
+    }
+}
+
+/// TC-CLI-CONF-1: `tetanus config` against a document that sets two keys.
+/// Expected: exit 0; those two keys report the written value and `file`, and
+/// every other key still reports `default`. A page that read the document but
+/// reported `default` for what it found would be worse than one that read
+/// nothing, because it would say the setting had not taken.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn config_reports_the_document_that_set_a_key() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: journals\nagent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let page = stdout(&out);
+    let rows = layers(&page);
+    let layer = |key: &str| {
+        rows.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, layer)| layer.clone())
+            .unwrap_or_else(|| panic!("{key} is not on the page:\n{page}"))
+    };
+    assert_eq!(layer("sessions.root"), "file", "{page}");
+    assert_eq!(layer("agent.max_steps"), "file", "{page}");
+    assert_eq!(layer("provider.default"), "default", "{page}");
+    assert!(page.contains("journals"), "{page}");
+}
+
+/// TC-CLI-CONF-2: a document whose value is one the key does not take.
+/// Expected: exit 2, per §4.5's status for `InvalidParams`; the field is
+/// named; the next step names the document rather than sending the reader to
+/// `--help`, because nothing in a document is a flag; and nothing is printed
+/// on stdout, because there is no resolved configuration to print.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn a_value_the_key_does_not_take_is_a_usage_error() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "agent:\n  max_steps: 0\n",
+    )
+    .expect("the document is written");
+
+    let out = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let told = stderr(&out);
+    assert!(told.contains("agent.max_steps"), "{told}");
+    assert!(
+        told.contains(&home.path().join("settings.yaml").display().to_string()),
+        "{told}"
+    );
+    assert!(!told.contains("--help"), "{told}");
+    assert_eq!(stdout(&out), "");
+}
+
+/// TC-CLI-CONF-3: the two ways the document itself cannot be read.
+/// Expected: exit 1, per §4.5's status for `Io`; the path is named once and
+/// only once, because a reader deciding which file to open reads two copies
+/// of one path as two paths; and nothing on stdout.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding, in turn, a
+/// document that does not parse and a directory where the document should be.
+#[test]
+fn a_document_that_cannot_be_read_stops_the_command() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    let named = document.display().to_string();
+
+    std::fs::write(&document, "not: [valid\n").expect("the document is written");
+    let broken = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+    assert_eq!(broken.status.code(), Some(1), "{}", stderr(&broken));
+    assert_eq!(
+        stderr(&broken).matches(&named).count(),
+        1,
+        "{}",
+        stderr(&broken)
+    );
+    assert_eq!(stdout(&broken), "");
+
+    std::fs::remove_file(&document).expect("the document is removed");
+    std::fs::create_dir(&document).expect("a directory takes its place");
+    let directory = run(
+        dir.path(),
+        &["config", "--color", "never"],
+        &[("TETANUS_HOME", &home.path().display().to_string())],
+    );
+    assert_eq!(directory.status.code(), Some(1), "{}", stderr(&directory));
+    assert_eq!(
+        stderr(&directory).matches(&named).count(),
+        1,
+        "{}",
+        stderr(&directory)
+    );
+    assert_eq!(stdout(&directory), "");
+}
+
+/// TC-CLI-CONF-4: `tetanus config --json` against the same document.
+/// Expected: one object per §4.7, carrying every key the page carries with
+/// the same layer for each. Two views of one answer that disagreed would make
+/// a script and a person read the same build differently.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the
+/// document below.
+#[test]
+fn the_json_config_says_what_the_page_says() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "agent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    let json = stdout(&run(dir.path(), &["config", "--json"], &env));
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+    let entries = parsed["entries"].as_array().expect("the entries");
+    let told: Vec<(String, String)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry["key"].as_str().unwrap_or_default().to_string(),
+                entry["layer"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(told, layers(&page), "{json}\n{page}");
+    assert!(
+        told.contains(&("agent.max_steps".to_string(), "file".to_string())),
+        "{json}"
+    );
+}
+
+/// TC-CLI-CONF-5: `--dir` against a document that sets `sessions.root`.
+/// Expected: without the flag the listing is the document's directory; with
+/// it, the flag's. A build where the flag lost would make the document
+/// impossible to overrule for one command; a build where the document could
+/// never win would make it decorative.
+///
+/// And the provenance follows the same rule: a flag is only on the `Flag`
+/// layer of the process it was typed at, so a page asked for on its own says
+/// `file`, and the same page asked with `--dir` says `flag` and carries the
+/// flag's value.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the document
+/// below, and the working directory holds two journals a real run wrote, in
+/// two directories of their own.
+#[test]
+fn a_flag_beats_the_document_and_says_so() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for (prompt, path) in [
+        ("written down", "documented/a.jsonl"),
+        ("typed out", "flagged/b.jsonl"),
+    ] {
+        let out = run(dir.path(), &["run", "-p", prompt, "--session", path], &env);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: documented\n",
+    )
+    .expect("the document is written");
+
+    let ids = |args: &[&str]| -> Vec<String> {
+        let out = run(dir.path(), args, &env);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout(&out)).expect("one JSON object");
+        parsed["sessions"]
+            .as_array()
+            .expect("the sessions")
+            .iter()
+            .map(|session| {
+                session["session_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    assert_eq!(ids(&["sessions", "--json"]), ["a"], "the document lost");
+    assert_eq!(
+        ids(&["sessions", "--dir", "flagged", "--json"]),
+        ["b"],
+        "the flag lost"
+    );
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    assert!(
+        layers(&page).contains(&("sessions.root".to_string(), "file".to_string())),
+        "{page}"
+    );
+
+    let asked = stdout(&run(
+        dir.path(),
+        &["config", "--dir", "flagged", "--color", "never"],
+        &env,
+    ));
+    assert!(
+        layers(&asked).contains(&("sessions.root".to_string(), "flag".to_string())),
+        "{asked}"
+    );
+    assert!(
+        asked
+            .lines()
+            .any(|line| line.starts_with("sessions.root") && line.contains("flagged")),
+        "{asked}"
+    );
+}
+
+/// TC-CLI-CONF-6: a document that cannot be read, on the two subcommands that
+/// run an engine rather than describe one.
+/// Expected: exit 1 and the path, from both, and no listing and no banner. A
+/// boot that fell back to the defaults would put the sessions somewhere the
+/// user did not ask for and say nothing about it, which is worse than not
+/// starting: the run is lost either way, and only one of the two tells them.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding a document
+/// that does not parse.
+#[test]
+fn a_document_that_cannot_be_read_stops_every_engine() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    std::fs::write(&document, "sessions: [1, 2\n").expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    for args in [vec!["sessions"], vec!["sessions", "--json"], vec!["serve"]] {
+        let out = run(dir.path(), &args, &env);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "`{args:?}` printed a page");
+        assert!(
+            stderr(&out).contains(&document.display().to_string()),
+            "`{args:?}` did not name the document: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// TC-CLI-CONF-7: a document that holds a credential.
+/// Expected: the key keeps its row and its layer, so a reader can still see
+/// that it is set, and the value is `<redacted>` in both views. The page is
+/// the engine's own `config.dump`, which §4.3 of the contract says never
+/// publishes a secret's value; a surface that printed the resolved layers for
+/// itself would print the credential to whoever is reading the terminal, and
+/// into whatever the terminal is being logged to.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding the document
+/// below.
+#[test]
+fn a_credential_in_the_document_is_not_printed() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "llm:\n  providers:\n    deepseek:\n      api_key: sekrit-value\n",
+    )
+    .expect("the document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    let page = stdout(&run(dir.path(), &["config", "--color", "never"], &env));
+    let json = stdout(&run(dir.path(), &["config", "--json"], &env));
+
+    let key = "llm.providers.deepseek.api_key";
+    assert!(
+        layers(&page).contains(&(key.to_string(), "file".to_string())),
+        "the key lost its row or its layer:\n{page}"
+    );
+    assert!(page.contains("<redacted>"), "{page}");
+    assert!(
+        !page.contains("sekrit-value"),
+        "the page printed it:\n{page}"
+    );
+    assert!(!json.contains("sekrit-value"), "--json printed it:\n{json}");
+}
+
+/// TC-CLI-CONF-11: `--settings` naming a document, with another under the
+/// harness home.
+/// Expected: the named document is the one every subcommand boots from - the
+/// page reports its values on the `file` layer and the listing is its root -
+/// and the home's document is not read at all. The flag is global, so it
+/// reads the same typed before the subcommand and after it; a flag that only
+/// worked in one position would be a flag a reader has to remember the shape
+/// of.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding one
+/// document, the working directory holds another, and a journal sits under
+/// each of the two roots they name.
+#[test]
+fn a_named_document_is_the_one_every_command_boots_from() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        home.path().join("settings.yaml"),
+        "sessions:\n  root: at-home\n",
+    )
+    .expect("the home's document is written");
+    std::fs::write(dir.path().join("named.yaml"), "sessions:\n  root: named\n")
+        .expect("the named document is written");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for path in ["at-home/home.jsonl", "named/flagged.jsonl"] {
+        run(dir.path(), &["run", "-p", "hi", "--session", path], &env);
+    }
+
+    let page = stdout(&run(
+        dir.path(),
+        &["--settings", "named.yaml", "config", "--color", "never"],
+        &env,
+    ));
+    assert!(
+        page.lines()
+            .any(|line| line.starts_with("sessions.root") && line.contains("named")),
+        "{page}"
+    );
+    assert!(
+        !page.contains("at-home"),
+        "the home's document was read:\n{page}"
+    );
+    assert!(
+        layers(&page).contains(&("sessions.root".to_string(), "file".to_string())),
+        "{page}"
+    );
+
+    for args in [
+        vec!["--settings", "named.yaml", "sessions", "--json"],
+        vec!["sessions", "--settings", "named.yaml", "--json"],
+    ] {
+        let out = run(dir.path(), &args, &env);
+
+        assert!(out.status.success(), "`{args:?}`: {}", stderr(&out));
+        let listed: serde_json::Value =
+            serde_json::from_str(&stdout(&out)).expect("one JSON object");
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .expect("the sessions")
+            .iter()
+            .map(|session| session["session_id"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(ids, vec!["flagged"], "`{args:?}`: {}", stdout(&out));
+    }
+}
+
+/// TC-CLI-CONF-12: `--settings` naming a path with nothing there.
+/// Expected: exit 1 and the path, from every subcommand that boots, and
+/// nothing done. A document nobody named may be absent, because a first run
+/// has none; a path the user typed is a path they typed because something is
+/// in it, and reading the compiled defaults instead would run a harness they
+/// did not configure and say nothing about it.
+///
+/// Environmental needs: `TETANUS_HOME` names an empty directory, so the only
+/// document in the case is the one that is not there.
+#[test]
+fn a_named_document_that_is_not_there_stops_the_command() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    for args in [
+        vec!["config"],
+        vec!["sessions"],
+        vec!["run", "-p", "hi"],
+        vec!["replay", "turn"],
+    ] {
+        let args = [vec!["--settings", "gone.yaml"], args].concat();
+        let out = run(dir.path(), &args, &env);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "`{args:?}` printed a page");
+        assert_eq!(
+            stderr(&out).matches("gone.yaml").count(),
+            1,
+            "`{args:?}`: {}",
+            stderr(&out)
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("read").count(),
+        0,
+        "a refused command left something behind"
+    );
+}
+
+/// TC-CLI-CONF-14: `tetanus config --defaults`, against a document that sets
+/// keys and then against one that does not parse.
+/// Expected: one page both times - every row on the `default` layer, nothing
+/// of the document on it, and exit 0 even where the plain page exits 1. The
+/// question `--defaults` answers is about the build rather than the machine,
+/// so a document is not read to answer it, and the moment a reader most needs
+/// the answer is the moment their own document is the thing that is broken.
+///
+/// The page also says what it is not, on stderr, so the bytes a script reads
+/// are the same bytes the other page gives it.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory holding, in turn,
+/// each of the two documents.
+#[test]
+fn the_defaults_page_reads_no_document_at_all() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let document = home.path().join("settings.yaml");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    std::fs::write(&document, "sessions:\n  root: documented\n").expect("the document is written");
+    let set = run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &env,
+    );
+    std::fs::write(&document, "sessions: [1, 2\n").expect("the document is written");
+    let broken = run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &env,
+    );
+
+    for (case, out) in [("a document", &set), ("a broken document", &broken)] {
+        assert!(out.status.success(), "{case}: {}", stderr(out));
+        let page = stdout(out);
+        assert!(
+            !page.contains("documented"),
+            "{case} reached the page:\n{page}"
+        );
+        assert!(
+            layers(&page).iter().all(|(_, layer)| layer == "default"),
+            "{case}: a row came off something else:\n{page}"
+        );
+        assert!(
+            stderr(out).contains("not what it will run on"),
+            "{case} did not say what the page is not: {}",
+            stderr(out)
+        );
+    }
+    assert_eq!(stdout(&set), stdout(&broken), "the two pages differ");
+    // The plain page against that same document is the failure this one is
+    // asked instead of.
+    let plain = run(dir.path(), &["config", "--color", "never"], &env);
+    assert_eq!(plain.status.code(), Some(1), "{}", stderr(&plain));
+}
+
+/// TC-CLI-CONF-15: the two other shapes of `--defaults`.
+/// Expected: `--json` carries the keys and layers the page carries, as it does
+/// for the page this one is a variant of; and `--dir` with it is a usage
+/// error, because a flag that overrides a setting and a page that reads no
+/// settings are two questions, and answering one while being asked both would
+/// print a `flag` row on a page whose whole claim is that nothing was set.
+#[test]
+fn the_defaults_page_answers_json_and_refuses_a_flag_layer() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let page = stdout(&run(
+        dir.path(),
+        &["config", "--defaults", "--color", "never"],
+        &[],
+    ));
+    let json = stdout(&run(dir.path(), &["config", "--defaults", "--json"], &[]));
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+    let told: Vec<(String, String)> = parsed["entries"]
+        .as_array()
+        .expect("the entries")
+        .iter()
+        .map(|entry| {
+            (
+                entry["key"].as_str().unwrap_or_default().to_string(),
+                entry["layer"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(told, layers(&page), "{json}\n{page}");
+
+    let both = run(
+        dir.path(),
+        &["config", "--defaults", "--dir", "elsewhere"],
+        &[],
+    );
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+    assert_eq!(stdout(&both), "", "it printed a page anyway");
+    assert!(
+        stderr(&both).contains("cannot be used with"),
+        "{}",
+        stderr(&both)
+    );
+}
+
+/// TC-CLI-CONF-16: which document the page says it read, in the four states a
+/// reader meets it in.
+/// Expected: the heading carries the document beside the title - the one under
+/// the harness home, the one `--settings` named written out in full even
+/// though it was typed relative, and the same path marked when nothing is
+/// there yet. `--defaults` carries no document at all, because it read none.
+///
+/// The question this page is opened with is "why is it that, and where do I
+/// change it", and the second half of it is unanswerable from the rows: a
+/// `file` layer says a document won, not which document. All four headings
+/// are asserted whole, because a heading that named the wrong file would be
+/// worse than one that named none.
+///
+/// Environmental needs: `TETANUS_HOME` names a directory of the case's own,
+/// holding a document for the first state and nothing for the third.
+#[test]
+fn the_config_page_names_the_document_it_read() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = [("TETANUS_HOME", home.path().display().to_string())];
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let document = home.path().join("settings.yaml");
+    let heading = |args: &[&str]| {
+        let page = stdout(&run(dir.path(), args, &env));
+        page.lines().nth(1).unwrap_or_default().to_string()
+    };
+
+    std::fs::write(&document, "sessions:\n  root: documented\n").expect("the document");
+    assert_eq!(
+        heading(&["config", "--color", "never"]),
+        format!("config  {}", document.display())
+    );
+
+    std::fs::write(dir.path().join("named.yaml"), "sessions:\n  root: named\n")
+        .expect("the document");
+    assert_eq!(
+        heading(&["--settings", "named.yaml", "config", "--color", "never"]),
+        format!("config  {}/named.yaml", here(&dir).display()),
+        "a relative path was printed as it was typed"
+    );
+
+    std::fs::remove_file(&document).expect("the document goes");
+    assert_eq!(
+        heading(&["config", "--color", "never"]),
+        format!("config  {} (not there yet)", document.display())
+    );
+
+    assert_eq!(
+        heading(&["config", "--defaults", "--color", "never"]),
+        "config"
+    );
 }
 
 /// TC-CLI-UI-11: `tetanus replay --live` into a pipe.
@@ -355,6 +1006,107 @@ fn a_playback_that_cannot_happen_is_a_usage_error() {
         stderr(&zero).contains("greater than zero"),
         "{}",
         stderr(&zero)
+    );
+}
+
+/// TC-CLI-UI-30: a step budget of zero, on both commands that take one.
+/// Expected: exit 2 and a sentence saying why, from the flag rather than from
+/// the run. A budget is spent by taking a step and checked afterwards, so a
+/// turn always takes at least one: accepted, `--max-steps 0` produces a
+/// journal that records a step the command line said it could not have, and
+/// closes it `step budget spent`. One is still accepted, because one step
+/// with no tool call answered is a real thing to ask for.
+#[test]
+fn a_step_budget_of_zero_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    for command in [
+        vec![
+            "run",
+            "--max-steps",
+            "0",
+            "-p",
+            "hi",
+            "--session",
+            "j.jsonl",
+        ],
+        vec!["chat", "--max-steps", "0", "--session", "c.jsonl"],
+    ] {
+        let refused = run(dir.path(), &command, &[]);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{} {}",
+            stdout(&refused),
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains("greater than zero"),
+            "{}",
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains("at least one step"),
+            "{}",
+            stderr(&refused)
+        );
+    }
+
+    let one = run(
+        dir.path(),
+        &[
+            "run",
+            "--max-steps",
+            "1",
+            "-p",
+            "hi",
+            "--session",
+            "j.jsonl",
+        ],
+        &[],
+    );
+    assert_eq!(one.status.code(), Some(0), "{}", stderr(&one));
+}
+
+/// TC-CLI-UI-31: the two crossings this binary no longer makes for itself.
+/// Expected: a stop reason the contract does not name as a variant crosses as
+/// the engine's own word for it, and a journal that cannot be read reports the
+/// code §4.5 gives it. Both mappings are the engine's and published
+/// (`convert::stop_reason`, `convert::journal_error`); this case is what says
+/// the surface still answers the same way now that it only calls them.
+#[test]
+fn what_the_engine_maps_is_what_the_page_reports() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // A budget of one stops the turn on a reason the contract names.
+    let spent = run(
+        dir.path(),
+        &[
+            "run",
+            "--max-steps",
+            "1",
+            "-p",
+            "echo this",
+            "--session",
+            "j.jsonl",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(spent.status.success(), "{}", stderr(&spent));
+    let last = stdout(&spent);
+    let last = last.lines().last().expect("a result").to_string();
+    let result: serde_json::Value = serde_json::from_str(&last).expect(&last);
+    assert_eq!(result["summary"]["stop_reason"], "max-steps", "{last}");
+
+    // And a journal that is not one is `LogCorrupt`, which §4.5 exits 1 for.
+    std::fs::write(dir.path().join("bad.jsonl"), "not json\n").expect("write");
+    let corrupt = run(dir.path(), &["replay", "bad.jsonl"], &[]);
+    assert_eq!(corrupt.status.code(), Some(1), "{}", stderr(&corrupt));
+    assert!(
+        stderr(&corrupt).contains("not readable at line 1"),
+        "{}",
+        stderr(&corrupt)
     );
 }
 
@@ -735,7 +1487,7 @@ fn the_tool_page_lists_what_a_turn_can_call() {
     }
 }
 
-/// TC-CLI-SESS-7: `tetanus sessions` on a directory two runs wrote into.
+/// TC-CLI-SESS-13: `tetanus sessions` on a directory two runs wrote into.
 /// Expected: one row per journal, newest first, each carrying the size of the
 /// journal and the prompt that opened it. This is the page a user reads an id
 /// out of, so it is asserted against journals a real run wrote and not
@@ -762,10 +1514,12 @@ fn sessions_lists_what_the_runs_wrote() {
     assert!(rows[0].ends_with("idle  and again"), "{told}");
     assert!(rows[1].starts_with("a  "), "{told}");
     assert!(rows[1].ends_with("idle  echo this"), "{told}");
-    assert!(rows[0].contains("18 events"), "{told}");
+    // Twenty, not eighteen, since the context lane: each of the turn's two
+    // steps writes a `request/context` envelope before it dispatches.
+    assert!(rows[0].contains("20 events"), "{told}");
 }
 
-/// TC-CLI-SESS-8: the id the page prints against the journal it names.
+/// TC-CLI-SESS-14: the id the page prints against the journal it names.
 /// Expected: the id is the journal's file name, because a store resolves an
 /// id to `<root>/<id>.jsonl` and an id that resolves to nothing is worth
 /// nothing to the reader who retypes it. `--json` carries both, verbatim.
@@ -791,8 +1545,10 @@ fn the_id_a_session_is_listed_under_names_its_journal() {
 }
 
 /// TC-CLI-SESS-9: `tetanus sessions` before anything has been run.
-/// Expected: exit 0 and a page that says what writes one. An empty store is
-/// not a failure, and a missing directory is the ordinary first-run state.
+/// Expected: exit 0 and a page that says what writes one, headed by the root
+/// it looked in and marked as not there yet. An empty store is not a failure,
+/// and a missing directory is the ordinary first-run state - but it is also
+/// what the wrong root looks like, so the page names the one it read.
 #[test]
 fn an_empty_store_is_not_a_failure() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -801,12 +1557,206 @@ fn an_empty_store_is_not_a_failure() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        "\nsessions\nno sessions yet - tetanus run writes one\n"
+        format!(
+            "\nsessions  {}/sessions (not there yet)\n\
+             no sessions yet - tetanus run writes one\n",
+            here(&dir).display()
+        )
     );
     assert_eq!(
         stdout(&run(dir.path(), &["sessions", "--json"], &[])),
         "{\"sessions\":[]}\n"
     );
+}
+
+/// TC-CLI-SESS-15: which root the listing says it read, against the three
+/// things that can choose it.
+/// Expected: the heading names the directory that was actually listed - the
+/// compiled default, the one the settings document set, and the one `--dir`
+/// overrode it with - each written out in full. `--json` is unchanged, because
+/// a caller that asked for the machine form already knows the root it passed.
+///
+/// A listing under the wrong root reads exactly like a listing under the right
+/// one, so this is the line that tells the two apart. It is asserted for a
+/// page with rows on it as well as an empty one, because the empty page is
+/// where a reader most needs it and the full page is where it is easiest to
+/// leave out.
+///
+/// Environmental needs: `TETANUS_HOME` is the case's own directory, and the
+/// document under it sets a root the flag then overrides.
+#[test]
+fn the_listing_names_the_root_it_read() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let heading = |args: &[&str]| {
+        let page = stdout(&run(dir.path(), args, &[]));
+        page.lines().nth(1).unwrap_or_default().to_string()
+    };
+    let out = run(
+        dir.path(),
+        &["run", "-p", "echo this", "--session", "sessions/a.jsonl"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let root = format!("{}/sessions", here(&dir).display());
+    assert_eq!(
+        heading(&["sessions", "--color", "never"]),
+        format!("sessions  {root}")
+    );
+
+    // A root the document named has to be there - the engine refuses to read
+    // a caller's typo as an empty history - so this one is made before it is
+    // listed.
+    std::fs::create_dir(dir.path().join("documented")).expect("the root is made");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: documented\n",
+    )
+    .expect("the document is written");
+    assert_eq!(
+        heading(&["sessions", "--color", "never"]),
+        format!("sessions  {}/documented", here(&dir).display()),
+        "the document did not choose the root"
+    );
+    assert_eq!(
+        heading(&["sessions", "--dir", "sessions", "--color", "never"]),
+        format!("sessions  {root}"),
+        "the flag did not beat the document"
+    );
+
+    assert_eq!(
+        stdout(&run(
+            dir.path(),
+            &["sessions", "--dir", "sessions", "--json"],
+            &[]
+        ))
+        .lines()
+        .count(),
+        1,
+        "the machine form grew a heading"
+    );
+}
+
+/// TC-CLI-SESS-10: the id `tetanus sessions` printed, typed into
+/// `tetanus replay`.
+/// Expected: exit 0 and the journal that id names, for the bare id and for the
+/// id with the extension it is listed under. The page a reader takes an id off
+/// and the command they retype it into are the pair this case exists for: the
+/// note on a missing journal sends them to that page, so a page whose ids the
+/// next command refuses is a loop with no way out of it.
+#[test]
+fn an_id_the_session_list_printed_is_one_replay_opens() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+    for prompt in ["echo this", "and again"] {
+        let out = run(
+            dir.path(),
+            &[
+                "run",
+                "-p",
+                prompt,
+                "--session",
+                &format!("journals/{}.jsonl", prompt.replace(' ', "-")),
+            ],
+            &[],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let listed = stdout(&run(dir.path(), &["sessions", "--color", "never"], &[]));
+    let mut ids: Vec<String> = listed
+        .lines()
+        .skip(2)
+        .filter_map(|row| row.split_whitespace().next().map(str::to_string))
+        .collect();
+    ids.sort();
+
+    assert_eq!(ids, vec!["and-again", "echo-this"], "{listed}");
+    for id in &ids {
+        let told = stdout(&run(dir.path(), &["replay", id, "--color", "never"], &[]));
+        assert!(told.contains("session on mock-echo-1"), "`{id}`: {told}");
+        let with_extension = stdout(&run(
+            dir.path(),
+            &["replay", &format!("{id}.jsonl"), "--color", "never"],
+            &[],
+        ));
+        assert_eq!(with_extension, told, "`{id}.jsonl` read something else");
+    }
+}
+
+/// TC-CLI-SESS-11: a target that is a path, against a document whose root
+/// holds a journal of the same name, and `--dir` over the document.
+/// Expected: the path is opened as it was given - a journal the user can see
+/// is the one they meant, whatever a document says about roots - and an id is
+/// looked up under `--dir` when one is passed.
+#[test]
+fn a_path_is_opened_as_given_and_a_flag_says_where_an_id_lives() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+    for (prompt, path) in [
+        ("under the root", "journals/same.jsonl"),
+        ("beside it", "same.jsonl"),
+        ("somewhere else", "elsewhere/other.jsonl"),
+    ] {
+        let out = run(dir.path(), &["run", "-p", prompt, "--session", path], &[]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let told = stdout(&run(
+        dir.path(),
+        &["replay", "same.jsonl", "--color", "never"],
+        &[],
+    ));
+    assert!(
+        told.contains("beside it"),
+        "the root's copy was opened: {told}"
+    );
+
+    let by_id = stdout(&run(
+        dir.path(),
+        &["replay", "same", "--color", "never"],
+        &[],
+    ));
+    assert!(by_id.contains("under the root"), "{by_id}");
+
+    let flagged = stdout(&run(
+        dir.path(),
+        &["replay", "other", "--dir", "elsewhere", "--color", "never"],
+        &[],
+    ));
+    assert!(flagged.contains("somewhere else"), "{flagged}");
+}
+
+/// TC-CLI-SESS-12: a target that is neither a path nor an id.
+/// Expected: exit 4, `SessionNotFound` in the contract's table; the message
+/// names what was typed rather than a path nobody typed; the way out names the
+/// root it was looked for under, because the reader typed an id and either the
+/// id is wrong or the root is; and nothing is printed on stdout.
+#[test]
+fn a_target_that_is_nothing_names_the_root_it_was_looked_for_under() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+
+    let out = run(dir.path(), &["replay", "nope", "--color", "never"], &[]);
+
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "", "a missing journal printed a page");
+    let told = said(&out);
+    assert!(told.contains("no journal at nope"), "{told}");
+    assert!(told.contains("journals"), "{told}");
+    assert!(told.contains("tetanus sessions"), "{told}");
 }
 
 /// TC-CLI-ERR-12: a provider that answers nothing.
@@ -985,7 +1935,7 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
             "",
             "`{args:?}` wrote a page for a missing file"
         );
-        let err = stderr(&out);
+        let err = said(&out);
         assert!(
             err.contains("no journal at nope.jsonl"),
             "`{args:?}`: {err}"
@@ -998,9 +1948,9 @@ fn a_journal_that_is_not_there_is_not_an_empty_one() {
     );
 }
 
-/// TC-CLI-ERR-12: an empty value, on every flag that takes one.
-/// Expected: clap's usage error and exit 2 from all five, and nothing done.
-/// The two paths already refused it because clap refuses an empty `PathBuf`;
+/// TC-CLI-ERR-15: an empty value, on every flag that takes one.
+/// Expected: clap's usage error and exit 2 from all six, and nothing done.
+/// The three paths already refused it because clap refuses an empty `PathBuf`;
 /// the three that stay text did not, and each carried the empty string
 /// somewhere further on - a run announced itself on a model with no name and
 /// wrote that name into the journal header, `replay` reported a journal
@@ -1012,12 +1962,13 @@ fn a_value_that_names_nothing_is_a_usage_error() {
 
     for (args, named) in [
         (vec!["run", "--model", "", "-p", "hi"], "--model <ID>"),
-        (vec!["replay", ""], "<PATH>"),
+        (vec!["replay", ""], "<JOURNAL>"),
         (vec!["serve", "--listen", ""], "--listen <ADDR>"),
-        // The two that were already refused, asserted here so that the five
+        // The three that were already refused, asserted here so that the six
         // cannot drift back into two answers for one mistake.
         (vec!["run", "--session", "", "-p", "hi"], "--session <PATH>"),
         (vec!["sessions", "--dir", ""], "--dir <PATH>"),
+        (vec!["--settings", "", "config"], "--settings <PATH>"),
     ] {
         let out = run(dir.path(), &args, &[]);
 
@@ -1032,6 +1983,39 @@ fn a_value_that_names_nothing_is_a_usage_error() {
         0,
         "a refused run left something behind"
     );
+}
+
+/// TC-CLI-ERR-16: a journal path that is a directory, on the two views that
+/// open one to write and the one that opens it to read.
+/// Expected: one sentence for all three - `held: is a directory`, exit 1 - so
+/// a reader who typed the wrong path is told which path it was, whichever
+/// command they typed it on. The write side used to print what the operating
+/// system said with nothing in front of it, which named no file at all on a
+/// page whose whole subject is a file, while the read side named it. The
+/// errno is gone from the page as well: `(os error 21)` says a second time
+/// what the three words in front of it have said, and the number a script
+/// reads is the exit status.
+///
+/// Environmental needs: none. `chat` is given the mock adapter and no key, so
+/// it fails on the journal rather than on a credential, and it reads no
+/// stdin because it never gets as far as the prompt.
+#[test]
+fn a_journal_that_is_a_directory_is_named_by_every_view() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir(dir.path().join("held")).expect("a directory");
+
+    for args in [
+        vec!["run", "--session", "held", "-p", "hi"],
+        vec!["chat", "--adapter", "mock", "--session", "held"],
+        vec!["replay", "held"],
+    ] {
+        let out = run(dir.path(), &args, &[]);
+
+        assert_eq!(out.status.code(), Some(1), "`{args:?}`: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(err.contains("held: is a directory"), "`{args:?}`: {err}");
+        assert!(!err.contains("os error"), "`{args:?}`: {err}");
+    }
 }
 
 /// TC-CLI-ERR-11: a journal that is there and holds nothing.
@@ -1112,4 +2096,398 @@ fn the_build_page_counts_agree_with_the_catalogues() {
         "{page}"
     );
     assert!(page.starts_with("\ntetanus "), "{page}");
+}
+
+/// TC-CLI-WEB-1: `tetanus serve --frontend` pointed at a directory with no
+/// page in it.
+/// Expected: exit 1, the directory named, and nothing bound. A server that
+/// came up on the address a person was about to open and then answered every
+/// request with "no index.html" is a worse failure than not coming up.
+#[test]
+fn the_web_panel_refuses_a_frontend_that_is_not_there() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let refused = run(
+        dir.path(),
+        &["serve", "--listen", "127.0.0.1:0", "--frontend", "nowhere"],
+        &[],
+    );
+
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("nowhere"), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("index.html"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// TC-CLI-WEB-2: an address this server will not bind.
+/// Expected: refused, with the two it will bind named. There is no TLS here,
+/// no authentication and no origin policy, so a third address would read as an
+/// option this server had thought about.
+#[test]
+fn the_web_panel_binds_loopback_or_the_wildcard() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(dir.path().join("app/index.html"), "<html></html>").expect("the page");
+
+    let refused = run(
+        dir.path(),
+        &[
+            "serve",
+            "--listen",
+            "192.168.1.10:5300",
+            "--frontend",
+            "app",
+        ],
+        &[],
+    );
+
+    assert_ne!(refused.status.code(), Some(0), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("127.0.0.1 or 0.0.0.0"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// The bridge, asked one question over plain HTTP.
+fn over_http(port: u16, method: &str, kind: &str, body: &str) -> (u16, String) {
+    over_http_at(port, method, kind, body, None)
+}
+
+/// The same, with an `authorization` header when one is given.
+fn over_http_at(
+    port: u16,
+    method: &str,
+    kind: &str,
+    body: &str,
+    authorization: Option<&str>,
+) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).expect("it connects");
+    let authorization = match authorization {
+        Some(value) => format!("authorization: {value}\r\n"),
+        None => String::new(),
+    };
+    let request = format!(
+        "POST /api/{method} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: {kind}\r\n{authorization}content-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).expect("written");
+    let mut said = String::new();
+    socket.read_to_string(&mut said).expect("read");
+    let status = said
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = said.split_once("\r\n\r\n").map(|(_, it)| it).unwrap_or("");
+    (status, body.to_string())
+}
+
+/// TC-CLI-WEB-5: the `/api` bridge - a media type that is not JSON, the
+/// handshake, a call after it, and a method this build does not have.
+/// Expected: 415 before dispatch for the media type, because a cross-site
+/// "simple" post must never execute a side-effectful method blind; 200 with
+/// the contract's own envelope for the rest, including the unknown method,
+/// whose failure is the engine's answer and not a fault of the carrier.
+#[test]
+fn the_api_bridge_answers_the_published_contract_over_http() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["serve", "--listen", "127.0.0.1:5399", "--frontend", "app"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let (refused, _) = over_http(5399, "rpc.hello", "text/plain", "{}");
+    let (greeted, hello) = over_http(
+        5399,
+        "rpc.hello",
+        "application/json",
+        r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#,
+    );
+    let (listed, sessions) = over_http(5399, "session.list", "application/json", "{}");
+    let (unknown, nothing) = over_http(5399, "nope.nope", "application/json", "{}");
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(refused, 415, "a media type that is not JSON is refused");
+    assert_eq!(greeted, 200, "{hello}");
+    assert!(hello.contains("protocol_version"), "{hello}");
+    assert_eq!(listed, 200, "{sessions}");
+    assert!(sessions.contains("\"sessions\""), "{sessions}");
+    // The carrier worked; the method did not exist. Those are different facts
+    // and they are reported in different places.
+    assert_eq!(unknown, 200, "{nothing}");
+    assert!(nothing.contains("-32601"), "{nothing}");
+}
+
+/// TC-CLI-WEB-6: the host's own methods on the bridge - a listing, a
+/// creation, one that is already there, and a path that is not qualified.
+/// Expected: the picker's three failures arrive as codes with the subject path
+/// in `data`, because a chooser saying "cannot be read" with nothing named is
+/// a dialog the reader cannot argue with. The carrier says 200 throughout: the
+/// filesystem refusing is an answer, not a transport fault.
+#[test]
+fn the_bridge_answers_the_host_methods_too() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+    std::fs::create_dir(dir.path().join("already")).expect("a directory");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["serve", "--listen", "127.0.0.1:5398", "--frontend", "app"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let root = dir.path().display().to_string();
+    let (listed, listing) = over_http(
+        5398,
+        "host.listDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}"}}"#),
+    );
+    let (made, created) = over_http(
+        5398,
+        "host.createDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}","name":"fresh"}}"#),
+    );
+    let (again, exists) = over_http(
+        5398,
+        "host.createDirectory",
+        "application/json",
+        &format!(r#"{{"path":"{root}","name":"already"}}"#),
+    );
+    let (relative, unqualified) = over_http(
+        5398,
+        "host.listDirectory",
+        "application/json",
+        r#"{"path":"not/absolute"}"#,
+    );
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(listed, 200, "{listing}");
+    assert!(listing.contains("\"crumbs\""), "{listing}");
+    assert!(listing.contains("already"), "{listing}");
+    // A listing is directories only, so the frontend directory is in it and
+    // its index.html is not.
+    assert!(!listing.contains("index.html"), "{listing}");
+
+    assert_eq!(made, 200, "{created}");
+    assert!(dir.path().join("fresh").is_dir(), "{created}");
+
+    assert_eq!(again, 200, "{exists}");
+    assert!(
+        exists.contains("-32602"),
+        "already there is a bad argument: {exists}"
+    );
+    assert!(
+        exists.contains("already"),
+        "the subject path is missing: {exists}"
+    );
+
+    assert_eq!(relative, 200, "{unqualified}");
+    assert!(unqualified.contains("-32009"), "{unqualified}");
+    assert!(unqualified.contains("not/absolute"), "{unqualified}");
+}
+
+/// TC-CLI-WEB-7: the bridge under a stated token.
+/// Expected: a POST with no token is 401 and never reaches the JSON-RPC layer,
+/// one with the token in the query is answered, and so is one presenting it as
+/// a bearer header. A door with a lock beside a door without one is a room
+/// with no lock: this carrier reaches the whole engine exactly as the socket
+/// does, so the posture has to be the same on both.
+#[test]
+fn the_bridge_is_locked_the_way_the_socket_is() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:5397",
+            "--frontend",
+            "app",
+            "--token",
+            "a-stated-secret",
+        ])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let hello = r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#;
+    let (bare, _) = over_http(5397, "rpc.hello", "application/json", hello);
+    let (with_query, greeted) = over_http_at(
+        5397,
+        "rpc.hello?token=a-stated-secret",
+        "application/json",
+        hello,
+        None,
+    );
+    let (with_header, _) = over_http_at(
+        5397,
+        "session.list",
+        "application/json",
+        "{}",
+        Some("Bearer a-stated-secret"),
+    );
+    // The page is not the protocol: it stays readable, which is what makes the
+    // token deliverable to a reader who was given the URL.
+    let page = std::net::TcpStream::connect(("127.0.0.1", 5397)).is_ok();
+    served.kill().ok();
+    served.wait().ok();
+
+    assert_eq!(bare, 401, "an unauthenticated POST reached the engine");
+    assert_eq!(with_query, 200, "{greeted}");
+    assert!(greeted.contains("protocol_version"), "{greeted}");
+    assert_eq!(with_header, 200, "a bearer token was not accepted");
+    assert!(page, "the page stopped being served");
+}
+
+/// The SSE stream, read on a thread while calls are made on another.
+fn stream_frames(port: u16, want: usize, seconds: u64) -> std::sync::mpsc::Receiver<String> {
+    use std::io::{Read, Write};
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut socket =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("the stream connects");
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(seconds)))
+            .ok();
+        socket
+            .write_all(b"GET /api/events HTTP/1.1\r\nhost: x\r\naccept: text/event-stream\r\n\r\n")
+            .expect("asked for the stream");
+        let mut seen = Vec::new();
+        let mut byte = [0_u8; 4096];
+        let mut sent = 0;
+        while sent < want {
+            match socket.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => seen.extend_from_slice(&byte[..read]),
+            }
+            let text = String::from_utf8_lossy(&seen).to_string();
+            let mut parts: Vec<&str> = text.split("\n\n").collect();
+            parts.pop();
+            for part in parts.iter().skip(sent) {
+                if sender.send(part.to_string()).is_err() {
+                    return;
+                }
+                sent += 1;
+            }
+        }
+    });
+    receiver
+}
+
+/// TC-CLI-WEB-8: a subscription made over HTTP, and the turn that follows it.
+/// Expected: the stream opens, and the pushes arrive on it as the same
+/// notification frames the socket sends - §4.1's promise is that every carrier
+/// moves the same payloads, and an SSE line whose `data:` held a different
+/// shape would make this a second contract wearing the first one's names.
+#[test]
+fn a_subscription_over_http_has_somewhere_to_deliver() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("the frontend");
+    std::fs::write(
+        dir.path().join("app/index.html"),
+        "<html><head></head></html>",
+    )
+    .expect("page");
+
+    let mut served = std::process::Command::new(env!("CARGO_BIN_EXE_tetanus"))
+        .current_dir(dir.path())
+        .args(["serve", "--listen", "127.0.0.1:5395", "--frontend", "app"])
+        .env("TETANUS_HOME", dir.path())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // Enough frames for a whole mock turn: the header, the status, and the
+    // events the turn writes. The loop below stops at the one it is looking
+    // for rather than at a count.
+    let frames = stream_frames(5395, 24, 20);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let hello = r#"{"protocol_version":"1.0","client":{"name":"case","version":"1"}}"#;
+    over_http(5395, "rpc.hello", "application/json", hello);
+    let (_, made) = over_http(5395, "session.create", "application/json", "{}");
+    let id = made
+        .split("\"session_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a session id")
+        .to_string();
+    over_http(
+        5395,
+        "session.subscribe",
+        "application/json",
+        &format!(r#"{{"session_id":"{id}","from_seq":0}}"#),
+    );
+    over_http(
+        5395,
+        "agent.prompt",
+        "application/json",
+        &format!(r#"{{"session_id":"{id}","content":"over http"}}"#),
+    );
+
+    let mut read = Vec::new();
+    while let Ok(frame) = frames.recv_timeout(std::time::Duration::from_secs(10)) {
+        let done = frame.contains("over http");
+        read.push(frame);
+        if done {
+            break;
+        }
+    }
+    served.kill().ok();
+    served.wait().ok();
+
+    let whole = read.join("\n");
+    // The stream says it is open before anything has happened on it, so a
+    // reader is not left wondering whether it connected.
+    assert!(whole.contains(": open"), "{whole}");
+    assert!(
+        whole.contains("data: {\"jsonrpc\":\"2.0\",\"method\":\"session/event\""),
+        "the pushes are not the contract's own frames: {whole}"
+    );
+    assert!(
+        whole.contains("over http"),
+        "the turn's own events never arrived: {whole}"
+    );
 }

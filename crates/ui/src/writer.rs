@@ -14,7 +14,7 @@ use std::io::{self, IsTerminal, Write};
 use crate::color::{self, ColorChoice, Env};
 use crate::progress::Progress;
 use crate::screen::Screen;
-use crate::text::{or_empty, visible_width};
+use crate::text::{or_empty, visible_width, wrap};
 use crate::theme::{Painted, Role, Theme};
 
 /// A styled output stream.
@@ -67,6 +67,30 @@ impl<W: Write> Ui<W> {
     pub fn heading(&mut self, text: &str) -> io::Result<()> {
         writeln!(self.out)?;
         writeln!(self.out, "{}", self.theme.paint(Role::Heading, text))
+    }
+
+    /// The same title, with the place the page read drawn muted beside it.
+    ///
+    /// A page that lists what is somewhere - the keys in a settings document,
+    /// the journals under a sessions root - is answering a question about a
+    /// place, and a reader who cannot see which place cannot act on the
+    /// answer. Two pages ask for that shape, so it is one method rather than
+    /// two compositions that drift apart.
+    ///
+    /// `place` is drawn as it is given, like [`line`](Self::line) and
+    /// [`field`](Self::field): it comes off a document, a flag or an
+    /// environment, so the caller tames it. It is never cut, because it is
+    /// the one value on the page a reader copies - a terminal folding a long
+    /// path leaves it readable, and a cut one sends them back to the flag
+    /// they typed it on.
+    pub fn heading_at(&mut self, text: &str, place: &str) -> io::Result<()> {
+        writeln!(self.out)?;
+        writeln!(
+            self.out,
+            "{}  {}",
+            self.theme.paint(Role::Heading, text),
+            self.theme.paint(Role::Muted, place)
+        )
     }
 
     /// One `label  value` row. `pad` is the shared label column width, so a
@@ -124,8 +148,28 @@ impl<W: Write> Ui<W> {
         self.tagged(Role::Error, "error", text)
     }
 
+    /// One diagnostic, folded under its own tag.
+    ///
+    /// A sentence longer than the terminal is folded by the terminal, at
+    /// column zero, where its second half reads as a line this build wrote
+    /// without a tag - and the sentences here are the ones a reader meets when
+    /// something has already gone wrong. Folded here instead, the rest of it
+    /// lands under the text rather than under the tag: the shape says at a
+    /// glance that it is one diagnostic and not two.
+    ///
+    /// Folded on the words, because these are sentences. The values inside
+    /// them - a path, a key - are cut to the width by whoever composed them,
+    /// which is where the width of a value is known.
     fn tagged(&mut self, role: Role, tag: &str, text: &str) -> io::Result<()> {
-        writeln!(self.out, "{}: {text}", self.theme.paint(role, tag))
+        let label = tag.chars().count() + 2;
+        let mut folded = wrap(text, self.width.saturating_sub(label).max(1)).into_iter();
+        let first = folded.next().unwrap_or_default();
+        writeln!(self.out, "{}: {first}", self.theme.paint(role, tag))?;
+        let indent = " ".repeat(label);
+        for line in folded {
+            writeln!(self.out, "{indent}{line}")?;
+        }
+        Ok(())
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
@@ -143,6 +187,10 @@ pub struct Policy {
     pub stdout: Theme,
     pub stderr: Theme,
     pub width: usize,
+    /// Rows the terminal has, for the one view that draws a block in place: a
+    /// block as tall as the terminal scrolls its own top away, and every frame
+    /// after it lands a row out.
+    pub rows: usize,
     /// Whether stderr is a terminal. Colour does not answer this: `--color
     /// never` at a terminal is still a terminal, and progress may still
     /// repaint in place.
@@ -150,6 +198,11 @@ pub struct Policy {
     /// The same question for stdout, which the live view repaints on. The two
     /// are asked separately because they are redirected separately.
     pub stdout_is_terminal: bool,
+    /// Whether stdout can hold a full-screen view: a terminal, and one that
+    /// answers the cursor moves a screen is drawn with. A `--ui` flag is
+    /// refused where this is false, because a page repainted at a terminal
+    /// that cannot address its cursor arrives as the escapes themselves.
+    pub stdout_is_screen: bool,
 }
 
 impl Policy {
@@ -170,8 +223,15 @@ impl Policy {
                 charset,
             ),
             width: color::width(env, terminal_width),
+            rows: terminal_size::terminal_size()
+                .map(|(_, rows)| usize::from(rows.0))
+                .filter(|rows| *rows > 0)
+                // A stream that is not a terminal has no height to respect,
+                // and `Screen` writes nothing to one anyway.
+                .unwrap_or(usize::MAX),
             stderr_is_terminal,
             stdout_is_terminal,
+            stdout_is_screen: stdout_is_terminal && color::addressable(env),
         }
     }
 
@@ -196,7 +256,7 @@ impl Policy {
     /// The live block, on stdout, repainted only at a terminal. A piped run
     /// gets the printed lines and no frames at all.
     pub fn stdout_screen(&self) -> Screen<io::Stdout> {
-        Screen::new(self.stdout(), self.stdout_is_terminal)
+        Screen::new(self.stdout(), self.stdout_is_terminal, self.rows)
     }
 }
 

@@ -8,8 +8,21 @@ members = [
   "crates/protocol",
   "crates/ui",
   "crates/engine",
+  "crates/exec",
   "crates/rpc",
+  "crates/sandbox",
   "crates/turn",
+  "crates/toolset",
+  "crates/host",
+  "crates/features",
+  "crates/fs",
+  "crates/mcp",
+  "crates/web",
+  "crates/hooks",
+  "crates/subagent",
+  "crates/query",
+  "crates/sdk",
+  "crates/acp",
 ]
 
 [workspace.package]
@@ -32,16 +45,39 @@ tracing = "0.1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Already in the tree under `reqwest`. Named as a workspace dependency because
+# `crates/web` compares origins and refuses credentials in a URL, and a
+# hand-rolled parser is wrong exactly where those two matter.
+url = "2"
 tempfile = "3"
 # Upstream pins some contracts with fast-check property suites; this is the
 # Rust equivalent, and never more than a dev-dependency.
 proptest = "1"
+# The request line and headers, parsed by the crate everybody uses for it
+# rather than by hand: a hand-rolled parser is where a carrier grows its
+# security bugs.
+httparse = "1"
+# The hook matcher compiles a configured pattern. Rust regexes are not
+# JavaScript regexes; `crates/hooks/src/matcher.rs` says where that shows.
+regex = "1"
 anstyle = "1"
 terminal_size = "0.4"
+# The second session-persistence backend. `bundled` vendors the amalgamation
+# rather than linking whatever the host happens to ship, so a build needs no
+# system library and every deployment reads the same SQLite.
+rusqlite = { version = "0.40", features = ["bundled"] }
 # A terminal draws a CJK character in two columns and a combining mark in
 # none, so every width this workspace measures is asked of this crate.
 unicode-width = "0.2"
-crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
+crossterm = { version = "0.29", default-features = false, features = [
+    "events",
+    "bracketed-paste",
+    "windows",
+] }
 # Already in the tree under `crossterm`; named here because `crates/ui` asks
 # it for the watch that gives the terminal back when the process is killed.
 signal-hook = "0.3"
+# `crates/exec` signals a process *group*, which the standard library will not
+# do. One `killpg` is why a grandchild cannot outlive the command that started
+# it; nothing else in the workspace calls libc directly.
+libc = "0.2"

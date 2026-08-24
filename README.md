@@ -54,12 +54,23 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | --- | --- | --- |
 | Turn flow | The complete documented sequence, `turn/start` through `turn/end`, driven end to end | Continuation after a stop veto |
 | Extension points | Eight live extension points in a turn, over the four dispatch modes upstream documents | Capability seams (`fs/*`, telemetry) |
-| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity | Compaction, session query |
-| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports, the usage and context projections |
-| Tools | One built-in `echo` tool through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order | Shell, subprocess, filesystem, MCP client; permissions, cancellation |
-| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home, re-reading it at run time, and resolving the engine's own settings out of it - which no subcommand wires yet | Profiles, bundles, patch overlays, a file watcher |
+| Session log | Append-only JSONL journal, fsynced per append, replay verifies `seq` contiguity; a session forks at a closed turn boundary into a child that continues the conversation it inherited; a SQLite store behind the same seam, chosen by `sessions.backend`, with a lossless migration either way; the journal read back as data - turn and step derived from the structural events, filters by turn, step, role, tool, time, outcome and text, paging by `seq`, and named aggregates for tool calls, a tool's failing turns and what a range of turns cost | Telemetry, full-text search and its cursors |
+| Context | A conversation that outgrows its window folds its older span into a summary recorded on the journal, so a replay derives the compacted history; over-long tool results shrink first, without a model | Manual compaction, per-model policy |
+| Projections | Named folds over the journal, driven as events commit and checkpointed: title, stats, token usage, context pressure, context breakdown | Telemetry, log export |
+| Secrets and spill | A credential store outside the settings document - the environment over an owner-only file - whose values reach no dump, log line or journal; oversized payloads spill to disk behind a bounded preview | Wiring spill into the tool pipeline |
+| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports |
+| Tools | `echo`, `shell`, the four persistent-shell tools and the six terminal tools through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order; a call a tool declares irreversible is decided before it runs, and a refused call never runs; `web_fetch` and `web_search`, and the tools any MCP server advertises, all dispatched by that same pipeline. Every tool the binary offers comes from one declared set of named sources - one line per crate - which the settings document selects by crate, so the tools page and the registry a turn dispatches from are the same list | Cancellation inside a step; starting declared MCP servers at boot |
+| Feature tools | The built-in tools a usable harness has, each over state kept only on the journal: a todo list, a standing goal with revisions, plan mode, an operator feedback channel, skills discovered from project and user roots, attachments admitted and content-addressed, and a workspace sketch; a surface reads all of it through one folded vocabulary (`SessionView`, `WorkspaceView`) that carries no bytes and no presentation; all of them offered by the shipped binary | Putting the views on the JSON-RPC boundary, an autonomous goal driver, a workspace picker |
+| Filesystem | A filesystem service with a local and a sandboxed backend behind one trait - read, write, edit, list, glob, stat, delete - each failing in a named class rather than an `io::Error` string; seven model-facing tools over it; the read-before-write policy that refuses to overwrite what a session has not read | Read windows over bytes, a search tool, the kernel sandbox backends |
+| Process execution | One command through a resolved shell backend (bash, or PowerShell where a host has it), argv without a shell re-split, an environment the caller listed, output bounded to its tail - with the whole of it kept beside the session's journal when the bound drops something, and the result saying where - and a timeout that kills the whole process group; persistent shells that keep `cd` and exported variables between tool calls and report a death rather than restarting under the caller; persistent *terminals* on a real pseudo-terminal, where a command settles when the shell announces its own prompt with that command's exit status, a `^C` reaches the command rather than the shell, a bounded scrollback pages back from the newest line, and long work is started with a short wait and collected later; one seam for a protocol peer this harness talks to over pipes, ended over its own process group so a server's helpers go with it; a credential typed at a terminal is withheld from the journal when the model marks it, and the tool descriptions say plainly that anything not marked is written down | `run_in_background` for one-shot commands, which needs a job store; a screen model for programs that draw with cursor movement |
+| Sandboxing | A deployment writes `sandbox.mode` (with `sandbox.workspace` and `sandbox.network`) in its settings document and every child the binary starts obeys it - commands, persistent shells, terminals and hooks - because the engine settles one policy value and the composition hands that value to each; enforced by Landlock on both sides: a spawned command confined between `fork` and `exec`, a persistent shell confined once for every command it will run, and the file service confined on a worker thread that restricts itself - so a path the fence allows and the policy does not is refused by the kernel; a denial told to the model as policy rather than as a bug in its command; a host that cannot enforce what was asked refusing at composition rather than pretending | A `--sandbox` flag beside the settings key, a Windows ACL backend, changing the mode inside a session, parallel file operations behind the boundary |
+| Permissions | A tool call gated on a decision, audited on the journal as one `approval/asked`/`approval/decided` pair; user questions with the same durable pair; presets bundling the filesystem mode and the approval policy under one name | Serving the decision over the boundary (`approval.set`, `ui/approve`, `ui/ask`) |
+| Outside the machine | An MCP client over stdio - handshake, discovery, invocation, a shutdown that leaves no child behind, and a bounded reconnect supervisor; a fetch with redirect, size and content-type policy above one transport seam; a search seam with one provider and a deterministic mock. A server that dies, hangs or answers nonsense fails that tool call with a class, and the turn carries on | Streamable HTTP for MCP, attachments for image results, more search providers, HTML converted to markdown |
+| Agent presets | A preset names a model, a tool subset, a prompt shape and a persona, written inline in the settings document or as a preset directory, selected per session on `session.create`, recorded in the session header and inherited by a fork | Authoring presets, switching one on a running session, a `--preset` flag on `tetanus run` |
+| Config | Layered resolution with provenance (`default < file < env < flag`), reading a `settings.yaml` or `.json` document under the harness home - or the one `--settings <path>` names - re-reading it at run time, and resolving the engine's own settings out of it, which every subcommand that builds an engine boots from - the provider, model, step budget and journal root a turn runs on included - with the flags it was given over it on the `flag` layer | Profiles, bundles, patch overlays, a file watcher |
 | Effects | RAII handles and scopes: unwinding is newest-first, nests, and finishes past a panicking undo; a failed plugin mount rolls boot back | Live subtree remount |
-| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `web/chat`, a browser panel that holds a conversation over that WebSocket carrier | The fire UI |
+| Surfaces | `tetanus` CLI, headless, with `--ui` for a scrollable full-screen view of a turn - live, replayed, or picked off the session list; `tetanus chat` for a conversation of many turns on one journal, and `tetanus chat --ui` for that conversation held on a screen of its own - transcript above, the line you type on pinned to the foot of it; `tetanus serve`: the published contract served over the stdio and WebSocket carriers; `tetanus serve --frontend`, the browser panel served by the harness's own HTTP host, with the protocol on the same address | A history to walk with the up and down keys; a turn stopped without leaving the chat |
+| Contract surfaces | An ACP bridge riding the JSON-RPC carrier - initialize, `session/new`, `session/prompt`, one-way cancel, the turn as `session/update` - and an ACP client that spawns one and drives a whole turn over pipes, answering its permission questions; an in-process SDK that drives the same turn with no CLI and no socket; the request surface as an enumerable catalog that validates named arguments before dispatch | Image and audio prompts, ACP session load/fork/resume, an engine-side approval seam for the permission channel |
 | Plugins | Compile-time composition through a typed registry | WASM component host for out-of-tree plugins |
 
 Phase boundaries are set in [docs/PLAN.md](docs/PLAN.md); what Phase ① deliberately left as a seam is
@@ -121,8 +132,8 @@ but never persisted.
 The session journal is append-only JSONL.
 Its first line is a `session/start` header naming the id, the provider, the model and the step
 budget, so a reader can open a journal nobody told them about.
-It lands at `sessions/turn.jsonl` under the current directory unless `--session <path>` says
-otherwise. Read it back with:
+It lands at `turn.jsonl` under `sessions.root` - `sessions` under the current directory unless the
+settings document says otherwise - and `--session <path>` overrides both. Read it back with:
 
 ```bash
 cargo run --bin tetanus -- replay sessions/turn.jsonl
@@ -143,10 +154,10 @@ Without the key the command says so and stops before any network call.
 | `tetanus run` | Run one turn and print it as a conversation, or watch it full-screen with `--ui` |
 | `tetanus chat` | Hold a conversation: one journal, a turn per message you type, resumed by `--session` |
 | `tetanus sessions` | List the journals in a directory, newest first, or pick one to read with `--ui` |
-| `tetanus replay <path>` | Read a session journal back: at once, `--live`, or full-screen with `--ui` |
+| `tetanus replay <journal>` | Read a session journal back - by path, or by the id `tetanus sessions` printed: at once, `--live`, or full-screen with `--ui` |
 | `tetanus models` | List providers, the models they advertise, and what is reachable |
 | `tetanus tools` | List the tools an agent can call, and the arguments each takes |
-| `tetanus config` | Show resolved config with its provenance layer |
+| `tetanus config` | Show resolved config with its provenance layer, or `--defaults` for what this build compiles in |
 | `tetanus serve` | Host the JSON-RPC protocol on stdio, or on a socket with `--listen`, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
@@ -154,6 +165,10 @@ Without the key the command says so and stops before any network call.
 `--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
 `--trace` (the raw sequence) with `--verbose` (each durable payload), `--ui` (a screen of its own),
 and `--json`.
+`--settings <path>` and `--color <when>` are on every subcommand, before it or after it.
+The first names the settings document to read in place of the one under the harness home (`$TETANUS_HOME`, or `~/.tetanus`), and a path with nothing there is an error rather than a quiet fall back to the compiled defaults.
+Which document a run read is on the `tetanus config` heading, written out in full and marked when nothing is there yet, so "where do I change it" is answered by the page rather than by the flags you typed; `--defaults` names none, because it read none.
+`tetanus sessions` heads its list the same way, with the directory it listed, whether `--dir`, the settings document or the compiled default chose it.
 `--json` is on every subcommand that makes a call, and prints that call's result type verbatim,
 one JSON object per line - the shape is fixed by [docs/interface-contract.md](docs/interface-contract.md) §4.7.
 Run `tetanus --help` or `tetanus run --help` for the authoritative list.
@@ -178,7 +193,10 @@ Closing it before the turn finishes stops the turn, and a stopped turn has no re
 It needs a terminal - a piped `--ui` is refused with the same exit status as any other bad argument, before a journal is opened - and it cannot be combined with `--trace` or `--json`.
 When the view comes down, the answer and the journal path are written on the ordinary screen, so what a run leaves in the scrollback is the same either way.
 
-`tetanus replay <path> --ui` reads a finished journal the same way and with the same keys, so a long turn is paged through instead of poured into the scrollback, which it leaves untouched.
+`tetanus replay` takes either a path or the id `tetanus sessions` listed the journal under, so an id read off that page can be typed straight back in.
+A path that is there is opened as it was given; an id is looked for under `sessions.root`, and `--dir <path>` says where instead.
+
+`tetanus replay <journal> --ui` reads a finished journal the same way and with the same keys, so a long turn is paged through instead of poured into the scrollback, which it leaves untouched.
 Nothing is arriving in that view, so the foot of the screen says `end` rather than `live`, and a terminal made narrower rewraps the journal rather than cutting it.
 Rewrapping counts the columns a terminal draws, not characters, so a prompt in a script drawn two columns to the character folds inside the frame like any other.
 `q` or Esc leaves it having read the journal, and exits 0; Ctrl-C is an interruption, and exits 130 like any other.
@@ -200,17 +218,28 @@ An escape sequence - a screen clear, a window title, a bell, a colour of its own
 The list pages are the same: a provider and the models it advertises, a tool and its arguments, a config key and the layer that settled it, and the id of a session, which `tetanus sessions` reads out of the journal's header rather than off the file it found.
 A name a terminal draws two columns to the character takes those columns in the list it is in, so every row beside it stays lined up.
 A failure report is the same, and it is one line however the failure was written: the sentence is composed out of what the engine sent - a path, a session id, a tool, a method, a provider - and a second line under `error:` would read as a second report.
+A failure about a file names the file and reads as one lower-case clause - `held: is a directory`, whether the journal was opened to write it or to read it - because the operating system's own capital and its `(os error 21)` tail say nothing the words in front of them have not said, and the number a script reads is the exit status.
 So is what a view is headed with and what a run says it is doing: the path you typed, the id read out of a journal's header, and the model a flag or a config file named are drawn as their words, on the one row each is given.
 This holds in every view and under every `--color` setting.
 `--raw` prints the payload as the JSON it is, where an escape is six characters no terminal acts on.
 
 `tetanus chat` holds a conversation instead of running one turn: type a message, watch the turn arrive, and the prompt comes back for the next one.
 Every exchange is appended to one journal, and each turn is asked with the ones before it as history, so the conversation remembers for as long as the journal does.
-That journal is `sessions/chat.jsonl` unless `-s/--session <path>` says otherwise, and a path that already holds a conversation is resumed rather than replaced: the opening page says how many turns it is carrying, and the next turn is numbered after them.
-It takes the same `--adapter`, `--model`, `--max-steps` and `--think` flags as `run`, and like `run` it defaults to DeepSeek, so a chat with no `DEEPSEEK_API_KEY` says so and stops before a journal is opened.
+That journal is `chat.jsonl` under `sessions.root`, unless `-s/--session <path>` says otherwise, and a path that already holds a conversation is resumed rather than replaced: the opening page says how many turns it is carrying, and the next turn is numbered after them.
+It takes the same `--adapter`, `--model`, `--max-steps` and `--think` flags as `run`, and where `run` is the mock adapter when nothing says otherwise a chat is DeepSeek, so a chat with no `DEEPSEEK_API_KEY` says so and stops before a journal is opened.
+A settings document that sets `provider.default` decides for both, since a flag that was not passed is not an opinion and a document is.
 A line that opens with a slash is a command: `/help` lists them, `/exit` leaves, and `//text` asks the model `/text` rather than running it as one.
 Ctrl-D leaves the way `/exit` does and exits 0, Ctrl-C stops what is running and exits 130, and either way every turn already written stays on the journal.
 Standard input can be a pipe as well as a keyboard - `tetanus chat -a mock < questions.txt` asks each line in turn - and a piped chat prints the transcript without the prompt marker.
+
+`tetanus chat --ui` holds the same conversation on a screen of its own.
+The transcript is above and scrollable - the arrows a line at a time, the page keys a screenful, Escape back to the foot - the turn arrives in the block under it, and the row you type on is pinned to the foot of the terminal wherever you have scrolled to.
+Every printable key belongs to that row, `?` and `q` included, so the commands are still the chat's own: `/help`, `/exit`, `//text` to ask a question that opens with a slash, `/find word` to look back through what was said - ctrl-n and ctrl-p walk the matches, Escape ends the search - `/keys`, which names every key the screen answers, the editing ones included, and `/think` and `/more`, which unfold what the model thought and print a tool's result whole - both toggles, over what is already on the page.
+The up and down keys walk the questions you have asked, keeping whatever you were half-way through writing; the page keys scroll the conversation, and Tab and Shift-Tab walk the turns themselves - a turn's opening line to the top of the screen, which is how you get back to something said thirty turns ago without scrolling through the twenty-nine in between.
+A pasted block is one question: the terminal is held in bracketed paste, so the newlines in it are text rather than forty presses of Enter, and the message keeps them.
+A line finished while a turn is still being answered waits on the row rather than being sent, because a session answering one prompt refuses a second.
+Ctrl-C and Ctrl-D mean what they mean in the ordinary chat, and exit with the same statuses, so a script wrapping either reads one answer.
+It needs a terminal to draw on: `tetanus chat --ui | cat` is a usage error rather than a chat with nowhere to put itself.
 
 `tetanus serve` is the one subcommand that prints no page.
 Its stdout belongs to the carrier, one JSON-RPC frame per line, so everything a person reads goes to stderr.
@@ -220,23 +249,36 @@ It takes `--dir <path>`, the directory the journals it writes land in.
 The banner then names the address that was bound rather than the one asked for, so `--listen 127.0.0.1:0` tells you which port the operating system chose.
 That server has no end of file to stop it, so Ctrl-C is the shutdown and it exits 0.
 
-[web/chat](web/chat/README.md) is a browser panel over that carrier: a page and a script, no build step, that holds the same conversation `tetanus chat` holds and draws each reply as it streams.
-`python3 web/chat/serve.py` starts a `tetanus serve` behind it and prints the address to open.
+[web/app](web/app/README.md) is a browser panel over that carrier: a page and a script, no build step, that holds the same conversation `tetanus chat` holds and draws each reply as it streams.
+`tetanus serve --listen <addr> --frontend web/app` serves it from the harness's own HTTP host, puts the protocol on the same address, and hands the page that address through the boot manifest.
 
 ## Workspace layout
 
-A Cargo workspace of nine crates.
+A Cargo workspace of twenty-two crates.
 
 | Crate | Directory | Responsibility |
 | --- | --- | --- |
-| `tetanus-core` | [crates/core](crates/core) | Plugin registry, typed service registry, four-mode event bus, RAII effect handles |
-| `tetanus-session` | [crates/session](crates/session) | Durable `SessionEvent` vocabulary, append-only JSONL journal, replay |
-| `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, boot composition, tracer |
-| `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, and the settings document it reads |
+| `tetanus-core` | [crates/core](crates/core) | Plugin registry, typed service registry, four-mode event bus, RAII effect handles, the durable key-value store and the spill store |
+| `tetanus-session` | [crates/session](crates/session) | Durable `SessionEvent` vocabulary, the JSONL and SQLite journals behind one seam, replay, and the projection registry with the units that need no pricing |
+| `tetanus-turn` | [crates/turn](crates/turn) | Turn engine, live extension points, LLM adapter seam, tool registry, the decision seams a call and a question are gated on, boot composition, tracer, compaction and the priced projections |
+| `tetanus-toolset` | [crates/toolset](crates/toolset) | The one declared set of tool sources this build offers, and the settings key that selects them |
+| `tetanus-fs` | [crates/fs](crates/fs) | The filesystem service, its local and sandboxed backends, the read-before-write policy, the model-facing file tools, and the permission presets over them |
+| `tetanus-config` | [crates/config](crates/config) | Layered config resolution with provenance, the settings document it reads, and the credential store that deliberately is not in it |
 | `tetanus-protocol` | [crates/protocol](crates/protocol) | The engine/presentation contract: wire types, JSON-RPC envelope, and the `Engine` facade |
 | `tetanus-engine` | [crates/engine](crates/engine) | The `Engine` implementation |
+| `tetanus-exec` | [crates/exec](crates/exec) | Process execution: the subprocess seam and its process-group termination, the piped seam a protocol peer is started through, the executor a configured hook runs through, the shell backends, persistent shells and terminals, and the model-facing shell and terminal tools |
+| `tetanus-sandbox` | [crates/sandbox](crates/sandbox) | The sandbox policy every surface applies, and the Landlock backend that enforces it |
 | `tetanus-rpc` | [crates/rpc](crates/rpc) | The JSON-RPC codec and the stdio and WebSocket carriers |
+| `tetanus-host` | [crates/host](crates/host) | The HTTP route carrier the web GUI rides on: named routes, one fallback seat, upgrade seats, and the directory picker behind them |
+| `tetanus-mcp` | [crates/mcp](crates/mcp) | The MCP client: a server on stdio, its tools in the registry, and the supervisor that keeps it up |
+| `tetanus-web` | [crates/web](crates/web) | `web_fetch` and `web_search`, the transport seam under them, and one search provider |
+| `tetanus-hooks` | [crates/hooks](crates/hooks) | The out-of-process hooks protocol: which hooks an event selects, what is written to them, and how several answers combine |
+| `tetanus-subagent` | [crates/subagent](crates/subagent) | Delegation: an agent that starts another, and the budget that stops the recursion |
 | `tetanus-ui` | [crates/ui](crates/ui) | Terminal presentation: colour policy, theme, width, redrawable screen, the whole-screen frame and the scrollable page on it, held terminal and loop a full-screen view runs in |
+| `tetanus-features` | [crates/features](crates/features) | The built-in feature tools: skill, todo, goal, plan, feedback, attachment and workspace |
+| `tetanus-query` | [crates/query](crates/query) | A session journal read as data: derived turn and step, filters, paging, and the named aggregates |
+| `tetanus-sdk` | [crates/sdk](crates/sdk) | The in-process client and owned-run API, and the request surface as an enumerable catalog |
+| `tetanus-acp` | [crates/acp](crates/acp) | The Agent Client Protocol, both halves - the bridge riding the JSON-RPC carrier, and the client that drives one |
 | `tetanus-hardness` | [crates/cli](crates/cli) | The `tetanus` binary |
 
 The binary is `tetanus`; the publishable umbrella crate is `tetanus-hardness`, because the bare

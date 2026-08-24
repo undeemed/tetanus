@@ -73,6 +73,14 @@ async fn a_retryable_failure_is_sent_again_and_recorded() {
     assert_eq!(data["provider"], PROVIDER);
     assert_eq!(data["code"], "SERVER");
     assert_eq!(data["message"], "PROVIDER: 503 upstream is down");
+    // `get`, not indexing: a missing key indexes to `Null` too, so indexing
+    // would pass on a record that dropped the field altogether - which is the
+    // one thing this assertion exists to catch.
+    assert_eq!(
+        data.get("request_id"),
+        Some(&serde_json::Value::Null),
+        "this provider named no id, and the record says so rather than omitting the key"
+    );
     assert_eq!(data["retry"], 1, "the attempt about to be made");
     assert_eq!(data["max_retries"], 2);
     assert_eq!(data["delay_ms"], 2, "the first local wait, jitter fixed");
@@ -316,6 +324,16 @@ async fn an_interrupt_before_the_policy_records_nothing() {
 /// A provider that fails its first `failures` calls and then works, counting
 /// every call it was asked to make.
 fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectHandle) {
+    flaky_named(bus, failures, status, None)
+}
+
+/// The same, for a provider that names its refused requests.
+fn flaky_named(
+    bus: &EventBus,
+    failures: u32,
+    status: u16,
+    request_id: Option<&'static str>,
+) -> (Arc<AtomicU32>, EffectHandle) {
     let attempts = Arc::new(AtomicU32::new(0));
     let counted = Arc::clone(&attempts);
     let handle = bus.on_waterfall::<LlmStream, _>(move |ev, next| {
@@ -326,12 +344,59 @@ fn flaky(bus: &EventBus, failures: u32, status: u16) -> (Arc<AtomicU32>, EffectH
                     status,
                     message: "upstream is down".into(),
                     retry_after_ms: None,
+                    request_id: request_id.map(str::to_string),
                 });
             }
             next.run(ev).await
         })
     });
     (attempts, handle)
+}
+
+/// TC-PORT-REQID-5: a retried refusal leaves the provider's id on the journal.
+///
+/// Upstream: `packages/llm/llm-retry/tests/invariant.spec.ts`, which requires
+/// `failure.requestId` to be a non-empty string when a retry record carries
+/// one, and its session-persistence coordinator, which accepts the same field
+/// on a persisted failure.
+///
+/// This is the case where nobody is watching. A refusal that ends the turn is
+/// reported to the caller with its id (`crates/engine/tests/faults.rs`,
+/// TC-REQID-6); a refusal the policy recovered from is reported to nobody at
+/// all, and the journal is then the only place that can answer "which of my
+/// requests did the provider refuse, and under what id" - the question a user
+/// takes to a provider's support after a slow session that did finish.
+///
+/// Input: a route whose first call fails with 503 naming `req-retried`, under
+/// a policy that retries `SERVER`.
+/// Expected: the turn completes, and the one `llm/retry` record read back off
+/// the file carries that id beside the code and message of the attempt it
+/// describes. Read off the file rather than out of memory, because a resumed
+/// session has only the file.
+#[tokio::test]
+async fn a_retried_refusal_records_the_id_the_provider_named() {
+    let h = Harness::new("retryx-request-id").await;
+    let (attempts, _flaky) = flaky_named(h.bus(), 1, 503, Some("req-retried"));
+    let _executor = install(
+        h.bus(),
+        Arc::clone(h.engine.log()),
+        PROVIDER,
+        normal(2),
+        fixed_jitter(),
+    );
+
+    let outcome = h.engine.run_turn("retry me").await.expect("the turn ran");
+
+    assert_eq!(outcome.content, "You said: retry me");
+    assert_eq!(attempts.load(Ordering::Relaxed), 3, "the failure recovered");
+
+    let scheduled = records(&h, RETRY_EVENT);
+    assert_eq!(scheduled.len(), 1, "one failure, one scheduled retry");
+    assert_eq!(
+        scheduled[0].data["request_id"], "req-retried",
+        "the id of the attempt that failed is not on the record it describes"
+    );
+    assert_eq!(scheduled[0].data["code"], "SERVER", "beside its code");
 }
 
 /// Waits short enough that a case does not measure the clock: two milliseconds

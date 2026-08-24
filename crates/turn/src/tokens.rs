@@ -43,9 +43,11 @@ pub struct SurfaceNode {
 
 /// The priced surface, folded from the log in order.
 ///
-/// Append-only, because tetanus's surface is: nothing rewrites an event that
-/// the model has already seen. Compaction, which replaces a range of nodes with
-/// one summary, is the phase ② case this type does not carry.
+/// A compaction replaces a range of nodes with one summary, and
+/// [`TokenSurface::of`] reads the log through
+/// [`crate::compaction::surface`], so the priced surface is the surface the
+/// model actually sees. [`TokenSurface::fold`] is the append-only half, for a
+/// caller placing one event at a time on a surface it is building itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenSurface {
     nodes: Vec<SurfaceNode>,
@@ -53,11 +55,11 @@ pub struct TokenSurface {
 }
 
 impl TokenSurface {
-    /// The priced surface of a whole log, in log order.
+    /// The priced surface of a whole log, in the order a request carries it.
     pub fn of(events: &[SessionEvent]) -> Self {
         let mut surface = Self::default();
-        for event in events {
-            surface.fold(event);
+        for index in crate::compaction::surface(events) {
+            surface.fold(&events[index]);
         }
         surface
     }
@@ -139,6 +141,17 @@ pub fn estimate_tools(tools: &[ToolSchema]) -> u64 {
 /// system prompt included, because tetanus carries that as a message too.
 pub fn estimate_request(request: &ModelRequest) -> u64 {
     estimate_tools(&request.tools) + request.messages.iter().map(estimate_message).sum::<u64>()
+}
+
+/// One free-standing piece of text - a system prompt, say - as a message
+/// carrying nothing else. Published because the request envelope is priced
+/// outside a `Message`, and pricing it any other way would give a figure that
+/// did not add up with the rest.
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    if text.is_empty() {
+        return 0;
+    }
+    ROLE_OVERHEAD + estimate_text(text)
 }
 
 /// One text block: its content at the fixed density, plus block framing.

@@ -25,10 +25,39 @@ pub mod method {
     pub const AGENT_PROMPT: &str = "agent.prompt";
     pub const AGENT_STATUS: &str = "agent.status";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
+    pub const AGENT_STEER: &str = "agent.steer";
     pub const CATALOG_TOOLS: &str = "catalog.tools";
     pub const CATALOG_MODELS: &str = "catalog.models";
     pub const CONFIG_DUMP: &str = "config.dump";
     pub const APPROVAL_SET: &str = "approval.set";
+
+    /// Every client-to-server method this contract defines, served or
+    /// reserved.
+    ///
+    /// The list exists so completeness can be checked by a machine rather than
+    /// remembered by a person. A routing arm is written by hand, so the one
+    /// that gets forgotten is the one no case names - and a case that names
+    /// the methods one by one has the same hole one level up. A conformance
+    /// case iterates this instead, so a method wired nowhere fails at once.
+    ///
+    /// Adding a constant above and not adding it here is the single mistake
+    /// this cannot catch, which is why the two sit together.
+    pub const ALL: &[&str] = &[
+        HELLO,
+        SESSION_CREATE,
+        SESSION_LIST,
+        SESSION_EVENTS,
+        SESSION_FORK,
+        SESSION_SUBSCRIBE,
+        SESSION_UNSUBSCRIBE,
+        AGENT_PROMPT,
+        AGENT_STATUS,
+        AGENT_INTERRUPT,
+        CATALOG_TOOLS,
+        CATALOG_MODELS,
+        CONFIG_DUMP,
+        APPROVAL_SET,
+    ];
 }
 
 /// Server-to-client frames. The two notifications are one-way; `UI_ASK` and
@@ -40,12 +69,37 @@ pub mod push {
     pub const UI_APPROVE: &str = "ui/approve";
 }
 
+/// The largest page `session.events` will return, however large a `limit` asks
+/// for.
+///
+/// Contract section 4.4.5. A surface reads this rather than spelling the
+/// number, for the reason section 5 gives `PROTOCOL_VERSION` and one more: a
+/// literal in a consuming lane is a claim about a server it may not be talking
+/// to, and it fails *silently*, because a `limit` above the maximum is clamped
+/// rather than refused.
+///
+/// A caller paging with `next_seq` and `eof` never needs it. It is here for
+/// the one that wants a single round trip.
+pub const MAX_PAGE_SIZE: u32 = 500;
+/// The largest frame any carrier will send or accept, in bytes.
+///
+/// Contract section 4.1. One bound for every carrier, because without one they
+/// disagree under the same abuse: a WebSocket library refuses an over-long
+/// message by default, while a line reader given bytes and no newline grows
+/// its buffer until the process dies.
+///
+/// Sixteen mebibytes is far above any legitimate frame - a page of session
+/// events, a tool result, a completion - and far below what it costs to
+/// refuse. The engine keeps it from ever binding by not *writing* a durable
+/// event larger than this, so a page of one event always fits.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Capability strings a server advertises in [`HelloResult`]. A surface checks
 /// one before it uses an optional call.
 pub mod capability {
     pub const SESSION_FORK: &str = "session.fork";
     pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
     pub const AGENT_INTERRUPT: &str = "agent.interrupt";
+    pub const AGENT_STEER: &str = "agent.steer";
     pub const UI_ASK: &str = "ui.ask";
     pub const UI_APPROVE: &str = "ui.approve";
     pub const APPROVAL_SET: &str = "approval.set";
@@ -91,6 +145,12 @@ pub struct SessionCreateParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u32>,
+    /// The named agent preset this session is composed from: a model, a tool
+    /// subset, a prompt shape and a persona, resolved server-side. Omit for
+    /// the server's default preset, if it has one. An explicit `provider`,
+    /// `model` or `max_steps` above wins over what the preset says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// Params for every call that names one session and nothing else.
@@ -199,6 +259,28 @@ pub struct AgentPromptParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptResult {
     pub summary: TurnSummary,
+}
+
+/// Params of `agent.steer`: a message for the turn already running.
+///
+/// Contract section 4.4.10. Not `agent.prompt`: this joins a turn rather than
+/// starting one, and is refused when there is none to join.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSteerParams {
+    pub session_id: String,
+    pub content: String,
+}
+
+/// Where a steered message landed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSteerResult {
+    /// The turn that took it.
+    pub turn: u64,
+    /// The step that read it, so a surface can show the message landing where
+    /// it landed rather than where it was typed. Absent while it is still
+    /// queued at the moment the call answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_at_step: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,25 +409,7 @@ pub trait Engine: Send + Sync {
         &self,
         params: SessionEventsParams,
     ) -> Result<SessionEventsResult, RpcError>;
-    /// Contract section 4.2: reserved.
-    ///
-    /// The default body is what `Reserved` states in Rust. A build that does
-    /// not serve the call answers `NotImplemented` instead of failing to
-    /// compile, which is exactly the promise the status makes to a surface
-    /// building against a frozen shape. The slice that serves the call deletes
-    /// this body, and section 7.4's compile error for every implementor comes
-    /// back with it.
-    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
-        let _ = params;
-        Err(RpcError::new(
-            ErrorCode::NotImplemented,
-            format!(
-                "`{}` is reserved, and this build does not serve it",
-                method::SESSION_FORK
-            ),
-        )
-        .with_data(serde_json::json!({ "method": method::SESSION_FORK })))
-    }
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError>;
     /// The one call whose trait form takes an argument the wire does not
     /// carry: where the carrier wants its pushes delivered.
     async fn session_subscribe(
@@ -357,6 +421,19 @@ pub trait Engine: Send + Sync {
     async fn agent_prompt(&self, params: AgentPromptParams) -> Result<AgentPromptResult, RpcError>;
     async fn agent_status(&self, params: SessionRef) -> Result<AgentStatusResult, RpcError>;
     async fn agent_interrupt(&self, params: SessionRef) -> Result<Ack, RpcError>;
+    /// Contract section 4.2: reserved. See [`Engine::session_fork`] for what a
+    /// default body means here.
+    async fn agent_steer(&self, params: AgentSteerParams) -> Result<AgentSteerResult, RpcError> {
+        let _ = params;
+        Err(RpcError::new(
+            ErrorCode::NotImplemented,
+            format!(
+                "`{}` is reserved, and this build does not serve it",
+                method::AGENT_STEER
+            ),
+        )
+        .with_data(serde_json::json!({ "method": method::AGENT_STEER })))
+    }
     async fn catalog_tools(&self) -> Result<ToolCatalogResult, RpcError>;
     async fn catalog_models(&self) -> Result<ModelCatalogResult, RpcError>;
     async fn config_dump(&self) -> Result<ConfigDumpResult, RpcError>;

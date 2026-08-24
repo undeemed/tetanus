@@ -1,0 +1,194 @@
+// How a tool call and its result are drawn.
+//
+// Upstream's `ui-tool` is 26 components: one shared frame and a view per tool,
+// so a shell command looks like a terminal, a file read looks like a file, and
+// a search looks like results. The frame is the part that has to exist first,
+// for the same reason the primitives did - every per-tool view sits on it, and
+// adding it later means rewriting all of them.
+//
+// # What is here, and what is deliberately not
+//
+// `views` is a table keyed by tool name; a tool with no entry gets the generic
+// frame, which is honest and complete rather than a placeholder: name,
+// arguments as a tree, the result, and whether it worked.
+//
+// The seam has now been used as intended three times. `echo` is this file's
+// own; the seven filesystem tools are one import from `tool-files.js` and the
+// five shell tools one from `tool-shell.js`, with no change anywhere else,
+// which is what the table was for. The MCP and web tools follow the same way
+// as their lanes land.
+//
+// # The fold line carries a summary, because a name alone is not one
+//
+// A transcript of a dozen calls all labelled `read` tells a reader nothing
+// about which file, and opening twelve folds to find out is the cost. Upstream
+// puts a per-tool summary on its `ToolRow` for the same reason. A view supplies
+// it from the arguments; a tool without a view still shows its name alone,
+// because a summary this page invented from arguments it does not understand
+// would be a guess printed as a fact.
+//
+// # Why the generic frame is not a fallback to be embarrassed about
+//
+// A tool this page has never heard of is the ordinary case, not the exception:
+// MCP servers advertise their own tools, so the set is open by construction.
+// A surface that rendered only the tools it knew would show blanks for exactly
+// the tools a deployment added on purpose.
+
+import { disclosure, jsonTree, pill } from "./primitives.js";
+import { fileViews } from "./tool-files.js";
+import { shellViews } from "./tool-shell.js";
+import { webViews } from "./tool-web.js";
+
+/**
+ * Views by tool name. Empty of everything but the tool this build has, and
+ * that is the point: an entry here is a promise that the shape it reads is a
+ * shape this tree can produce.
+ */
+export const views = {
+  /**
+   * Where the session is working: the project root, how it was identified,
+   * the instruction files the project keeps, and what is at the top level.
+   *
+   * Registered and inert. The tool is on `fm/tetanus-p2-features` and answers
+   * **rendered text** rather than a structure - `Workspace::render()` - so the
+   * view that claims it will be a reader of that text, and writing it against
+   * a format on an unlanded branch would be writing against a format still
+   * free to change. Until then the generic frame shows exactly what the tool
+   * said, which for a text-answering tool is most of what a view would do
+   * anyway.
+   */
+  workspace_info: null,
+
+  /**
+   * `echo` returns what it was given. Its result is the text, so it is drawn
+   * as text rather than as a one-key tree that a reader has to open to find a
+   * sentence in.
+   */
+  echo: {
+    summary: (args) => (typeof args?.text === "string" ? args.text : null),
+    call: (args) => text(typeof args?.text === "string" ? args.text : JSON.stringify(args)),
+    result: (content) => text(content),
+  },
+
+  // The two families that have landed, from `crates/fs` and `crates/exec`.
+  // Spread rather than listed, so adding a tool to one of them is a change to
+  // one file and not to two.
+  ...fileViews,
+  ...shellViews,
+  ...webViews,
+};
+
+/**
+ * A tool call, drawn by its own view when it has one.
+ *
+ * A view's `call` may answer `null` for arguments it does not recognise - a
+ * `write` with no `content` in it - and that falls back to the tree rather
+ * than to an empty fold. A view is a better rendering of a shape it knows, not
+ * a promise to render every shape.
+ */
+export function toolCall(name, args) {
+  const view = views[name];
+  const root = frame("call", name, said(view, args));
+  root.body.append(view?.call?.(args) ?? jsonTree(args ?? {}));
+  return root;
+}
+
+/**
+ * The summary beside a tool's name, or nothing.
+ *
+ * Bounded, and bounded here rather than in each view, so no view can put a
+ * model-written argument of any length onto the fold and push the rest of the
+ * row off the screen. A summary is a glance; the body is the detail.
+ */
+function said(view, args) {
+  let summary = null;
+  try {
+    summary = view?.summary?.(args);
+  } catch {
+    // A view that threw on arguments it did not expect loses its summary and
+    // nothing else. The call itself is still drawn, which is the part the
+    // transcript cannot do without.
+    summary = null;
+  }
+  if (typeof summary !== "string") return null;
+  const oneLine = summary.replace(/\s+/g, " ").trim();
+  if (!oneLine) return null;
+  return oneLine.length > SUMMARY_MAX ? `${oneLine.slice(0, SUMMARY_MAX - 1)}\u2026` : oneLine;
+}
+
+/** How much of a summary fits on a fold before it stops being a glance. */
+const SUMMARY_MAX = 90;
+
+/**
+ * A tool result, drawn by the same view, and told apart by whether it worked.
+ *
+ * `ok` is the tool's own answer and not this page's guess. A tool that failed
+ * says so in the protocol, and a surface that inferred failure from an empty
+ * result would call a successful `list_dir` on an empty directory a failure.
+ */
+export function toolResult(name, content, ok) {
+  const view = views[name];
+  const root = frame(ok ? "result" : "failed", name, null);
+  // A view draws a failure only if it said it could. The two are separate
+  // because they are separate formats: `read`'s failure is `FS_NOT_FOUND: ...`
+  // with no numbered lines in it to find, so `read` declares no `failure` and
+  // gets the tool's own words. `shell`'s failure is the case its view exists
+  // for - a non-zero exit is exactly when the code and the stderr matter - so
+  // it declares one.
+  const drawn = ok ? view?.result?.(content) : view?.failure?.(content);
+  root.body.append(drawn ?? text(content));
+  if (!ok) root.head.append(pill("failed", "bad"));
+  return root;
+}
+
+/**
+ * The shared frame: a folded row with the tool's name on it.
+ *
+ * Folded, because a transcript is read for the conversation and opened for the
+ * detail. Upstream folds the same way, and the reason shows the moment a tool
+ * returns a file: an unfolded result pushes the reply that follows it off the
+ * screen.
+ */
+function frame(kind, name, summary) {
+  const called = bridged(name);
+  const root = disclosure(called.said, { open: false, tone: kind === "failed" ? "bad" : undefined });
+  root.classList.add(`tool-${kind}`);
+  // The full name stays reachable: it is the identity the model called and the
+  // one a bug report needs, and only the spelling on the fold is this page's.
+  if (called.said !== name) root.head.title = name;
+  if (summary) {
+    const aside = document.createElement("span");
+    aside.className = "tool-said";
+    aside.textContent = summary;
+    root.head.append(aside);
+  }
+  return root;
+}
+
+/**
+ * How a tool's name is spelled on the fold.
+ *
+ * A tool bridged from an MCP server is called `mcp__<server>__<tool>`, and the
+ * prefix exists so "a reader of a catalogue can tell at a glance which tools
+ * are not this harness's own" - which is worth saying once, at the top, rather
+ * than being read out of a mangled identifier on every row. So it is drawn as
+ * `<server> · <tool>`.
+ *
+ * Splitting on `__` is safe rather than convenient: `crates/mcp` hashes a
+ * *server* whose own name contains the separator, precisely so this join has
+ * exactly one reading. A tool name that contains it keeps it, which is why the
+ * tail is rejoined instead of taking the third field.
+ */
+function bridged(name) {
+  const parts = String(name ?? "").split("__");
+  if (parts.length < 3 || parts[0] !== "mcp" || parts[1] === "") return { said: name };
+  return { said: `${parts[1]} \u00b7 ${parts.slice(2).join("__")}` };
+}
+
+/** A block of text from a tool, drawn as text and never as markup. */
+function text(said) {
+  const node = document.createElement("pre");
+  node.className = "tool-text";
+  node.textContent = said ?? "";
+  return node;
+}

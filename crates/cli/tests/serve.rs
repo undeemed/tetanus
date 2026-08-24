@@ -35,6 +35,10 @@ fn serve(dir: &Path, args: &[&str]) -> Child {
         .current_dir(dir)
         .arg("serve")
         .args(args)
+        // The harness home is the case's own directory: the server reads a
+        // settings document out of it, and a case that wants one writes it
+        // there itself.
+        .env("TETANUS_HOME", dir)
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("NO_COLOR")
         .env("TERM", "xterm-256color")
@@ -188,6 +192,32 @@ fn the_banner_names_the_directory_that_was_asked_for() {
     assert!(said.contains("sessions  elsewhere/journals"), "{said}");
 }
 
+/// TC-CLI-SERVE-6: no `--dir`, and a settings document that sets
+/// `sessions.root`.
+/// Expected: the banner names the document's directory. The default is what a
+/// document is for overriding, and a server that announced `sessions` while
+/// writing to `journals` would send every reader of the banner to the wrong
+/// directory.
+///
+/// Environmental needs: the harness home is the case's own directory, which
+/// `serve` sets, so the document below is the one the server reads.
+#[test]
+fn the_banner_names_the_directory_the_document_set() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "sessions:\n  root: journals\n",
+    )
+    .expect("the document is written");
+    let mut server = serve(dir.path(), &[]);
+    let reader = BufReader::new(server.stdout.take().expect("stdout is piped"));
+
+    let (_, out) = hang_up(server, reader);
+    let said = stderr(&out);
+
+    assert!(said.contains("sessions  journals"), "{said}");
+}
+
 /// A WebSocket server on a port the operating system chooses, read far enough
 /// to learn which one.
 ///
@@ -266,7 +296,7 @@ fn interrupt(server: Child, page: BufReader<ChildStderr>) -> (Output, String) {
     (out, rest)
 }
 
-/// TC-CLI-SERVE-6: the WebSocket carrier, end to end through the binary.
+/// TC-CLI-SERVE-8: the WebSocket carrier, end to end through the binary.
 /// Expected: the banner names the port that was actually bound, a peer
 /// dialling that port completes the handshake, and the interrupt the banner
 /// named ends the process with status 0 and a closing line. Contract §4.7

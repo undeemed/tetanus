@@ -164,14 +164,17 @@ pub type Open<'a> = dyn Fn(&str) -> Result<Vec<SessionEvent>, String> + 'a;
 /// An empty list never opens a screen: `tetanus sessions`' own line - that
 /// nothing has been written yet, and what writes one - is the whole message,
 /// and a blank page with a cursor on nothing is a worse way to say it.
+/// `root` is carried for that one line's sake, which names the directory the
+/// list came out of; the screen itself heads every session with its own id.
 pub fn pick<W: Write>(
     out: &mut Ui<W>,
     list: &SessionListResult,
+    root: &str,
     think: bool,
     open: &Open<'_>,
 ) -> io::Result<Stop> {
     if list.sessions.is_empty() {
-        sessions::render(out, list)?;
+        sessions::render(out, list, root)?;
         return Ok(Stop::Quit);
     }
     let theme = *out.theme();
@@ -602,6 +605,8 @@ impl View for Picker<'_> {
 /// so no case touches the filesystem, and no case opens a terminal.
 #[cfg(test)]
 mod tests {
+    use tetanus_ui::visible_width;
+
     use serde_json::json;
     use tetanus_protocol::types::AgentState;
     use tetanus_ui::{buffered, Charset};
@@ -654,6 +659,7 @@ mod tests {
         frame.paint(&mut ui).expect("paint");
         ui.contents()
             .trim_start_matches("\x1b[H")
+            .trim_end_matches("\x1b[?25l")
             .trim_end_matches("\x1b[J")
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").trim_end().to_string())
@@ -1141,6 +1147,46 @@ mod tests {
         // compared.
         let past = |row: &str| row.trim_start_matches(['\u{203a}', ' ']).to_string();
         assert_eq!(past(&plain[0]), past(&before[1]), "a plain list was marked");
+    }
+
+    /// TC-CLI-PICK-17: every size a terminal can be, with a filter open and
+    /// with the card up.
+    /// Expected: the frame is exactly the height asked for and no row overruns
+    /// the width. The picker composes its own frame rather than reusing
+    /// `Page`, so the arithmetic that keeps the window under the cursor is its
+    /// own too - and a terminal reports no columns at all while it is being
+    /// resized.
+    #[test]
+    fn the_picker_holds_at_every_size() {
+        for rows in 0..=8 {
+            for cols in 0..=24 {
+                for card in [false, true] {
+                    let list = list(3);
+                    let open = |_: &str| Ok(journal());
+                    let mut view = Picker::new(theme(), &list, false, &open, 80);
+                    if card {
+                        typed(&mut view, "ir");
+                        view.key(Key::Char('?'));
+                    }
+                    let frame = view.frame(cols, rows);
+                    assert_eq!(frame.rows(), rows, "{cols}x{rows} card={card}");
+
+                    let mut ui = buffered(theme(), cols);
+                    frame.paint(&mut ui).expect("paint");
+                    for row in ui
+                        .contents()
+                        .trim_start_matches("\x1b[H")
+                        .split("\r\n")
+                        .map(|row| row.split('\x1b').next().unwrap_or_default())
+                    {
+                        assert!(
+                            visible_width(row) <= cols,
+                            "`{row}` overruns {cols} at {cols}x{rows}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// TC-CLI-PICK-16: an id off a journal's header, in both places the

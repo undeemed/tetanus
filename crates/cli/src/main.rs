@@ -1,12 +1,14 @@
 //! The `tetanus` binary: run one documented turn headlessly.
 
+mod bridge;
 mod chat;
 mod prompt;
 mod render;
+mod settings;
+mod tools;
+mod web;
 
-use tetanus_protocol::methods::{
-    AgentPromptResult, ConfigDumpResult, ModelCatalogResult, SessionEventsResult, ToolCatalogResult,
-};
+use tetanus_protocol::methods::{AgentPromptResult, ModelCatalogResult, SessionEventsResult};
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as protocol;
 
@@ -16,9 +18,9 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::boot_with;
+use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
-use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 use tetanus_ui::{
     tame_line, when_killed, ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen,
@@ -27,6 +29,7 @@ use tetanus_ui::{
 
 use render::help;
 use render::live::Live;
+use tools::{catalog, registry, whose};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +53,13 @@ struct Cli {
         value_parser = clap::builder::PossibleValuesParser::new(ColorChoice::NAMES)
     )]
     color: String,
+    /// Settings document to read, instead of the one under the harness home
+    ///
+    /// The harness home is `$TETANUS_HOME` when that is set and `~/.tetanus`
+    /// when it is not, and the document in it is `settings.yaml`. That one is
+    /// allowed to be missing; a document named here is not.
+    #[arg(long, value_name = "PATH", global = true)]
+    settings: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -62,6 +72,14 @@ enum Cmd {
     Chat(chat::ChatArgs),
     /// Show resolved config with provenance
     Config {
+        /// Answer as though `--dir <PATH>` had been given to a subcommand
+        /// that takes it, so the layer a flag settles on can be read
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+        /// Print what this build compiles in, reading no document at all:
+        /// the answer a machine with nothing configured would give
+        #[arg(long, conflicts_with = "dir")]
+        defaults: bool,
         /// Print the call's result as JSON: one object, per contract §4.7
         #[arg(long)]
         json: bool,
@@ -80,9 +98,10 @@ enum Cmd {
     },
     /// List the session journals this build has written
     Sessions {
-        /// Directory the journals live in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals live in. Defaults to `sessions.root` in
+        /// the settings document, or `sessions` when nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Move a cursor down the list on a screen of its own, and read the
         /// journal under it with Enter
         #[arg(long, conflicts_with = "json")]
@@ -96,9 +115,14 @@ enum Cmd {
     },
     /// Replay a session journal
     Replay {
-        /// Path to a JSONL journal a previous run wrote
-        #[arg(value_name = "PATH", value_parser = named())]
+        /// Path to a JSONL journal a previous run wrote, or the id
+        /// `tetanus sessions` printed for it
+        #[arg(value_name = "JOURNAL", value_parser = named())]
         path: String,
+        /// Directory an id is looked up in. Defaults to `sessions.root` in
+        /// the settings document, or `sessions` when nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Print one line per journal line, including any the timeline refuses
         #[arg(long)]
         raw: bool,
@@ -119,14 +143,31 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["raw", "live"])]
         json: bool,
     },
-    /// Host the JSON-RPC protocol on stdin and stdout
+    /// Host the JSON-RPC protocol: on stdin and stdout, on a WebSocket, or
+    /// behind the browser panel
     Serve {
-        /// Directory the journals this server writes will land in
-        #[arg(long, value_name = "PATH", default_value = "sessions")]
-        dir: PathBuf,
+        /// Directory the journals this server writes land in. Defaults to
+        /// `sessions.root` in the settings document, or `sessions` when
+        /// nothing sets it.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
         /// Serve the WebSocket carrier on this address instead of on stdio
         #[arg(long, value_name = "ADDR", value_parser = named())]
         listen: Option<String>,
+        /// Also serve the browser panel from this directory, with the
+        /// protocol on the same address. Needs `--listen`.
+        #[arg(long, value_name = "PATH", requires = "listen")]
+        frontend: Option<PathBuf>,
+        /// Secret a reader's URL must carry to reach the protocol. Required
+        /// for a bind that is not loopback, per contract §4.1.2, unless
+        /// `--open-to-anyone` says the opposite out loud.
+        #[arg(long, value_name = "TOKEN", requires = "listen")]
+        token: Option<String>,
+        /// Serve the protocol to anybody who can reach this machine, with no
+        /// token. Only meaningful with a non-loopback `--listen`, and only
+        /// ever right for a demonstration on a network you trust.
+        #[arg(long, conflicts_with = "token", requires = "listen")]
+        open_to_anyone: bool,
     },
     /// Print version/build info
     Info,
@@ -140,23 +181,27 @@ struct RunArgs {
     /// What to ask the agent, named rather than positional
     #[arg(short, long, value_name = "TEXT", conflicts_with = "ask")]
     prompt: Option<String>,
-    /// Which model provider to resolve into the registry
-    #[arg(short, long, value_enum, default_value_t = AdapterChoice::Mock)]
-    adapter: AdapterChoice,
+    /// Which model provider to resolve into the registry. Defaults to
+    /// `provider.default` in the settings document, and to the mock adapter
+    /// when nothing sets it
+    #[arg(short, long, value_enum)]
+    adapter: Option<AdapterChoice>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID", value_parser = named())]
     model: Option<String>,
-    /// Where the session journal lands
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "sessions/turn.jsonl"
-    )]
-    session: PathBuf,
-    /// Step budget for the turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    max_steps: u32,
+    /// Where the session journal lands. Defaults to `turn.jsonl` under
+    /// `sessions.root` in the settings document
+    #[arg(short, long, value_name = "PATH")]
+    session: Option<PathBuf>,
+    /// Step budget for the turn. Defaults to `agent.max_steps` in the
+    /// settings document
+    #[arg(long, value_name = "N", value_parser = step_budget)]
+    max_steps: Option<u32>,
+    /// What every command, shell and terminal this run starts is confined to.
+    /// Defaults to `sandbox.mode` in the settings document, and to
+    /// `danger-full-access` when nothing sets it
+    #[arg(long, value_name = "MODE", value_parser = sandbox_mode)]
+    sandbox: Option<String>,
     /// Print the raw event sequence instead of the turn
     #[arg(long)]
     trace: bool,
@@ -254,14 +299,46 @@ impl Cli {
 /// carried the empty string somewhere further on: a run announced itself on a
 /// model with no name, `replay` reported a journal missing when none had been
 /// named, and `serve` said `: invalid socket address`. This is clap's own
-/// rule, so all five now refuse the same mistake in the same words, with the
-/// exit Â§4.5 gives a bad argument.
+/// rule, so every one of them now refuses the same mistake in the same words,
+/// with the exit §4.5 gives a bad argument.
 ///
 /// Only the empty string. A name made of spaces is a name this build cannot
 /// judge - a file may be called that - and refusing it would be this module
 /// deciding what a path may be.
 fn named() -> clap::builder::NonEmptyStringValueParser {
     clap::builder::NonEmptyStringValueParser::new()
+}
+
+/// Accept a step budget, rejecting the one number a turn cannot be run under.
+///
+/// A budget is spent by taking a step and checked afterwards, so a turn always
+/// takes at least one: `--max-steps 0` asks for a run that cannot happen, and
+/// the engine answers it with one step and `step budget spent`, which is a
+/// flag saying one thing while the journal records another. Refused at the
+/// flag instead, the way `--speed 0` is - both are a number the work cannot
+/// be done with, and §4.5 gives a bad argument exit 2.
+///
+/// Only zero is refused. A budget of one is a real request - one step, no
+/// tool call answered - and the ceiling is `u32`'s, which no turn reaches.
+/// A sandbox mode clap will accept, refused here rather than at boot so a
+/// typed flag is answered the way every other bad argument is - with the list
+/// of what exists, before anything opens a journal.
+fn sandbox_mode(word: &str) -> Result<String, String> {
+    match tetanus_sandbox::Mode::parse(word) {
+        Some(mode) => Ok(mode.as_str().to_string()),
+        None => Err(format!(
+            "must be one of {}",
+            tetanus_sandbox::Mode::NAMES.join(", ")
+        )),
+    }
+}
+
+fn step_budget(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(0) => Err("expected a number greater than zero: a turn takes at least one step".into()),
+        Ok(steps) => Ok(steps),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Accept a playback speed, rejecting the values the arithmetic cannot use.
@@ -288,20 +365,32 @@ fn color_choice(value: &str) -> ColorChoice {
 
 fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
     let mut out = policy.stdout();
+    // Which document every boot below reads, settled once and for all of
+    // them. `--settings` is global, so a path that names nothing is the same
+    // mistake whichever subcommand it was typed at, and one answer here is
+    // what keeps `tetanus config` describing the document the next command
+    // will read.
+    let document = settings::document(policy, cli.settings)?;
     match cli.cmd {
         Cmd::Run(args) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            runtime.block_on(run(policy, &mut out, args))
+            runtime.block_on(run(policy, &document, &mut out, args))
         }
         Cmd::Chat(args) => {
+            // Answered before a journal is opened, the way `run` and `replay`
+            // answer the same flag: a screen the terminal cannot hold is a
+            // bad argument, not a failure of the conversation.
+            if args.ui && !policy.stdout_is_terminal {
+                return Err(fail(policy, &nowhere_to_draw(policy)));
+            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| report(policy, &err.to_string(), None))?;
-            let held = runtime.block_on(chat::chat(policy, &mut out, args));
+            let held = runtime.block_on(chat::chat(policy, &document, &mut out, args));
             // The line reader is a blocking read that nothing can cancel, so a
             // chat left with Ctrl-C exits with one still parked on standard
             // input. Dropping the runtime waits for its pool; this does not,
@@ -309,19 +398,11 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             runtime.shutdown_background();
             held
         }
-        Cmd::Config { json } => {
-            let mut config = tetanus_config::Config::default();
-            config.set("log.level", "info".into(), tetanus_config::Layer::Default);
-            let dump = ConfigDumpResult {
-                entries: settings(&config),
-            };
-            if json {
-                return render::json::line(&mut out, &dump)
-                    .map_err(|err| report(policy, &err.to_string(), None));
-            }
-            render::config::render(&mut out, &dump.entries).ok();
-            Ok(())
-        }
+        Cmd::Config {
+            dir,
+            defaults,
+            json,
+        } => settings::page(policy, &document, &mut out, dir.as_deref(), defaults, json),
         Cmd::Models { json } => {
             let catalog = providers();
             if json {
@@ -332,7 +413,8 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             Ok(())
         }
         Cmd::Tools { json } => {
-            let catalog = catalog();
+            let booted = settings::booted(policy, &document, &[])?;
+            let catalog = catalog(policy, &document, &booted.resolved)?;
             if json {
                 return render::json::line(&mut out, &catalog)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -349,17 +431,25 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // Answered before the directory is read, for the reason `run` and
             // `replay` answer it before a journal is opened: a flag the
             // terminal cannot honour is wrong at the moment it is read.
-            if ui && !policy.stdout_is_terminal {
-                return Err(fail(policy, &nowhere_to_draw()));
+            if ui && !policy.stdout_is_screen {
+                return Err(fail(policy, &nowhere_to_draw(policy)));
             }
             // A listing is the store's own view of a directory: what ids it
             // holds, and which of them a turn is running on. No surface can
             // assemble that from a path, which is why this is the first
             // subcommand whose whole answer comes from the engine.
-            let engine = tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                sessions_root: dir,
-                ..Default::default()
-            });
+            //
+            // Which directory is the settings document's answer unless the
+            // flag overrode it, and the engine is built from the whole of
+            // that boot rather than from a path and the compiled defaults:
+            // a listing under one set of settings and a run under another
+            // would be two harnesses wearing one name.
+            let booted = settings::booted(policy, &document, &settings::root(dir.as_deref()))?;
+            // Read off the settled settings rather than off `--dir`, so the
+            // page names the directory that was actually listed even when
+            // nobody passed a flag and the document chose it.
+            let under = place(&booted.sessions_root);
+            let engine = tetanus_engine::HarnessEngine::new(booted);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -380,7 +470,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                         .map(boundary)
                         .map_err(|err| journal_fault(&err, std::path::Path::new(path)).message)
                 };
-                return match render::pick::pick(&mut out, &list, think, &open) {
+                return match render::pick::pick(&mut out, &list, &under, think, &open) {
                     Ok(Stop::Interrupted) => Err(stopped(policy)),
                     Ok(Stop::Quit) => Ok(()),
                     // The list is worth more than the view of it, and by here
@@ -390,16 +480,17 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                             .stderr()
                             .note(&format!("no full-screen view: {err}"))
                             .ok();
-                        render::sessions::render(&mut out, &list).ok();
+                        render::sessions::render(&mut out, &list, &under).ok();
                         Ok(())
                     }
                 };
             }
-            render::sessions::render(&mut out, &list).ok();
+            render::sessions::render(&mut out, &list, &under).ok();
             Ok(())
         }
         Cmd::Replay {
             path,
+            dir,
             raw,
             live,
             speed,
@@ -410,17 +501,14 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             // Before the path is even looked at, for the reason `run` answers
             // it before the journal is opened: a flag the terminal cannot
             // honour is wrong at the moment it is read.
-            if ui && !policy.stdout_is_terminal {
-                return Err(fail(policy, &nowhere_to_draw()));
+            if ui && !policy.stdout_is_screen {
+                return Err(fail(policy, &nowhere_to_draw(policy)));
             }
-            // A path that is not there is a typo, and reading it as an
-            // empty session is how a typo becomes a blank page and a zero
-            // exit. The check is here, before any view is chosen, so every
-            // shape of `replay` fails the same way.
-            let file = std::path::Path::new(&path);
-            if !file.exists() {
-                return Err(fail(policy, &missing_journal(file)));
-            }
+            // A target that is nothing at all is a typo, and reading it as
+            // an empty session is how a typo becomes a blank page and a zero
+            // exit. The lookup is here, before any view is chosen, so every
+            // shape of `replay` finds and fails the same way.
+            let path = journal_named(policy, &document, &path, dir.as_deref())?;
             // `--raw` is the view for a journal the reader below refuses,
             // so it opens the file itself. Asking for a log first would make
             // the one command that reads a broken journal fail on exactly the
@@ -488,6 +576,7 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             let played = runtime.block_on(render::replay::play(
                 &mut out,
                 policy.stdout_is_terminal,
+                policy.rows,
                 &events,
                 speed.unwrap_or(1.0),
                 think,
@@ -498,13 +587,35 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 _ => Ok(()),
             }
         }
-        Cmd::Serve { dir, listen } => {
+        Cmd::Serve {
+            dir,
+            listen,
+            frontend: Some(frontend),
+            token,
+            open_to_anyone,
+        } => web::web(
+            policy,
+            &document,
+            dir,
+            listen.as_deref().unwrap_or("127.0.0.1:5300"),
+            &frontend,
+            web::Posture {
+                token,
+                open_to_anyone,
+            },
+        ),
+        Cmd::Serve { dir, listen, .. } => {
             // The one subcommand that writes no page: on stdio, stdout belongs
             // to the carrier from here on (contract §4.1), so everything a
             // person reads goes to stderr and `out` is left untouched. The
             // WebSocket carrier does not touch stdout either way, and reads
             // the same page in the same place.
             let mut err = policy.stderr();
+            // Before anything is bound or announced. A document the harness
+            // cannot read is a fault to report, not a server to start on the
+            // defaults: the sessions the caller asked for would land
+            // somewhere else, and the banner would say so too late to matter.
+            let booted = settings::booted(policy, &document, &settings::root(dir.as_deref()))?;
             // Multi-threaded, because both carriers' properties are
             // concurrency properties: `agent.interrupt` is answered while the
             // prompt it interrupts still runs, and a push overtakes the answer
@@ -553,16 +664,16 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 &mut err,
                 &render::serve::Serving {
                     carrier,
-                    sessions: &dir,
+                    sessions: &booted.sessions_root,
                     protocol: tetanus_protocol::PROTOCOL_VERSION,
                 },
             )
             .ok();
+            // Through `tools::served`, which is the only place that says what
+            // a served engine's tools are - so this carrier and the frontend's
+            // cannot answer `catalog.tools` differently.
             let engine: Arc<dyn tetanus_protocol::methods::Engine> = Arc::new(
-                tetanus_engine::HarnessEngine::new(tetanus_engine::EngineConfig {
-                    sessions_root: dir,
-                    ..Default::default()
-                }),
+                tetanus_engine::HarnessEngine::new(tools::served(policy, &document, booted)?),
             );
             let served = match listener {
                 // A WebSocket server has no end of its own: it accepts until
@@ -596,7 +707,13 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: tetanus_protocol::PROTOCOL_VERSION,
                 providers: providers().providers.len(),
-                tools: catalog().tools.len(),
+                tools: catalog(
+                    policy,
+                    &document,
+                    &settings::booted(policy, &document, &[])?.resolved,
+                )?
+                .tools
+                .len(),
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
             };
@@ -618,44 +735,25 @@ fn boundary(events: Vec<tetanus_session::SessionEvent>) -> Vec<protocol::Session
 }
 
 /// One event across the same boundary.
+///
+/// The engine's own `convert::session_event`, taking a reference because every
+/// caller here is reading a journal it does not own. A copy of this crossing
+/// lived in this file until the engine published one; two copies of a field
+/// list are two places to forget a field the day the type grows one.
 fn crossing(event: &tetanus_session::SessionEvent) -> protocol::SessionEvent {
-    protocol::SessionEvent {
-        ty: event.ty.clone(),
-        seq: event.seq,
-        time: event.time,
-        data: event.data.clone(),
-        source_event_seqs: event.source_event_seqs.clone(),
-    }
+    tetanus_engine::convert::session_event(event.clone())
 }
 
-/// Carry a stop reason across. The one crossing where neither enum contains
-/// the other: the contract names reasons only a served call can produce, and
-/// the engine names `MaxTokens` and `Interrupted`, which the contract carries
-/// as values of the growable `StopReason` rather than as variants.
+/// Carry a stop reason across.
 ///
-/// The match has no wildcard arm on purpose. A reason the engine adds stops
-/// this crate from compiling until someone decides how it crosses, which is
-/// the cheapest moment to decide it.
+/// The engine's, and only the engine's. Section 4 of the contract names
+/// `tetanus_turn::StopReason` as the example of a type a surface must never
+/// reach past the wire for: an internal enum has no fallback arm, so a match
+/// on one outside the engine crate stops compiling the day the engine names a
+/// new case - and, worse than stopping, decides on its own what the new case
+/// means to a reader.
 fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
-    match reason {
-        tetanus_turn::StopReason::Natural => protocol::StopReason::Natural,
-        tetanus_turn::StopReason::PreStepRejected => protocol::StopReason::PreStepRejected,
-        tetanus_turn::StopReason::MaxSteps => protocol::StopReason::MaxSteps,
-        tetanus_turn::StopReason::Cancelled => protocol::StopReason::Cancelled,
-        // Neither reason is one the contract names as a variant. Section 7.5
-        // makes both values of the growable enum and fixes what a surface does
-        // with one, so each crosses as `Other` carrying the engine's own word
-        // for it - the same word the journal holds, and the one the timeline
-        // then prints.
-        //
-        // `MaxTokens` is the provider stopping the completion at its output
-        // cap, so the answer is unfinished (§4.4.2). `Interrupted` is written
-        // by crash repair when a later run finds a journal left open (§4.4.4),
-        // never by a turn this process ran.
-        tetanus_turn::StopReason::MaxTokens | tetanus_turn::StopReason::Interrupted => {
-            protocol::StopReason::Other(reason.as_str().to_string())
-        }
-    }
+    tetanus_engine::convert::stop_reason(reason)
 }
 
 /// Every provider this build registers, in the contract's shape.
@@ -748,49 +846,6 @@ fn adapter(
     Ok((adapter, model))
 }
 
-/// The tools an agent may call. Built from the registry a turn is booted with,
-/// so `tetanus tools` cannot list a tool a run does not have. It answers
-/// `catalog.tools`.
-fn catalog() -> ToolCatalogResult {
-    ToolCatalogResult {
-        tools: registry()
-            .schemas()
-            .into_iter()
-            .map(|schema| protocol::ToolDescriptor {
-                name: schema.name,
-                description: schema.description,
-                parameters: schema.parameters,
-            })
-            .collect(),
-    }
-}
-
-/// The one registry, so what is listed and what is callable are one thing.
-fn registry() -> ToolRegistry {
-    ToolRegistry::new().with(Arc::new(EchoTool))
-}
-
-/// Carry resolved config across to the contract shape the view reads.
-///
-/// The same story as [`boundary`]: the
-/// layers agree one for one, so this is a copy. It goes when the engine serves
-/// `config.dump`, and `render::config` does not notice.
-fn settings(config: &tetanus_config::Config) -> Vec<protocol::ConfigEntry> {
-    config
-        .provenance()
-        .map(|(key, resolved)| protocol::ConfigEntry {
-            key: key.clone(),
-            value: resolved.value.clone(),
-            layer: match resolved.layer {
-                tetanus_config::Layer::Default => protocol::ConfigLayer::Default,
-                tetanus_config::Layer::File => protocol::ConfigLayer::File,
-                tetanus_config::Layer::Env => protocol::ConfigLayer::Env,
-                tetanus_config::Layer::Flag => protocol::ConfigLayer::Flag,
-            },
-        })
-        .collect()
-}
-
 /// Ctrl-C, as a future that resolves when it arrives.
 ///
 /// Only the two surfaces that draw a block in place wait on this. Everywhere
@@ -827,6 +882,20 @@ fn report(policy: &Policy, message: &str, hint: Option<&str>) -> Reported {
 /// The wording is `render::fault`'s and the status is the contract's table,
 /// so a script can branch on `$?` and read the same number from any tetanus
 /// surface (§4.5).
+/// Say what failed, and stay where you are.
+///
+/// The same words and the same stream as [`fail`], without the status: an
+/// interactive chat reports a failed turn onto the page and asks for the next
+/// line, because a conversation is not over because one turn of it was.
+fn said_fault(policy: &Policy, error: &RpcError) {
+    let (message, hint) = render::fault::wording(error);
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if let Some(hint) = hint {
+        err.note(&hint).ok();
+    }
+}
+
 fn fail(policy: &Policy, error: &RpcError) -> Reported {
     let (message, hint) = render::fault::wording(error);
     let mut err = policy.stderr();
@@ -837,28 +906,126 @@ fn fail(policy: &Policy, error: &RpcError) -> Reported {
     Reported(render::fault::status(error))
 }
 
-/// A path the user named that is not there.
+/// [`fail`], for a settings document the harness cannot run on.
+///
+/// The wording and the status are the same, because the fault crossed the
+/// boundary like any other. The next step is not: `wording` sends a refused
+/// value to `--help`, and nothing in a document is a flag. The file is where
+/// the value was written and where it has to be fixed, so the note names it -
+/// unless the sentence above has named it already, which is the case for
+/// every fault about the file itself rather than a value in it.
+fn misconfigured(policy: &Policy, document: &std::path::Path, error: &RpcError) -> Reported {
+    let (message, _) = render::fault::wording(error);
+    let document = document.display().to_string();
+    let mut err = policy.stderr();
+    err.error(&message).ok();
+    if !message.contains(&document) {
+        err.note(&format!("{document} is the document that sets it"))
+            .ok();
+    }
+    Reported(render::fault::status(error))
+}
+
+/// A path as a page names it: absolute, tamed, and marked when nothing is
+/// there yet.
+///
+/// A page that says where it read from is answering "where do I change it",
+/// and a relative path only answers that from the directory this run started
+/// in - which the page does not print. So the path is made absolute first,
+/// without asking the filesystem to resolve it, because a path that is not
+/// there yet still has to be named.
+///
+/// It is tamed for the reason every other path this binary draws is: it can
+/// come off a document, an environment or a flag, and none of the three is
+/// ours to trust with the cursor.
+///
+/// A path with nothing at it is still the right answer - it is the file to
+/// write, or the directory the first run will make - so it is named and
+/// marked rather than left out. The mark matters most on the two pages that
+/// have it: a config page of nothing but `default` rows, and a sessions page
+/// that lists nothing, both read the same whether the place is empty or the
+/// reader is looking at the wrong one.
+fn place(path: &std::path::Path) -> String {
+    let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let named = tame_line(&full.display().to_string());
+    match full.exists() {
+        true => named,
+        false => format!("{named} (not there yet)"),
+    }
+}
+
+/// The journal a target names: the path if there is one there, and otherwise
+/// the id `tetanus sessions` printed for it, under the root the settings
+/// settled.
+///
+/// The page a reader takes an id off said `turn`, and until this the command
+/// they retyped it into answered `no journal at turn` - and sent them to that
+/// same page. The two now look in one place. A store resolves an id to
+/// `<root>/<id>.jsonl`, so that is what is looked for, and `<root>/<target>`
+/// beside it for an id given with the extension it is listed under.
+///
+/// A path that is there is opened as it was given, and the document is not
+/// read at all: a journal the user can see is a journal `replay` opens,
+/// whatever a document elsewhere says about roots. Only a target that is
+/// nothing on disk asks where the sessions live.
+fn journal_named(
+    policy: &Policy,
+    document: &std::path::Path,
+    target: &str,
+    dir: Option<&std::path::Path>,
+) -> Result<String, Reported> {
+    let named = std::path::Path::new(target);
+    if named.exists() {
+        return Ok(target.to_string());
+    }
+    let sessions = settings::booted(policy, document, &settings::root(dir))?.sessions_root;
+    match [
+        sessions.join(target),
+        sessions.join(format!("{target}.jsonl")),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
+    {
+        Some(found) => Ok(found.display().to_string()),
+        None => Err(fail(policy, &missing_journal(named, Some(&sessions)))),
+    }
+}
+
+/// A journal the user named that is not there, and the root an id was looked
+/// for under when the target was not a path.
 ///
 /// The contract's §4.7 mapping sends `tetanus replay <path>` through
 /// `session.create`, which creates a journal at a path that has none. That is
 /// what `run --session` wants and the opposite of what a read wants, so this
 /// surface answers the read before it makes the call.
-fn missing_journal(path: &std::path::Path) -> RpcError {
+fn missing_journal(path: &std::path::Path, root: Option<&std::path::Path>) -> RpcError {
+    let mut data = serde_json::json!({ "path": path.display().to_string() });
+    if let Some(root) = root {
+        data["root"] = serde_json::json!(root.display().to_string());
+    }
     RpcError::new(
         ErrorCode::SessionNotFound,
         format!("no journal at {}", path.display()),
     )
-    .with_data(serde_json::json!({ "path": path.display().to_string() }))
+    .with_data(data)
 }
 
 /// `--ui` where there is no screen to draw on.
 ///
-/// Both views that take the flag answer it the same way, at the point the flag
-/// was read: it is a bad argument, not a failure of the work the command was
-/// asked to do, and §4.5 gives that exit 2.
-fn nowhere_to_draw() -> RpcError {
-    RpcError::new(ErrorCode::InvalidParams, "--ui needs a terminal to draw on")
-        .with_data(serde_json::json!({ "field": "ui" }))
+/// Every view that takes the flag answers it the same way, at the point the
+/// flag was read: it is a bad argument, not a failure of the work the command
+/// was asked to do, and §4.5 gives that exit 2.
+///
+/// Two ways to have no screen, and a reader can only act on the one they are
+/// in. A redirected stdout is a pipe to undo; a terminal that cannot address
+/// its cursor is a `TERM` to set, and saying "needs a terminal" to somebody
+/// sitting at one is the kind of answer that gets read as a bug.
+fn nowhere_to_draw(policy: &Policy) -> RpcError {
+    let said = match policy.stdout_is_terminal {
+        true => "--ui needs a terminal that can draw one, and TERM does not say this one can",
+        false => "--ui needs a terminal to draw on",
+    };
+    RpcError::new(ErrorCode::InvalidParams, said).with_data(serde_json::json!({ "field": "ui" }))
 }
 
 /// Read a journal as text, one line at a time.
@@ -881,19 +1048,47 @@ fn journal_lines(path: &str) -> Result<Vec<render::raw::Line>, tetanus_session::
         .collect())
 }
 
-/// Carry a journal failure across to the contract's error view. A corrupt
-/// journal and an unreadable one are different codes, because they are
-/// different things for the user to do.
-fn journal_fault(error: &tetanus_session::SessionError, path: &std::path::Path) -> RpcError {
-    match error {
-        tetanus_session::SessionError::Corrupt(line) => {
-            RpcError::new(ErrorCode::LogCorrupt, error.to_string())
-                .with_data(serde_json::json!({ "line": line }))
-        }
-        tetanus_session::SessionError::Io(io) => RpcError::new(ErrorCode::Io, io.to_string())
-            .with_data(serde_json::json!({ "path": path.display().to_string() })),
-        other => RpcError::new(ErrorCode::Internal, other.to_string()),
+/// The same failure, with the file it is about named on it.
+///
+/// `session.create` is handed a path and reports what the filesystem said
+/// about it, but the failure it sends back carries no `path`, so a page can
+/// read `is a directory` with no directory on it while `tetanus replay` names
+/// the same file on the same mistake. §4.5 asks an `Io` to carry the path
+/// when the caller knows one, and here the caller does: it is the file
+/// `--session` named. Only that field is filled in - the code, the message
+/// and every other field are the engine's and are passed on untouched, and a
+/// path the engine did name is never written over.
+fn about(mut error: RpcError, path: &std::path::Path) -> RpcError {
+    if error.kind() != Some(ErrorCode::Io) {
+        return error;
     }
+    let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(fields) = data.as_object_mut() {
+        fields
+            .entry("path")
+            .or_insert_with(|| serde_json::json!(path.display().to_string()));
+    }
+    error
+}
+
+/// Carry a journal failure across to the contract's error view.
+///
+/// `convert::journal_error` decides the code, as §4.5 says it must: the
+/// mapping from an engine failure to a code is the engine's and is published,
+/// and a surface that matched `SessionError` for itself would be a second
+/// table deciding what a script acts on. It also has no fallback variant, so
+/// the match this replaced would have stopped compiling the day the engine
+/// named a new failure.
+///
+/// The id is the journal's own file name. `session.create` is what knows the
+/// id a journal carries, and every caller here is reporting a file it could
+/// not open - there is no session yet to name.
+fn journal_fault(error: &tetanus_session::SessionError, path: &std::path::Path) -> RpcError {
+    let named = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    tetanus_engine::convert::journal_error(&named, Some(path), error)
 }
 
 /// Carry a turn failure across to the contract's error view.
@@ -918,24 +1113,62 @@ fn turn_fault(
     tetanus_engine::convert::turn_error(session_id, provider, Some(journal), error)
 }
 
+/// The status line, for a run whose progress the person cannot already see.
+///
+/// One rule for the four ways a turn is run, because they used to hold three
+/// between them and one of them held none: the plain run asked whether stdout
+/// was a terminal, `--json` asked whether stderr was, `--trace` never asked,
+/// and `--ui` wrote no status at all. So `tetanus run --json > events 2> log`
+/// left `log` empty while the same command with no `--json` filled it.
+///
+/// `drawn_on_stdout` is whether this way of running shows the turn on stdout:
+/// true for the live block and the watched page, false for `--trace`, which
+/// prints nothing until the end, and for `--json`, whose stdout is for a
+/// script rather than a person.
+///
+/// The status is then written unless it would be a second spinner on a screen
+/// that already has one. A stderr that is not a terminal cannot be: the line
+/// degrades to one plain sentence, which is the record a redirected stderr was
+/// redirected to keep.
+fn status_line(
+    policy: &Policy,
+    phase: &str,
+    drawn_on_stdout: bool,
+) -> Option<tetanus_ui::Progress<std::io::Stderr>> {
+    if drawn_on_stdout && policy.stderr_is_terminal {
+        return None;
+    }
+    let mut status = policy.stderr_progress();
+    status.set(phase).ok();
+    Some(status)
+}
+
 /// Run `work` behind the status line, ticking the animation while it waits.
 ///
 /// A live model call can hold for a long time with nothing to print, and a
 /// surface that prints nothing looks hung. The line is on stderr and is erased
 /// before anything else is written, so stdout is unchanged either way.
+///
+/// Nothing is drawn on stdout here - the trace is printed after the turn - so
+/// [`status_line`] always gives one, which is what this did before it asked.
 async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, work: F) -> F::Output {
-    let mut progress = policy.stderr_progress();
-    progress.set(label).ok();
+    let mut progress = status_line(policy, label, false);
 
     let mut work = std::pin::pin!(work);
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let done = loop {
         tokio::select! {
             done = &mut work => break done,
-            _ = frames.tick() => { progress.tick().ok(); }
+            _ = frames.tick() => {
+                if let Some(progress) = &mut progress {
+                    progress.tick().ok();
+                }
+            }
         }
     };
-    progress.finish().ok();
+    if let Some(progress) = progress {
+        progress.finish().ok();
+    }
     done
 }
 
@@ -947,9 +1180,9 @@ async fn with_progress<F: std::future::Future>(policy: &Policy, label: &str, wor
 /// lane out of the engine - the log is a public type, and the one tracer the
 /// conformance suite attaches stays the only observer of the bus.
 ///
-/// The status line is for a piped run only. At a terminal the block's own
-/// footer says what a status line would, and two spinners at once read as two
-/// programs.
+/// The block is on stdout, so [`status_line`] gives a status only when stderr
+/// is somewhere else: at one terminal the block's own footer says what a
+/// status line would, and two spinners at once read as two programs.
 ///
 /// Returns `None` when the user stopped the turn with Ctrl-C. The turn is
 /// dropped where it stands; the block still comes off the screen, and the
@@ -970,18 +1203,18 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 ) -> Option<F::Output> {
     let (theme, width) = (*out.theme(), out.width());
     let mut view = Live::new(theme, width, phase, think);
-    let mut screen = Screen::new(Ui::new(out.out(), theme, width), policy.stdout_is_terminal);
-    let mut status = match policy.stdout_is_terminal {
-        true => None,
-        false => {
-            let mut status = policy.stderr_progress();
-            status.set(phase).ok();
-            Some(status)
-        }
-    };
+    let mut screen = Screen::new(
+        Ui::new(out.out(), theme, width),
+        policy.stdout_is_terminal,
+        policy.rows,
+    );
+    let mut status = status_line(policy, phase, policy.stdout_is_terminal);
 
     let started = std::time::Instant::now();
     let mut seen = from;
+    // How long the journal was when it was last read, so a frame that has
+    // nothing new to settle costs one `stat` instead of a copy of every event.
+    let mut length = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
     let mut stop = std::pin::pin!(interrupt());
@@ -990,13 +1223,17 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
             done = &mut work => break Some(done),
             _ = &mut stop => break None,
             _ = frames.tick() => {
-                seen = settle(&mut view, &mut screen, log, seen);
+                seen = settle(&mut view, &mut screen, log, seen, &mut length);
                 // The window can be resized while the turn runs. Asked once,
                 // the block would keep drawing at a width that stopped being
                 // true, and every frame after the resize would land wrong.
                 if policy.stdout_is_terminal {
-                    let width = tetanus_ui::measure();
+                    let (width, rows) = tetanus_ui::size();
                     screen.resize(width).ok();
+                    // The height decides how much of the next block there is
+                    // room for, and a terminal that was made shorter while a
+                    // turn ran is the case this exists for.
+                    screen.rows(rows);
                     view.resize(width);
                 }
                 view.tick();
@@ -1010,7 +1247,7 @@ async fn with_live<W: std::io::Write, F: std::future::Future>(
 
     // Whatever the last frame did not catch. A turn shorter than one frame
     // interval - every offline turn - is committed entirely here.
-    settle(&mut view, &mut screen, log, seen);
+    settle(&mut view, &mut screen, log, seen, &mut length);
     screen.finish().ok();
     if let Some(status) = status {
         status.finish().ok();
@@ -1113,6 +1350,12 @@ where
         }
     };
 
+    // The page is on stdout, so a stderr that is the same terminal is left
+    // alone - it is behind the alternate screen anyway. A stderr that is not
+    // gets the one line, which is the whole of what a redirected stderr can
+    // learn about a run watched on a screen it cannot see.
+    let status = status_line(policy, phase, true);
+
     let theme = *out.theme();
     let (cols, rows) = tetanus_ui::size();
     let mut watch = Watch {
@@ -1122,8 +1365,10 @@ where
         page: Page::new(theme, "tetanus", title),
         size: (cols, rows),
         seen: 0,
+        length: 0,
         help: false,
         started: std::time::Instant::now(),
+        painted: None,
     };
     // One frame before the loop. Entering the alternate screen and leaving it
     // blank until something happens is a visible flash, and an offline turn
@@ -1168,6 +1413,9 @@ where
         }
     }
     held.release().ok();
+    if let Some(status) = status {
+        status.finish().ok();
+    }
     done
 }
 
@@ -1186,9 +1434,16 @@ struct Watch<'a> {
     size: (usize, usize),
     /// Journal events already settled onto the page.
     seen: usize,
+    /// How long the journal's file was when it was last read. A view that
+    /// outlives its turn - this one does, until the reader closes it - polls
+    /// for as long as it is up.
+    length: u64,
     /// Whether the key card is up in place of the turn.
     help: bool,
     started: std::time::Instant,
+    /// The frame the terminal is showing, so an unchanged one is not sent
+    /// again. See [`Watch::paint`].
+    painted: Option<Frame>,
 }
 
 impl Watch<'_> {
@@ -1284,6 +1539,10 @@ impl Watch<'_> {
     /// The journal is polled rather than subscribed to, for the reason
     /// [`with_live`] gives, so this is the only way anything reaches the page.
     fn settle(&mut self) {
+        let Some(grown) = appended(self.log.path(), self.length) else {
+            return;
+        };
+        self.length = grown;
         let events = self.log.events();
         for event in events.iter().skip(self.seen) {
             let settled = self.live.push(&crossing(event));
@@ -1348,10 +1607,28 @@ impl Watch<'_> {
         flow
     }
 
-    /// Compose the screen at the size the terminal has now, and paint it.
+    /// Compose the screen at the size the terminal has now, and paint it if
+    /// it is not already the screen on the terminal.
+    ///
+    /// This loop's clock is the turn's, not the reader's: it comes round every
+    /// 80ms so that a spinner moves and a keystroke is answered without a wait
+    /// anybody notices. The content does not change that often, and once the
+    /// turn is over it does not change at all - `Live::block` is empty from
+    /// there on, so every later frame is the previous one. The views driven by
+    /// `tetanus_ui::show` never meet this, because a page over something
+    /// finished waits an hour for a key; this one cannot wait, so it compares
+    /// instead. Without the comparison a finished turn left on the screen goes
+    /// on sending a repaint of it twelve times a second for as long as the
+    /// reader reads it, which over a slow link is the difference between a
+    /// still page and a flickering one.
     fn paint<W: std::io::Write>(&mut self, out: &mut Ui<W>) {
         let (cols, rows) = self.size;
-        self.frame(cols, rows).paint(out).ok();
+        let frame = self.frame(cols, rows);
+        if self.painted.as_ref() == Some(&frame) {
+            return;
+        }
+        frame.paint(out).ok();
+        self.painted = Some(frame);
     }
 }
 
@@ -1367,15 +1644,9 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
     phase: &str,
     work: F,
 ) -> Option<F::Output> {
-    let mut status = match policy.stderr_is_terminal {
-        false => None,
-        true => {
-            let mut status = policy.stderr_progress();
-            status.set(phase).ok();
-            Some(status)
-        }
-    };
+    let mut status = status_line(policy, phase, false);
     let mut seen = 0;
+    let mut length = 0;
     let mut frames = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut work = std::pin::pin!(work);
     let mut stop = std::pin::pin!(interrupt());
@@ -1384,7 +1655,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
             done = &mut work => break Some(done),
             _ = &mut stop => break None,
             _ = frames.tick() => {
-                seen = flush(out, log, seen);
+                seen = flush(out, log, seen, &mut length);
                 if let Some(status) = &mut status {
                     status.tick().ok();
                 }
@@ -1393,7 +1664,7 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
     };
     // Whatever the last poll did not catch. Every offline turn ends inside one
     // frame interval, so for those this is the whole stream.
-    flush(out, log, seen);
+    flush(out, log, seen, &mut length);
     if let Some(status) = status {
         status.finish().ok();
     }
@@ -1402,12 +1673,40 @@ async fn with_json<W: std::io::Write, F: std::future::Future>(
 
 /// Write every event the log gained since the last look, and report how many
 /// it now holds.
-fn flush<W: std::io::Write>(out: &mut Ui<W>, log: &JsonlSessionLog, seen: usize) -> usize {
+fn flush<W: std::io::Write>(
+    out: &mut Ui<W>,
+    log: &JsonlSessionLog,
+    seen: usize,
+    length: &mut u64,
+) -> usize {
+    let Some(grown) = appended(log.path(), *length) else {
+        return seen;
+    };
+    *length = grown;
     let events = log.events();
     for event in events.iter().skip(seen) {
         render::json::line(out, &crossing(event)).ok();
     }
     events.len()
+}
+
+/// A journal's length, when that is not the length it was.
+///
+/// Every view in this binary polls its journal on a clock, and
+/// `SessionLog::events` copies every event it holds - which is the right shape
+/// for the call and the wrong thing to ask twelve times a second: the cost
+/// grows with the conversation, and on a journal of six thousand events it was
+/// a sixth of a core spent watching nothing happen.
+///
+/// A journal is append-only, so a file the same length as last time holds
+/// nothing the caller has not seen. `None` is "nothing new". A file the
+/// filesystem will not answer for reads as new every time, which is what this
+/// replaced and the safe way to be wrong.
+pub fn appended(journal: &std::path::Path, seen: u64) -> Option<u64> {
+    let length = std::fs::metadata(journal)
+        .map(|file| file.len())
+        .unwrap_or(u64::MAX);
+    (length != seen).then_some(length)
 }
 
 /// Commit every event written since the last look, and report how many events
@@ -1417,7 +1716,12 @@ fn settle<W: std::io::Write>(
     screen: &mut Screen<W>,
     log: &JsonlSessionLog,
     seen: usize,
+    length: &mut u64,
 ) -> usize {
+    let Some(grown) = appended(log.path(), *length) else {
+        return seen;
+    };
+    *length = grown;
     let events = log.events();
     for event in events.iter().skip(seen) {
         let lines = view.push(&crossing(event));
@@ -1428,14 +1732,15 @@ fn settle<W: std::io::Write>(
 
 async fn run<W: std::io::Write>(
     policy: &Policy,
+    document: &std::path::Path,
     out: &mut Ui<W>,
     args: RunArgs,
 ) -> Result<(), Reported> {
     // Before anything is opened. A view needs a screen to draw on, and a run
     // that cannot have one should say so at the point the flag was read rather
     // than after it has written a journal nobody will get to see.
-    if args.ui && !policy.stdout_is_terminal {
-        return Err(fail(policy, &nowhere_to_draw()));
+    if args.ui && !policy.stdout_is_screen {
+        return Err(fail(policy, &nowhere_to_draw(policy)));
     }
 
     // Then, before the journal exists: a prompt this build will not send is
@@ -1443,7 +1748,26 @@ async fn run<W: std::io::Write>(
     let asked = prompt::resolve(args.ask.or(args.prompt), std::io::stdin().lock())
         .map_err(|err| fail(policy, &err))?;
 
-    let (adapter, model) = adapter(policy, args.adapter, args.model)?;
+    // What the turn runs on: the settings document, with the flags over it.
+    // Before the journal is opened, because the document decides where the
+    // journal goes when `--session` did not.
+    let settled = settings::turn_settings(
+        policy,
+        document,
+        settings::TurnFlags {
+            adapter: args.adapter,
+            model: args.model,
+            max_steps: args.max_steps,
+            session: args.session,
+            sandbox: args.sandbox,
+        },
+        // A first run must need no credential, so an unconfigured `run` is
+        // the mock adapter.
+        AdapterChoice::Mock,
+        "turn.jsonl",
+    )?;
+
+    let (adapter, model) = adapter(policy, settled.provider, settled.model.clone())?;
 
     // The journal is the engine's to open. `session.create` writes the
     // `session/start` header that makes the file self-describing - the model
@@ -1451,24 +1775,51 @@ async fn run<W: std::io::Write>(
     // reader open a journal nobody told them about. The turn below still runs
     // in this process; it moves behind `agent.prompt` in its own slice, and
     // nothing here changes when it does.
-    let opened = session(&args.session, args.adapter.route(), &model, args.max_steps)
-        .await
-        .map_err(|err| fail(policy, &err))?;
+    let opened = session(
+        settled.settings.clone(),
+        &settled.journal,
+        settled.provider.route(),
+        &model,
+        settled.max_steps,
+    )
+    .await
+    .map_err(|err| fail(policy, &about(err, &settled.journal)))?;
 
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
-        .map_err(|err| fail(policy, &journal_fault(&err, &args.session)))?;
+    let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
+        .map_err(|err| fail(policy, &journal_fault(&err, &settled.journal)))?;
 
     // Read the sequence with the same tracer the conformance suite uses.
     let trace = TurnTrace::attach(&bus);
 
-    let ctx = boot(bus, adapter, Arc::new(registry()), log.clone())
-        .map_err(|err| report(policy, &err.to_string(), None))?;
+    // One switch for the loop and for the tools: an interrupt that does not
+    // reach a running command leaves it running after the turn is over.
+    let interrupt = Interrupt::new();
+    let ctx = boot_with(
+        bus,
+        adapter,
+        // The session that will call them: its terminals are owned by it, and
+        // anything it has to keep on disk lands beside its own journal.
+        Arc::new(registry(
+            policy,
+            document,
+            &whose(
+                &settled.settings.resolved,
+                &opened.session_id,
+                log.clone(),
+                settled.journal.parent(),
+                &interrupt,
+            ),
+        )?),
+        log.clone(),
+        Arc::clone(&interrupt),
+    )
+    .map_err(|err| report(policy, &err.to_string(), None))?;
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {
             model: model.clone(),
-            max_steps: args.max_steps,
+            max_steps: settled.max_steps,
             ..TurnConfig::default()
         },
     )
@@ -1493,7 +1844,12 @@ async fn run<W: std::io::Write>(
                 title: &named,
             };
             with_page(policy, out, &log, watched, turn, |err| {
-                turn_fault(err, &opened.session_id, args.adapter.route(), &args.session)
+                turn_fault(
+                    err,
+                    &opened.session_id,
+                    settled.provider.route(),
+                    &settled.journal,
+                )
             })
             .await
         }
@@ -1517,8 +1873,8 @@ async fn run<W: std::io::Write>(
             &turn_fault(
                 &err,
                 &opened.session_id,
-                args.adapter.route(),
-                &args.session,
+                settled.provider.route(),
+                &settled.journal,
             ),
         )
     })?;
@@ -1599,6 +1955,7 @@ async fn run<W: std::io::Write>(
 /// turn, not about the name - so the call is made again without it and the
 /// store mints its own.
 async fn session(
+    settings: tetanus_engine::EngineConfig,
     path: &std::path::Path,
     provider: &str,
     model: &str,
@@ -1613,7 +1970,10 @@ async fn session(
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".")),
-        ..Default::default()
+        // Everything else is what the document settled: the retry policy a
+        // turn runs under is in there, and an engine built from the compiled
+        // defaults would quietly ignore it.
+        ..settings
     });
     let named = tetanus_protocol::methods::SessionCreateParams {
         session_id: path
@@ -1624,6 +1984,10 @@ async fn session(
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
         max_steps: Some(max_steps),
+        // A run composes no preset: `run` takes its model and adapter from
+        // flags, and a preset would be a second answer to the same question.
+        // Selecting one per session is served over `session.create`.
+        preset: None,
     };
     let anonymous = tetanus_protocol::methods::SessionCreateParams {
         session_id: None,

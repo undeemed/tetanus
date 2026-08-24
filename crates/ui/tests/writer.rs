@@ -4,7 +4,9 @@
 //! theme wraps a span and resets it; that format width pads the text and not
 //! the escape sequences; that a field pads its label in the columns a
 //! terminal draws it in; what a field says when its value draws nothing; the
-//! diagnostic tags; the charset-dependent glyphs.
+//! diagnostic tags, including one longer than the terminal; the
+//! charset-dependent glyphs; and that a heading can carry the place a page
+//! read without cutting it.
 //!
 //! Features NOT tested here: the policy that produced the theme (see
 //! `color_policy.rs`) and the real process streams.
@@ -140,4 +142,89 @@ fn a_value_that_draws_nothing_is_said_and_not_left_blank() {
             "the row ends in blank space: {line:?}"
         );
     }
+}
+
+/// TC-UI-WRITE-8: a heading with the place the page read.
+/// Expected: one row - the title, two spaces, the place - after the blank a
+/// heading always writes, and the place drawn as it was handed over. With
+/// colour on, the title and the place are two spans and each is reset, so the
+/// muted place cannot bleed into the rows under it.
+#[test]
+fn a_heading_can_carry_the_place_a_page_read() {
+    let mut plain = buffered(Theme::plain(), 80);
+    plain
+        .heading_at("config", "/home/u/.tetanus/settings.yaml")
+        .expect("write");
+    assert_eq!(
+        plain.contents(),
+        "\nconfig  /home/u/.tetanus/settings.yaml\n"
+    );
+
+    let mut colored = buffered(Theme::new(true, Charset::Unicode), 80);
+    colored.heading_at("sessions", "/srv/j").expect("write");
+    let out = colored.contents();
+    assert!(out.contains("sessions"), "{out:?}");
+    assert!(out.contains("/srv/j"), "{out:?}");
+    assert_eq!(
+        out.matches("\u{1b}[0m").count(),
+        2,
+        "one reset per styled span: {out:?}"
+    );
+
+    // A place longer than the width is not cut: it is the value a reader
+    // copies, and a terminal folds it where a truncation would mislead.
+    let long = "/home/u/".to_string() + &"deep/".repeat(30) + "settings.yaml";
+    let mut narrow = buffered(Theme::plain(), 40);
+    narrow.heading_at("config", &long).expect("write");
+    assert!(narrow.contents().contains(&long), "the place was cut");
+}
+
+/// TC-UI-WRITE-9: a diagnostic longer than the terminal.
+/// Expected: folded under its own tag, with the rest of the sentence indented
+/// past `note: ` rather than starting at column zero. A sentence folded by the
+/// terminal instead puts its second half in the column a tag goes in, where it
+/// reads as a second diagnostic this build wrote without one - and these are
+/// the sentences a reader meets when something has already gone wrong.
+#[test]
+fn a_diagnostic_folds_under_its_own_tag() {
+    let mut ui = buffered(Theme::plain(), 40);
+    ui.note("nothing there, and nothing named that under sessions; list what there is")
+        .expect("note");
+
+    let written = ui.contents();
+    let rows: Vec<&str> = written.lines().collect();
+    assert!(rows.len() > 1, "it did not fold: {rows:?}");
+    for row in &rows {
+        assert!(visible_width(row) <= 40, "`{row}` overruns 40");
+    }
+    assert!(rows[0].starts_with("note: "), "{rows:?}");
+    for row in &rows[1..] {
+        assert!(
+            row.starts_with("      "),
+            "not indented under the tag: `{row}`"
+        );
+        assert!(!row.trim_start().is_empty(), "a blank row: {rows:?}");
+    }
+    // The sentence is whole, whatever it was folded on.
+    let said = written.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        said,
+        "note: nothing there, and nothing named that under sessions; list what there is"
+    );
+}
+
+/// TC-UI-WRITE-10: the three tags at a width that holds them.
+/// Expected: one row each, unchanged. Folding is what a long sentence gets,
+/// not what every diagnostic gets: the common case is one line and stays one.
+#[test]
+fn a_diagnostic_that_fits_is_left_alone() {
+    let mut ui = buffered(Theme::plain(), 80);
+    ui.note("end with Ctrl-D").expect("note");
+    ui.warn("interrupted").expect("warn");
+    ui.error("no journal at j.jsonl").expect("error");
+
+    assert_eq!(
+        ui.contents(),
+        "note: end with Ctrl-D\nwarning: interrupted\nerror: no journal at j.jsonl\n"
+    );
 }

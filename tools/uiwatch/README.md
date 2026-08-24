@@ -3,10 +3,34 @@
 The frontend of this project is a terminal, so there is no markup to serve.
 `serve.py` serves the real thing instead.
 
-On every change under `crates/`, it rebuilds `tetanus`, runs a fixed set of
-scenarios through a pty so the binary sees a terminal and paints exactly as it
-would for a user, converts the escape codes to HTML, and pushes a reload to
-every open browser.
+On every change under `crates/`, and on every move of `HEAD`, it rebuilds
+`tetanus`, runs a fixed set of scenarios through a pty so the binary sees a
+terminal and paints exactly as it would for a user, converts the escape codes
+to HTML, and pushes a reload to every open browser.
+
+A scenario may type at the view it opens. `tetanus chat --ui` is one: it paints
+nothing worth reading until somebody asks something, and it never exits on its
+own, so its scenario asks a question, opens the key card and leaves with
+ctrl-D. A view that takes the alternate screen is rendered from what it painted
+there - the frames between the two switches - and the pane shows the last of
+them, which is the screen that was in front of the reader when they left it.
+
+`HEAD` counts because the header names the branch and the commit a page was
+built from, and that is the only provenance a reviewer has. A commit writes
+nothing in the working tree, and a checkout between branches that differ only
+outside `crates/` writes nothing either, so watching the files alone would
+leave the header naming the previous commit over the current build.
+
+While cargo runs, the light in the header turns amber, reads `building`, and
+breathes. Everything under it is the previous build until the reload arrives,
+which on a cold build is ten seconds of a page that would otherwise claim to
+be current. The dot moves because a state that lasts seconds and never moves
+reads as stuck; under `prefers-reduced-motion` it holds still and the colour
+and the word say it instead.
+
+The event stream only speaks when the version or that light changes, and
+sends a comment every fifteen seconds so an idle connection is not closed
+under it. A browser left open on this page is sent nothing at all.
 
 ```sh
 python3 tools/uiwatch/serve.py                  # http://15.204.113.4:5200

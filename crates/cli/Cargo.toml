@@ -19,7 +19,12 @@ tetanus-config = { path = "../config" }
 tetanus-engine = { path = "../engine" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+tetanus-toolset = { path = "../toolset" }
+# The confinement vocabulary, for the `--sandbox` flag's value parser: a typed
+# mode is refused with the list of what exists before a journal is opened.
+tetanus-sandbox = { path = "../sandbox" }
 tetanus-protocol = { path = "../protocol" }
+tetanus-host = { path = "../host" }
 tetanus-rpc = { path = "../rpc" }
 tetanus-ui = { path = "../ui" }
 

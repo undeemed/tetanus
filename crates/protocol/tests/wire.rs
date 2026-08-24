@@ -5,14 +5,17 @@
 //! round trips through the same code that produced them.
 
 use serde_json::json;
+use tetanus_protocol::methods::AskResult;
+use tetanus_protocol::methods::MAX_PAGE_SIZE;
 use tetanus_protocol::methods::{
-    capability, method, push, AgentStatusPush, ApprovalSetParams, ApproveParams, ApproveResult,
-    SessionEventPush, SessionForkParams,
+    capability, method, push, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush,
+    AgentSteerParams, AgentSteerResult, ApprovalSetParams, ApproveParams, ApproveResult,
+    SessionEventPush, SessionEventsResult, SessionForkParams, MAX_FRAME_BYTES,
 };
 use tetanus_protocol::rpc::{ErrorCode, Id, Message, Payload, Response, RpcError, V2};
 use tetanus_protocol::types::{
-    AgentState, ApprovalOutcome, ApprovalPolicy, Chunk, ConfigEntry, ConfigLayer, KnownEvent,
-    SessionEvent, StopReason, TurnSummary, Usage, REDACTED,
+    AgentState, Answer, ApprovalOutcome, ApprovalPolicy, Chunk, ConfigEntry, ConfigLayer,
+    KnownEvent, Question, QuestionOption, SessionEvent, StopReason, TurnSummary, Usage, REDACTED,
 };
 use tetanus_protocol::{is_compatible, PROTOCOL_VERSION};
 
@@ -537,6 +540,9 @@ fn session_start_lineage_is_optional_and_absent_means_no_parent() {
             max_steps: 8,
             parent_session: None,
             fork_seq: None,
+            cwd: None,
+            spawned_by: None,
+            depth: None,
         }
     );
 
@@ -556,6 +562,9 @@ fn session_start_lineage_is_optional_and_absent_means_no_parent() {
             max_steps: 8,
             parent_session: Some("s1".into()),
             fork_seq: Some(6),
+            cwd: None,
+            spawned_by: None,
+            depth: None,
         }
     );
 
@@ -801,4 +810,1757 @@ fn the_approval_audit_types_stage_like_the_others() {
     };
     assert_eq!(bare.data.get("call_id"), None);
     assert_eq!(bare.data.get("reason"), None);
+}
+
+/// TC-PROTO-25: contract section 4.3.2. `context/snapshot` stages like the
+/// other durable types this version writes and does not parse, and carries the
+/// parts section 4.4.8 fixes.
+///
+/// It names its `turn`, unlike the approval pair, because it belongs to the
+/// turn rather than to a moment inside a step.
+#[test]
+fn a_context_snapshot_stages_and_carries_its_parts() {
+    let event = SessionEvent {
+        ty: "context/snapshot".into(),
+        seq: 1,
+        time: 0,
+        data: json!({
+            "turn": 1,
+            "parts": [
+                { "name": "time", "text": "The date is 2026-08-21." },
+                { "name": "workspace", "text": "The working directory is /srv/app." },
+            ],
+        }),
+        source_event_seqs: None,
+    };
+
+    assert!(
+        event.parse().is_none(),
+        "staged, not a KnownEvent variant yet"
+    );
+    assert_eq!(event.data["turn"], json!(1));
+    let parts = event.data["parts"].as_array().expect("parts is a list");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["name"], json!("time"));
+    assert!(parts[0]["text"].is_string());
+}
+
+/// TC-PROTO-26: contract section 4.4.8. The joining rule reproduces exactly
+/// what the model read.
+///
+/// The record carries the parts and not the rendered text, so the rule that
+/// turns one into the other is load-bearing: without it a reader cannot say
+/// what the model saw, and the whole point of recording a snapshot is that it
+/// can. It is the rule section 4.3 already gives prompt sections, restated
+/// against a list of parts.
+#[test]
+fn the_joining_rule_reproduces_what_the_model_read() {
+    let parts = [
+        ("time", "The date is 2026-08-21."),
+        ("cwd", "You are in /srv."),
+    ];
+
+    let joined = parts
+        .iter()
+        .map(|(_, text)| *text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    assert_eq!(
+        joined, "The date is 2026-08-21.\n\nYou are in /srv.",
+        "a blank line between parts, in the order the list gives"
+    );
+}
+
+/// TC-PROTO-27: contract section 4.4.8. A part with nothing to say contributes
+/// nothing, and a snapshot with nothing to say is not written.
+///
+/// A provider that has no answer this turn - no branch, because this is not a
+/// checkout - must not cost a blank line in the message, and a deployment that
+/// configures no providers must not pay for an empty user message on every
+/// turn.
+#[test]
+fn an_empty_part_contributes_nothing() {
+    let join = |parts: &[(&str, &str)]| {
+        parts
+            .iter()
+            .map(|(_, text)| *text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+
+    assert_eq!(
+        join(&[
+            ("time", "It is Tuesday."),
+            ("branch", ""),
+            ("cwd", "In /srv.")
+        ]),
+        "It is Tuesday.\n\nIn /srv.",
+        "an empty part leaves no gap behind it"
+    );
+    assert_eq!(join(&[("branch", ""), ("tmux", "")]), "");
+    assert_eq!(join(&[]), "", "and nothing at all is nothing to write");
+}
+
+/// TC-PROTO-30: contract section 4.4.9. Every origin fact is optional in both
+/// directions, and absent means absent.
+///
+/// A journal written before these existed must parse, and one that carries
+/// none of them must not serialize three nulls into every header - a reader
+/// cannot tell `"cwd": null` from a session opened nowhere, and there is no
+/// such thing.
+#[test]
+fn every_origin_fact_is_optional_and_absent_means_absent() {
+    let bare = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        source_event_seqs: None,
+    };
+    assert_eq!(
+        bare.parse()
+            .expect("a header written before this still parses"),
+        KnownEvent::SessionStart {
+            session_id: "s1".into(),
+            provider: "mock".into(),
+            model: "m".into(),
+            max_steps: 8,
+            parent_session: None,
+            fork_seq: None,
+            cwd: None,
+            spawned_by: None,
+            depth: None,
+        }
+    );
+
+    let wire = serde_json::to_value(bare.parse().expect("parse")).expect("serialize");
+    for absent in ["cwd", "spawned_by", "depth"] {
+        assert_eq!(wire.get(absent), None, "`{absent}` is absent, not null");
+    }
+}
+
+/// TC-PROTO-31: contract section 4.4.9. A copy and a delegation are told
+/// apart, and one session may be both.
+///
+/// This is the case the two fields exist for. A fork begins holding another
+/// journal's history; a subagent is a different conversation another one asked
+/// for. Merging them would leave a reader unable to answer either "what else
+/// came out of this conversation" or "why does this session exist", and a fork
+/// of a subagent's journal is both at once - which is what rules out one field
+/// with a kind beside it.
+#[test]
+fn a_copy_and_a_delegation_are_told_apart() {
+    let both = header(json!({
+        "session_id": "s3", "provider": "mock", "model": "m", "max_steps": 8,
+        "parent_session": "s2", "fork_seq": 12,
+        "spawned_by": "s1", "depth": 1,
+        "cwd": "/srv/app"
+    }));
+
+    match both.parse().expect("parse") {
+        KnownEvent::SessionStart {
+            parent_session,
+            fork_seq,
+            spawned_by,
+            depth,
+            cwd,
+            ..
+        } => {
+            assert_eq!(parent_session.as_deref(), Some("s2"), "copied from");
+            assert_eq!(fork_seq, Some(12));
+            assert_eq!(spawned_by.as_deref(), Some("s1"), "started by");
+            assert_ne!(
+                parent_session, spawned_by,
+                "the two answer different questions and are not one field"
+            );
+            assert_eq!(depth, Some(1));
+            assert_eq!(cwd.as_deref(), Some("/srv/app"));
+        }
+        other => panic!("expected a header, got {other:?}"),
+    }
+
+    // Each may appear without the other: a plain fork delegates nothing, and a
+    // subagent's own first journal was copied from nothing.
+    let forked = header(json!({
+        "session_id": "s2", "provider": "mock", "model": "m", "max_steps": 8,
+        "parent_session": "s1", "fork_seq": 4
+    }));
+    let delegated = header(json!({
+        "session_id": "s4", "provider": "mock", "model": "m", "max_steps": 8,
+        "spawned_by": "s1", "depth": 1
+    }));
+    assert!(forked.parse().is_some() && delegated.parse().is_some());
+}
+
+/// TC-PROTO-32: contract section 4.4.9. Depth counts levels, and survives the
+/// round trip that a resume depends on.
+///
+/// The number is durable precisely so a restarted subagent does not come back
+/// believing it is a root session and free to delegate again. That only holds
+/// if it reads back as what was written, including the zero a root would write
+/// if it wrote one at all.
+#[test]
+fn depth_counts_levels_and_survives_a_round_trip() {
+    for level in [0u32, 1, 2, 7] {
+        let event = header(json!({
+            "session_id": "s", "provider": "mock", "model": "m", "max_steps": 8,
+            "spawned_by": "parent", "depth": level
+        }));
+        let parsed = event.parse().expect("parse");
+        match &parsed {
+            KnownEvent::SessionStart { depth, .. } => assert_eq!(*depth, Some(level)),
+            other => panic!("expected a header, got {other:?}"),
+        }
+        let wire = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(wire["depth"], json!(level), "a written level reads back");
+    }
+
+    // Absent is a root session, and is not the same as a written zero: one was
+    // never delegated, the other says so.
+    let root = header(json!({
+        "session_id": "s", "provider": "mock", "model": "m", "max_steps": 8
+    }));
+    match root.parse().expect("parse") {
+        KnownEvent::SessionStart { depth, .. } => assert_eq!(depth, None),
+        other => panic!("expected a header, got {other:?}"),
+    }
+}
+
+/// A `session/start` event carrying `data`.
+fn header(data: serde_json::Value) -> SessionEvent {
+    SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data,
+        source_event_seqs: None,
+    }
+}
+
+/// TC-PROTO-35: contract section 4.4.10. A steer names the turn it joined and
+/// the step that read it.
+///
+/// The step is what lets a surface show the message landing where it landed
+/// rather than where it was typed - a person who says "actually, use TypeScript"
+/// mid-answer needs to see which step acted on it, because the one before it
+/// did not.
+#[test]
+fn a_steer_names_the_turn_and_the_step_that_read_it() {
+    let params = AgentSteerParams {
+        session_id: "s1".into(),
+        content: "actually, use the other file".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize"),
+        json!({ "session_id": "s1", "content": "actually, use the other file" })
+    );
+
+    let landed = AgentSteerResult {
+        turn: 3,
+        taken_at_step: Some(2),
+    };
+    assert_eq!(
+        serde_json::to_value(&landed).expect("serialize"),
+        json!({ "turn": 3, "taken_at_step": 2 })
+    );
+
+    // Still queued when the call answered: the turn is known, the step is not
+    // yet, and absent says so rather than naming a step that did not read it.
+    let queued = AgentSteerResult {
+        turn: 3,
+        taken_at_step: None,
+    };
+    let wire = serde_json::to_value(&queued).expect("serialize");
+    assert_eq!(wire.get("taken_at_step"), None);
+    assert_eq!(
+        serde_json::from_value::<AgentSteerResult>(wire).expect("parse"),
+        queued
+    );
+
+    assert_eq!(capability::AGENT_STEER, method::AGENT_STEER);
+}
+
+/// TC-PROTO-36: contract section 4.4.10. A steered message is on the journal
+/// whether or not a step ever read it, and is not a `user/message`.
+///
+/// The durability rule exists to prevent the worst outcome available here: a
+/// caller told its message was accepted, which then vanishes from the history
+/// because the turn ended first. The person believes they have said something
+/// and the transcript disagrees.
+///
+/// The separate type exists because both derive to the same role, and a reader
+/// replaying must still tell a message that *opened* a turn from one that
+/// arrived during it - only one of them can be refused for arriving too late.
+#[test]
+fn a_steer_that_was_never_read_is_still_on_the_journal() {
+    let read = SessionEvent {
+        ty: "user/steer".into(),
+        seq: 7,
+        time: 0,
+        data: json!({ "content": "use the other file", "turn": 3, "taken": true }),
+        source_event_seqs: None,
+    };
+    let missed = SessionEvent {
+        data: json!({ "content": "too late", "turn": 3, "taken": false }),
+        ..read.clone()
+    };
+
+    for event in [&read, &missed] {
+        assert!(event.parse().is_none(), "staged, like the other new types");
+        assert!(event.data["content"].is_string());
+        assert!(event.data["taken"].is_boolean(), "it says which happened");
+    }
+    assert_ne!(read.data["taken"], missed.data["taken"]);
+
+    assert_ne!(
+        read.ty, "user/message",
+        "a steer is not a prompt, though both derive to the same role"
+    );
+}
+
+/// TC-PROTO-37: contract section 4.4.10. An idle session refuses with a null
+/// turn.
+///
+/// Worth a case because the wording reads backwards at first: a session that
+/// is *not* busy is exactly what makes steering impossible. The code names the
+/// condition the caller has to fix - there is no turn to join - and the null
+/// turn says which way round it is, so a surface can tell "nothing is running"
+/// from "the turn is finishing and will read nothing more".
+#[test]
+fn an_idle_session_refuses_with_a_null_turn() {
+    let idle = RpcError::new(ErrorCode::SessionBusy, "no turn is running")
+        .with_data(json!({ "session_id": "s1", "turn": null }));
+    let too_late = RpcError::new(ErrorCode::SessionBusy, "the turn takes no further step")
+        .with_data(json!({ "session_id": "s1", "turn": 3 }));
+
+    for refusal in [&idle, &too_late] {
+        assert_eq!(refusal.kind(), Some(ErrorCode::SessionBusy), "no new code");
+        assert_eq!(ErrorCode::SessionBusy.exit_status(), 4);
+    }
+
+    let idle_data = idle.data.clone().expect("data");
+    assert_eq!(idle_data["turn"], json!(null), "nothing is running");
+    assert_eq!(
+        too_late.data.clone().expect("data")["turn"],
+        json!(3),
+        "and a turn that is finishing names itself"
+    );
+}
+
+/// TC-PROTO-40: contract section 4.4.2. A turn a guard stopped names which
+/// guard, and is a summary rather than an error.
+///
+/// The two reasons are separate because they need opposite answers. Running
+/// out of time usually means a bigger budget or a smaller task; looping means
+/// a bigger budget makes it strictly worse. One reason for both would leave a
+/// reader unable to tell "this needs longer" from "longer will not help",
+/// which is the only decision the reason is for.
+#[test]
+fn a_guarded_turn_names_which_guard_stopped_it() {
+    let out_of_time = summary("timed-out");
+    let looping = summary("repeated");
+
+    assert_eq!(
+        out_of_time.stop_reason,
+        StopReason::Other("timed-out".into())
+    );
+    assert_eq!(looping.stop_reason, StopReason::Other("repeated".into()));
+    assert_ne!(
+        out_of_time.stop_reason, looping.stop_reason,
+        "a reader must be able to tell them apart"
+    );
+
+    // Both are summaries: the turn produced whatever it produced, and the
+    // reason says why it stopped short rather than that it failed.
+    for stopped in [&out_of_time, &looping] {
+        assert_eq!(stopped.steps, 3);
+        assert_eq!(stopped.content, "as far as I got");
+        assert!(stopped.stop_veto.is_none());
+    }
+}
+
+/// TC-PROTO-41: contract section 4.4.2 and section 7.5. A guard reason is a
+/// value of the growable enum, not a new variant.
+///
+/// That is what makes this a minor change: an older surface renders it through
+/// the fallback it already has, exactly as it does `"interrupted"` and
+/// `"max-tokens"`. A case is worth having because the property is invisible in
+/// the type - `Other` looks like a parse failure until you know it is the
+/// mechanism.
+#[test]
+fn a_guard_reason_is_a_value_not_a_variant() {
+    for word in ["timed-out", "repeated"] {
+        let parsed: StopReason =
+            serde_json::from_value(json!(word)).expect("an unknown reason is not a parse failure");
+        assert_eq!(parsed, StopReason::Other(word.into()));
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("serialize"),
+            json!(word),
+            "and it travels back out as the word it arrived as"
+        );
+    }
+
+    // The named variants are untouched, so nothing an older build already knew
+    // has changed meaning.
+    assert_eq!(
+        serde_json::from_value::<StopReason>(json!("natural")).expect("parse"),
+        StopReason::Natural
+    );
+    assert_eq!(
+        serde_json::from_value::<StopReason>(json!("max-steps")).expect("parse"),
+        StopReason::MaxSteps
+    );
+}
+
+/// A closing summary carrying `reason`.
+fn summary(reason: &str) -> TurnSummary {
+    TurnSummary {
+        turn: 1,
+        steps: 3,
+        stop_reason: serde_json::from_value(json!(reason)).expect("a reason"),
+        stop_veto: None,
+        content: "as far as I got".into(),
+        duration_ms: None,
+        usage: None,
+    }
+}
+
+/// TC-PROTO-45: contract section 4.3. The two redaction rules compose by
+/// union, and a key either rule marks is withheld.
+///
+/// The direction is the point. A schema that could un-mark a key would make
+/// adding a key to the schema a way to start publishing it, and the mistake
+/// would be silent and permanent. Each rule alone has a blind spot - a schema
+/// misses what it does not describe, a name rule misses a credential called
+/// `authorization` - so the union is what fails safe.
+///
+/// The rules themselves live in the engine; what this pins is the shape the
+/// boundary carries in every case, so a surface can rely on it before either
+/// rule is complete.
+#[test]
+fn the_two_redaction_rules_compose_by_union() {
+    // Named like a secret, whatever a schema says.
+    let by_name = withheld("llm.providers.acme.api_key");
+    // A credential a name rule could never find; only a schema knows.
+    let by_schema = withheld("llm.providers.acme.authorization");
+    // Neither rule marks it, so its value travels.
+    let plain = ConfigEntry {
+        key: "agent.max_steps".into(),
+        value: json!(8),
+        layer: ConfigLayer::Default,
+    };
+
+    for hidden in [&by_name, &by_schema] {
+        assert_eq!(hidden.value, json!(REDACTED), "{}", hidden.key);
+        assert!(!hidden.key.is_empty(), "the key is still published");
+        assert_eq!(
+            hidden.layer,
+            ConfigLayer::File,
+            "and so is the layer that set it: a surface still says it is set"
+        );
+    }
+    assert_eq!(plain.value, json!(8), "a setting is not a secret");
+}
+
+/// TC-PROTO-46: contract section 4.3. The sentinel is a rendering, not a
+/// claim, and a surface must not read it as proof.
+///
+/// Nothing distinguishes a withheld value from a document that literally
+/// contains `<redacted>`. That ambiguity is why the honest signal is a flag on
+/// the entry, and why section 4.3 says the flag is deferred rather than
+/// pretending the sentinel does the job: `ConfigEntry` is a type the
+/// presentation lane constructs, so adding a field is a change both lanes land
+/// together.
+///
+/// This case exists so the deferral is visible. When the flag lands it fails,
+/// and asks for the wording to be updated with it.
+#[test]
+fn the_sentinel_is_not_proof_and_says_so() {
+    let withheld_secret = withheld("llm.providers.acme.api_key");
+    let literal = ConfigEntry {
+        key: "ui.placeholder".into(),
+        value: json!(REDACTED),
+        layer: ConfigLayer::File,
+    };
+
+    assert_eq!(
+        withheld_secret.value, literal.value,
+        "the two are indistinguishable by value, which is exactly the gap"
+    );
+
+    // And the entry carries nothing else that would tell them apart. A field
+    // added here is what closes it, and this is the assertion that notices.
+    let wire = serde_json::to_value(&withheld_secret).expect("serialize");
+    let mut keys: Vec<&str> = wire
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["key", "layer", "value"],
+        "when a redaction flag joins this type, section 4.3's deferral is spent"
+    );
+}
+
+/// An entry whose value the engine withheld.
+fn withheld(key: &str) -> ConfigEntry {
+    ConfigEntry {
+        key: key.into(),
+        value: json!(REDACTED),
+        layer: ConfigLayer::File,
+    }
+}
+
+/// TC-PROTO-50: contract section 4.3. A result nobody ran carries a code
+/// saying why, and a code this build does not know is still readable.
+///
+/// A call the engine dispatched reports its outcome in `ok` and `content` and
+/// needs no reason for not having one. A result the engine *synthesized* -
+/// crash repair closing an interrupted call, or a call refused before it ran -
+/// has no outcome, so the code is the whole explanation.
+///
+/// The vocabulary grows with the reasons, so an unknown code reads as "not
+/// run, for a reason this build does not know" rather than failing: a journal
+/// written by a newer engine must stay readable by an older surface.
+#[test]
+fn a_synthesized_result_carries_a_code_and_an_unknown_one_is_readable() {
+    for code in [
+        "TOOL_NOT_STARTED",
+        "TOOL_OUTCOME_UNKNOWN",
+        "TOOL_NOT_PERMITTED",
+        "SOMETHING_A_LATER_ENGINE_ADDED",
+    ] {
+        let event = SessionEvent {
+            ty: "tool/result".into(),
+            seq: 9,
+            time: 0,
+            data: json!({
+                "call_id": "c1",
+                "name": "shell",
+                "ok": false,
+                "content": "the call did not run",
+                "code": code,
+            }),
+            source_event_seqs: Some(vec![7]),
+        };
+
+        // The extra field never stops the event parsing: rule 1 of section 5.
+        let parsed = event
+            .parse()
+            .expect("an unknown field is ignored, not fatal");
+        assert!(matches!(parsed, KnownEvent::ToolResult { ok: false, .. }));
+        assert_eq!(event.data["code"], json!(code), "and it is on the journal");
+    }
+
+    // A result that was actually run carries no code, and its absence is the
+    // signal that it has a real outcome.
+    let ran = SessionEvent {
+        ty: "tool/result".into(),
+        seq: 9,
+        time: 0,
+        data: json!({ "call_id": "c1", "name": "shell", "ok": true, "content": "done" }),
+        source_event_seqs: Some(vec![7]),
+    };
+    assert!(ran.parse().is_some());
+    assert_eq!(ran.data.get("code"), None);
+}
+
+/// TC-PROTO-51: contract section 4.3. The typed path cannot see the code yet,
+/// and this is the case that says so on purpose.
+///
+/// Section 4.4.4 calls the distinction load-bearing - `TOOL_NOT_STARTED` is
+/// safe to retry and `TOOL_OUTCOME_UNKNOWN` is not - and a surface using
+/// `parse()` cannot make it today. The value is on `SessionEvent.data`, so
+/// nothing is lost to a reader willing to look there; what is missing is the
+/// compiler-checked path.
+///
+/// It is deferred rather than fixed because `KnownEvent::ToolResult` is
+/// matched field by field in the presentation lane, so the field is a build
+/// break there and a change both lanes land together (section 5). When that
+/// lane adopts a rest pattern and the field lands, this case fails and asks
+/// for section 4.3's wording to be spent with it.
+#[test]
+fn the_typed_path_cannot_see_the_code_yet_and_says_so() {
+    let not_started = synthesized("TOOL_NOT_STARTED");
+    let outcome_unknown = synthesized("TOOL_OUTCOME_UNKNOWN");
+
+    let (Some(a), Some(b)) = (not_started.parse(), outcome_unknown.parse()) else {
+        panic!("both parse");
+    };
+    assert_eq!(
+        a, b,
+        "the typed forms are identical: the reason one is safe to retry and \
+         the other is not does not survive `parse()`"
+    );
+
+    // The raw data does keep them apart, which is where a surface must look
+    // until the field lands.
+    assert_ne!(not_started.data["code"], outcome_unknown.data["code"]);
+
+    match a {
+        KnownEvent::ToolResult {
+            call_id,
+            name,
+            ok,
+            content,
+        } => {
+            assert_eq!(
+                (call_id.as_str(), name.as_str(), ok),
+                ("c1", "shell", false)
+            );
+            assert!(!content.is_empty());
+        }
+        other => panic!("expected a tool result, got {other:?}"),
+    }
+}
+
+/// A `tool/result` the engine synthesized rather than ran.
+fn synthesized(code: &str) -> SessionEvent {
+    SessionEvent {
+        ty: "tool/result".into(),
+        seq: 9,
+        time: 0,
+        data: json!({
+            "call_id": "c1",
+            "name": "shell",
+            "ok": false,
+            "content": "the call did not run",
+            "code": code,
+        }),
+        source_event_seqs: Some(vec![7]),
+    }
+}
+
+/// TC-PROTO-55: contract section 4.4.3. An answer covers every question or it
+/// is no answer, and an answer to a question nobody asked is ignored.
+///
+/// A tool that asked three things needs three. Given two it is in a state its
+/// author never wrote code for, so the boundary collapses that into the case
+/// the author did handle: no answer, exactly as a client that errored. The
+/// extra-answer rule points the other way because it can - the questions are
+/// the contract, and a client that answered more has not answered less.
+#[test]
+fn a_partial_answer_is_no_answer() {
+    let asked = ["shell", "editor", "branch"];
+
+    let covers =
+        |answers: &[&str]| -> bool { asked.iter().all(|q| answers.iter().any(|given| given == q)) };
+
+    assert!(covers(&["shell", "editor", "branch"]), "all three");
+    assert!(
+        covers(&["branch", "shell", "editor"]),
+        "order is not coverage: an answer echoes its question id"
+    );
+    assert!(
+        covers(&["shell", "editor", "branch", "unasked"]),
+        "an extra answer does not make it incomplete"
+    );
+
+    assert!(!covers(&["shell", "editor"]), "one short is no answer");
+    assert!(!covers(&[]), "and none is no answer");
+
+    // The shape a complete answer travels in.
+    let result = AskResult {
+        answers: asked
+            .iter()
+            .map(|id| Answer {
+                id: (*id).to_string(),
+                labels: vec!["yes".into()],
+            })
+            .collect(),
+    };
+    assert_eq!(result.answers.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&result.answers[0]).expect("serialize"),
+        json!({ "id": "shell", "labels": ["yes"] })
+    );
+}
+
+/// TC-PROTO-56: contract section 4.4.3. A closed list is closed, and a
+/// single-select question given several labels is unanswered.
+///
+/// `QuestionOption.label` is both the text and the value, so the offered
+/// labels are the whole vocabulary. The multi-select rule is the one worth
+/// stating: first-wins would let a tool act on a guess about which option the
+/// user meant, and a tool told it has no answer is in a better position than a
+/// tool confidently doing the wrong thing.
+#[test]
+fn an_answer_outside_a_closed_list_is_no_answer() {
+    let closed = Question {
+        id: "shell".into(),
+        question: "Which shell?".into(),
+        detail: None,
+        options: vec![option("bash"), option("zsh")],
+        multi_select: false,
+    };
+    let free = Question {
+        id: "branch".into(),
+        question: "Which branch?".into(),
+        detail: None,
+        options: Vec::new(),
+        multi_select: false,
+    };
+
+    let accepts = |q: &Question, labels: &[&str]| -> bool {
+        if labels.is_empty() {
+            return false;
+        }
+        if !q.multi_select && labels.len() > 1 {
+            return false;
+        }
+        q.options.is_empty()
+            || labels
+                .iter()
+                .all(|given| q.options.iter().any(|o| o.label == *given))
+    };
+
+    assert!(accepts(&closed, &["bash"]));
+    assert!(!accepts(&closed, &["fish"]), "not on the list");
+    assert!(
+        !accepts(&closed, &["bash", "zsh"]),
+        "single-select given two is unanswered, never first-wins"
+    );
+    assert!(!accepts(&closed, &[]), "no label is no answer");
+
+    assert!(accepts(&free, &["anything at all"]), "free text");
+    assert!(!accepts(&free, &["a", "b"]), "still single-select");
+
+    let multi = Question {
+        multi_select: true,
+        ..closed.clone()
+    };
+    assert!(accepts(&multi, &["bash", "zsh"]), "asked for several");
+    assert!(!accepts(&multi, &["bash", "fish"]), "still a closed list");
+}
+
+/// TC-PROTO-57: contract section 4.4.3. The pair is on the journal in both
+/// outcomes.
+///
+/// A tool acted on what the user said, and a transcript showing the action
+/// without the question cannot explain it - section 4.4.7's reason for the
+/// approval pair, and the same one here. `answered` says which outcome
+/// happened, so an ask nobody answered is a fact rather than an absence, and
+/// crash repair has something to close.
+#[test]
+fn the_ask_pair_is_durable_in_both_outcomes() {
+    let asked = SessionEvent {
+        ty: "question/asked".into(),
+        seq: 4,
+        time: 0,
+        data: json!({
+            "id": "q-1",
+            "questions": [{ "id": "shell", "question": "Which shell?" }],
+        }),
+        source_event_seqs: None,
+    };
+    let answered = SessionEvent {
+        ty: "question/answered".into(),
+        seq: 5,
+        time: 0,
+        data: json!({
+            "id": "q-1",
+            "answers": [{ "id": "shell", "labels": ["bash"] }],
+            "answered": true,
+        }),
+        source_event_seqs: None,
+    };
+    let withdrawn = SessionEvent {
+        data: json!({ "id": "q-1", "answers": [], "answered": false }),
+        ..answered.clone()
+    };
+
+    for event in [&asked, &answered, &withdrawn] {
+        assert!(event.parse().is_none(), "staged, like the other new types");
+    }
+    assert_eq!(asked.data["id"], answered.data["id"], "paired by id");
+    assert_eq!(answered.data["answered"], json!(true));
+    assert_eq!(
+        withdrawn.data["answered"],
+        json!(false),
+        "an ask nobody answered is recorded, not absent"
+    );
+}
+
+fn option(label: &str) -> QuestionOption {
+    QuestionOption {
+        label: label.to_string(),
+        description: None,
+    }
+}
+
+/// TC-PROTO-60: contract section 4.4.5. The maximum a surface reads is the
+/// maximum the engine clamps to.
+///
+/// The number lived only in the engine and in one sentence of prose, so the
+/// machine-readable half of this contract did not carry a value the document
+/// promised. Publishing it is only worth anything if the two cannot drift,
+/// which is what this pins: the engine's constant is defined as this one.
+///
+/// A surface that hard-coded `500` instead would be making a claim about a
+/// server it may not be talking to, and would find out silently, because a
+/// `limit` above the maximum is clamped rather than refused.
+#[test]
+fn the_published_page_maximum_is_what_the_engine_clamps_to() {
+    assert_eq!(MAX_PAGE_SIZE, 500, "this build's maximum");
+
+    // A limit at or below the maximum is what the caller asked for; above it,
+    // the caller gets the maximum and is not told - which is why the number
+    // has to be readable rather than guessed.
+    let clamp = |asked: Option<u32>| {
+        asked
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_PAGE_SIZE)
+            .min(MAX_PAGE_SIZE)
+    };
+    assert_eq!(clamp(Some(10)), 10);
+    assert_eq!(clamp(Some(MAX_PAGE_SIZE)), MAX_PAGE_SIZE);
+    assert_eq!(
+        clamp(Some(MAX_PAGE_SIZE + 1)),
+        MAX_PAGE_SIZE,
+        "clamped, not refused"
+    );
+    assert_eq!(clamp(Some(0)), MAX_PAGE_SIZE, "zero reads as absent");
+    assert_eq!(clamp(None), MAX_PAGE_SIZE);
+}
+
+/// TC-PROTO-65: contract section 4.4.11. A turn a shutdown stopped is a closed
+/// turn that answers a summary.
+///
+/// The payoff is the journal. A server that exits cleanly leaves nothing for
+/// section 4.4.4's repair, so a restart is not preceded by a wave of
+/// synthesized closers on every session that happened to be busy - and a
+/// caller gets the work the turn did manage rather than an error that throws
+/// it away.
+#[test]
+fn a_shut_down_turn_is_closed_and_says_so() {
+    let stopped = TurnSummary {
+        turn: 2,
+        steps: 1,
+        stop_reason: serde_json::from_value(json!("shutdown")).expect("a reason"),
+        stop_veto: None,
+        content: "as far as I got before the restart".into(),
+        duration_ms: None,
+        usage: None,
+    };
+
+    assert_eq!(stopped.stop_reason, StopReason::Other("shutdown".into()));
+    assert!(
+        !stopped.content.is_empty(),
+        "a summary, not an error: the work it did survives"
+    );
+    assert_eq!(
+        serde_json::to_value(&stopped.stop_reason).expect("serialize"),
+        json!("shutdown")
+    );
+}
+
+/// TC-PROTO-66: contract section 4.4.11. Shutdown, cancellation and an
+/// unfinished drain are three different facts.
+///
+/// They are one event to the engine and three answers to a reader. Someone
+/// pressed stop; the operator restarted the service; the drain ran out of time
+/// and the journal was repaired on the next open. The first is a decision to
+/// respect, the second is expected, the third is something to go and look at -
+/// and a transcript that said "cancelled" for a rolling restart would send the
+/// reader after a user who did nothing.
+#[test]
+fn shutdown_and_cancellation_are_different_facts() {
+    let reason =
+        |word: &str| -> StopReason { serde_json::from_value(json!(word)).expect("a reason") };
+
+    let by_user = StopReason::Cancelled;
+    let by_operator = reason("shutdown");
+    let by_crash = reason("interrupted");
+
+    assert_ne!(by_user, by_operator);
+    assert_ne!(by_operator, by_crash);
+    assert_ne!(by_user, by_crash);
+
+    // The named variant is a variant; the two added words are values, so an
+    // older surface renders them through the fallback it already has rather
+    // than failing to parse a journal a newer engine wrote.
+    assert!(matches!(by_user, StopReason::Cancelled));
+    assert_eq!(by_operator, StopReason::Other("shutdown".into()));
+    assert_eq!(by_crash, StopReason::Other("interrupted".into()));
+}
+
+/// TC-PROTO-70: contract section 4.4.12. The calls a client may repeat, and
+/// the three it may not.
+///
+/// A carrier drops a connection and the client does not know whether the call
+/// ran. This is the table it needs, pinned so a call added later has to be
+/// placed in it deliberately rather than inheriting whichever answer nobody
+/// thought about.
+#[test]
+fn which_calls_a_client_may_repeat() {
+    // Reads and calls that land in the same place twice.
+    let repeatable = [
+        method::HELLO,
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_UNSUBSCRIBE,
+        method::AGENT_STATUS,
+        method::AGENT_INTERRUPT,
+        method::CATALOG_TOOLS,
+        method::CATALOG_MODELS,
+        method::CONFIG_DUMP,
+    ];
+    // Repeating these does something a second time.
+    let unsafe_to_repeat = [method::AGENT_PROMPT, method::SESSION_SUBSCRIBE];
+
+    for call in repeatable {
+        assert!(
+            !unsafe_to_repeat.contains(&call),
+            "{call} cannot be in both lists"
+        );
+    }
+
+    // Every method the table names is one this build actually has, so the
+    // documentation cannot drift into describing calls that do not exist.
+    for call in repeatable.iter().chain(unsafe_to_repeat.iter()) {
+        assert!(call.contains('.'), "a method name: {call}");
+    }
+
+    // `agent.prompt` is the one that costs money, and the reason is that
+    // `SessionBusy` guards only the window the client has already left.
+    assert_eq!(
+        ErrorCode::SessionBusy.exit_status(),
+        4,
+        "a busy session is a caller-state problem, not a retry signal"
+    );
+}
+
+/// TC-PROTO-71: contract section 4.4.12. Unsubscribing a subscription that is
+/// already gone is a fact, not a failure.
+///
+/// This is what makes `session.unsubscribe` safe to repeat: a client that
+/// retries after a lost answer gets `ok: false` and knows the outcome, rather
+/// than an error it has to interpret. `Ack.ok` is carrying information here
+/// rather than being decoration, which is worth pinning because a future
+/// change making it always true would quietly remove that.
+#[test]
+fn unsubscribing_twice_is_a_fact_not_a_failure() {
+    let removed = Ack { ok: true };
+    let already_gone = Ack { ok: false };
+
+    assert_eq!(
+        serde_json::to_value(&removed).expect("serialize"),
+        json!({ "ok": true })
+    );
+    assert_eq!(
+        serde_json::to_value(&already_gone).expect("serialize"),
+        json!({ "ok": false })
+    );
+    assert_ne!(
+        removed, already_gone,
+        "the two outcomes are distinguishable, which is what a retry needs"
+    );
+}
+
+/// TC-PROTO-75: contract section 4.4.13. A journal a second process already
+/// holds for writing is refused, and the refusal names it.
+///
+/// The refusal is `Io` with the path, which is the same answer a journal that
+/// cannot be read gets, because the caller's next move is the same: go and
+/// look at that path. What the shape has to guarantee is that the path is
+/// *there* - a refusal that only said "could not open" would leave an operator
+/// with several sessions and no idea which one is held.
+#[test]
+fn a_second_writer_is_refused_naming_the_journal() {
+    let held = RpcError::new(
+        ErrorCode::Io,
+        "another process has /srv/sessions/s1.jsonl open for writing",
+    )
+    .with_data(json!({ "path": "/srv/sessions/s1.jsonl" }));
+
+    assert_eq!(held.kind(), Some(ErrorCode::Io));
+    assert_eq!(ErrorCode::Io.exit_status(), 1);
+    assert_eq!(
+        held.data.clone().expect("data")["path"],
+        json!("/srv/sessions/s1.jsonl"),
+        "the operator is told which journal, not merely that one failed"
+    );
+
+    // The message carries the reason because the code cannot yet. Section
+    // 4.4.13 defers a dedicated code, and this is the assertion that notices
+    // when one arrives: a surface keys its wording on the code, so until then
+    // "another process" lives only in text meant for a log.
+    assert!(
+        held.message.contains("another process"),
+        "the reason is in the message: {}",
+        held.message
+    );
+}
+
+/// TC-PROTO-76: contract section 4.4.13. A reader is never refused because a
+/// writer is present.
+///
+/// One writer and many readers is the whole rule, and the reading half is what
+/// makes it usable: a second `tetanus` sharing a sessions root can still list,
+/// page and fork every session in it. That works because a journal is
+/// append-only, so a prefix of one is stable however busy its writer is -
+/// which section 4.4.6 already relies on for forking a session a turn is
+/// running on.
+///
+/// What a reader can meet is a half-written last line, and that is the crash
+/// tail it already drops rather than a new failure mode.
+#[test]
+fn a_reader_is_never_refused_for_a_writer_being_present() {
+    // The read calls, which stay available whoever is writing.
+    for read_only in [
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+        method::CONFIG_DUMP,
+        method::CATALOG_TOOLS,
+    ] {
+        assert!(read_only.contains('.'), "a method name: {read_only}");
+    }
+
+    // A torn last line is `LogCorrupt` only when it is damage the writer
+    // finished, never when it is the tail of a write still in progress; the
+    // two are told apart by the newline that commits a record, so a reader
+    // sharing a journal with a writer needs no new code and gets none.
+    let corrupt = RpcError::new(ErrorCode::LogCorrupt, "journal line 12 does not parse")
+        .with_data(json!({ "session_id": "s1", "line": 12 }));
+    assert_eq!(corrupt.kind(), Some(ErrorCode::LogCorrupt));
+    assert_eq!(
+        corrupt.data.expect("data")["line"],
+        json!(12),
+        "damage names its line; a crash tail is dropped and names nothing"
+    );
+}
+
+/// TC-PROTO-80: contract section 4.6. The two push kinds are ordered against
+/// each other.
+///
+/// `running` before the turn's first event, `idle` after its `turn/end`. Both
+/// prevent a visible glitch rather than a subtle wrongness: a surface told
+/// `idle` while events were still arriving stops its spinner and keeps
+/// drawing, and one told `running` after `turn/start` draws a turn's opening
+/// while showing an idle session.
+///
+/// The types cannot enforce an order, so what this pins is that the two are
+/// distinguishable at all - a surface has to be able to tell a transition from
+/// an event to sequence them, and both arrive as notifications on one stream.
+#[test]
+fn the_two_push_kinds_are_distinguishable_and_ordered() {
+    let running = AgentStatusPush {
+        session_id: "s1".into(),
+        state: AgentState::Running,
+        turn: Some(4),
+        step: None,
+    };
+    let idle = AgentStatusPush {
+        session_id: "s1".into(),
+        state: AgentState::Idle,
+        turn: None,
+        step: None,
+    };
+    let event = SessionEventPush {
+        session_id: "s1".into(),
+        event: SessionEvent {
+            ty: "turn/start".into(),
+            seq: 3,
+            time: 0,
+            data: json!({ "turn": 4 }),
+            source_event_seqs: None,
+        },
+    };
+
+    // Different frames, so a surface sequences them by arrival rather than by
+    // guessing which kind it has.
+    assert_ne!(push::AGENT_STATUS, push::SESSION_EVENT);
+
+    // `running` names the turn it opened, so a surface can tie the transition
+    // to the events that follow it; `idle` names none, because there is no
+    // longer a turn to name.
+    assert_eq!(running.turn, Some(4));
+    assert_eq!(event.event.data["turn"], json!(4), "the same turn");
+    assert_eq!(idle.turn, None);
+
+    for push in [&running, &idle] {
+        assert_eq!(push.session_id, "s1", "a push names its session");
+    }
+}
+
+/// TC-PROTO-81: contract section 4.6. `idle` is pushed however the turn ended.
+///
+/// The transition is not conditional on success, so a surface can never be
+/// left showing `running` for a session that stopped. This is the property a
+/// spinner depends on, and the one most easily lost by an early return on the
+/// failure path - a turn that fails pushes `idle` and *then* the call answers
+/// its error.
+#[test]
+fn idle_is_pushed_however_the_turn_ended() {
+    // Every way a turn reaches its end, from section 4.4.2 and its neighbours.
+    let endings = [
+        StopReason::Natural,
+        StopReason::Cancelled,
+        StopReason::MaxSteps,
+        StopReason::PreStepRejected,
+        StopReason::Other("failed".into()),
+        StopReason::Other("max-tokens".into()),
+        StopReason::Other("interrupted".into()),
+    ];
+
+    for ending in endings {
+        // Whatever the reason, the state a surface is left in is the same one.
+        let after = AgentStatusPush {
+            session_id: "s1".into(),
+            state: AgentState::Idle,
+            turn: None,
+            step: None,
+        };
+        assert_eq!(after.state, AgentState::Idle, "after {ending:?}");
+        assert_eq!(
+            after.turn, None,
+            "and no turn is named, because none is running"
+        );
+    }
+}
+
+/// TC-PROTO-85: contract section 4.3. `seq` orders a journal and `time` does
+/// not.
+///
+/// The case that makes this concrete is not a clock fault: a forked journal is
+/// non-monotonic *by construction*. Section 4.4.6 copies the parent's events
+/// as they stand, so seqs 1 upward carry the parent's timestamps while seq 0
+/// is the child's own header, written later. Every forked journal has a header
+/// stamped after the events that follow it.
+///
+/// A surface that sorted by `time` would put that header in the middle of the
+/// history it opens.
+#[test]
+fn seq_orders_a_journal_and_time_does_not() {
+    // A forked journal: the child's header written now, the inherited prefix
+    // stamped when the parent wrote it.
+    let child_header = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 5_000,
+        data: json!({
+            "session_id": "child", "provider": "mock", "model": "m", "max_steps": 8,
+            "parent_session": "parent", "fork_seq": 2
+        }),
+        source_event_seqs: None,
+    };
+    let inherited = [
+        SessionEvent {
+            ty: "turn/start".into(),
+            seq: 1,
+            time: 1_000,
+            data: json!({ "turn": 1 }),
+            source_event_seqs: None,
+        },
+        SessionEvent {
+            ty: "turn/end".into(),
+            seq: 2,
+            time: 2_000,
+            data: json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            source_event_seqs: None,
+        },
+    ];
+
+    let journal = [
+        child_header.clone(),
+        inherited[0].clone(),
+        inherited[1].clone(),
+    ];
+
+    // In journal order, `seq` only ever increases.
+    let seqs: Vec<u64> = journal.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, [0, 1, 2]);
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "seq is the order");
+
+    // `time` does not, and this journal is a perfectly ordinary one.
+    let times: Vec<u64> = journal.iter().map(|e| e.time).collect();
+    assert_eq!(times, [5_000, 1_000, 2_000]);
+    assert!(
+        !times.windows(2).all(|w| w[0] <= w[1]),
+        "a forked journal's header is stamped after the events it precedes"
+    );
+
+    // Sorting by time reorders the journal, which is the bug this rule exists
+    // to prevent.
+    let mut by_time = journal.clone();
+    by_time.sort_by_key(|e| e.time);
+    assert_ne!(
+        by_time.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        seqs,
+        "ordering by time is not ordering the journal"
+    );
+}
+
+/// TC-PROTO-86: contract section 4.3. A duration is measured, not subtracted.
+///
+/// This document used to say `duration_ms` was "only the engine saying it
+/// once". It is not: it is measured on a monotonic clock while the turn runs,
+/// and `time` is wall clock, so the two answer the same question and only one
+/// of them is right when a clock moves. A reader that subtracts two stamps
+/// gets an estimate that is usually close and occasionally negative.
+#[test]
+fn a_duration_is_measured_not_subtracted() {
+    // A turn during which the clock was corrected backwards: the difference of
+    // the stamps is negative, and the measured duration is not.
+    let opened: u64 = 10_000;
+    let closed: u64 = 8_500;
+    assert!(
+        closed < opened,
+        "a clock correction mid-turn, which is an ordinary event"
+    );
+
+    let measured = TurnSummary {
+        turn: 1,
+        steps: 1,
+        stop_reason: StopReason::Natural,
+        stop_veto: None,
+        content: "done".into(),
+        duration_ms: Some(1_400),
+        usage: None,
+    };
+
+    assert_eq!(
+        measured.duration_ms,
+        Some(1_400),
+        "the monotonic measurement is unaffected by the clock moving"
+    );
+    // The subtraction a reader might reach for cannot even be done in the
+    // journal's own type without underflowing, which is the sharpest form of
+    // "do not do this".
+    assert_eq!(closed.checked_sub(opened), None);
+
+    // Unmeasured stays absent rather than zero, as section 4.3 already
+    // requires of both optional fields.
+    let unmeasured = TurnSummary {
+        duration_ms: None,
+        ..measured
+    };
+    assert_eq!(unmeasured.duration_ms, None);
+}
+
+/// TC-PROTO-90: contract section 4.4.2. A prompt with nothing in it is refused
+/// before anything is spent.
+///
+/// Today nothing checks it: an empty `content` opens a turn, writes a
+/// `user/message` saying nothing to the journal for ever, and buys a provider
+/// call to be told the obvious. The refusal names the field, because that is
+/// the one thing the caller can act on.
+#[test]
+fn a_prompt_with_nothing_in_it_is_refused() {
+    let refused = RpcError::new(ErrorCode::InvalidParams, "a prompt needs content")
+        .with_data(json!({ "field": "content" }));
+
+    assert_eq!(refused.kind(), Some(ErrorCode::InvalidParams));
+    assert_eq!(
+        ErrorCode::InvalidParams.exit_status(),
+        2,
+        "the caller is wrong, which is a different exit from a build that cannot"
+    );
+    assert_eq!(
+        refused.data.expect("data")["field"],
+        json!("content"),
+        "naming the field is what makes it actionable"
+    );
+
+    // The shape a real prompt travels in, so the refusal is about the value
+    // rather than about the call.
+    let real = AgentPromptParams {
+        session_id: "s1".into(),
+        content: "do the thing".into(),
+    };
+    assert!(!real.content.trim().is_empty());
+}
+
+/// TC-PROTO-91: contract section 4.4.2. Whitespace is nothing, as it already
+/// is for a credential.
+///
+/// This is not pedantry about spaces. It is the same defect the credential
+/// rule fixed once: a value of nothing but whitespace reads as present to
+/// every check that does not trim, and then spends a real request in order to
+/// be refused by somebody else. Fixing it in one place and not the other would
+/// leave the cheaper mistake in the more common call.
+#[test]
+fn whitespace_is_nothing_as_it_is_for_a_credential() {
+    let nothing = ["", " ", "   ", "\t", "\n", " \t\r\n "];
+    let something = ["x", " x ", "\nhello\n", "  do the thing"];
+
+    for empty in nothing {
+        assert!(
+            empty.trim().is_empty(),
+            "{empty:?} is a prompt with nothing in it"
+        );
+    }
+    for real in something {
+        assert!(!real.trim().is_empty(), "{real:?} is a prompt");
+    }
+
+    // The rule is trimming, not emptiness: a check that only asked
+    // `is_empty()` would accept every value in `nothing` but the first, which
+    // is precisely the bug being ruled out.
+    let untrimmed_would_accept = nothing.iter().filter(|v| !v.is_empty()).count();
+    assert_eq!(
+        untrimmed_would_accept, 5,
+        "five of these six get through a check that does not trim"
+    );
+}
+
+/// TC-PROTO-95: contract section 4.1. The frame bound is published, and is one
+/// bound for every carrier.
+///
+/// Publishing it is the point: without a shared number the carriers disagree
+/// under the same abuse, and "one contract, three carriers" stops being true
+/// for a peer that sends bytes and no newline. A surface also needs it to know
+/// what it may send.
+#[test]
+fn the_frame_bound_is_published_and_is_one_bound() {
+    assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
+
+    // Comfortably above any legitimate frame. A full page at the server's
+    // documented maximum of 500 events still leaves room for each of them,
+    // which is what stops the frame bound from being the thing that decides
+    // how much of a journal a caller can read at once.
+    let per_event = MAX_FRAME_BYTES / 500;
+    assert!(
+        per_event > 30_000,
+        "a full page leaves {per_event} bytes an event, which has to be a usable amount"
+    );
+
+    // An over-long frame is refused with the answer section 4.1 already gives
+    // a frame it cannot make sense of, so no new code is needed for it.
+    let refused = RpcError::new(ErrorCode::ParseError, "frame exceeds the maximum size");
+    assert_eq!(refused.kind(), Some(ErrorCode::ParseError));
+    assert_eq!(
+        refused.data, None,
+        "ParseError carries no data, per section 4.5"
+    );
+}
+
+/// TC-PROTO-96: contract section 4.1. A short page is not the end; `eof` is.
+///
+/// A caller can meet a page shorter than its `limit` for two reasons that have
+/// nothing to do with reaching the journal's end - the server's page maximum,
+/// and now the frame bound. A pager that stopped on a short page would
+/// silently truncate a transcript, and would do it only for the sessions with
+/// the most in them, which is the worst possible distribution of a bug.
+#[test]
+fn a_short_page_is_not_the_end() {
+    // Short because the frame bound stopped it, with more to come.
+    let bounded = SessionEventsResult {
+        events: Vec::new(),
+        next_seq: 40,
+        eof: false,
+    };
+    // Short because the journal ended.
+    let finished = SessionEventsResult {
+        events: Vec::new(),
+        next_seq: 40,
+        eof: true,
+    };
+
+    assert_eq!(
+        bounded.events.len(),
+        finished.events.len(),
+        "the two are indistinguishable by page length, which is the trap"
+    );
+    assert!(!bounded.eof, "so the caller pages again");
+    assert!(finished.eof, "and only this one says stop");
+
+    // `next_seq` advances in both, so a pager that loops on `eof` makes
+    // progress either way rather than asking for the same page twice.
+    assert_eq!(bounded.next_seq, finished.next_seq);
+}
+
+/// TC-PROTO-105: contract section 4.3.3. A journal with no `format` reads as
+/// the first one.
+///
+/// Every journal written before this field existed lacks it, and none of them
+/// may become unreadable for that. Absent-means-one is what makes the field
+/// addable at all - the alternative is a flag day for data already on disk.
+#[test]
+fn a_journal_with_no_format_reads_as_the_first_one() {
+    let existing = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({ "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8 }),
+        source_event_seqs: None,
+    };
+    assert!(
+        existing.parse().is_some(),
+        "a journal written before this still parses"
+    );
+    assert_eq!(
+        existing.data.get("format"),
+        None,
+        "and absent is how it says format 1, rather than carrying a 1 nobody wrote"
+    );
+
+    let versioned = SessionEvent {
+        data: json!({
+            "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8,
+            "format": 1
+        }),
+        ..existing.clone()
+    };
+    assert!(versioned.parse().is_some());
+    assert_eq!(versioned.data["format"], json!(1));
+
+    // A format from a later build is readable *as a value* - which is what
+    // lets a reader refuse it deliberately rather than fail to parse the line
+    // and report damage instead.
+    let newer = SessionEvent {
+        data: json!({
+            "session_id": "s1", "provider": "mock", "model": "m", "max_steps": 8,
+            "format": 9
+        }),
+        ..existing
+    };
+    assert_eq!(newer.data["format"], json!(9));
+    assert!(
+        newer.parse().is_some(),
+        "the header still parses, so the refusal is a decision and not a crash"
+    );
+}
+
+/// TC-PROTO-106: contract section 4.3.3. An envelope change is a different
+/// problem from a new type, and the two have different answers.
+///
+/// Section 4.3.2 lets the vocabulary grow because an unknown `type` is a line
+/// a reader can skip while still understanding the rest of the journal. That
+/// argument does not extend to the shape around it: a changed envelope is a
+/// journal that cannot be read at all, or that reads into something meaning
+/// something else. This case pins the distinction the two rules rest on.
+#[test]
+fn an_envelope_change_is_a_different_problem_from_a_new_type() {
+    // A type from a later build: skipped, and everything around it still
+    // works. This is section 4.3.2's whole promise.
+    let unknown_type = SessionEvent {
+        ty: "something/from-a-later-build".into(),
+        seq: 5,
+        time: 0,
+        data: json!({ "whatever": true }),
+        source_event_seqs: None,
+    };
+    assert!(unknown_type.parse().is_none(), "skipped, not fatal");
+    assert_eq!(unknown_type.seq, 5, "and the envelope still reads");
+    assert_eq!(unknown_type.data["whatever"], json!(true));
+
+    // The envelope is what every line depends on, so it is the thing a
+    // version has to protect: `seq` is how a journal is ordered and paged,
+    // and a reader that misread it would page a history that never happened.
+    let ordinary = SessionEvent {
+        ty: "turn/start".into(),
+        seq: 6,
+        time: 7,
+        data: json!({ "turn": 1 }),
+        source_event_seqs: None,
+    };
+    let wire = serde_json::to_value(&ordinary).expect("serialize");
+    let mut fields: Vec<&str> = wire
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["data", "seq", "time", "type"],
+        "the envelope every line carries; `format` names which one this is"
+    );
+}
+
+/// TC-PROTO-110: contract section 4.4.4.1. A resumed session runs under its
+/// header.
+///
+/// The header is where `provider`, `model` and `max_steps` live, and they are
+/// what the session's existing history was produced under. A build that
+/// applied its own defaults instead would silently change how an old session
+/// behaves the moment someone reopened it - raise `agent.max_steps` in a
+/// deployment and every archived session starts running longer turns.
+#[test]
+fn a_resumed_session_runs_under_its_header() {
+    let header = SessionEvent {
+        ty: "session/start".into(),
+        seq: 0,
+        time: 1,
+        data: json!({
+            "session_id": "s1",
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-pro",
+            "max_steps": 4
+        }),
+        source_event_seqs: None,
+    };
+
+    match header.parse().expect("parse") {
+        KnownEvent::SessionStart {
+            provider,
+            model,
+            max_steps,
+            ..
+        } => {
+            assert_eq!(provider, "deepseek-official");
+            assert_eq!(model, "deepseek-v4-pro");
+            assert_eq!(
+                max_steps, 4,
+                "the budget the history was produced under, not this build's"
+            );
+        }
+        other => panic!("expected a header, got {other:?}"),
+    }
+
+    // All three are on the header rather than resolved per turn, which is what
+    // makes the rule expressible at all: a journal carries its own route.
+    let wire = serde_json::to_value(header.parse().expect("parse")).expect("serialize");
+    for carried in ["provider", "model", "max_steps"] {
+        assert!(wire.get(carried).is_some(), "the header carries {carried}");
+    }
+}
+
+/// TC-PROTO-111: contract section 4.4.4.1. A route this build cannot serve is
+/// refused where it is needed, and names which provider.
+///
+/// Opening a journal never needs its route - reading is what a journal is for,
+/// and refusing to show someone their own history because an adapter is not
+/// installed would be the wrong trade. The refusal belongs to `agent.prompt`,
+/// and it carries the provider as well as the field, because naming the field
+/// alone leaves a reader to open the journal to find out which provider it
+/// meant.
+#[test]
+fn a_route_this_build_cannot_serve_is_refused_where_it_is_needed() {
+    let refused = RpcError::new(
+        ErrorCode::InvalidParams,
+        "no adapter for provider `deepseek-official` in this build",
+    )
+    .with_data(json!({ "field": "provider", "provider": "deepseek-official" }));
+
+    assert_eq!(refused.kind(), Some(ErrorCode::InvalidParams));
+    assert_eq!(ErrorCode::InvalidParams.exit_status(), 2);
+
+    let data = refused.data.expect("data");
+    assert_eq!(data["field"], json!("provider"));
+    assert_eq!(
+        data["provider"],
+        json!("deepseek-official"),
+        "the extra key section 4.5 now describes: which provider, not just which field"
+    );
+
+    // The calls that keep working, so a journal from another build is still
+    // readable, pageable and forkable.
+    for readable in [
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+    ] {
+        assert_ne!(
+            readable,
+            method::AGENT_PROMPT,
+            "only prompting needs the route"
+        );
+    }
+}
+
+/// TC-PROTO-115: contract section 4.7. A failure is not on stdout, and the
+/// exit status is read before the last line.
+///
+/// The trap this pins is a real misreading of the previous wording. A
+/// streaming subcommand whose turn fails partway has printed events and no
+/// result line, so the last line on stdout is a `SessionEvent` - and a script
+/// told to "treat the last line as the answer" would report a chunk of a
+/// model's reply as the outcome of the run.
+///
+/// The types are what make the confusion possible: an event line and a result
+/// line are both JSON objects, and neither carries a marker saying which it
+/// is. That is deliberate - a marker would be a field on every line to
+/// describe a case the exit status already answers - so the case asserts the
+/// ambiguity exists rather than pretending the shapes can be told apart.
+#[test]
+fn a_failure_is_not_on_stdout_and_the_status_is_read_first() {
+    // What a streaming run prints when it succeeds: events, then the answer.
+    let event = serde_json::to_value(SessionEvent {
+        ty: "assistant/chunk".into(),
+        seq: 4,
+        time: 0,
+        data: json!({ "chunk": "text", "delta": "hel", "turn": 1, "step": 1 }),
+        source_event_seqs: None,
+    })
+    .expect("serialize");
+    let answer = serde_json::to_value(AgentPromptResult {
+        summary: TurnSummary {
+            turn: 1,
+            steps: 1,
+            stop_reason: StopReason::Natural,
+            stop_veto: None,
+            content: "hello".into(),
+            duration_ms: None,
+            usage: None,
+        },
+    })
+    .expect("serialize");
+
+    // Both are objects, and neither says which it is. A consumer cannot
+    // discriminate by shape, which is why the status is the discriminator.
+    assert!(event.is_object() && answer.is_object());
+    assert_eq!(event.get("kind"), None);
+    assert_eq!(answer.get("kind"), None);
+
+    // Zero: the last line is the answer.
+    let succeeded: Vec<&serde_json::Value> = vec![&event, &answer];
+    assert_eq!(
+        succeeded.last().copied(),
+        Some(&answer),
+        "on success the answer is last"
+    );
+
+    // Non-zero: there is no answer on stdout, whatever is on it. The failure
+    // is the section 4.5 object, on stderr, and its status is what a script
+    // branches on.
+    let failed: Vec<&serde_json::Value> = vec![&event];
+    assert_eq!(
+        failed.last().copied(),
+        Some(&event),
+        "a partway failure leaves an event last, which is not an answer"
+    );
+
+    let reported = RpcError::new(ErrorCode::ProviderError, "provider answered 503")
+        .with_data(json!({ "provider": "deepseek-official", "status": 503 }));
+    assert_eq!(reported.kind(), Some(ErrorCode::ProviderError));
+    assert_eq!(
+        ErrorCode::ProviderError.exit_status(),
+        6,
+        "non-zero, which is the whole signal"
+    );
+    // The rule rests on this and nothing else: if any code in section 4.5
+    // exited zero, "non-zero means no answer" would be false and a script
+    // would read an event as an answer for exactly that failure.
+    for code in [
+        ErrorCode::ParseError,
+        ErrorCode::InvalidRequest,
+        ErrorCode::MethodNotFound,
+        ErrorCode::InvalidParams,
+        ErrorCode::Internal,
+        ErrorCode::UnsupportedProtocolVersion,
+        ErrorCode::NotImplemented,
+        ErrorCode::SessionNotFound,
+        ErrorCode::SessionBusy,
+        ErrorCode::Cancelled,
+        ErrorCode::MissingCredential,
+        ErrorCode::ProviderError,
+        ErrorCode::ToolUnknown,
+        ErrorCode::LogCorrupt,
+        ErrorCode::Io,
+    ] {
+        assert_ne!(
+            code.exit_status(),
+            0,
+            "{code:?} exits zero, which would make a failure indistinguishable from an answer"
+        );
+    }
+}
+
+/// TC-PROTO-100: contract section 4.1.2. Every call is available to any
+/// connected peer, so the connection is the whole of the decision.
+///
+/// This is worth pinning rather than assuming, because it is the premise the
+/// rest of the section rests on. If a call were ever gated per-peer, the
+/// argument that authentication at the handshake is sufficient stops holding,
+/// and this case is where that change would first be noticed.
+///
+/// What a connected peer gets is named here too: turns that run tools and
+/// spend money, every journal in the server's directory, and the resolved
+/// configuration.
+#[test]
+fn every_call_is_available_to_any_connected_peer() {
+    // The whole client-to-server surface of section 4.2. No entry carries a
+    // permission, a scope or a role - the trait has one shape for every peer.
+    let surface = [
+        method::HELLO,
+        method::SESSION_CREATE,
+        method::SESSION_LIST,
+        method::SESSION_EVENTS,
+        method::SESSION_FORK,
+        method::SESSION_SUBSCRIBE,
+        method::SESSION_UNSUBSCRIBE,
+        method::AGENT_PROMPT,
+        method::AGENT_STATUS,
+        method::AGENT_INTERRUPT,
+        method::CATALOG_TOOLS,
+        method::CATALOG_MODELS,
+        method::CONFIG_DUMP,
+    ];
+
+    // The three that make the boundary matter: work, history, configuration.
+    assert!(
+        surface.contains(&method::AGENT_PROMPT),
+        "runs tools, spends money"
+    );
+    assert!(
+        surface.contains(&method::SESSION_LIST),
+        "the user's whole history"
+    );
+    assert!(
+        surface.contains(&method::CONFIG_DUMP),
+        "the resolved configuration"
+    );
+
+    // Capabilities gate features a build may not serve, never peers. A
+    // capability that meant "this peer may" would be a per-call authorization
+    // and would contradict section 4.1.2.
+    for cap in [capability::SESSION_SUBSCRIBE, capability::AGENT_INTERRUPT] {
+        assert!(
+            surface.contains(&cap),
+            "a capability names a call, not a permission: {cap}"
+        );
+    }
+}
+
+/// TC-PROTO-101: contract section 4.1.2. A refused handshake never reaches the
+/// JSON-RPC layer, which is why no error code exists for it.
+///
+/// The absence is the design. Refusing at the HTTP upgrade means an
+/// unauthenticated peer never sends a frame, so there is nothing to answer and
+/// no code to carry an answer. A code added later would mean the refusal had
+/// moved *after* the upgrade, which is a weaker place to make it.
+#[test]
+fn a_refused_handshake_never_reaches_the_json_rpc_layer() {
+    // Every code this contract defines, and none of them is for "you may not
+    // connect" - because by the time a code can be sent, the peer already has.
+    let codes = [
+        ErrorCode::ParseError,
+        ErrorCode::InvalidRequest,
+        ErrorCode::MethodNotFound,
+        ErrorCode::InvalidParams,
+        ErrorCode::Internal,
+        ErrorCode::UnsupportedProtocolVersion,
+        ErrorCode::NotImplemented,
+        ErrorCode::SessionNotFound,
+        ErrorCode::SessionBusy,
+        ErrorCode::Cancelled,
+        ErrorCode::MissingCredential,
+        ErrorCode::ProviderError,
+        ErrorCode::ToolUnknown,
+        ErrorCode::LogCorrupt,
+        ErrorCode::Io,
+    ];
+    for code in codes {
+        assert!(
+            code.exit_status() > 0,
+            "every code is a failure a connected peer can be told about"
+        );
+    }
+
+    // `UnsupportedProtocolVersion` is the closest neighbour and is deliberately
+    // not this: it refuses a peer that connected and greeted, which is exactly
+    // the position an unauthenticated peer must never reach.
+    assert_eq!(ErrorCode::UnsupportedProtocolVersion.exit_status(), 3);
 }

@@ -68,6 +68,12 @@ pub(super) const INDENT: &str = "  ";
 /// read back.
 const CAP: usize = 16;
 
+/// The shortest reading either half of the pace is worth reporting from: a
+/// tenth of a second, which is the resolution [`duration`] prints at. Under
+/// it, `0.0s` reads as a measurement rather than as a wait too short to have
+/// one.
+const FLOOR: u64 = 100;
+
 /// What a reader has to remember between events: the tool call still waiting
 /// for its result, and what the turn has spent so far.
 #[derive(Default)]
@@ -75,6 +81,9 @@ pub struct Reader {
     /// Whether the reasoning of a message is printed in full. Folded to its
     /// first line otherwise, which is what a reader of the answer wants.
     think: bool,
+    /// Whether a tool's result is printed whole. Capped at [`CAP`] otherwise,
+    /// so one long result cannot push the answer it led to off the screen.
+    whole: bool,
     open_call: Option<String>,
     /// Tokens billed by every step of the turn in progress. `None` until a
     /// message carries usage, because a build that does not measure tokens
@@ -82,6 +91,84 @@ pub struct Reader {
     spent: Option<Usage>,
     /// When the turn in progress started, from the journal's own clock.
     started: Option<u64>,
+    /// How fast the model answered, folded over the steps that recorded it.
+    pace: Pace,
+}
+
+/// What the journal says about the speed of a turn, as upstream's own turn
+/// footer folds it: the wait for the first token, and the rate the rest of it
+/// decoded at.
+///
+/// Both are derived here rather than carried across the boundary, because both
+/// are arithmetic over event times the journal already holds - and a surface
+/// deriving them cannot disagree with a journal it read.
+#[derive(Debug, Default, Clone, Copy)]
+struct Pace {
+    /// When the step in progress started, and when its first chunk arrived.
+    step: Option<u64>,
+    first: Option<u64>,
+    /// The wait for the first token of the turn's first step, which is the
+    /// one a reader is waiting through. Later steps are waiting on a tool.
+    waited: Option<u64>,
+    /// Milliseconds spent decoding, and the tokens decoded in them, over every
+    /// step that recorded both. A step missing either is left out rather than
+    /// counted as instant.
+    decoding: u64,
+    decoded: u64,
+}
+
+impl Pace {
+    /// A step began.
+    fn step(&mut self, time: u64) {
+        self.step = Some(time);
+        self.first = None;
+    }
+
+    /// A chunk arrived. Only the first of a step says anything.
+    fn chunk(&mut self, time: u64) {
+        if self.first.is_some() {
+            return;
+        }
+        self.first = Some(time);
+        if let Some(step) = self.step {
+            let waited = time.saturating_sub(step);
+            // The first step's wait, and no other: what a reader waited
+            // through before the answer began.
+            self.waited.get_or_insert(waited);
+        }
+    }
+
+    /// A message settled, carrying what it cost.
+    fn settled(&mut self, time: u64, usage: Option<&Usage>) {
+        let (Some(first), Some(usage)) = (self.first.take(), usage) else {
+            self.step = None;
+            return;
+        };
+        self.decoding += time.saturating_sub(first);
+        self.decoded += usage.completion_tokens;
+        self.step = None;
+    }
+
+    /// Tokens a second, over the steps that recorded both halves of it.
+    ///
+    /// `None` when too little time passed to divide by: a rate over a
+    /// millisecond is not a fast model, it is an unmeasured one, and a mock
+    /// that answers inside the clock's resolution would otherwise be reported
+    /// as the fastest provider anyone has ever seen.
+    fn rate(&self) -> Option<u64> {
+        (self.decoding >= FLOOR && self.decoded > 0)
+            .then(|| self.decoded * 1_000 / self.decoding)
+            .filter(|rate| *rate > 0)
+    }
+
+    /// The wait for the first token, when there was one worth reporting.
+    ///
+    /// Under a tenth of a second `duration` prints `0.0s`, which says less
+    /// than nothing: it reads as a measurement rather than as a wait too short
+    /// to have one.
+    fn waited(&self) -> Option<u64> {
+        self.waited.filter(|waited| *waited >= FLOOR)
+    }
 }
 
 impl Reader {
@@ -91,6 +178,17 @@ impl Reader {
             think,
             ..Self::default()
         }
+    }
+
+    /// Print a tool's result whole, or capped.
+    ///
+    /// Told after the reader was built, because this is a reader changing
+    /// their mind about what is already on the page: the view composes the
+    /// conversation again with it. The thinking is not here for the same
+    /// reason it does not need to be - a view rebuilds its composer to change
+    /// that, and `think` is what it is built with.
+    pub fn whole(&mut self, whole: bool) {
+        self.whole = whole;
     }
 
     /// The lines one event produces, in order, and none for an event a
@@ -114,15 +212,19 @@ impl Reader {
                 {
                     self.spent = None;
                     self.started = Some(time);
+                    self.pace = Pace::default();
                     String::new()
                 },
                 theme
                     .paint(Role::Heading, &format!("turn {turn}"))
                     .to_string(),
             ],
-            KnownEvent::StepStart { step, .. } => vec![theme
-                .paint(Role::Muted, &format!("{INDENT}step {step}"))
-                .to_string()],
+            KnownEvent::StepStart { step, .. } => {
+                self.pace.step(time);
+                vec![theme
+                    .paint(Role::Muted, &format!("{INDENT}step {step}"))
+                    .to_string()]
+            }
             KnownEvent::UserMessage { content } => said(theme, width, "you", Role::Accent, content),
             KnownEvent::AssistantMessage {
                 content,
@@ -130,6 +232,7 @@ impl Reader {
                 usage,
                 ..
             } => {
+                self.pace.settled(time, usage.as_ref());
                 if let Some(step) = usage {
                     // Each step is billed for the whole prompt it resent, so
                     // the turn's cost is the sum of its requests, not of its
@@ -178,7 +281,9 @@ impl Reader {
                     Some(open) if open == call_id => None,
                     _ => Some(call_id.as_str()),
                 };
-                produced(theme, width, glyph, role, name, content, answers)
+                produced(
+                    theme, width, self.whole, glyph, role, name, content, answers,
+                )
             }
             KnownEvent::TurnEnd {
                 turn,
@@ -188,7 +293,7 @@ impl Reader {
             } => {
                 let dot = theme.glyph("·", "-");
                 let shown = stopped(stop_reason);
-                let reason = theme.paint(Role::Ok, &shown);
+                let reason = theme.paint(settled(stop_reason), &shown);
                 let unit = if *steps == 1 { "step" } else { "steps" };
                 let mut closing = format!("turn {turn} {dot} {reason} {dot} {steps} {unit}");
                 // Under a second is not worth reporting: nobody waited for
@@ -207,16 +312,67 @@ impl Reader {
                     let noun = if total == 1 { "token" } else { "tokens" };
                     closing.push_str(&format!(" {dot} {} {noun}", tokens(total)));
                 }
+                // How fast it was, on the turns slow enough for that to be a
+                // fact rather than a rounding: the wait for the first token,
+                // and the rate the rest decoded at. Upstream's turn footer
+                // carries the same pair, folded the same way - the first
+                // step's wait, because a later step is waiting on a tool, and
+                // a rate over the steps that recorded both halves of it.
+                //
+                // Behind the same threshold as the duration, and for the same
+                // reason: under a second these are noise, and two runs of one
+                // turn must print the same bytes.
+                if took.is_some_and(|took| took >= 1_000) {
+                    let pace = std::mem::take(&mut self.pace);
+                    if let Some(waited) = pace.waited() {
+                        closing.push_str(&format!(
+                            " {dot} first token in {}",
+                            duration(Duration::from_millis(waited))
+                        ));
+                    }
+                    if let Some(rate) = pace.rate() {
+                        closing.push_str(&format!(" {dot} {rate} tok/s"));
+                    }
+                }
                 let mut lines = vec![String::new(), closing];
                 if let Some(veto) = stop_veto {
                     lines.push(format!("{INDENT}held open by {}", tame(veto)));
                 }
+                // The one reason worth a sentence of its own. The contract
+                // asks for it in as many words (§4.4.2): a surface that
+                // renders a cut-off turn as an ordinary end tells the reader
+                // that a sentence the model never finished is the whole reply.
+                if matches!(stop_reason, StopReason::Other(reason) if reason == "max-tokens") {
+                    lines.push(
+                        theme
+                            .paint(
+                                Role::Muted,
+                                &format!("{INDENT}the answer stops where the cap did; ask again to go on"),
+                            )
+                            .to_string(),
+                    );
+                }
                 lines
             }
             // The streaming surface, and the frames of the turn. A finished
-            // turn reads better without them.
-            KnownEvent::AssistantChunk { .. } | KnownEvent::StepEnd { .. } => Vec::new(),
+            // turn reads better without them - but the first chunk of a step
+            // is when the model started answering, which the closing line
+            // reports.
+            KnownEvent::AssistantChunk { .. } => {
+                self.pace.chunk(time);
+                Vec::new()
+            }
+            KnownEvent::StepEnd { .. } => Vec::new(),
         }
+    }
+    /// What the turn has spent so far, over every step of it.
+    ///
+    /// `None` until a message carries usage: a build that does not measure
+    /// tokens says nothing about them rather than saying nothing was spent.
+    pub fn spent(&self) -> Option<u64> {
+        self.spent
+            .as_ref()
+            .map(|spent| spent.prompt_tokens + spent.completion_tokens)
     }
 }
 
@@ -238,7 +394,7 @@ pub(super) fn duration(elapsed: Duration) -> String {
 /// A token count the way upstream's conversation UI writes one: `517`,
 /// `12.2K`, `1.2M`. One decimal until the figure reaches three digits, then
 /// whole numbers - a turn's cost is read at a glance, not audited.
-fn tokens(count: u64) -> String {
+pub(super) fn tokens(count: u64) -> String {
     let scaled = |value: f64| match value >= 100.0 {
         true => format!("{}", value.round()),
         false => format!("{}", (value * 10.0).round() / 10.0),
@@ -248,6 +404,197 @@ fn tokens(count: u64) -> String {
         count if count < 1_000_000 => format!("{}K", scaled(count as f64 / 1_000.0)),
         count => format!("{}M", scaled(count as f64 / 1_000_000.0)),
     }
+}
+
+/// What a whole conversation has cost and how fast it has been.
+///
+/// Upstream keeps the same figures on a strip beside its composer, folded over
+/// the same events: how much was asked, how long the model and the tools each
+/// took, how long the first token took on average, the rate the answers
+/// decoded at, and what was billed. This is that fold, over a journal.
+///
+/// Every figure is derived rather than carried: the journal holds event times
+/// and the usage a message reported, and a surface that computed them from
+/// anything else would be a second answer about one conversation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub turns: u64,
+    pub steps: u64,
+    /// Milliseconds between a step starting and its message settling, summed.
+    pub thinking: u64,
+    /// Milliseconds between a tool being called and answering, summed.
+    pub tooling: u64,
+    /// Summed first-token waits, and how many steps recorded one.
+    pub waited: u64,
+    pub waits: u64,
+    /// Decode time and the tokens decoded in it, over the steps recording both.
+    pub decoding: u64,
+    pub decoded: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl Stats {
+    /// The average wait for a first token, when any step recorded one.
+    pub fn wait(&self) -> Option<u64> {
+        (self.waits > 0).then(|| self.waited / self.waits)
+    }
+
+    /// Tokens a second while decoding, on the same terms the closing line
+    /// reports it: nothing when too little time passed to divide by.
+    pub fn rate(&self) -> Option<u64> {
+        (self.decoding >= FLOOR && self.decoded > 0)
+            .then(|| self.decoded * 1_000 / self.decoding)
+            .filter(|rate| *rate > 0)
+    }
+}
+
+/// Fold a journal into what it says about the conversation on it.
+pub fn stats(events: &[SessionEvent]) -> Stats {
+    let mut stats = Stats::default();
+    let mut step: Option<u64> = None;
+    let mut first: Option<u64> = None;
+    // Calls waiting on a result, by the id a result pairs to (contract §4.3.1);
+    // never by arrival order, because two calls in flight arrive in whichever
+    // order the tools finish.
+    let mut calls: Vec<(String, u64)> = Vec::new();
+    for event in events {
+        let time = event.time;
+        match event.parse() {
+            Some(KnownEvent::TurnStart { .. }) => stats.turns += 1,
+            Some(KnownEvent::StepStart { .. }) => {
+                stats.steps += 1;
+                step = Some(time);
+                first = None;
+            }
+            Some(KnownEvent::AssistantChunk { .. }) => {
+                if first.is_none() {
+                    first = Some(time);
+                    if let Some(started) = step {
+                        stats.waited += time.saturating_sub(started);
+                        stats.waits += 1;
+                    }
+                }
+            }
+            Some(KnownEvent::AssistantMessage { usage, .. }) => {
+                if let Some(started) = step.take() {
+                    stats.thinking += time.saturating_sub(started);
+                }
+                if let (Some(first), Some(usage)) = (first.take(), usage.as_ref()) {
+                    stats.decoding += time.saturating_sub(first);
+                    stats.decoded += usage.completion_tokens;
+                }
+                if let Some(usage) = usage {
+                    stats.prompt_tokens += usage.prompt_tokens;
+                    stats.completion_tokens += usage.completion_tokens;
+                }
+            }
+            Some(KnownEvent::ToolCall { id, .. }) => calls.push((id, time)),
+            Some(KnownEvent::ToolResult { call_id, .. }) => {
+                if let Some(at) = calls.iter().position(|(id, _)| *id == call_id) {
+                    let (_, called) = calls.remove(at);
+                    stats.tooling += time.saturating_sub(called);
+                }
+            }
+            _ => {}
+        }
+    }
+    stats
+}
+
+/// The strip a reader asks for: what was asked, what it took, how fast it was,
+/// and what it cost.
+///
+/// Grouped the way upstream groups it, and a group with nothing in it is left
+/// out whole rather than printed as zeroes - a conversation whose every
+/// request failed has counts and no billing, and saying `0 tokens` would read
+/// as a conversation that was free rather than one that never got an answer.
+pub fn told(theme: &Theme, stats: &Stats) -> Vec<String> {
+    if stats.turns == 0 && stats.steps == 0 {
+        return vec![theme
+            .paint(Role::Muted, "nothing has been asked yet")
+            .to_string()];
+    }
+    let dot = theme.glyph("·", "-");
+    let groups: Vec<String> = [
+        Some(counted(stats, dot)),
+        took(stats, dot),
+        fast(stats, dot),
+        billed(stats, dot),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    vec![
+        theme.paint(Role::Heading, "stats").to_string(),
+        format!("  {}", theme.paint(Role::Muted, &groups.join("   "))),
+    ]
+}
+
+/// How much was asked.
+///
+/// A turn that failed before its first step is still a turn, and each half is
+/// counted where it is there rather than the pair being counted together.
+fn counted(stats: &Stats, dot: &str) -> String {
+    let mut counts = Vec::new();
+    if stats.turns > 0 {
+        counts.push(match stats.turns {
+            1 => "1 turn".to_string(),
+            turns => format!("{turns} turns"),
+        });
+    }
+    if stats.steps > 0 {
+        counts.push(match stats.steps {
+            1 => "1 step".to_string(),
+            steps => format!("{steps} steps"),
+        });
+    }
+    counts.join(&format!(" {dot} "))
+}
+
+/// How long the model and the tools each took.
+fn took(stats: &Stats, dot: &str) -> Option<String> {
+    let mut took = Vec::new();
+    if stats.thinking > 0 {
+        took.push(format!(
+            "model {}",
+            duration(Duration::from_millis(stats.thinking))
+        ));
+    }
+    if stats.tooling > 0 {
+        took.push(format!(
+            "tools {}",
+            duration(Duration::from_millis(stats.tooling))
+        ));
+    }
+    (!took.is_empty()).then(|| took.join(&format!(" {dot} ")))
+}
+
+/// How fast the answers came, on the readings worth reporting.
+fn fast(stats: &Stats, dot: &str) -> Option<String> {
+    let mut fast = Vec::new();
+    if let Some(wait) = stats.wait().filter(|wait| *wait >= FLOOR) {
+        fast.push(format!(
+            "first token in {} on average",
+            duration(Duration::from_millis(wait))
+        ));
+    }
+    if let Some(rate) = stats.rate() {
+        fast.push(format!("{rate} tok/s"));
+    }
+    (!fast.is_empty()).then(|| fast.join(&format!(" {dot} ")))
+}
+
+/// What was billed, when anything was.
+fn billed(stats: &Stats, dot: &str) -> Option<String> {
+    let spent = stats.prompt_tokens + stats.completion_tokens;
+    (spent > 0).then(|| {
+        format!(
+            "{} in {dot} {} out",
+            tokens(stats.prompt_tokens),
+            tokens(stats.completion_tokens)
+        )
+    })
 }
 
 /// Render a whole event stream, as a reader of a finished turn sees it.
@@ -282,7 +629,26 @@ pub(super) fn stopped(reason: &StopReason) -> String {
         StopReason::PreStepRejected => "rejected before the step".into(),
         StopReason::MaxSteps => "step budget spent".into(),
         StopReason::Cancelled => "cancelled".into(),
+        // The two values §4.4.2 and §4.4.3 name on the growable enum. A
+        // surface that echoed the wire word would print `max-tokens` at a
+        // reader, which says what the field holds rather than what happened.
+        StopReason::Other(reason) if reason == "max-tokens" => "cut off at the output cap".into(),
+        StopReason::Other(reason) if reason == "failed" => "failed".into(),
         StopReason::Other(reason) => tame(reason),
+    }
+}
+
+/// Whether a turn ended the way it meant to.
+///
+/// Only one reason is: a model that stopped writing because it had finished.
+/// Every other reason means the answer on the page is missing something the
+/// reader cannot see is missing - the cap cut it off, a budget ran out, a
+/// listener refused the step, somebody interrupted - and a closing line that
+/// painted them all alike would say so in the colour of a job well done.
+fn settled(reason: &StopReason) -> Role {
+    match reason {
+        StopReason::Natural => Role::Ok,
+        _ => Role::Warn,
     }
 }
 
@@ -384,10 +750,14 @@ fn more(lines: usize) -> String {
 /// Folded like prose, so newlines the tool wrote are newlines on the page -
 /// command output is lines, and flattening them to one paragraph loses the
 /// shape a reader reads it by. Capped at [`CAP`], so one long result cannot
-/// push the answer it led to off the top of the screen.
+/// push the answer it led to off the top of the screen - unless the caller
+/// asked for the whole of it, which is a reader saying they came for the
+/// output rather than for the answer it led to.
+#[allow(clippy::too_many_arguments)]
 fn produced(
     theme: &Theme,
     width: usize,
+    whole: bool,
     glyph: &str,
     role: Role,
     name: &str,
@@ -408,9 +778,9 @@ fn produced(
     let pad = " ".repeat(visible_width(&head));
 
     let mut said: Vec<&str> = content.lines().collect();
-    let folded = said
-        .len()
-        .checked_sub(CAP)
+    let folded = (!whole)
+        .then_some(said.len())
+        .and_then(|lines| lines.checked_sub(CAP))
         .filter(|hidden| *hidden > 0)
         .map(|hidden| {
             let keep = CAP.div_ceil(2);
@@ -919,7 +1289,7 @@ mod tests {
         }
     }
 
-    /// TC-CLI-TL-12: the compact figure, at every scale.
+    /// TC-CLI-TL-26: the compact figure, at every scale.
     /// Expected: upstream's own rule - plain under a thousand, one decimal
     /// until the figure reaches three digits, then whole numbers. A turn's
     /// cost is read at a glance; `1234567 tokens` is not read at all.
@@ -1238,6 +1608,295 @@ mod tests {
         ] {
             assert!(told.contains(word), "`{word}` is not drawn:\n{told}");
         }
+    }
+
+    /// TC-CLI-TL-26: a turn slow enough to have a pace, over two steps.
+    /// Expected: the wait for the first token of the first step, and the rate
+    /// the answer decoded at, folded over the steps that recorded both halves
+    /// of it. Upstream's own turn footer carries this pair, and folds it the
+    /// same way: a later step's first token is a wait on a tool rather than on
+    /// the model, and a step with no usage is left out of the rate rather than
+    /// counted as free.
+    #[test]
+    fn a_slow_turn_says_how_fast_the_model_was() {
+        let out = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                // Six hundred milliseconds to the first token, then four
+                // hundred to decode two hundred of them: five hundred a second.
+                timed(
+                    600,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on ", "turn": 1, "step": 1 }),
+                ),
+                timed(
+                    1_000,
+                    "assistant/message",
+                    json!({ "content": "on it", "usage": { "prompt_tokens": 10, "completion_tokens": 200 } }),
+                ),
+                timed(1_000, "step/start", json!({ "turn": 1, "step": 2 })),
+                // A second step waits on a tool, not on the model: its wait is
+                // not the one reported, and its decoding still counts.
+                timed(
+                    3_000,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "done", "turn": 1, "step": 2 }),
+                ),
+                timed(
+                    3_600,
+                    "assistant/message",
+                    json!({ "content": "done", "usage": { "prompt_tokens": 10, "completion_tokens": 100 } }),
+                ),
+                timed(
+                    4_000,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 2, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+
+        let closing = out.lines().last().expect("a closing line").to_string();
+        assert!(closing.contains("first token in 0.6s"), "{closing}");
+        // Three hundred tokens over a second of decoding.
+        assert!(closing.contains("300 tok/s"), "{closing}");
+        assert!(
+            closing.contains("4.0s"),
+            "the duration went missing: {closing}"
+        );
+    }
+
+    /// TC-CLI-TL-27: the turns too fast, or too unmeasured, to have one.
+    /// Expected: nothing about pace. A turn under a second is noise - two runs
+    /// of it must print the same bytes - a first token inside a tenth of a
+    /// second reads as `0.0s`, which is a measurement nobody made, and a
+    /// message carrying no usage leaves a rate with nothing to divide.
+    #[test]
+    fn a_fast_or_unmeasured_turn_says_nothing_about_pace() {
+        let quick = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                timed(
+                    10,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+                ),
+                timed(
+                    20,
+                    "assistant/message",
+                    json!({ "content": "on it", "usage": { "prompt_tokens": 1, "completion_tokens": 2 } }),
+                ),
+                timed(
+                    30,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+        assert!(!quick.contains("tok/s"), "{quick}");
+        assert!(!quick.contains("first token"), "{quick}");
+
+        let unmeasured = rendered(
+            &[
+                timed(0, "turn/start", json!({ "turn": 1 })),
+                timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+                timed(
+                    900,
+                    "assistant/chunk",
+                    json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+                ),
+                timed(2_000, "assistant/message", json!({ "content": "on it" })),
+                timed(
+                    2_000,
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ],
+            Charset::Unicode,
+            120,
+        );
+        // The wait is a fact the journal holds even when nothing was billed.
+        assert!(unmeasured.contains("first token in 0.9s"), "{unmeasured}");
+        assert!(!unmeasured.contains("tok/s"), "{unmeasured}");
+    }
+
+    /// TC-CLI-TL-28: the fold over a conversation of two turns, one of them
+    /// with two tools in flight at once.
+    /// Expected: every figure the strip reports, and a tool's time taken from
+    /// the call its result names rather than from the call before it - two
+    /// calls in flight arrive in whichever order the tools finish, which is
+    /// the reason the contract pairs them by id (§4.3.1).
+    #[test]
+    fn the_fold_reads_a_conversation_off_its_journal() {
+        let told = stats(&[
+            timed(0, "turn/start", json!({ "turn": 1 })),
+            timed(0, "step/start", json!({ "turn": 1, "step": 1 })),
+            timed(
+                500,
+                "assistant/chunk",
+                json!({ "chunk": "text", "delta": "on", "turn": 1, "step": 1 }),
+            ),
+            timed(
+                1_500,
+                "assistant/message",
+                json!({ "content": "on it", "usage": { "prompt_tokens": 100, "completion_tokens": 50 } }),
+            ),
+            timed(
+                1_500,
+                "tool/call",
+                json!({ "id": "slow", "name": "echo", "arguments": {} }),
+            ),
+            timed(
+                1_600,
+                "tool/call",
+                json!({ "id": "quick", "name": "echo", "arguments": {} }),
+            ),
+            // The second call answers first: paired by id, the slow one is a
+            // second and the quick one is a tenth.
+            timed(
+                1_700,
+                "tool/result",
+                json!({ "call_id": "quick", "name": "echo", "ok": true, "content": "" }),
+            ),
+            timed(
+                2_500,
+                "tool/result",
+                json!({ "call_id": "slow", "name": "echo", "ok": true, "content": "" }),
+            ),
+            timed(
+                2_500,
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+            ),
+            timed(3_000, "turn/start", json!({ "turn": 2 })),
+            timed(3_000, "step/start", json!({ "turn": 2, "step": 1 })),
+            timed(
+                3_200,
+                "assistant/chunk",
+                json!({ "chunk": "text", "delta": "again", "turn": 2, "step": 1 }),
+            ),
+            timed(
+                3_700,
+                "assistant/message",
+                json!({ "content": "again", "usage": { "prompt_tokens": 40, "completion_tokens": 10 } }),
+            ),
+            timed(
+                3_700,
+                "turn/end",
+                json!({ "turn": 2, "steps": 1, "stop_reason": "natural" }),
+            ),
+        ]);
+
+        assert_eq!(told.turns, 2);
+        assert_eq!(told.steps, 2);
+        // 1.5s of the first step and 0.7s of the second.
+        assert_eq!(told.thinking, 2_200);
+        // A second for the slow call, a tenth for the quick one.
+        assert_eq!(told.tooling, 1_100);
+        assert_eq!(told.waits, 2);
+        assert_eq!(told.wait(), Some(350));
+        // Sixty tokens decoded over a second and a half.
+        assert_eq!(told.decoded, 60);
+        assert_eq!(told.decoding, 1_500);
+        assert_eq!(told.rate(), Some(40));
+        assert_eq!(told.prompt_tokens, 140);
+        assert_eq!(told.completion_tokens, 60);
+    }
+
+    /// TC-CLI-TL-29: the strip, on a conversation with nothing to say about
+    /// speed or money, and on one with nothing at all.
+    /// Expected: a group with no data is left out whole rather than printed as
+    /// zeroes. `0 tokens` reads as a conversation that was free; a
+    /// conversation whose every request failed is one that never got an
+    /// answer, and the counts say so on their own.
+    #[test]
+    fn a_group_with_nothing_in_it_is_left_out() {
+        let theme = Theme::new(false, Charset::Unicode);
+        let counted = told(
+            &theme,
+            &Stats {
+                turns: 1,
+                steps: 1,
+                ..Stats::default()
+            },
+        );
+        let strip = counted.join(" ");
+        assert!(strip.contains("1 turn · 1 step"), "{strip}");
+        assert!(!strip.contains("tok/s"), "{strip}");
+        assert!(!strip.contains(" in "), "{strip}");
+
+        let nothing = told(&theme, &Stats::default()).join(" ");
+        assert!(nothing.contains("nothing has been asked yet"), "{nothing}");
+    }
+
+    /// TC-CLI-TL-30: a turn the provider cut off at its output cap.
+    /// Expected: worded rather than echoed - `max-tokens` is what the field
+    /// holds, not what happened - said in the warning colour rather than the
+    /// one a finished turn gets, and followed by the sentence the contract
+    /// asks for in as many words (§4.4.2): a surface that renders this as an
+    /// ordinary end tells the reader that a sentence the model never finished
+    /// is the whole reply.
+    #[test]
+    fn a_turn_cut_off_at_the_cap_says_the_answer_is_unfinished() {
+        let events = [
+            event("turn/start", json!({ "turn": 1 })),
+            event(
+                "assistant/message",
+                json!({ "content": "it was the best of" }),
+            ),
+            event(
+                "turn/end",
+                json!({ "turn": 1, "steps": 1, "stop_reason": "max-tokens" }),
+            ),
+        ];
+        let out = rendered(&events, Charset::Unicode, 80);
+
+        assert!(out.contains("cut off at the output cap"), "{out}");
+        assert!(
+            !out.contains("max-tokens"),
+            "the wire word reached the page: {out}"
+        );
+        assert!(out.contains("the answer stops where the cap did"), "{out}");
+
+        // And it is not painted as a turn that ended well.
+        let mut ui = buffered(Theme::new(true, Charset::Unicode), 80);
+        render(&mut ui, &events, false).expect("render");
+        let painted = ui.contents();
+        let cut = painted
+            .lines()
+            .find(|line| line.contains("cut off"))
+            .expect("the closing line");
+        let natural = {
+            let mut ui = buffered(Theme::new(true, Charset::Unicode), 80);
+            let ended = [
+                event("turn/start", json!({ "turn": 1 })),
+                event(
+                    "turn/end",
+                    json!({ "turn": 1, "steps": 1, "stop_reason": "natural" }),
+                ),
+            ];
+            render(&mut ui, &ended, false).expect("render");
+            ui.contents()
+                .lines()
+                .find(|line| line.contains("natural"))
+                .expect("the closing line")
+                .to_string()
+        };
+        let colour = |line: &str| {
+            line.split('\u{1b}')
+                .find(|part| part.starts_with('[') && part.contains('m'))
+                .map(|part| part.split('m').next().unwrap_or_default().to_string())
+        };
+        assert_ne!(
+            colour(cut),
+            colour(&natural),
+            "a cut-off turn is painted like a finished one"
+        );
     }
 
     /// TC-CLI-TL-25: a tool whose name a terminal draws twice as wide.

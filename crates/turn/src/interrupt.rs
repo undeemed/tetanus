@@ -53,6 +53,23 @@ impl Interrupt {
         self.stopped.send_replace(false);
     }
 
+    /// Resolve when the turn is interrupted, and never otherwise.
+    ///
+    /// For a caller that is racing the interrupt against work rather than
+    /// against a clock - an outstanding question, say - where
+    /// [`wait`](Self::wait) would need a delay it does not have. Like `wait`,
+    /// it subscribes before it checks, so an interrupt that landed while the
+    /// race was being set up is not missed.
+    pub async fn cancelled(&self) {
+        let mut stopped = self.stopped.subscribe();
+        if *stopped.borrow_and_update() {
+            return;
+        }
+        // The sender outlives every turn that watches it, so the only way this
+        // resolves is the value changing to `true`.
+        let _ = stopped.changed().await;
+    }
+
     /// Wait for `delay`, or until the turn is interrupted, whichever is first.
     ///
     /// Answers `true` when the wait finished, and `false` when the interrupt

@@ -621,6 +621,8 @@ impl View for Journal {
 /// states and the size it asks for. No case opens a terminal.
 #[cfg(test)]
 mod tests {
+    use tetanus_ui::visible_width;
+
     use serde_json::json;
     use tetanus_ui::{buffered, Charset};
 
@@ -703,6 +705,7 @@ mod tests {
         frame.paint(&mut ui).expect("paint");
         ui.contents()
             .trim_start_matches("\x1b[H")
+            .trim_end_matches("\x1b[?25l")
             .trim_end_matches("\x1b[J")
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").trim_end().to_string())
@@ -1189,6 +1192,48 @@ mod tests {
 
         view.key(Key::Char('t'));
         assert_eq!(rows(&mut view, COLS, tall), before);
+    }
+
+    /// TC-CLI-BROWSE-18: every size a terminal can be, with a search open and
+    /// with the card up.
+    /// Expected: the frame is exactly the height asked for and no row overruns
+    /// the width - at no columns by no rows as much as at eighty by twenty
+    /// four. A terminal reports zero while it is being resized, and this view
+    /// refills on every width change, which is the arithmetic most likely to
+    /// be wrong at an end.
+    #[test]
+    fn the_journal_holds_at_every_size() {
+        for rows in 0..=8 {
+            for cols in 0..=24 {
+                for open in [false, true] {
+                    let mut view = journal(&turn(), 80);
+                    if open {
+                        view.key(Key::Char('/'));
+                        for letter in "echo".chars() {
+                            view.key(Key::Char(letter));
+                        }
+                        view.key(Key::Enter);
+                        view.key(Key::Char('?'));
+                    }
+                    let frame = view.frame(cols, rows);
+                    assert_eq!(frame.rows(), rows, "{cols}x{rows} card={open}");
+
+                    let mut ui = buffered(theme(), cols);
+                    frame.paint(&mut ui).expect("paint");
+                    for row in ui
+                        .contents()
+                        .trim_start_matches("\x1b[H")
+                        .split("\r\n")
+                        .map(|row| row.split('\x1b').next().unwrap_or_default())
+                    {
+                        assert!(
+                            visible_width(row) <= cols,
+                            "`{row}` overruns {cols} at {cols}x{rows}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// TC-CLI-BROWSE-17: a title with a sequence and a newline in it.

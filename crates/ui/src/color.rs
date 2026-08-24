@@ -104,6 +104,21 @@ pub fn color_enabled(choice: ColorChoice, env: &Env, is_terminal: bool) -> bool 
     is_terminal
 }
 
+/// Whether a terminal can hold a full-screen view.
+///
+/// A screen is not written with characters, it is written with cursor moves:
+/// the alternate screen, absolute addressing, and an erase per row. `TERM=dumb`
+/// is a terminal saying it answers none of that, and a terminal with no `TERM`
+/// at all has not said it answers any - both are asking for the pages this
+/// binary prints, not for a page it repaints.
+///
+/// Colour asks the same question about the same variable and is a separate
+/// answer: a terminal that cannot address the cursor may still show colour,
+/// and one that shows no colour may address it perfectly.
+pub fn addressable(env: &Env) -> bool {
+    !env.is_dumb() && Env::set(&env.term)
+}
+
 /// Which glyphs the renderer may draw. A dumb terminal or a non-UTF-8 locale
 /// gets the ASCII set, so a spinner never lands as mojibake in a log file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

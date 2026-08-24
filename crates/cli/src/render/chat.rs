@@ -22,7 +22,7 @@
 
 use std::io::{self, Write};
 
-use tetanus_ui::{or_empty, tame_line, Role, Ui};
+use tetanus_ui::{or_empty, tame_line, truncate, Role, Theme, Ui};
 
 /// Width of the label column on the opening page. `journal` is the longest
 /// label, and `run` prints its own journal line at this width, so the two land
@@ -74,25 +74,86 @@ fn turns(turns: usize) -> String {
     }
 }
 
-/// The marker a chat waits at. No newline: the reader types on this line, and
-/// it is flushed because nothing else will flush it before they do.
-pub fn prompt<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
+/// The marker a chat waits at, painted, with the space the reader types after.
+///
+/// Returned rather than written, because the row it opens is redrawn on every
+/// keystroke by [`tetanus_ui::read`], which runs on a thread of its own and
+/// has no writer to paint with.
+pub fn marker<W: Write>(ui: &mut Ui<W>) -> String {
     let glyph = ui.theme().glyph("›", ">").to_string();
-    let marker = ui.paint(Role::Accent, &glyph).to_string();
-    write!(ui.out(), "\n{marker} ")?;
+    format!("{} ", ui.paint(Role::Accent, &glyph))
+}
+
+/// The blank row between the turn above and the marker under it.
+///
+/// It is written through the writer and flushed, because the editor draws the
+/// row after it and the two must not arrive out of order.
+pub fn space<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
+    ui.blank()?;
     ui.flush()
 }
 
 /// Every command the chat answers, in the order a reader meets them.
+/// Every command the chat answers, and what each one does.
+///
+/// One list, read by the page a chat prints and by the card the full-screen
+/// view settles onto its transcript. Two lists would be two answers to
+/// `/help`, and the one a reader met would depend on which chat they were in.
+pub const COMMANDS: [(&str, &str); 8] = [
+    ("/help", "this card; `/?` does the same"),
+    (
+        "/keys",
+        "on a screen of its own: every key it answers, editing keys included",
+    ),
+    (
+        "/exit",
+        "leave the chat; `/quit`, `/q` and ctrl-d do the same",
+    ),
+    (
+        "/find word",
+        "on a screen of its own: mark it, and walk the marks with ctrl-n and ctrl-p; `/find` alone takes the marks off",
+    ),
+    (
+        "/think",
+        "on a screen of its own: unfold what the model thought, or fold it back",
+    ),
+    (
+        "/more",
+        "on a screen of its own: print a tool's result whole, or cap it again",
+    ),
+    (
+        "/stats",
+        "on a screen of its own: what this conversation has cost, and how fast it has been",
+    ),
+    ("//text", "ask `/text`, rather than run it as a command"),
+];
+
+/// The same card, as lines to settle onto a transcript.
+///
+/// The full-screen view has no writer to hand: its rows are composed and then
+/// painted as one frame, so the card is composed the same way. The heading is
+/// drawn as a heading rather than written as one, for the same reason.
+pub fn card(theme: &Theme, cols: usize) -> Vec<String> {
+    let label = COMMANDS
+        .iter()
+        .map(|(command, _)| command.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![theme.paint(Role::Heading, "commands").to_string()];
+    lines.extend(COMMANDS.iter().map(|(command, said)| {
+        let pad = " ".repeat(label - command.chars().count() + 2);
+        let said = truncate(said, cols.saturating_sub(label + 4), theme.charset());
+        format!(
+            "  {}{pad}{}",
+            theme.paint(Role::Accent, command),
+            theme.paint(Role::Muted, &said)
+        )
+    }));
+    lines
+}
+
 pub fn help<W: Write>(ui: &mut Ui<W>) -> io::Result<()> {
-    let rows = [
-        ("/help", "this card; `/?` does the same"),
-        (
-            "/exit",
-            "leave the chat; `/quit`, `/q` and ctrl-d do the same",
-        ),
-        ("//text", "ask `/text`, rather than run it as a command"),
-    ];
+    let rows = COMMANDS;
     let label = rows
         .iter()
         .map(|(command, _)| command.chars().count())
@@ -235,15 +296,21 @@ mod tests {
         );
     }
 
-    /// TC-CLI-CHAT-PAGE-3: the marker.
-    /// Expected: a blank line, the glyph and one space, with no newline after
-    /// it, so the reader types on that line. In the ASCII charset it is `>`,
-    /// because a terminal that cannot draw `›` draws a replacement glyph in a
-    /// column the marker was measured without.
+    /// TC-CLI-CHAT-PAGE-3: the marker, and the row it sits on.
+    /// Expected: the glyph and one space, with nothing around it - the editor
+    /// puts it at the start of a row it redraws, so a newline inside it would
+    /// be redrawn too. In the ASCII charset it is `>`, because a terminal that
+    /// cannot draw `›` draws a replacement glyph in a column the marker was
+    /// measured without. The blank row above it is written separately, because
+    /// it belongs to the transcript and not to the line being typed.
     #[test]
-    fn the_marker_leaves_the_cursor_on_its_own_line() {
-        assert_eq!(rendered(Charset::Unicode, |ui| prompt(ui).unwrap()), "\n› ");
-        assert_eq!(rendered(Charset::Ascii, |ui| prompt(ui).unwrap()), "\n> ");
+    fn the_marker_is_a_glyph_and_the_room_to_type_after_it() {
+        let mut ui = buffered(Theme::new(false, Charset::Unicode), 80);
+        assert_eq!(marker(&mut ui), "› ");
+        let mut ui = buffered(Theme::new(false, Charset::Ascii), 80);
+        assert_eq!(marker(&mut ui), "> ");
+
+        assert_eq!(rendered(Charset::Unicode, |ui| space(ui).unwrap()), "\n");
     }
 
     /// TC-CLI-CHAT-PAGE-4: the card.

@@ -6,6 +6,14 @@
 //! conversation, so both of the adapter's questions are asked of this step's
 //! own messages: an earlier turn's tool result is history, not an answer to
 //! the call this step has not made yet.
+//!
+//! Which tool it calls is the prompt's to choose. A prompt opening with `!`
+//! means "run the rest as a command", and the adapter asks for [`SHELL`] with
+//! it; anything else is echoed back. That one convention is what lets a build
+//! with no API key demonstrate a real command running through a real turn -
+//! the model is the only part of the loop being stood in for, and a mock that
+//! could only ever call `echo` would leave the whole shell path unreachable
+//! from the binary.
 
 use crate::llm::{
     ChunkSink, LlmAdapter, LlmError, ModelRequest, ModelResponse, Role, StreamChunk, Usage,
@@ -48,12 +56,21 @@ impl LlmAdapter for MockAdapter {
             .messages
             .last()
             .filter(|message| message.role == Role::Tool);
-        let can_echo = request.tools.iter().any(|t| t.name == "echo");
+        let asked = last_content(request, Role::User);
+        let wanted = wanted_call(&asked, request);
 
-        if answer.is_none() && can_echo {
-            let asked = last_content(request, Role::User);
-            let content = "Let me echo that back.";
-            for delta in ["Let me ", "echo that ", "back."] {
+        if answer.is_none() {
+            let Some((tool, arguments, said)) = wanted else {
+                // Neither tool is registered, so there is nothing to call and
+                // the step answers directly.
+                return answer_now(&asked, sink).await;
+            };
+            let content = said.concat();
+            // Three text chunks and then the call, whichever tool it is: the
+            // conformance suite asserts the whole event sequence, and a mock
+            // that streamed a different number of pieces for one prompt would
+            // make the documented flow depend on what was typed.
+            for delta in said {
                 sink.chunk(StreamChunk::Text {
                     delta: delta.to_string(),
                 })
@@ -61,17 +78,17 @@ impl LlmAdapter for MockAdapter {
             }
             let call = ToolCall {
                 id: "call_1".into(),
-                name: "echo".into(),
-                arguments: serde_json::json!({ "text": asked }),
+                name: tool.into(),
+                arguments,
             };
             sink.chunk(StreamChunk::ToolCall { call: call.clone() })
                 .await?;
             return Ok(ModelResponse {
-                content: content.into(),
+                content: content.clone(),
                 reasoning: String::new(),
                 tool_calls: vec![call],
                 finish_reason: "tool_calls".into(),
-                usage: Some(usage(request, content)),
+                usage: Some(usage(request, &content)),
             });
         }
 
@@ -93,6 +110,62 @@ impl LlmAdapter for MockAdapter {
             usage: Some(usage(request, &content)),
         })
     }
+}
+
+/// The command a `!` prompt asks for: everything after the mark, trimmed.
+fn command_of(prompt: &str) -> Option<&str> {
+    let command = prompt.strip_prefix('!')?.trim();
+    (!command.is_empty()).then_some(command)
+}
+
+/// Which tool this step asks for, with what, and the three pieces it says
+/// while doing it.
+fn wanted_call(
+    asked: &str,
+    request: &ModelRequest,
+) -> Option<(&'static str, serde_json::Value, [&'static str; 3])> {
+    let has = |name: &str| request.tools.iter().any(|tool| tool.name == name);
+    if let Some(command) = command_of(asked) {
+        if has(SHELL) {
+            return Some((
+                SHELL,
+                serde_json::json!({ "command": command }),
+                ["Let me ", "run that ", "command."],
+            ));
+        }
+    }
+    has("echo").then(|| {
+        (
+            "echo",
+            serde_json::json!({ "text": asked }),
+            ["Let me ", "echo that ", "back."],
+        )
+    })
+}
+
+/// The name of the shell tool, as `tetanus-exec` registers it. Named here as a
+/// string because the loop's crate cannot depend on the crate that provides
+/// it; a rename that missed this would show up as the shell path going
+/// unexercised offline, which TC-CLI-SHELL-1 is watching for.
+const SHELL: &str = "shell";
+
+/// A step with no tool to call still owes an answer.
+async fn answer_now(asked: &str, sink: &mut dyn ChunkSink) -> Result<ModelResponse, LlmError> {
+    let content = format!("You said: {asked}");
+    sink.chunk(StreamChunk::Text {
+        delta: content.clone(),
+    })
+    .await?;
+    Ok(ModelResponse {
+        content: content.clone(),
+        reasoning: String::new(),
+        tool_calls: Vec::new(),
+        finish_reason: "stop".into(),
+        usage: Some(Usage {
+            prompt_tokens: (asked.len() / 4) as u64,
+            completion_tokens: (content.len() / 4) as u64,
+        }),
+    })
 }
 
 fn last_content(request: &ModelRequest, role: Role) -> String {

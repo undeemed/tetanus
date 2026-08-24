@@ -1,9 +1,12 @@
 //! Test Design Specification: the text rules every renderer shares.
 //!
 //! Features tested: cutting a value to a width and saying so, folding a
-//! paragraph to a width without losing a word, measuring and cutting a line
-//! that a theme has already painted, and making text the harness did not write
-//! safe to draw, as a paragraph and as one row. Features NOT tested here: what any particular renderer does
+//! paragraph to a width without losing a word and without losing the column a
+//! line was written in, measuring and cutting text a terminal joins as it
+//! draws - an emoji family, a skin tone, a flag - as the one thing it draws,
+//! measuring and cutting a line that a theme has already
+//! painted, and making text the harness did not write safe to draw, as a
+//! paragraph and as one row. Features NOT tested here: what any particular renderer does
 //! with the result - the status line owns its own cases in `progress.rs`, the
 //! timeline owns its own in `render/timeline.rs`.
 //!
@@ -298,13 +301,13 @@ fn a_sequence_a_tool_wrote_is_taken_out_whole() {
 /// TC-UI-TEXT-18: control characters that are not part of a sequence.
 /// Expected: each becomes one space, so a byte between two words cannot join
 /// them; newlines survive, because they are what a paragraph is folded on and
-/// a tool that wrote lines meant lines.
+/// a tool that wrote lines meant lines. A tab is the one control with a width
+/// of its own, and TC-UI-TEXT-30 has it.
 #[test]
 fn a_stray_control_becomes_a_space_and_a_newline_survives() {
     assert_eq!(tame("one\rtwo"), "one two");
     assert_eq!(tame("ring\u{7}ing"), "ring ing");
     assert_eq!(tame("a\u{0}b\u{7f}c"), "a b c");
-    assert_eq!(tame("one\ttwo"), "one two");
     assert_eq!(tame("first\n\nsecond"), "first\n\nsecond");
     assert_eq!(tame("plain text"), "plain text");
 }
@@ -363,5 +366,188 @@ fn a_value_that_draws_nothing_is_given_a_word() {
     assert_eq!(
         or_empty(&tame_line("\u{1b}[2J\u{1b}]0;pwned\u{7}")),
         "(empty)"
+    );
+}
+
+/// TC-UI-TEXT-22: a line that was written indented.
+/// Expected: the indent is still there, and what folded out of the line is
+/// laid under it rather than back at column zero. A continuation at column
+/// zero reads as the next line of a block rather than the rest of this one,
+/// which is a different text from the one the model wrote.
+#[test]
+fn a_folded_line_keeps_the_column_it_started_in() {
+    let lines = wrap(
+        "    a long indented sentence that has to fold somewhere",
+        24,
+    );
+
+    assert!(lines.len() > 1, "nothing folded: {lines:?}");
+    for line in &lines {
+        assert!(visible_width(line) <= 24, "`{line}` overruns 24");
+        assert!(line.starts_with("    "), "lost its column: {lines:?}");
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.trim_start())
+            .collect::<Vec<_>>()
+            .join(" "),
+        "a long indented sentence that has to fold somewhere"
+    );
+}
+
+/// TC-UI-TEXT-23: a fenced block inside prose a model wrote.
+/// Expected: every line comes back at the depth it was written at. This is the
+/// case the rule exists for: a body indented four columns inside a function is
+/// a different program from one flush with the `fn` above it, and a renderer
+/// that folds an answer must not be the thing that changes it.
+#[test]
+fn a_block_keeps_the_shape_it_was_written_in() {
+    let said = "Here is the fix.\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+    let lines = wrap(said, 40);
+
+    assert_eq!(
+        lines,
+        vec![
+            "Here is the fix.",
+            "",
+            "```rust",
+            "fn main() {",
+            "    println!(\"hi\");",
+            "}",
+            "```",
+        ]
+    );
+}
+
+/// TC-UI-TEXT-24: a blank line, and a line of nothing but spaces.
+/// Expected: both come back empty. An indent is only put back on a row that
+/// has something after it, because an indent alone is trailing space: nothing
+/// is drawn by it, and a frame would still spend the columns.
+#[test]
+fn a_line_with_nothing_on_it_is_not_indented() {
+    assert_eq!(wrap("a\n\nb", 20), vec!["a", "", "b"]);
+    assert_eq!(wrap("a\n    \nb", 20), vec!["a", "", "b"]);
+}
+
+/// TC-UI-TEXT-25: a line indented as wide as the window, or wider.
+/// Expected: it still folds, one column at a time, and no row is empty for
+/// want of room. A deep indent in a narrow terminal is a real journal - a
+/// nested diff read on a phone - and the fold has to terminate on it.
+#[test]
+fn an_indent_wider_than_the_window_still_folds() {
+    let lines = wrap("          deep", 8);
+
+    assert!(!lines.is_empty(), "nothing came back");
+    for line in &lines {
+        assert!(!line.trim().is_empty(), "an empty row: {lines:?}");
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.trim_start())
+            .collect::<String>(),
+        "deep"
+    );
+}
+
+/// TC-UI-TEXT-26: the width of text that a terminal joins as it draws.
+/// Expected: two columns for a family emoji, a skin tone and a flag, however
+/// many characters each is spelled with; one for a letter with a combining
+/// mark; four for two CJK characters. A row measured per character says the
+/// family is six, pads four columns short, and every column after it on that
+/// row lands wrong.
+#[test]
+fn what_is_drawn_as_one_thing_is_measured_as_one_thing() {
+    assert_eq!(
+        visible_width("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"),
+        2
+    );
+    assert_eq!(visible_width("\u{1f44d}\u{1f3fd}"), 2);
+    assert_eq!(visible_width("\u{1f1ef}\u{1f1f5}"), 2);
+    assert_eq!(visible_width("e\u{301}"), 1);
+    assert_eq!(visible_width("한글"), 4);
+    // Two flags are two flags, not one wide one.
+    assert_eq!(visible_width("\u{1f1ef}\u{1f1f5}\u{1f1e9}\u{1f1ea}"), 4);
+}
+
+/// TC-UI-TEXT-27: a cut that would land inside a join.
+/// Expected: the join is kept whole or dropped whole. A cut between the man
+/// and the woman of a family leaves two people where there was one emoji, and
+/// the row is a column wider than it was promised to be either way.
+#[test]
+fn a_cut_never_lands_inside_a_join() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let said = format!("{family}{family}");
+
+    let cut = truncate(&said, 3, Charset::Unicode);
+    assert!(visible_width(&cut) <= 3, "{cut:?} overruns three columns");
+    assert!(
+        !cut.contains('\u{200d}') || cut.matches('\u{1f468}').count() == 1,
+        "a family was cut in half: {cut:?}"
+    );
+    assert_eq!(truncate(&said, 4, Charset::Unicode), said);
+}
+
+/// TC-UI-TEXT-28: a word of joined emoji, folded narrower than the word.
+/// Expected: every row holds whole emoji and no row overruns, and the rows put
+/// back together are the word that went in.
+#[test]
+fn a_fold_breaks_between_joins_and_not_inside_them() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let word = family.repeat(4);
+    let lines = wrap(&word, 5);
+
+    for line in &lines {
+        assert!(visible_width(line) <= 5, "`{line:?}` overruns five");
+    }
+    assert_eq!(lines.concat(), word, "the word changed: {lines:?}");
+}
+
+/// TC-UI-TEXT-29: a painted line that also holds a joined emoji.
+/// Expected: the sequences a theme wrote are still not counted, and the emoji
+/// is still two columns. The two rules compose, because the escapes are taken
+/// out before the clusters are measured.
+#[test]
+fn a_painted_line_with_an_emoji_is_measured_by_what_is_drawn() {
+    let line = "\u{1b}[1mai\u{1b}[0m \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    assert_eq!(visible_width(line), 5);
+}
+
+/// TC-UI-TEXT-30: a tab, at each of the places a line can hold one.
+/// Expected: the spaces that reach the next stop, counted from the start of
+/// the line the tab is on - so a tab at column three is five spaces, a tab at
+/// a stop is a whole eight, and the count starts again after a newline. One
+/// space each would be a column count that is predictably wrong, and a tab
+/// left alone is one nothing here can predict.
+#[test]
+fn a_tab_reaches_the_next_stop() {
+    assert_eq!(tame("one\ttwo"), "one     two");
+    assert_eq!(tame("\tone"), "        one");
+    assert_eq!(tame("12345678\tx"), "12345678        x");
+    assert_eq!(tame("\t\tx"), "                x");
+    // Counted from the start of each line, not of the text.
+    assert_eq!(tame("longer\n\tx"), "longer\n        x");
+    // In columns, so a character that draws two spends two of them.
+    assert_eq!(tame("한글\tx"), "한글    x");
+}
+/// TC-UI-TEXT-31: tab-indented code, as a model sends it.
+/// Expected: the nesting is still readable - each level is a stop further in,
+/// and the closing brace is back where the `if` was. A Makefile, a Go file and
+/// a stack trace are all indented this way, and one column per tab throws the
+/// nesting away.
+#[test]
+fn tab_indented_code_keeps_its_nesting() {
+    let said = "func main() {\n\tif ok {\n\t\tfmt.Println(\"hi\")\n\t}\n}";
+
+    assert_eq!(
+        tame(said).lines().collect::<Vec<_>>(),
+        vec![
+            "func main() {",
+            "        if ok {",
+            "                fmt.Println(\"hi\")",
+            "        }",
+            "}",
+        ]
     );
 }

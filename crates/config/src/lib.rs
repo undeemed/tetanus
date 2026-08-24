@@ -9,10 +9,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub mod credentials;
+pub mod env;
 pub mod file;
 pub mod home;
+pub mod preset;
 pub mod recompose;
 pub mod secret;
+pub mod watch;
 
 /// A fault reading the settings document.
 ///

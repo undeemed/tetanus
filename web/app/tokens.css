@@ -1,0 +1,72 @@
+/* The design tokens every primitive is drawn from.
+ *
+ * Upstream's `ui-primitives` is 46 components over one token set, and the
+ * order matters more than the count: the tokens come first, because a
+ * component that picks its own colour is a component that has to be found and
+ * edited when the palette moves. Everything below is a value with a name, and
+ * nothing above this file hard-codes one.
+ *
+ * The names follow upstream's shape - surface, line, text, muted, accent,
+ * state - rather than its spelling, because `--dsw-alias-*` is that project's
+ * namespace and copying it would claim a compatibility this page does not
+ * have. What is copied is the discipline.
+ */
+
+:root {
+  /* Surfaces, back to front: the page, a panel on it, a raised thing on that. */
+  --surface: #0f1416;
+  --surface-panel: #141b1e;
+  --surface-raised: #1a2428;
+  --surface-sunken: #0b0f11;
+
+  /* One line colour, and one brighter for a thing that has focus. */
+  --line: #24323a;
+  --line-bright: #3a5560;
+
+  /* Text, in the three weights a reader actually distinguishes. */
+  --text: #d7e3e6;
+  --text-muted: #7d9198;
+  --text-bright: #eef6f8;
+
+  /* The states a surface reports. Green is not "good" and red is not
+   * "error" - they are "running as expected" and "stopped without
+   * finishing", which is the distinction the closing line already draws. */
+  --state-ok: #64d69a;
+  --state-busy: #e2c169;
+  --state-bad: #e2776b;
+  --state-idle: var(--text-muted);
+
+  /* One accent, used for the thing a reader is meant to act on. A second
+   * accent is how a page stops having one. */
+  --accent: #5fb3c4;
+
+  /* Spacing, on a scale rather than per-component: a page whose paddings are
+   * all different by two pixels reads as a page nobody measured. */
+  --gap-tight: 4px;
+  --gap: 8px;
+  --gap-wide: 14px;
+  --gap-block: 22px;
+
+  --radius: 9px;
+  --radius-tight: 6px;
+
+  /* Two families and nothing else. Prose in the reader's own font, and
+   * anything the machine wrote in a monospace, because alignment is meaning
+   * in a transcript. */
+  --font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --size-small: 12.5px;
+  --size-body: 14px;
+  --size-head: 15px;
+}
+
+/* A terminal's own preference wins where the page has one to give.
+ * `prefers-contrast` is answered because a reader who asked their system for
+ * more contrast has already said what they want, and a page that ignores it
+ * is a page that made them ask twice. */
+@media (prefers-contrast: more) {
+  :root {
+    --text-muted: #a8bcc4;
+    --line: #40525c;
+  }
+}

@@ -10,7 +10,8 @@
 //!   worded exactly like the turn they replay tomorrow, and a piped run - where
 //!   the block is never drawn at all - writes the timeline byte for byte.
 //! - The **block** holds what the settled lines cannot say yet: the answer as
-//!   the chunks assemble it, and a footer naming what the turn is waiting on.
+//!   the chunks assemble it, and a footer naming what the turn is waiting on,
+//!   how long it has been waiting, and what it has spent so far.
 //!
 //! Nothing here writes, and nothing here reads a clock. The caller owns the
 //! `Screen`, the poll interval and the stopwatch, so every case in the suite is
@@ -110,6 +111,11 @@ impl Live {
         self.width = width;
     }
 
+    /// Print a tool's result whole, or capped.
+    pub fn whole(&mut self, whole: bool) {
+        self.reader.whole(whole);
+    }
+
     /// Advance the spinner. Called on the caller's frame interval, not on an
     /// event, so a long silence still looks alive.
     pub fn tick(&mut self) {
@@ -145,7 +151,15 @@ impl Live {
     fn footer(&self, elapsed: Duration) -> String {
         let glyph = progress::frame(self.theme.charset(), self.tick);
         let dot = self.theme.glyph("·", "-");
-        let text = format!("{} {dot} {}", self.phase, duration(elapsed));
+        // What the turn has spent so far, once it has spent anything. A step
+        // is billed when its message settles, so this moves a step at a time
+        // rather than a chunk at a time - which is the truth about a turn's
+        // cost, and the same number the closing line will report.
+        let spent = match self.reader.spent() {
+            Some(spent) => format!(" {dot} {} tokens", super::timeline::tokens(spent)),
+            None => String::new(),
+        };
+        let text = format!("{} {dot} {}{spent}", self.phase, duration(elapsed));
         let spin = self.theme.paint(Role::Accent, glyph);
         let text = self.theme.paint(Role::Muted, &text);
         format!("  {spin} {text}")
@@ -179,9 +193,9 @@ impl Live {
 ///
 /// Features tested: that the settled half is the timeline byte for byte, that
 /// chunks settle nothing, what the block holds while an answer arrives, its
-/// height, its footer, that it follows a resize, that it empties when the turn
-/// ends, and that it empties when the caller says the turn is over without
-/// one.
+/// height, its footer, what it says the turn has spent so far, that it follows
+/// a resize, that it empties when the turn ends, and that it empties when the
+/// caller says the turn is over without one.
 ///
 /// Features NOT tested here: drawing (owned by `tetanus-ui`'s `screen.rs`),
 /// the wording of a settled line (owned by `timeline.rs`), and the polling
@@ -403,6 +417,48 @@ mod tests {
                 "`{line}` overruns thirty columns"
             );
         }
+    }
+
+    /// TC-CLI-LIVE-10: what the block says a turn has spent.
+    /// Expected: nothing until a message carries usage, and then the running
+    /// total, in the same words the closing line uses. A reader watching a
+    /// turn is watching it spend money; a number that only arrives once the
+    /// turn is over tells them afterwards.
+    #[test]
+    fn the_block_says_what_the_turn_has_spent_so_far() {
+        let mut live = view(80);
+        for event in turn().into_iter().take(3) {
+            live.push(&event);
+        }
+        let early = live.block(Duration::from_secs(1));
+        assert!(
+            !early.last().expect("a footer").contains("tokens"),
+            "a count before anything was billed: {early:?}"
+        );
+
+        live.push(&event(
+            "assistant/message",
+            json!({
+                "content": "on it",
+                "usage": { "prompt_tokens": 900, "completion_tokens": 400 },
+            }),
+        ));
+        let spent = live.block(Duration::from_secs(2));
+        let footer = spent.last().expect("a footer");
+        assert!(footer.contains("1.3K tokens"), "{footer:?}");
+
+        // A second step is billed for the prompt it resent, so the block adds
+        // rather than replacing - the same arithmetic the closing line does.
+        live.push(&event(
+            "assistant/message",
+            json!({
+                "content": "and again",
+                "usage": { "prompt_tokens": 700, "completion_tokens": 100 },
+            }),
+        ));
+        let footer = live.block(Duration::from_secs(3));
+        let footer = footer.last().expect("a footer");
+        assert!(footer.contains("2.1K tokens"), "{footer:?}");
     }
 
     /// TC-CLI-LIVE-9: a turn that stopped without ending.

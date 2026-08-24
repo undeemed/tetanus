@@ -8,6 +8,7 @@
 //! one carrier works over the others, and two suites asserting it against two
 //! different doubles would not be asserting the same thing.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -15,8 +16,8 @@ use tetanus_protocol::methods::{
     method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
     ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
     SessionCreateParams, SessionEventPush, SessionEventsParams, SessionEventsResult,
-    SessionListResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
-    SessionUnsubscribeParams, ToolCatalogResult,
+    SessionForkParams, SessionListResult, SessionRef, SessionSubscribeParams,
+    SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::RpcError;
 use tetanus_protocol::types::{AgentState, SessionEvent, SessionInfo, StopReason, TurnSummary};
@@ -32,6 +33,10 @@ pub struct Fake {
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     /// `agent.prompt` waits on this; `agent.interrupt` releases it.
     turn: Notify,
+    /// Mints a distinct id per subscription. A double that answered the same
+    /// id every time would make any case about *several* subscriptions agree
+    /// with itself no matter what the carrier did.
+    subscriptions: AtomicUsize,
 }
 
 impl Fake {
@@ -88,8 +93,9 @@ impl Engine for Fake {
     ) -> Result<SessionSubscribeResult, RpcError> {
         self.record(method::SESSION_SUBSCRIBE);
         *self.sink.lock().expect("sink") = Some(sink);
+        let n = self.subscriptions.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(SessionSubscribeResult {
-            subscription_id: "sub-1".into(),
+            subscription_id: format!("sub-{n}"),
             last_seq: 0,
         })
     }
@@ -123,6 +129,9 @@ impl Engine for Fake {
         Ok(Ack { ok: true })
     }
     async fn session_create(&self, _: SessionCreateParams) -> Result<SessionInfo, RpcError> {
+        unused()
+    }
+    async fn session_fork(&self, _: SessionForkParams) -> Result<SessionInfo, RpcError> {
         unused()
     }
     async fn session_events(

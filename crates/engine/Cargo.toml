@@ -9,11 +9,15 @@ description = "The tetanus Engine implementation: the contract in docs/interface
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
+thiserror.workspace = true
 tetanus-protocol = { path = "../protocol" }
 tetanus-core = { path = "../core" }
 tetanus-config = { path = "../config" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
+# The confinement vocabulary, so a document's `sandbox.mode` is settled here
+# with every other key rather than parsed again by each composition.
+tetanus-sandbox = { path = "../sandbox" }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -1,7 +1,7 @@
 //! Test Design Specification: the help page a user actually reads.
 //!
 //! Features tested: that the root page carries usage, every command, both
-//! trailing blocks and the environment it honours; that `--help` explains more
+//! trailing blocks and every variable the binary reads; that `--help` explains more
 //! than `-h`; that a subcommand carries its own examples and not the root's;
 //! that nothing overruns the width cap; and that every example on the page is
 //! an invocation the binary really accepts.
@@ -119,7 +119,17 @@ fn the_root_page_is_complete() {
     }
     // A user who cannot make the binary work looks here first, so every
     // variable that changes its behaviour has to be on the page.
-    for variable in ["DEEPSEEK_API_KEY", "NO_COLOR", "CLICOLOR_FORCE", "COLUMNS"] {
+    for variable in [
+        "DEEPSEEK_API_KEY",
+        "NO_COLOR",
+        "CLICOLOR_FORCE",
+        "CLICOLOR",
+        "TERM",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LANG",
+        "COLUMNS",
+    ] {
         assert!(
             block(&page, "Environment:")
                 .iter()
@@ -417,4 +427,52 @@ fn the_examples_stack_where_two_columns_do_not_fit() {
         let back = block(&page, "Examples:");
         assert_eq!(back.len(), count, "{fits} columns did not go back to two");
     }
+}
+
+/// TC-CLI-HELP-9: the environment block at a window too narrow for two
+/// columns.
+/// Expected: nothing is folded at column zero. A variable's name is a row of
+/// its own and what it changes is indented under it, so no continuation of a
+/// description can be read as another variable's name - which is what a block
+/// written out with its own spaces gets from clap, and the reason the two
+/// blocks on this page are composed rather than written.
+#[test]
+fn the_environment_block_folds_under_itself() {
+    let page = help_at("40", &["--help"]);
+    let block = block(&page, "Environment:");
+
+    assert!(!block.is_empty(), "no environment block:\n{page}");
+    for line in &block {
+        assert!(line.chars().count() <= 40, "`{line}` overruns 40");
+        let indented = line.starts_with("  ");
+        assert!(indented, "`{line}` starts at column zero");
+    }
+    // Each variable is still findable as the start of a row.
+    for variable in ["DEEPSEEK_API_KEY", "TERM", "COLUMNS"] {
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim_start().starts_with(variable)),
+            "`{variable}` does not start a row:\n{page}"
+        );
+    }
+}
+
+/// TC-CLI-HELP-10: an example wider than the window.
+/// Expected: the command folds under itself, indented, rather than at column
+/// zero. `tetanus run -a deepseek -m deepseek-v4-pro` at forty columns is the
+/// case: its tail at column zero reads as the start of another example.
+#[test]
+fn a_wide_example_folds_under_itself() {
+    let page = help_at("40", &["--help"]);
+    let block = block(&page, "Examples:");
+
+    for line in &block {
+        assert!(line.chars().count() <= 40, "`{line}` overruns 40");
+        assert!(line.starts_with("  "), "`{line}` starts at column zero");
+    }
+    assert!(
+        block.iter().any(|line| line.contains("deepseek-v4-pro")),
+        "the folded example lost its tail:\n{page}"
+    );
 }

@@ -21,6 +21,87 @@ fn columns(char: char) -> usize {
     UnicodeWidthChar::width(char).unwrap_or(0)
 }
 
+/// Zero-width joiner: what makes several emoji one.
+const JOINER: char = '\u{200d}';
+
+/// The variation selector that asks for the emoji drawing of a character that
+/// also has a text one.
+const EMOJI_STYLE: char = '\u{fe0f}';
+
+/// Whether `char` is one of the five skin tones, which are drawn as part of
+/// the emoji before them rather than beside it.
+fn tone(char: char) -> bool {
+    ('\u{1f3fb}'..='\u{1f3ff}').contains(&char)
+}
+
+/// Whether `char` is a regional indicator, the letters a flag is spelled with.
+fn flag_letter(char: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&char)
+}
+
+/// Split `text` into the pieces a terminal draws as one thing each.
+///
+/// Not the whole of UAX #29 - only the joins that change what is drawn, which
+/// are the ones a renderer that measures per character gets wrong:
+///
+/// - a combining mark, a variation selector or a skin tone belongs to the
+///   character before it;
+/// - a zero-width joiner takes the character after it into the same piece, so
+///   a family is one emoji and not three;
+/// - two regional indicators are one flag.
+///
+/// The point is not Unicode correctness for its own sake. A row measured per
+/// character says a family emoji is six columns where a terminal draws two,
+/// so the row is padded four columns short and every column after it lands
+/// wrong; and a cut made per character can land inside the join, which leaves
+/// a man, a woman and a girl where a family was.
+fn clusters(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, char)) = chars.next() {
+        if start > at {
+            continue;
+        }
+        let mut end = at + char.len_utf8();
+        if flag_letter(char) {
+            if let Some((next, second)) = chars.peek().copied().filter(|(_, c)| flag_letter(*c)) {
+                end = next + second.len_utf8();
+                chars.next();
+            }
+        }
+        // Everything that hangs off the character just taken, including a
+        // joiner and whatever it joins on.
+        while let Some((next, char)) = chars.peek().copied() {
+            let hangs = columns(char) == 0 || tone(char) || char == EMOJI_STYLE;
+            if !hangs && !text[..next].ends_with(JOINER) {
+                break;
+            }
+            end = next + char.len_utf8();
+            chars.next();
+        }
+        out.push(&text[start..end]);
+        start = end;
+    }
+    out
+}
+
+/// The columns a terminal draws one cluster in.
+///
+/// The first character decides, because the rest of a cluster hangs off it -
+/// except that a joined or emoji-styled cluster is drawn as an emoji whatever
+/// its first character is on its own, and every emoji is two columns wide.
+fn cluster_columns(cluster: &str) -> usize {
+    let joined = cluster.contains(JOINER)
+        || cluster.contains(EMOJI_STYLE)
+        || cluster.chars().any(tone)
+        || cluster.chars().filter(|char| flag_letter(*char)).count() == 2;
+    match joined {
+        true => 2,
+        false => cluster.chars().map(columns).sum(),
+    }
+}
+
 /// How many leading characters of `text` a terminal draws inside `width`
 /// columns.
 ///
@@ -28,10 +109,10 @@ fn columns(char: char) -> usize {
 /// that answer as it is - the width is the promise, and a column overrun
 /// corrupts every row under it - while a fold, which has to make progress or
 /// never end, takes one character anyway.
-fn take(text: &[char], width: usize) -> usize {
+fn take(text: &[&str], width: usize) -> usize {
     let mut columns = 0;
-    for (taken, char) in text.iter().enumerate() {
-        columns += self::columns(*char);
+    for (taken, cluster) in text.iter().enumerate() {
+        columns += cluster_columns(cluster);
         if columns > width {
             return taken;
         }
@@ -39,9 +120,9 @@ fn take(text: &[char], width: usize) -> usize {
     text.len()
 }
 
-/// The columns a terminal draws every character of `text` in.
-fn span(text: &[char]) -> usize {
-    text.iter().copied().map(columns).sum()
+/// The columns a terminal draws every cluster of `text` in.
+fn span(text: &[&str]) -> usize {
+    text.iter().copied().map(cluster_columns).sum()
 }
 
 /// Make text the harness did not write safe to draw.
@@ -57,9 +138,16 @@ fn span(text: &[char]) -> usize {
 /// So an escape sequence is taken out whole - it was a command that drew
 /// nothing, and nothing is what it should leave - and a stray control
 /// character becomes a space, so that a byte between two words cannot join
-/// them. Tabs become a space for the same reason and one of their own: a tab's
-/// width is a property of the terminal's stops, which no renderer here can
-/// know, so a tab drawn as a tab is a column count nothing can predict.
+/// them. A tab becomes the spaces that reach the next stop, counted from the
+/// start of its own line: a tab drawn as a tab is a column count nothing here
+/// can predict, because the stops belong to the terminal, and one drawn as a
+/// single space is a column count that is predictably wrong - a Makefile, a
+/// Go file and a stack trace are all indented with tabs, and squashing each
+/// to one column throws away the nesting they are read by. Expanded here, the
+/// terminal never sees a tab and the width is exact.
+///
+/// [`STOP`] columns apart, which is every terminal's default and what the
+/// tools that write tabs assume.
 ///
 /// Newlines survive. They are what [`wrap`] folds a paragraph on, and a tool
 /// that wrote lines meant lines.
@@ -72,19 +160,38 @@ fn span(text: &[char]) -> usize {
 pub fn tame(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
+    // Where the current line has got to, so a tab knows which stop is next.
+    let mut column = 0;
     while let Some(char) = chars.next() {
         match char {
-            '\n' => out.push('\n'),
-            '\t' => out.push(' '),
+            '\n' => {
+                out.push('\n');
+                column = 0;
+            }
+            '\t' => {
+                let reach = STOP - column % STOP;
+                out.extend(std::iter::repeat_n(' ', reach));
+                column += reach;
+            }
             '\u{1b}' => skip(&mut chars),
             // C0 and DEL. Everything above them is text, including the C1
             // range, which a terminal reading UTF-8 does not act on.
-            char if char.is_control() => out.push(' '),
-            char => out.push(char),
+            char if char.is_control() => {
+                out.push(' ');
+                column += 1;
+            }
+            char => {
+                out.push(char);
+                column += columns(char);
+            }
         }
     }
     out
 }
+
+/// Columns between tab stops. Eight is the terminal default everywhere this
+/// binary runs, and what the tools that indent with tabs are written against.
+const STOP: usize = 8;
 
 /// Make text the harness did not write safe to draw on one row.
 ///
@@ -163,8 +270,8 @@ pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
     // Tamed before it is measured, not after: a sequence taken out afterwards
     // would already have been paid for in columns the reader never sees.
     let text = tame(text);
-    let chars: Vec<char> = text.chars().collect();
-    if span(&chars) <= width {
+    let cut: Vec<&str> = clusters(&text);
+    if span(&cut) <= width {
         return text;
     }
     let mark = match charset {
@@ -174,14 +281,10 @@ pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
     if width <= visible_width(mark) {
         // No room to say it was cut. The width is the harder promise: a value
         // that overruns its column corrupts every line drawn under it.
-        return chars[..take(&chars, width)].iter().collect();
+        return cut[..take(&cut, width)].concat();
     }
     let keep = width - visible_width(mark);
-    chars[..take(&chars, keep)]
-        .iter()
-        .copied()
-        .chain(mark.chars())
-        .collect()
+    cut[..take(&cut, keep)].concat() + mark
 }
 
 /// The columns a terminal draws `text` in, ignoring the SGR sequences a theme
@@ -191,22 +294,10 @@ pub fn truncate(text: &str, width: usize, charset: Charset) -> String {
 /// and eleven characters. Any renderer that pads, cuts or counts a line it did
 /// not compose itself has to ask this rather than `chars().count()`.
 pub fn visible_width(text: &str) -> usize {
-    let mut columns = 0;
-    let mut chars = text.chars();
-    while let Some(char) = chars.next() {
-        if char != '\u{1b}' {
-            columns += self::columns(char);
-            continue;
-        }
-        // Every escape a `Theme` writes is `ESC [ ... m`. Skipping to the `m`
-        // is enough for those and harmless for the rest.
-        for escape in chars.by_ref() {
-            if escape == 'm' {
-                break;
-            }
-        }
-    }
-    columns
+    // Measured in clusters, and over the text a terminal actually draws: the
+    // sequences a theme wrote are removed first, by the one function that
+    // already knows the rule for them.
+    span(&clusters(&plain(text)))
 }
 
 /// The text a terminal draws, with the SGR sequences a theme wrote taken out.
@@ -301,32 +392,51 @@ pub fn fit(text: &str, width: usize, charset: Charset) -> String {
 /// Newlines in `text` are kept, blank lines included. A word too long for any
 /// line - a path, a URL, a base64 blob - is broken rather than allowed to
 /// overrun.
+///
+/// A line's own indentation is kept, and what folds out of that line is laid
+/// under it rather than back at column zero. Not every line a model writes is
+/// prose: a fenced block, a diff, a stack trace and a table all carry meaning
+/// in their leading spaces, and a fold that dropped them changed the text
+/// rather than laying it out - `    println!()` inside a function came back
+/// flush with the `fn` above it, which is a different program to read.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let text = tame(text);
     let mut lines = Vec::new();
 
     for paragraph in text.split('\n') {
+        let indent: String = paragraph.chars().take_while(|char| *char == ' ').collect();
+        // A line indented past the whole width has nowhere to fold to. It
+        // keeps one column to fold in, which is the same bargain `width` above
+        // makes with a caller who asked for none.
+        let room = width.saturating_sub(indent.len()).max(1);
+        let body = &paragraph[indent.len()..];
+        let mut lines_here: Vec<String> = Vec::new();
         let mut line = String::new();
         let mut filled = 0;
 
-        for word in paragraph.split_whitespace() {
-            let mut rest: Vec<char> = word.chars().collect();
-            while span(&rest) > width {
+        for word in body.split_whitespace() {
+            // Broken between clusters, never inside one: a cut that landed in
+            // the middle of a join leaves a man, a woman and a girl where a
+            // family was.
+            let all = clusters(word);
+            let mut rest: &[&str] = &all;
+            while span(rest) > room {
                 if filled > 0 {
-                    lines.push(std::mem::take(&mut line));
+                    lines_here.push(std::mem::take(&mut line));
                     filled = 0;
                 }
-                // One character in any case: a character wider than the whole
+                // One cluster in any case: a cluster wider than the whole
                 // width overruns it by a column, and a fold that took none
                 // would fold this word for the rest of the run.
-                let cut = take(&rest, width).max(1);
-                lines.push(rest.drain(..cut).collect::<String>());
+                let cut = take(rest, room).max(1);
+                lines_here.push(rest[..cut].concat());
+                rest = &rest[cut..];
             }
 
-            let drawn = span(&rest);
-            if filled > 0 && filled + 1 + drawn > width {
-                lines.push(std::mem::take(&mut line));
+            let drawn = span(rest);
+            if filled > 0 && filled + 1 + drawn > room {
+                lines_here.push(std::mem::take(&mut line));
                 filled = 0;
             }
             if filled > 0 {
@@ -334,9 +444,22 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 filled += 1;
             }
             filled += drawn;
-            line.extend(rest);
+            line.push_str(&rest.concat());
         }
-        lines.push(line);
+        lines_here.push(line);
+        // The indent is put back on every row the line folded into, so the
+        // block stays a block: a continuation at column zero would read as a
+        // new line of the code rather than the rest of the one above it.
+        lines.extend(
+            lines_here
+                .into_iter()
+                .map(|folded| match folded.is_empty() {
+                    // An indent with nothing after it is trailing space, and nothing
+                    // is drawn by it. A blank line stays blank.
+                    true => folded,
+                    false => format!("{indent}{folded}"),
+                }),
+        );
     }
     lines
 }

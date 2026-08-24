@@ -3,7 +3,8 @@
 //! Features tested: many turns on one journal, that each turn is asked with
 //! the ones before it as history, that a chat resumes a journal it did not
 //! start, every way out of the loop, the lines that are commands rather than
-//! questions, and the failure when a real provider has no credential.
+//! questions, the failure when a real provider has no credential, and what the
+//! settings document decides for a chat that was given no flags.
 //!
 //! Features NOT tested here: what a typed line means (owned by `chat::parse`,
 //! asserted in its own module), what the page looks like (owned by
@@ -12,8 +13,9 @@
 //! a case with a pipe on its standard input cannot press. The pipe reaches the
 //! same two exits: end of input is what Ctrl-D sends.
 //!
-//! Environmental needs: none. Every case runs offline on the mock adapter, and
-//! the one case about a real provider is the case where it is never reached.
+//! Environmental needs: none. Every case runs offline on the mock adapter,
+//! and the two cases about a real provider are the one where it is never
+//! reached and the one where it is pointed at a port nobody is listening on.
 
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -37,6 +39,10 @@ fn chat_with_key(dir: &Path, args: &[&str], typed: &str, key: Option<&str>) -> O
     cmd.current_dir(dir)
         .arg("chat")
         .args(args)
+        // The harness home is the case's own directory, so a settings
+        // document on the machine running the suite cannot decide what a
+        // chat runs on.
+        .env("TETANUS_HOME", dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -44,6 +50,10 @@ fn chat_with_key(dir: &Path, args: &[&str], typed: &str, key: Option<&str>) -> O
         Some(value) => cmd.env("DEEPSEEK_API_KEY", value),
         None => cmd.env_remove("DEEPSEEK_API_KEY"),
     };
+    // Port 1 is nobody's, so a case that reaches for a provider fails at
+    // connect rather than over the network: the suite stays offline, and the
+    // failure is the ordinary shape of one.
+    cmd.env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1");
     let mut child = cmd.spawn().expect("the binary runs");
     let written = child
         .stdin
@@ -347,4 +357,74 @@ fn nothing_a_chat_was_opened_with_can_drive_the_terminal() {
     // And the conversation still happened, on the journal that was named.
     let events = tetanus_session::replay(dir.path().join(&journal)).expect("replays");
     assert_eq!(asked(&events), vec!["asked"]);
+}
+
+/// TC-CLI-CHAT-10: a document naming the provider, the root and the budget,
+/// against a bare `tetanus chat` with no credential in the environment.
+/// Expected: exit 0 on the offline adapter, the journal at `chat.jsonl` under
+/// the document's root, and its header holding the document's budget. A chat
+/// that ignored the document would take its own DeepSeek default and exit 5,
+/// which is what TC-CLI-CHAT-5 asserts for a chat nobody configured.
+#[test]
+fn a_document_decides_what_a_chat_runs_on() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "provider:\n  default: mock\nsessions:\n  root: journals\nagent:\n  max_steps: 3\n",
+    )
+    .expect("the document is written");
+
+    let out = chat(dir.path(), &["--color", "never"], "hello\n");
+
+    assert_eq!(out.status.code(), Some(0), "{}", page(&out));
+    let text = std::fs::read_to_string(dir.path().join("journals/chat.jsonl"))
+        .expect("the journal is under the document's root");
+    let head: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("a header")).expect("json");
+    assert_eq!(head["data"]["provider"], "mock", "{head}");
+    assert_eq!(head["data"]["max_steps"], 3, "{head}");
+
+    // And the flag still beats it, on the value a conversation is named by.
+    let flagged = chat(dir.path(), &["-s", "flagged/c.jsonl"], "hello\n");
+    assert_eq!(flagged.status.code(), Some(0), "{}", page(&flagged));
+    assert!(dir.path().join("flagged/c.jsonl").exists());
+}
+
+/// TC-CLI-CHAT-11: a piped chat whose first turn fails on a provider that
+/// cannot be reached.
+/// Expected: the failure ends the run with the status §4.5 gives its code,
+/// and the second line is never asked. A reader at a terminal is asked for
+/// another line after a failed turn - a conversation is not over because one
+/// turn of it was - but a pipe has nobody to ask, and a script whose every
+/// turn failed must not read back success.
+#[test]
+fn a_piped_chat_stops_on_a_turn_that_failed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let out = chat_with_key(
+        dir.path(),
+        &[
+            "--color",
+            "never",
+            "-a",
+            "deepseek",
+            "-m",
+            "deepseek-v4-flash",
+        ],
+        "one\ntwo\n",
+        Some("not-a-key"),
+    );
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("one"), "the question is on the page: {said}");
+    assert!(
+        !said.contains("two"),
+        "the second line was asked after a failure: {said}"
+    );
 }

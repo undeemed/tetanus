@@ -20,11 +20,11 @@ use tempfile::TempDir;
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionEventDispatch, SessionLog};
 use tetanus_turn::boot::boot;
-use tetanus_turn::events::{AgentRequest, LlmStream, ToolsPostExecute};
+use tetanus_turn::events::{AgentRequest, AssemblePrompt, LlmStream, ToolsPostExecute};
 use tetanus_turn::llm::mock::MockAdapter;
 use tetanus_turn::log::topic;
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
-use tetanus_turn::{TurnConfig, TurnEngine};
+use tetanus_turn::{TurnConfig, TurnEngine, TurnError};
 
 /// TC-PORT-REG-1: an event is on the log before its listener is told about it.
 ///
@@ -212,6 +212,149 @@ struct Fixture {
     log: Arc<JsonlSessionLog>,
     bus: EventBus,
     _dir: TempDir,
+}
+
+/// TC-PORT-REG-5: a decision listener that panics ends its turn, and closes
+/// the journal behind it.
+///
+/// Upstream: "plugin exceptions are contained" - the half about a *decision*
+/// listener rather than an observer, which TC-PORT-REG-4 covers.
+///
+/// The bus keeps `serial` and `waterfall` loud by design, and that does not
+/// change here: a listener that decides something is not instrumentation, and
+/// a caller that asked one question should hear that it could not be answered.
+/// What is contained is the blast radius. Before this the panic escaped
+/// `run_turn` entirely, so `turn/start` sat unbalanced on the journal and the
+/// session was wedged open: a reader could not tell the turn was over, and the
+/// next `session.create` had to synthesize `interrupted` closers for a turn
+/// nothing had interrupted.
+///
+/// Input: a `system-prompt/assemble` listener that panics, so the turn dies
+/// inside a step that has already opened.
+/// Expected: `run_turn` returns `TurnError::Plugin` carrying the panic message
+/// rather than unwinding; the journal is balanced, ending `step/end` then
+/// `turn/end`; and `turn/end` reads `stop_reason: "failed"`, which is what
+/// contract section 4.4.2 says every failed turn reads.
+#[tokio::test]
+async fn a_panicking_decision_listener_ends_the_turn_and_balances_the_journal() {
+    quiet_deliberate_panics();
+    let f = Fixture::new("reg-decision-panic").await;
+    let _bug = f
+        .bus
+        .on_waterfall::<AssemblePrompt, _>(|_ev, _next| panic!("{DELIBERATE}"));
+
+    let failed = f
+        .engine
+        .run_turn("a listener with a bug")
+        .await
+        .expect_err("a panicking decision listener fails its turn");
+
+    match &failed {
+        TurnError::Plugin(fault) => assert!(
+            fault.contains(DELIBERATE),
+            "the panic's own message is what the caller is told: {fault}"
+        ),
+        other => panic!("expected a contained plugin panic, got {other:?}"),
+    }
+
+    let written: Vec<String> = f.log.events().iter().map(|e| e.ty.clone()).collect();
+    assert_eq!(
+        written.last().map(String::as_str),
+        Some(topic::TURN_END),
+        "the turn is closed on the journal: {written:?}"
+    );
+    assert_eq!(
+        written.iter().filter(|ty| *ty == topic::TURN_START).count(),
+        written.iter().filter(|ty| *ty == topic::TURN_END).count(),
+        "every turn opened is a turn ended: {written:?}"
+    );
+    assert_eq!(
+        written.iter().filter(|ty| *ty == topic::STEP_START).count(),
+        written.iter().filter(|ty| *ty == topic::STEP_END).count(),
+        "and the step the panic interrupted is ended too: {written:?}"
+    );
+
+    let ended = f
+        .log
+        .events()
+        .into_iter()
+        .find(|e| e.ty == topic::TURN_END)
+        .expect("turn/end");
+    assert_eq!(ended.data["stop_reason"], serde_json::json!("failed"));
+}
+
+/// TC-PORT-REG-6: the turn after a contained panic is an ordinary turn.
+///
+/// A containment that left the engine unusable would trade one wedged session
+/// for another. The step counter, the turn counter and the journal all have to
+/// carry on from where the failed turn left them, or a caller's only recovery
+/// from a plugin bug is a new process.
+///
+/// Input: a turn killed by a panicking listener, the listener then removed,
+/// then a second turn on the same engine and the same journal.
+/// Expected: the second turn succeeds, is numbered two, and its own boundaries
+/// are on the same journal after the first turn's closers - so the numbering
+/// never repeats and never skips.
+#[tokio::test]
+async fn the_turn_after_a_contained_panic_is_an_ordinary_turn() {
+    quiet_deliberate_panics();
+    let f = Fixture::new("reg-decision-panic-recovery").await;
+
+    let bug = f
+        .bus
+        .on_waterfall::<AssemblePrompt, _>(|_ev, _next| panic!("{DELIBERATE}"));
+    f.engine
+        .run_turn("the turn that dies")
+        .await
+        .expect_err("contained");
+    drop(bug);
+
+    let outcome = f
+        .engine
+        .run_turn("the turn that works")
+        .await
+        .expect("the engine still works");
+
+    assert_eq!(
+        outcome.turn, 2,
+        "numbering carries on rather than repeating"
+    );
+    let turns: Vec<u64> = f
+        .log
+        .events()
+        .iter()
+        .filter(|e| e.ty == topic::TURN_START)
+        .map(|e| e.data["turn"].as_u64().expect("turn"))
+        .collect();
+    assert_eq!(turns, vec![1, 2], "one journal, two turns, no gap");
+
+    let written: Vec<String> = f.log.events().iter().map(|e| e.ty.clone()).collect();
+    assert_eq!(
+        written.iter().filter(|ty| *ty == topic::TURN_START).count(),
+        written.iter().filter(|ty| *ty == topic::TURN_END).count(),
+        "both turns are closed: {written:?}"
+    );
+}
+
+const DELIBERATE: &str = "deliberate: a decision listener with a bug";
+
+static QUIET: std::sync::Once = std::sync::Once::new();
+
+/// Drop the panic report for exactly the payload these cases panic with, and
+/// pass every other panic - a failed assertion, a real bug - straight through.
+fn quiet_deliberate_panics() {
+    QUIET.call_once(|| {
+        let inherited = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let ours = info
+                .payload()
+                .downcast_ref::<&str>()
+                .is_some_and(|message| *message == DELIBERATE);
+            if !ours {
+                inherited(info);
+            }
+        }));
+    });
 }
 
 impl Fixture {

@@ -158,6 +158,7 @@ mod tests {
         frame.paint(&mut ui).expect("paint");
         ui.contents()
             .trim_start_matches("\x1b[H")
+            .trim_end_matches("\x1b[?25l")
             .trim_end_matches("\x1b[J")
             .split("\r\n")
             .map(|row| row.trim_end_matches("\x1b[K").trim_end().to_string())
@@ -231,6 +232,30 @@ mod tests {
                 .any(|row| row.contains("any key goes back") && row.contains("this card")),
             "a key row was written over the footer: {rows:?}"
         );
+    }
+
+    /// TC-CLI-KEYS-4: a card at every size a terminal can be.
+    /// Expected: a frame of exactly the height asked for, no row over the
+    /// width, and never a key row written over the footer - the card spends
+    /// four rows on furniture and counts what it could not show, and both of
+    /// those are subtractions that have to hold when there is nothing to
+    /// subtract from. A terminal reports no columns at all while it is being
+    /// resized.
+    #[test]
+    fn a_card_holds_at_every_size() {
+        for rows in 0..=8 {
+            for cols in 0..=24 {
+                let frame = card(&theme(), cols, rows, "journal", &MAP);
+                assert_eq!(frame.rows(), rows, "{cols}x{rows}");
+
+                for row in self::rows(&frame, cols) {
+                    assert!(
+                        visible_width(&row) <= cols.max(1),
+                        "`{row}` overruns {cols} at {cols}x{rows}"
+                    );
+                }
+            }
+        }
     }
 
     /// TC-CLI-KEYS-3: the same footer at three widths.

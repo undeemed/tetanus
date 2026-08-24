@@ -1,0 +1,21 @@
+[package]
+name = "tetanus-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Agent Client Protocol bridge: an ACP client drives a tetanus session over the workspace's own JSON-RPC carrier."
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tetanus-protocol = { path = "../protocol" }
+tetanus-rpc = { path = "../rpc" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tetanus-engine = { path = "../engine" }
+# The suite needs a provider it can hold open, so a case can look at a session
+# while its turn is genuinely in flight instead of racing one that is not.
+tetanus-turn = { path = "../turn" }

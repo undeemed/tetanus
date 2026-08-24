@@ -38,39 +38,48 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::boot;
+use tetanus_turn::boot::boot_with;
 use tetanus_turn::log::topic;
 use tetanus_turn::{TurnConfig, TurnEngine};
-use tetanus_ui::{tame_line, Policy, Ui};
+use tetanus_ui::{tame_line, when_killed, Held, Key, Keys, Policy, Tty, Ui};
 
 use crate::render;
 use crate::{AdapterChoice, Reported};
 
 #[derive(clap::Args)]
 pub struct ChatArgs {
-    /// Which model provider to talk to
-    #[arg(short, long, value_enum, default_value_t = AdapterChoice::Deepseek)]
-    pub adapter: AdapterChoice,
+    /// Which model provider to talk to. Defaults to `provider.default` in
+    /// the settings document, and to DeepSeek when nothing sets it
+    #[arg(short, long, value_enum)]
+    pub adapter: Option<AdapterChoice>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID")]
     pub model: Option<String>,
     /// The journal this conversation is kept in. An existing one is resumed.
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "sessions/chat.jsonl"
-    )]
-    pub session: PathBuf,
-    /// Step budget for each turn
-    #[arg(long, value_name = "N", default_value_t = 8)]
-    pub max_steps: u32,
+    /// Defaults to `chat.jsonl` under `sessions.root` in the settings
+    /// document
+    #[arg(short, long, value_name = "PATH")]
+    pub session: Option<PathBuf>,
+    /// Step budget for each turn. Defaults to `agent.max_steps` in the
+    /// settings document
+    #[arg(long, value_name = "N", value_parser = crate::step_budget)]
+    pub max_steps: Option<u32>,
+    /// What every command, shell and terminal this conversation starts is
+    /// confined to. Defaults to `sandbox.mode` in the settings document, and
+    /// to `danger-full-access` when nothing sets it
+    #[arg(long, value_name = "MODE", value_parser = crate::sandbox_mode)]
+    pub sandbox: Option<String>,
     /// Print the model's thinking in full, not folded to its first line
     #[arg(long)]
     pub think: bool,
+    /// Hold the conversation on a screen of its own: the transcript above,
+    /// scrollable, and the line you type on pinned to the foot of it
+    #[arg(long)]
+    pub ui: bool,
 }
 
 /// What a typed line asks for.
@@ -88,6 +97,20 @@ pub enum Input<'a> {
     Leave,
     /// Print the commands.
     Help,
+    /// Look for a word in what has already been said. Only the full-screen
+    /// chat can answer it: the ordinary one hands each line to the terminal's
+    /// own scrollback, where the reader's own pager already searches.
+    Find(&'a str),
+    /// Unfold what the model thought, or fold it back.
+    Think,
+    /// Print a tool's result whole, or cap it again.
+    More,
+    /// What this conversation has cost, and how fast it has been.
+    Stats,
+    /// Every key the full-screen chat answers. The ordinary one has no keys
+    /// of its own: its prompt is a line editor and its scrollback is the
+    /// terminal's.
+    Keys,
     /// A slash command this build does not have, as it was typed.
     Unknown(&'a str),
 }
@@ -108,14 +131,59 @@ pub fn parse(line: &str) -> Input<'_> {
     }
     match said {
         "" => Input::Blank,
-        "/exit" | "/quit" | "/q" => Input::Leave,
-        "/help" | "/?" => Input::Help,
-        // The command is the first word: `/reset now` is not a message, and
-        // saying which command is missing is what tells the user it is not.
-        _ => match said.starts_with('/') {
-            true => Input::Unknown(said.split_whitespace().next().unwrap_or(said)),
-            false => Input::Ask(said),
+        said => match commanded(said) {
+            Some(command) => command,
+            // The command is the first word: `/reset now` is not a message,
+            // and saying which command is missing is what tells the user it is
+            // not.
+            None => match said.starts_with('/') {
+                true => Input::Unknown(said.split_whitespace().next().unwrap_or(said)),
+                false => Input::Ask(said),
+            },
         },
+    }
+}
+
+/// The commands, read off a line that has already been trimmed.
+///
+/// Separate from [`parse`] because they are a list and it is a rule: the list
+/// grows every time the screen learns something, and a function that answered
+/// both would grow an arm each time as well.
+fn commanded(said: &str) -> Option<Input<'_>> {
+    if let Some(word) = said.strip_prefix("/find") {
+        // `/find` with nothing after it takes the marks off, which is what a
+        // reader who has found what they were looking for wants next.
+        if word.is_empty() || word.starts_with(' ') {
+            return Some(Input::Find(word.trim()));
+        }
+    }
+    match said {
+        "/exit" | "/quit" | "/q" => Some(Input::Leave),
+        "/help" | "/?" => Some(Input::Help),
+        "/keys" => Some(Input::Keys),
+        "/stats" => Some(Input::Stats),
+        "/think" => Some(Input::Think),
+        "/more" => Some(Input::More),
+        _ => None,
+    }
+}
+
+/// Why a command does nothing in a chat that has no screen of its own.
+///
+/// Each of them acts on a page: the rows already printed, or the keys a view
+/// answers. This chat's page is the reader's own scrollback, which it cannot
+/// rewrite and their terminal already searches, and its prompt answers the
+/// keys their shell gave it.
+fn elsewhere(command: &Input) -> &'static str {
+    match command {
+        Input::Keys => "/keys is for `tetanus chat --ui`; this chat answers your shell's keys",
+        Input::Stats => {
+            "/stats is for `tetanus chat --ui`; here every turn's own line already says it"
+        }
+        Input::Find(_) => {
+            "/find is for `tetanus chat --ui`; this chat's lines are in your scrollback"
+        }
+        _ => "/think and /more are for `tetanus chat --ui`; here they are flags: --think",
     }
 }
 
@@ -131,33 +199,97 @@ enum Typed {
 /// Hold a conversation on one session journal.
 pub async fn chat<W: Write>(
     policy: &Policy,
+    document: &std::path::Path,
     out: &mut Ui<W>,
     args: ChatArgs,
 ) -> Result<(), Reported> {
-    // Before the journal exists, as `run` refuses a prompt it will not send: a
-    // chat that cannot reach a model must say so at the point the adapter was
-    // named, not after it has written a journal holding no turns.
-    let (adapter, model) = crate::adapter(policy, args.adapter, args.model.clone())?;
+    // What every turn in this conversation runs on: the settings document,
+    // with the flags over it. Before the journal exists, because the document
+    // decides where the journal goes when `--session` did not.
+    let settled = crate::settings::turn_settings(
+        policy,
+        document,
+        crate::settings::TurnFlags {
+            adapter: args.adapter,
+            model: args.model.clone(),
+            max_steps: args.max_steps,
+            session: args.session.clone(),
+            sandbox: args.sandbox.clone(),
+        },
+        // A conversation with the mock adapter is a demonstration rather than
+        // a use, so an unconfigured chat is DeepSeek.
+        AdapterChoice::Deepseek,
+        "chat.jsonl",
+    )?;
 
-    let opened = crate::session(&args.session, args.adapter.route(), &model, args.max_steps)
-        .await
-        .map_err(|err| crate::fail(policy, &err))?;
+    // As `run` refuses a prompt it will not send: a chat that cannot reach a
+    // model must say so at the point the adapter was named, not after it has
+    // written a journal holding no turns.
+    let (adapter, model) = crate::adapter(policy, settled.provider, settled.model.clone())?;
+
+    let opened = crate::session(
+        settled.settings.clone(),
+        &settled.journal,
+        settled.provider.route(),
+        &model,
+        settled.max_steps,
+    )
+    .await
+    .map_err(|err| crate::fail(policy, &crate::about(err, &settled.journal)))?;
 
     let bus = EventBus::new();
-    let log = JsonlSessionLog::create(&opened.session_id, &args.session, bus.clone())
-        .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &args.session)))?;
+    let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
+        .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &settled.journal)))?;
 
-    let ctx = boot(bus, adapter, Arc::new(crate::registry()), log.clone())
-        .map_err(|err| crate::report(policy, &err.to_string(), None))?;
+    // The tools and the loop share one stop switch, so Ctrl-C reaches a
+    // command a turn started rather than only the step boundary.
+    let interrupt = tetanus_turn::interrupt::Interrupt::new();
+    let ctx = boot_with(
+        bus,
+        adapter,
+        Arc::new(crate::tools::registry(
+            policy,
+            document,
+            &crate::tools::whose(
+                &settled.settings.resolved,
+                &opened.session_id,
+                log.clone(),
+                settled.journal.parent(),
+                &interrupt,
+            ),
+        )?),
+        log.clone(),
+        Arc::clone(&interrupt),
+    )
+    .map_err(|err| crate::report(policy, &err.to_string(), None))?;
     let engine = TurnEngine::from_context(
         &ctx,
         TurnConfig {
             model: model.clone(),
-            max_steps: args.max_steps,
+            max_steps: settled.max_steps,
             ..TurnConfig::default()
         },
     )
     .map_err(|err| crate::report(policy, &err.to_string(), None))?;
+
+    // The same name as the banner draws, tamed for the line that says it -
+    // `tetanus run` words its phase line from a tamed name for the same
+    // reason. What was given still selects the adapter; what is drawn is
+    // drawn.
+    let phase = format!("running the turn on {}", tame_line(&model));
+
+    if args.ui {
+        return fire(
+            policy,
+            out,
+            &engine,
+            log.as_ref(),
+            &model,
+            &phase,
+            args.think,
+        )
+        .await;
+    }
 
     render::chat::banner(
         out,
@@ -173,17 +305,18 @@ pub async fn chat<W: Write>(
     // in gets the transcript and nothing else, so its output is the journal
     // it just wrote and not a page with markers through it.
     let typing = std::io::stdin().is_terminal();
-    // The same name as the banner drew, tamed for the line that says it -
-    // `tetanus run` words its phase line from a tamed name for the same
-    // reason. What was given still selects the adapter; what is drawn is
-    // drawn.
-    let phase = format!("running the turn on {}", tame_line(&model));
-
+    // Painted once, and drawn on every keystroke by the editor that owns the
+    // row. It is a string and not a call because the thread that draws it is
+    // not the one holding the writer.
+    let marker = render::chat::marker(out);
     loop {
+        // The blank line that separates the prompt from the turn above it goes
+        // through the writer, before the terminal is taken: it is an ordinary
+        // row of the transcript, and only the row under it is the editor's.
         if typing {
-            render::chat::prompt(out).ok();
+            render::chat::space(out).ok();
         }
-        let asked = match typed().await {
+        let asked = match typed(typing, &marker, policy.width).await {
             Ok(Typed::Line(line)) => line,
             // Both ways out land here: the journal is named, and the status
             // says which of them it was.
@@ -219,6 +352,12 @@ pub async fn chat<W: Write>(
                     .ok();
                 continue;
             }
+            // Every command that acts on a page this chat does not own.
+            command
+            @ (Input::Keys | Input::Think | Input::More | Input::Find(_) | Input::Stats) => {
+                policy.stderr().note(elsewhere(&command)).ok();
+                continue;
+            }
             Input::Ask(asked) => {
                 // Where this turn starts on the journal. The view draws what
                 // is appended from here, so a resumed session's history stays
@@ -231,20 +370,28 @@ pub async fn chat<W: Write>(
                     crate::journal(out, &log);
                     return Err(crate::stopped(policy));
                 };
-                // A turn that failed ends the chat with the status §4.5 gives
-                // its code, the same as `tetanus run`: the conversation is on
-                // the journal, and `tetanus chat -s <path>` picks it up again.
-                outcome.map_err(|err| {
-                    crate::fail(
-                        policy,
-                        &crate::turn_fault(
-                            &err,
-                            &opened.session_id,
-                            args.adapter.route(),
-                            &args.session,
-                        ),
-                    )
-                })?;
+                // A turn that failed is a turn that failed, not a chat that
+                // is over: the engine is still booted and the journal is
+                // still open, so the fault is said and the next line is
+                // asked for. A provider that could not be reached is the
+                // ordinary case here, and dropping a reader back to a shell
+                // to retype `tetanus chat -s <path>` answers a network blip
+                // by ending the conversation.
+                //
+                // Piped input keeps the old behaviour, because there is
+                // nobody there to ask again: the status §4.5 gives the code
+                // is what a script reads, and a run whose turns all failed
+                // must not exit 0.
+                if let Err(err) = outcome {
+                    let fault = crate::turn_fault(
+                        &err,
+                        &opened.session_id,
+                        settled.provider.route(),
+                        &settled.journal,
+                    );
+                    kept_going(policy, typing, &fault)?;
+                    continue;
+                }
                 engine
                     .flush()
                     .await
@@ -256,6 +403,358 @@ pub async fn chat<W: Write>(
     crate::journal(out, &log);
     Ok(())
 }
+
+/// What a failed turn does to the chat around it.
+///
+/// A reader at a terminal is told and asked for another line. A pipe has
+/// nobody to ask, so the run ends on the status §4.5 gives the fault's code -
+/// the same number `tetanus run` would have exited with, which is what a
+/// script branching on `$?` reads.
+fn kept_going(
+    policy: &Policy,
+    typing: bool,
+    fault: &tetanus_protocol::rpc::RpcError,
+) -> Result<(), Reported> {
+    if !typing {
+        return Err(crate::fail(policy, fault));
+    }
+    crate::said_fault(policy, fault);
+    Ok(())
+}
+
+/// Hold the conversation on a screen of its own.
+///
+/// The same engine, the same journal and the same wording as the ordinary
+/// chat: what changes is where the rows go. The transcript is kept by the view
+/// rather than by the reader's scrollback, because the alternate screen has
+/// none, and the row a person types on is the second-to-last row of the
+/// terminal whatever else is happening above it.
+async fn fire<W: Write>(
+    policy: &Policy,
+    out: &mut Ui<W>,
+    engine: &TurnEngine,
+    log: &JsonlSessionLog,
+    model: &str,
+    phase: &str,
+    think: bool,
+) -> Result<(), Reported> {
+    // Hung before the terminal is taken, for the reason `with_page` gives: the
+    // gap between the two is real, and a signal landing in it would find the
+    // alternate screen entered and no watch yet to leave it.
+    let killed = when_killed(Tty::new(std::io::stdout())).ok();
+    let mut held = match Held::take(Tty::new(std::io::stdout())) {
+        Ok(held) => held,
+        // It said it was a terminal and then would not be taken. Reported
+        // rather than fallen back from: the journal is open and the engine is
+        // booted, so a silent return would end a conversation the reader asked
+        // for without a word about why.
+        Err((_, err)) => {
+            drop(killed);
+            return Err(crate::fail(
+                policy,
+                &tetanus_protocol::rpc::RpcError::new(
+                    tetanus_protocol::rpc::ErrorCode::Io,
+                    format!("the terminal could not be taken: {err}"),
+                ),
+            ));
+        }
+    };
+
+    let theme = *out.theme();
+    let (cols, rows) = tetanus_ui::size();
+    let mut view =
+        render::fire::Fire::new(theme, cols, model, &log.path().display().to_string(), think);
+    let events = log.events();
+    view.history(&events.iter().map(crate::crossing).collect::<Vec<_>>());
+    let mut session = Session {
+        log,
+        view,
+        painted: None,
+        seen: events.len(),
+        length: 0,
+        size: (cols, rows),
+        frames: tokio::time::interval(FRAME),
+    };
+
+    let leaving = session.hold(out, engine, held.console(), phase).await;
+
+    held.release().ok();
+    drop(killed);
+    crate::journal(out, log);
+    match leaving {
+        Leaving::Stopped => Err(crate::stopped(policy)),
+        Leaving::Ended => Ok(()),
+    }
+}
+
+/// How the reader left, which is what the process exits with.
+enum Leaving {
+    /// `/exit`, or Ctrl-D on an empty line.
+    Ended,
+    /// Ctrl-C, which §4.5 gives 130.
+    Stopped,
+}
+
+/// The state one full-screen conversation keeps between frames.
+///
+/// A struct rather than a stack of locals because the loop has two halves -
+/// waiting for a line, and answering one - and both halves settle the journal,
+/// answer the keys and paint. Written as one function they were one function
+/// doing four things.
+struct Session<'a> {
+    log: &'a JsonlSessionLog,
+    view: render::fire::Fire,
+    /// The frame already on the terminal, so a screen that has not changed is
+    /// not painted again.
+    painted: Option<tetanus_ui::Frame>,
+    /// How much of the journal is on the page.
+    seen: usize,
+    /// How long the journal's file was when it was last read.
+    ///
+    /// A journal is append-only, so a file that has not grown holds nothing
+    /// this view has not seen. Asking the filesystem for its length costs one
+    /// syscall; asking the log for its events copies every event it holds, and
+    /// this loop asks twelve times a second.
+    length: u64,
+    size: (usize, usize),
+    frames: tokio::time::Interval,
+}
+
+impl Session<'_> {
+    /// Read lines and answer them until the reader leaves.
+    async fn hold<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+    ) -> Leaving {
+        loop {
+            let asked = match self.line(out, tty).await {
+                render::fire::Act::Asked(line) => line,
+                render::fire::Act::Leave => return Leaving::Ended,
+                render::fire::Act::Stopped => return Leaving::Stopped,
+                render::fire::Act::Go => continue,
+            };
+            if let Some(leaving) = self.answer(out, engine, tty, phase, &asked).await {
+                return leaving;
+            }
+        }
+    }
+
+    /// What one finished line does. `Some` is the reader leaving, and why.
+    ///
+    /// Split from [`Session::hold`] because the two are different questions -
+    /// what a keystroke did, and what a line means - and one function
+    /// answering both was one match too many for anybody reading it, the
+    /// structural gate included.
+    async fn answer<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+        asked: &str,
+    ) -> Option<Leaving> {
+        match parse(asked) {
+            Input::Leave => Some(Leaving::Ended),
+            // A failed turn is already on the page, said in the wording
+            // §4.5's code carries: the reader sees what went wrong under
+            // their question and asks again, or leaves. Tearing the screen
+            // down to print the same sentence to a shell would answer a
+            // provider blip by throwing away the conversation on it.
+            Input::Ask(said) => match self.turn(out, engine, tty, phase, said).await {
+                Some(_) => None,
+                None => Some(Leaving::Stopped),
+            },
+            // Everything else changes the page and nothing else.
+            command => {
+                self.shown(command);
+                None
+            }
+        }
+    }
+
+    /// A command that acts on the page, and says what it did where saying so
+    /// is the whole of the answer.
+    fn shown(&mut self, command: Input<'_>) {
+        match command {
+            Input::Help => self.view.card(),
+            Input::Keys => self.view.card_of_keys(),
+            Input::Stats => self.view.stats(),
+            Input::Find(word) => self.view.find(word),
+            Input::Think => {
+                let said = match self.view.thinking() {
+                    true => "thinking is shown in full",
+                    false => "thinking is folded to its first line",
+                };
+                self.said(said);
+            }
+            Input::More => {
+                let said = match self.view.whole() {
+                    true => "tool results are shown whole",
+                    false => "tool results are capped again",
+                };
+                self.said(said);
+            }
+            Input::Unknown(command) => self.said(&format!(
+                "{} is not a command; /help lists them",
+                tame_line(command)
+            )),
+            // A blank line is a keypress, and a question is answered by the
+            // caller, which is the one that can await a turn.
+            Input::Blank | Input::Leave | Input::Ask(_) => {}
+        }
+    }
+
+    /// Wait for the reader to finish a line, painting while they type.
+    ///
+    /// The clock still turns with nothing running, because a journal can grow
+    /// under a conversation resumed beside another one.
+    async fn line<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        tty: &mut Tty<std::io::Stdout>,
+    ) -> render::fire::Act {
+        loop {
+            self.frames.tick().await;
+            let typed = self.keys(tty);
+            self.settle();
+            self.paint(out, Duration::ZERO);
+            if typed != render::fire::Act::Go {
+                return typed;
+            }
+        }
+    }
+
+    /// Run one turn, painting it as it arrives.
+    ///
+    /// `None` is Ctrl-C: the turn is dropped where it stands, which is what
+    /// the ordinary chat does with the same key.
+    async fn turn<W: Write>(
+        &mut self,
+        out: &mut Ui<W>,
+        engine: &TurnEngine,
+        tty: &mut Tty<std::io::Stdout>,
+        phase: &str,
+        said: &str,
+    ) -> Option<Result<(), tetanus_protocol::rpc::RpcError>> {
+        self.view.started(phase);
+        let started = std::time::Instant::now();
+        let mut running = std::pin::pin!(engine.run_turn(said));
+        let outcome = loop {
+            tokio::select! {
+                done = &mut running => break Some(done),
+                _ = self.frames.tick() => {
+                    let typed = self.keys(tty);
+                    self.settle();
+                    self.view.tick();
+                    self.paint(out, started.elapsed());
+                    if typed != render::fire::Act::Go {
+                        break None;
+                    }
+                }
+            }
+        };
+        // Whatever the turn wrote after the last frame, and then the block
+        // goes: nothing more is coming.
+        self.settle();
+        self.view.finished();
+        let outcome = outcome?;
+        let answered = match outcome {
+            Ok(_) => Ok(()),
+            Err(err) => Err(crate::turn_fault(
+                &err,
+                self.log.id(),
+                self.model(),
+                self.log.path(),
+            )),
+        };
+        if let Err(fault) = &answered {
+            self.view.fault(fault);
+        }
+        self.paint(out, Duration::ZERO);
+        Some(answered)
+    }
+
+    /// The model this conversation is on, as the heading says it.
+    fn model(&self) -> &str {
+        self.view.model()
+    }
+
+    /// One line of this build's own words, on the transcript.
+    fn said(&mut self, text: &str) {
+        self.view.note(text);
+    }
+
+    /// Answer every keystroke waiting, and take the size the terminal reports.
+    ///
+    /// A resize arrives on the same queue as the keys and is answered here
+    /// rather than passed on, because a frame built for the old size is wrong
+    /// the instant it is read.
+    fn keys(&mut self, tty: &mut Tty<std::io::Stdout>) -> render::fire::Act {
+        for _ in 0..KEYS {
+            let Ok(Some(key)) = tty.key(Duration::ZERO) else {
+                break;
+            };
+            if let Key::Resize(cols, rows) = key {
+                self.size = (cols as usize, rows as usize);
+                continue;
+            }
+            match self.view.key(key) {
+                render::fire::Act::Go => {}
+                // The first line finished, or the first way out, ends the
+                // reading: what is left in the buffer belongs to the next line.
+                act => return act,
+            }
+        }
+        render::fire::Act::Go
+    }
+
+    /// Commit whatever the journal has grown by.
+    ///
+    /// The events this process wrote, which is what a conversation on one
+    /// journal is: a second writer's lines are on the file and not in this
+    /// log's memory, and reading the file back is `tetanus replay`'s job.
+    fn settle(&mut self) {
+        // Nothing appended, nothing to copy. On a journal of six thousand
+        // events, copying them every frame is a sixth of a core spent on a
+        // conversation nobody is having.
+        let Some(length) = crate::appended(self.log.path(), self.length) else {
+            return;
+        };
+        self.length = length;
+        let events = self.log.events();
+        for event in events.iter().skip(self.seen) {
+            self.view.push(&crate::crossing(event));
+        }
+        self.seen = events.len();
+    }
+
+    /// Paint, unless the frame is the frame already on the terminal.
+    ///
+    /// The clock runs at twelve frames a second and a conversation waiting for
+    /// somebody to type changes on none of them, so most frames are the one
+    /// before them. `Frame` is comparable for exactly this.
+    fn paint<W: Write>(&mut self, out: &mut Ui<W>, spent: Duration) {
+        let frame = self.view.frame(self.size.0, self.size.1, spent);
+        if self.painted.as_ref() == Some(&frame) {
+            return;
+        }
+        frame.paint(out).ok();
+        self.painted = Some(frame);
+    }
+}
+
+/// How often a frame is composed while the view is up. The same interval every
+/// other full-screen view in this binary uses.
+const FRAME: Duration = Duration::from_millis(80);
+
+/// Keystrokes one frame will answer before it draws. The same bound
+/// `Watch::beat` sets, and for the same reason: a held key repeats faster than
+/// the frames come round, and a pasted wall of text must not hold up the turn
+/// running beside it.
+const KEYS: usize = 32;
 
 /// Turns already on a journal, which is what a resumed chat remembers.
 fn turns_on(log: &JsonlSessionLog) -> usize {
@@ -275,7 +774,51 @@ fn turns_on(log: &JsonlSessionLog) -> usize {
 /// The blocking read outlives an interrupt - nothing can cancel a thread
 /// parked in `read(2)` - so the caller ends the process rather than dropping
 /// the runtime, which would wait for a line nobody is going to type.
-async fn typed() -> std::io::Result<Typed> {
+async fn typed(typing: bool, marker: &str, width: usize) -> std::io::Result<Typed> {
+    if !typing {
+        return piped().await;
+    }
+    let marker = marker.to_string();
+    tokio::task::spawn_blocking(move || edited(&marker, width))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// One line from a terminal, with the editing keys a shell has.
+///
+/// It runs on a blocking thread because that is what it is: a person typing.
+/// Raw mode is held for exactly as long as the line takes, and given back
+/// before anything else is printed - the transcript above the prompt is the
+/// reader's own scrollback, and a turn that drew into a raw terminal would
+/// leave every row of it starting where the last one ended.
+///
+/// Ctrl-C is a keystroke here rather than a signal, because raw mode is what
+/// turns the one into the other. It comes back as [`Typed::Interrupted`], which
+/// is the same answer the signal gives on the other path, so the loop above
+/// does not know which kind of terminal it is talking to.
+fn edited(marker: &str, width: usize) -> std::io::Result<Typed> {
+    // Armed before the terminal is taken and dropped after it is given back,
+    // so there is no moment in which the terminal is raw and nothing would
+    // undo it.
+    let killed = tetanus_ui::when_killed(tetanus_ui::Typing).ok();
+    let mut held = tetanus_ui::Held::take(tetanus_ui::Typing).map_err(|(_, err)| err)?;
+    let read = tetanus_ui::read(held.console(), &mut std::io::stdout(), marker, width);
+    let given = held.release();
+    drop(killed);
+    given.and(read).map(|typed| match typed {
+        tetanus_ui::Typed::Asked(line) => Typed::Line(line),
+        tetanus_ui::Typed::Interrupted => Typed::Interrupted,
+        // `read` returns on the three keys that end a line and on nothing
+        // else. If a later one ever arrives here, ending the chat is the
+        // answer that loses nothing: the journal holds every turn already.
+        _ => Typed::Eof,
+    })
+}
+
+/// One line from something that is not a terminal: a pipe, a here-document, a
+/// test. There is nobody to draw a row for, so the line is read as a line and
+/// Ctrl-C is a signal again.
+async fn piped() -> std::io::Result<Typed> {
     let line = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         std::io::stdin()
@@ -295,9 +838,11 @@ async fn typed() -> std::io::Result<Typed> {
 
 /// Test Design Specification: what a typed line means.
 ///
-/// Features tested: every command the chat answers and each spelling of it, a
-/// message, the escape that sends a message opening with a slash, what an
-/// empty line does, and a command this build does not have.
+/// Features tested: every command the chat answers and each spelling of it,
+/// including the two only the full-screen chat acts on, the word a search is
+/// given and what giving none means, a message, the
+/// escape that sends a message opening with a slash, what an empty line does,
+/// and a command this build does not have.
 ///
 /// Features NOT tested here: the loop itself and every way out of it (end to
 /// end, in `tests/chat.rs`, where a real binary reads a real pipe), and the
@@ -377,5 +922,71 @@ mod tests {
     fn an_unknown_command_is_not_a_question() {
         assert_eq!(parse("/reset\n"), Input::Unknown("/reset"));
         assert_eq!(parse("/model deepseek-chat\n"), Input::Unknown("/model"));
+    }
+
+    /// TC-CLI-CHAT-IN-7: the search command, with a word and without one.
+    /// Expected: the word, trimmed; and nothing, which is how a reader stops
+    /// looking. `/finder` is not `/find`, because a command is the whole first
+    /// word and a prefix that swallowed the rest would answer a typo.
+    #[test]
+    fn find_takes_a_word_and_giving_none_stops_looking() {
+        assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
+        assert_eq!(parse("/find  two words \n"), Input::Find("two words"));
+        assert_eq!(parse("/find\n"), Input::Find(""));
+        assert_eq!(parse("/finder\n"), Input::Unknown("/finder"));
+    }
+
+    /// TC-CLI-CHAT-IN-8: the commands only the full-screen chat acts on.
+    /// Expected: both parse, in both chats. The ordinary one answers them by
+    /// saying where they live; a command it dropped on the floor would read as
+    /// a typo this build did not recognise, which is what `Unknown` is for.
+    #[test]
+    fn the_screens_own_commands_are_read_by_both_chats() {
+        assert_eq!(parse("/keys\n"), Input::Keys);
+        assert_eq!(parse("/find alpha\n"), Input::Find("alpha"));
+        assert_eq!(parse("/think\n"), Input::Think);
+        assert_eq!(parse("/stats\n"), Input::Stats);
+        assert_eq!(parse("/more\n"), Input::More);
+        assert_eq!(parse("/keyboard\n"), Input::Unknown("/keyboard"));
+    }
+
+    /// TC-CLI-POLL-1: whether a journal has anything new in it.
+    /// Expected: its length the first time, nothing while it is unchanged, its
+    /// new length once something is appended, and - for a file that cannot be
+    /// read - something every time, which is the behaviour this replaced and
+    /// the safe way to be wrong.
+    ///
+    /// Every view in the binary asks this twelve times a second - the helper
+    /// is `main.rs`'s for that reason, and the case is here because this is
+    /// the module whose loop found it. Asking the log instead copies every
+    /// event it holds: on a journal of six thousand, that was a sixth of a
+    /// core spent on a conversation nobody was having.
+    #[test]
+    fn a_journal_that_has_not_grown_is_not_read_again() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let journal = dir.path().join("c.jsonl");
+        std::fs::write(&journal, "one line\n").expect("write");
+
+        let first = crate::appended(&journal, 0).expect("a length");
+        assert_eq!(first, 9);
+        assert_eq!(
+            crate::appended(&journal, first),
+            None,
+            "read again unchanged"
+        );
+
+        std::fs::write(&journal, "one line\ntwo lines\n").expect("append");
+        let second = crate::appended(&journal, first).expect("a new length");
+        assert_eq!(second, 19);
+
+        // A journal that is not there reads as new, every time.
+        assert!(crate::appended(&dir.path().join("gone.jsonl"), 0).is_some());
+
+        // And one that shrank - truncated, or replaced by a shorter file - is
+        // read again rather than trusted. The rule is "the length changed",
+        // not "the length grew": a view that only believed growth would be
+        // reading a file it had already been told to stop believing.
+        std::fs::write(&journal, "one line\n").expect("truncate");
+        assert_eq!(crate::appended(&journal, second), Some(9));
     }
 }

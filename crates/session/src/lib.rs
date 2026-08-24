@@ -8,6 +8,14 @@
 //! `data` payload, and - on the three surface event types - the
 //! `sourceEventSeqs` an event cites.
 
+//! [`projection`] is the derived-view seam over that log: a named fold per
+//! domain, driven forward as events commit, so a reader that wants token usage
+//! or a title does not recompute the whole journal to get it.
+
+pub mod projection;
+pub mod sqlite;
+pub mod units;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,6 +31,23 @@ pub enum SessionError {
     Corrupt(usize),
     #[error("event data for {0:?} is not JSON-serializable")]
     NotSerializable(String),
+    /// A backend refused. The message is the backend's own, because what a
+    /// caller can do about a locked database differs from a full disk and
+    /// only the backend knows which it met.
+    #[error("session store: {0}")]
+    Store(String),
+    /// A journal already exists under this id. Refused rather than appended
+    /// to, for [`seed`]'s reason.
+    #[error("session {0:?} already has a journal in this store")]
+    Exists(String),
+    #[error("{}: is not a tetanus session database (application id {found})", path.display())]
+    ForeignStore { path: PathBuf, found: i32 },
+    #[error(
+        "{}: is schema version {found}, and this build reads {}",
+        path.display(),
+        sqlite::SCHEMA_VERSION
+    )]
+    ForeignSchema { path: PathBuf, found: i32 },
 }
 
 /// One immutable entry in the session log.
@@ -191,6 +216,44 @@ impl SessionLog for JsonlSessionLog {
     }
 }
 
+/// Write a whole journal at once, from events that already carry their `seq`
+/// and `time`.
+///
+/// This is how a fork's seed is laid down (contract section 4.4.6): the copied
+/// events keep the seqs and the times they were written under, which `append`
+/// cannot do because it assigns both. The file must not exist. A seed written
+/// onto a journal that already holds a history would splice two histories into
+/// one file, and every seq after the join would name the wrong line.
+///
+/// The same rule the reader enforces is enforced here, so a seed cannot create
+/// a journal `replay` would refuse: `seq` must equal the index of its line.
+pub fn seed(path: impl AsRef<Path>, events: &[SessionEvent]) -> Result<(), SessionError> {
+    let path = path.as_ref();
+    for (i, event) in events.iter().enumerate() {
+        if event.seq != i as u64 {
+            return Err(SessionError::Corrupt(i + 1));
+        }
+    }
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    for event in events {
+        let line = serde_json::to_string(event)
+            .map_err(|_| SessionError::NotSerializable(event.ty.clone()))?;
+        writeln!(file, "{line}")?;
+    }
+    // One barrier for the whole seed: unlike an append, no caller has been
+    // told any part of this is durable until all of it is.
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Read a journal back from disk. `seq` contiguity is verified: a gap means the
 /// file is not a faithful copy of the log that produced it.
 ///
@@ -252,7 +315,7 @@ fn scan(path: &Path) -> Result<Scan, SessionError> {
     Ok(found)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

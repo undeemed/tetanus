@@ -48,14 +48,25 @@ A surface never reaches past the wire type to match an engine enum instead, such
 
 ### 4.1 Context view: carriers
 
-One contract, three carriers.
+One contract, four carriers.
 Every carrier moves the same payloads, so a surface that works over one works over the others.
 
 | Carrier | Who uses it | Framing |
 | --- | --- | --- |
 | In process | the `tetanus` binary | direct calls on the `Engine` trait, no serialization |
 | stdio | an editor or a script driving the binary | JSON-RPC 2.0, one object per line, UTF-8, no embedded newlines |
-| WebSocket | the fire UI | JSON-RPC 2.0, one object per text frame |
+| WebSocket | the browser panel, and any client that can hold a connection | JSON-RPC 2.0, one object per text frame |
+| HTTP | a client that cannot hold one: a `curl`, a script, a page behind a proxy that will not carry sockets | JSON-RPC 2.0, one object as the body of `POST /api/<method>`, one object as the response body |
+
+The HTTP carrier is a door onto the same room and not a second contract: the method is the path, the params are the request body, the answer is the response body, and the frame in between is the one the other carriers move.
+It has no push.
+A `session.subscribe` made over it has nowhere to deliver, so a surface that wants events uses the WebSocket, which is served on the same address.
+
+Every `POST /api/<method>` must declare `application/json`.
+Anything else is refused with 415 before the call is dispatched, because a browser sends three media types cross-site without asking permission first and none of them is that one; demanding it is what turns a cross-site attempt into a preflight the origin rules then refuse.
+
+An HTTP status describes the carrier and never the call.
+A method that ran and failed answers 200 with the contract's error object in the body, so a caller cannot mistake "the model refused" for "the server is broken".
 
 The envelope is JSON-RPC 2.0 exactly: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
 A frame whose `jsonrpc` is absent or is not the string `"2.0"` is rejected, not guessed at.
@@ -66,13 +77,63 @@ That covers a frame that is not JSON, a frame that is JSON but not a request, an
 `rpc::Id::Null` is that value.
 Dropping such a frame silently would leave a client waiting for a reply it will never get, which is the one failure a codec must not have; a client never sends the value itself.
 
-Pushes reach all three carriers the same way.
+Pushes reach the three carriers that have a way to push.
+The HTTP carrier is the one that does not, which is why a surface that wants events holds the socket instead.
 `session.subscribe` takes an `EventSink` alongside its params, supplied by the carrier and never by the wire.
-The stdio and WebSocket carriers implement `EventSink` as "serialize and write a frame"; the in-process caller implements it as "hand to the renderer".
+The stdio and WebSocket carriers implement `EventSink` as "serialize and write a frame"; the in-process caller implements it as "hand to the renderer"; the HTTP carrier has no sink of its own, and the composition that mounts it serves `GET /api/events` beside it for a reader that wants the stream.
 So one renderer serves every carrier, and no surface has to reach past `tetanus-protocol` to see a chunk arrive.
 
 Both peers demultiplex incoming frames with `rpc::Message`, because the server may also call the client (§4.4.3).
 
+**A frame has a maximum size, and it is the same on every carrier.**
+`methods::MAX_FRAME_BYTES` is that bound.
+Without one the carriers disagree under the same abuse: a WebSocket library refuses an over-long message by default, while a line reader given bytes and no newline grows its buffer until the process dies.
+"One contract, four carriers" (§7.1.1) is not true if one of them can be made to fall over by a peer the others merely refuse.
+
+**Inbound, an over-long frame is refused, not read.**
+The carrier stops reading it and answers `ParseError` with `id: null`, which is the answer §4.1 already gives a frame it cannot make sense of - a frame nobody finished sending is one of those.
+Refusing costs the peer a reply it can act on; reading costs the server whatever the peer felt like sending.
+
+**Outbound, a page may be shorter than its `limit`, and shortness never means the end.**
+`session.events` stops filling a page when the next event would take it past the bound, so a caller can meet a short page for a reason that has nothing to do with reaching the journal's end.
+This was already true of a `limit` clamped to the server's own maximum (§4.4.5); the frame bound is a second reason, and both have the same consequence: **`eof` says whether you are done, and a short page never does.**
+A pager that stopped on a short page would silently truncate a transcript, and would do it only for the sessions with the most in them.
+
+**The write side is what keeps this from ever binding.**
+The engine does not write a durable event larger than the frame bound, so a journal never holds something the wire cannot carry.
+That is the right place for the limit: bounding a tool's captured output when it is captured is a decision with an obvious answer, while discovering at delivery time that a journal contains an event nobody can be sent is a decision with none.
+A page of one event therefore always fits, which is what makes paging total rather than merely usual.
+#### 4.1.2 The trust boundary is the connection
+
+**A peer that can open a connection can do everything the engine can do.**
+There is no per-call authorization and none is planned: every call on §4.2 is available to any connected peer, so a connection is the whole of the decision.
+That is a defensible design for a personal harness, and it is only defensible if the thing that decides who may connect is taken seriously.
+
+What a connected peer gets is worth naming rather than leaving to imagination: it can start turns, which run tools and spend money; read every journal in the server's directory, which is the full history of the user's work; and read the resolved configuration, redacted of credentials (§4.3) but not of anything else.
+
+**The in-process and stdio carriers inherit their boundary.**
+In-process is the same process. stdio is a pipe handed over by whoever started the binary, so the peer is the parent, and the operating system has already decided.
+Neither needs anything further.
+
+**The WebSocket carrier does not, and it is the one that is exposed.**
+It accepts TCP connections, so the peer is whoever reached the port.
+Two things follow, and the second is the one that surprises people.
+
+*Loopback is not a trust boundary.* On a shared machine every local account can reach `127.0.0.1`.
+
+*A browser can reach it from any page.* The same-origin policy does not restrict WebSocket connections the way it restricts `fetch`: a page the user happens to be visiting can open `ws://127.0.0.1:<port>` and drive the agent, and will be allowed to unless the server refuses it. The fire UI is a web surface, so this carrier exists precisely to be driven by a browser - which makes the attack surface real rather than theoretical.
+
+**So the WebSocket carrier authenticates, and refuses before the upgrade.**
+
+- It requires a secret established out of band by whoever started the server for **every peer that is not on the loopback interface**, and a handshake that does not present it is refused with an HTTP failure *before* the connection becomes a WebSocket. A deployment bound off-box - which the standing rule makes the expected one - is therefore token-only. The weakest posture the carrier offers admits a local peer without a token, which is safe on a single-user machine and is not on a shared one; a deployment with other local accounts requires the token from everyone. Refusing at the upgrade means an unauthenticated peer never reaches the JSON-RPC layer, so there is no code in §4.5 for this and there should not be: the frame that would carry one is never sent.
+- It checks `Origin` when the handshake carries one, and refuses a browser origin it was not told to expect. A non-browser client sends none, and that is not a failure; a browser cannot forge one.
+
+**A secret cannot travel in a header here, and that is a constraint rather than an oversight.**
+A browser's WebSocket API cannot set request headers, so `Authorization` is unavailable to the very client this carrier is for.
+It travels in the URL or in `Sec-WebSocket-Protocol`, both of which browsers can set - and a URL is logged by more things than a header is, which is a cost to weigh rather than a reason to pretend the header option exists.
+
+**Binding is a deployment's decision and a default is not a safety net.**
+`--listen` takes an address, and a server told to bind a public interface will. The default is loopback; authentication is what makes the difference between a default and a guarantee.
 ### 4.2 Interface view: the calls
 
 `Served` means this build answers the call.
@@ -87,7 +148,7 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `session.create` | `SessionCreateParams` | `SessionInfo` | always | Served |
 | `session.list` | none | `SessionListResult` | always | Served |
 | `session.events` | `SessionEventsParams` | `SessionEventsResult` | always | Served |
-| `session.fork` | `SessionForkParams` | `SessionInfo` | `session.fork` | Reserved |
+| `session.fork` | `SessionForkParams` | `SessionInfo` | `session.fork` | Served |
 | `session.subscribe` | `SessionSubscribeParams` | `SessionSubscribeResult` | `session.subscribe` | Served |
 | `session.unsubscribe` | `SessionUnsubscribeParams` | `Ack` | `session.subscribe` | Served |
 | `agent.prompt` | `AgentPromptParams` | `AgentPromptResult` | always | Served |
@@ -97,8 +158,14 @@ A surface checks a capability string from `rpc.hello` before it uses a reserved 
 | `catalog.models` | none | `ModelCatalogResult` | always | Served |
 | `config.dump` | none | `ConfigDumpResult` | always | Served |
 | `approval.set` | `ApprovalSetParams` | `Ack` | `approval.set` | Reserved |
+| `agent.steer` | `AgentSteerParams` | `AgentSteerResult` | `agent.steer` | Reserved |
 
 A call with no params accepts an absent `params`, or `{}`, and treats them alike.
+
+**The table above is `methods::ALL` in code, and a case iterates it.**
+Both promises in this section are about *every* call - a served one answers, a reserved one answers `NotImplemented` rather than `MethodNotFound` - and a case that names methods one at a time cannot make a claim about every one of them.
+A routing arm is written by hand, so the arm that gets forgotten is the one no case names; a hand-written case has the same hole one level up.
+Iterating the list moves the only remaining mistake to a single place: adding a constant without adding it to `ALL`, which is why the two sit together.
 
 A reserved call is routed like any other, so it answers `NotImplemented` (`-32001`) and never `MethodNotFound` (`-32601`).
 The two are a whole decision apart for a caller: §4.5 exits 3 on the first, meaning this build rather than this call, and 2 on the second, meaning the caller is wrong.
@@ -108,7 +175,7 @@ The slice that serves the call deletes that body, and §7.4's compile error for 
 Every call is on the `Engine` trait, `session.subscribe` included.
 Its trait form takes one extra argument the wire does not carry: an `Arc<dyn EventSink>`, which is where the carrier wants its pushes delivered.
 `SessionSubscribeResult.subscription_id` is what `session.unsubscribe` names, so one caller may hold several subscriptions, and closing one never closes another.
-A carrier that drops a connection unsubscribes its sinks; a sink that is gone is dropped by the engine rather than erroring a turn.
+A carrier that drops a connection unsubscribes its sinks - every one it holds, since one connection may hold several (§4.2) and a leaked subscription is the engine pushing into a socket nobody reads for the life of the process. A sink that is gone is dropped by the engine rather than erroring a turn.
 
 #### Server to client
 
@@ -128,13 +195,30 @@ The distinction matters: the engine may add a notification in a minor version, a
 Every type below lives in `tetanus-protocol` with the field names its JSON uses.
 The crate is authoritative for field-level detail; this section states the invariants a reader cannot see in a struct.
 
-**`SessionEvent`** is one durable fact, byte-identical to one line of the JSONL journal.
+**`SessionEvent`** is one durable fact, byte-identical to one line of the JSONL journal - a claim about bytes, held by TC-CONTRACT-5 (§7.6) rather than by the boundary type agreeing with itself.
 `type` stays a free string because the durable vocabulary grows, and a surface must pass an unknown type through rather than drop it.
 `seq` equals the index of the line, so a replay verifies contiguity.
+
+**`seq` is the order. `time` is not, and must not be used as one.**
+`time` is epoch milliseconds from the clock of the machine that wrote the line, and nothing makes it monotonic within a journal.
+Three ordinary things break it, and the last is not an edge case at all:
+
+- a clock correction - NTP stepping, an operator setting the time, a virtual machine resuming - moves it backwards mid-session;
+- a journal is read on a machine that is not the one that wrote it, whose clock never agreed in the first place;
+- **a forked journal is non-monotonic by construction.** §4.4.6 copies the parent's events as they stand, so seqs 1 upward carry the parent's timestamps while seq 0 is the child's own `session/start`, written later. Every forked journal has a header stamped after the events that follow it.
+
+So a surface sorts, bisects and pages by `seq`, always.
+`time` is for showing a reader when something happened, and for nothing that has to be correct.
+
+**Subtracting two `time` values is not a duration.**
+It is an estimate that is usually close and occasionally negative, and a reader that computes one had better be prepared for both.
+`TurnSummary.duration_ms` is measured on a monotonic clock, which is immune to every case above, so it is the answer to "how long did this take" and the difference of two stamps is not.
 `sourceEventSeqs` keeps its camel case, and is present only on surface events (`user/message`, `assistant/message`, `tool/result`); an `assistant/message` may cite a known-empty list.
 
 The durable vocabulary a surface renders today: `session/start`, `turn/start`, `step/start`, `user/message`, `assistant/chunk`, `assistant/message`, `tool/call`, `tool/result`, `step/end`, `turn/end`.
-Five more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, and `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run (§4.3.2).
+Five more are written and are deliberately not in that list, because a surface needs nothing special to render them: `request/context`, and the four `compaction/*` types of §4.3.2.
+They are the worked example of the rule this section states - a build that has not learned them shows them raw, and `KnownEvent` has no variant for any of them yet.
+Six more are durable and staged: `llm/retry` and `llm/retry-started`, written when a provider request failed and the route's policy is trying again, `approval/asked`, `approval/decided` and `approval/policy`, the audit of a decision about whether a tool may run, and `context/snapshot`, the live facts a turn told the model about the world it is running in (§4.3.2).
 A surface renders them raw until it takes them, which is what "the vocabulary grows" means in practice.
 `session/start` is the first line of every journal and carries the session header, so listing a cold session reads the log and never a sidecar file.
 `assistant/chunk` is the streaming surface.
@@ -151,16 +235,80 @@ Both mean the same thing to a caller, which is to render the raw event.
 
 | `type` | `data` |
 | --- | --- |
-| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6) |
+| `session/start` | `session_id`, `provider`, `model`, `max_steps`, plus `format` (§4.3.3), plus `parent_session` and `fork_seq` on a journal that was forked (§4.4.6), plus `cwd`, `spawned_by` and `depth` where they apply (§4.4.9) |
 | `turn/start` | `turn` |
 | `step/start` | `turn`, `step` |
 | `user/message` | `content` |
 | `assistant/chunk` | `chunk` (`text` \| `reasoning` \| `tool_call`), plus `delta` for the first two and `call` for the third, plus `turn` and `step` |
 | `assistant/message` | `content`, `reasoning`, `tool_calls`, `finish_reason`, `usage` |
 | `tool/call` | `id`, `name`, `arguments` |
-| `tool/result` | `call_id`, `name`, `ok`, `content` |
+| `tool/result` | `call_id`, `name`, `ok`, `content`, plus `code` on a result the engine synthesized rather than ran (§4.4.4) or refused before it ran (§4.4.7, `TOOL_NOT_PERMITTED`) |
 | `step/end` | `turn`, `step` |
 | `turn/end` | `turn`, `steps`, `stop_reason`, `stop_veto` |
+
+#### 4.3.3 The journal's envelope has a version, and the vocabulary does not need one
+
+§4.3.2 says how the durable *vocabulary* grows: a new `type` is a free string, a surface renders what it does not know, and the `KnownEvent` variant follows later.
+That covers everything said *inside* an event and nothing about the shape around it.
+
+The envelope - `type`, `seq`, `time`, `data`, `sourceEventSeqs` - has no such story, and the two are different problems.
+An unknown `type` is a line a reader can skip and still understand the rest of the journal.
+A changed envelope is a journal a reader cannot parse at all, or worse, can parse into something that means something else.
+
+**So the header carries `format`.**
+`session/start.format` is an integer naming the envelope its journal was written under.
+It is absent on every journal written before this, which reads as format 1, so nothing already on disk becomes unreadable for lacking it.
+
+**On the header, not on every line.**
+A journal is the largest file this harness writes and its lines are its bulk, so a per-event version would cost bytes forever to answer a question once.
+The header is read first by every path that opens a journal - listing, paging, forking, repairing - so it is where the answer already has to be looked up.
+
+**A format a reader does not know is refused, not guessed at.**
+Guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not.
+The refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one: it says "this journal cannot be read", and the message says why.
+
+**Four codes are now deferred for the same reason, and they should land together.**
+This one, "another process holds the journal" (§4.4.13), "the server is stopping" (§4.4.11), and a redaction flag's neighbour (§4.3).
+Each is deferred because a surface's `ErrorCode` match is exhaustive, so any one of them breaks the presentation lane's build - and four separate breaks is four times the disruption of one.
+When the lanes coordinate, they land as a single change, and a reader meeting `LogCorrupt` for a foreign format until then is being told the truth coarsely rather than a lie precisely.
+
+#### 4.3.4 A `terminal_send` that types a password is on the journal in plain text
+
+Raised by the presentation lane while building the terminal views, and recorded here because it is a question for whoever owns `crates/exec` and this vocabulary rather than one a surface can answer.
+
+`terminal_send` exists so a model can drive a program that will not run without a real terminal, and one of those programs asks for a password.
+A send that answers `[sudo] password for ci:` is an ordinary tool call, so its arguments go on the journal like any other, and every surface that draws a tool call draws it - the browser panel most vividly, with a copy control beside it, but `tetanus run --ui`, `tetanus chat`, a replay and anything reading the file show it too.
+
+**The obvious fix is available and it is wrong.** `submit: false` is not a password signal: it means a control character or half a line to a REPL, so masking on it would hide `Ctrl-C` and still show every password sent the ordinary way, with Enter.
+The reliable signal is engine-side - the send that carries a credential is almost always the one after a result that came back `[wait: stdin_read]` - and a surface acting on it would be a page deciding what is secret by pattern-matching prose, failing in the direction that looks safe: a mask that makes a reader believe something is protected that is written in full a directory away.
+Redaction on screen alone would be exactly that, because the journal is the durable record.
+
+**What landed is the hybrid: a caller flag and a runtime backstop, composed by union.**
+
+`Tool::recorded` is the seam. A tool declares what the journal may keep of one call's arguments, the engine asks before it appends, and the tool still receives what the model actually sent.
+`terminal_send` withholds `text` when the call carries `secret: true`; `shell` and `shell_run` withhold `command` on the same flag, because a command line carries credentials just as often and a fix that stopped at the terminal would have been half a fix.
+The backstop arms a window when a program's last output line looks like a credential prompt - the mechanism is `sudo`'s, shipped in 1.9.10 for this problem - and a send into an armed terminal is withheld whether or not the model set the flag.
+The two compose by **union, never override**, which is the direction §4.3 already fixes for the two config-redaction rules: either says secret, it is secret, and neither can un-say it, because a rule that could un-redact would make adding one a way to start publishing silently.
+
+Two other mechanisms were measured dead rather than argued away.
+Inferring from the `[wait: stdin_read]` sequence has its premise inverted here: that is the *ordinary* settle reason for every command that finishes, while a program stopping to ask for a password emits no prompt marker at all.
+And `ECHO`-off detection is pinned to a constant by readline at its own prompt and by this crate's `stty -echo` for the session.
+
+**The withheld value is `types::REDACTED`**, the same sentinel §4.3 publishes for a withheld configuration value, so a surface that already draws one as *withheld, not empty* needs no second vocabulary.
+§4.3's warning about that sentinel does not survive the move unchanged, and the difference is worth having rather than leaving each surface to guess.
+For a configuration value the ambiguity is real: the document is the user's and can contain anything.
+For a tool argument the sentinel is *minted by the engine* and appears because a tool asked for it - a model can still send the literal string, so it is not proof, but the confusion narrows to "the engine withheld this" against "the model typed the sentinel", which is much smaller and which no surface behaviour turns on.
+The honest resolution is the one §4.3 already defers: a flag on the record rather than a magic string, which is a type change and lands as its own change touching `crates/protocol` and this document.
+
+**It appears in three places, and the last two are where a first fix leaked.**
+`tool/call` is the obvious one; `assistant/message` holds the same arguments because the model *said* the credential; and `assistant/chunk` is the streamed half that a replay and a live surface both read.
+A consumer reconstructing a request from the journal therefore sees the sentinel in the model's own prior call, which is intended: the model does not need to re-read a password it already sent, and the alternative is the credential in the record.
+
+**What it does not cover.**
+A `tool/result` is bounded by the program's echo behaviour and not by this flag - our terminals run with echo off, so `sudo` does not echo, but a REPL handed a token prints it and nothing withholds that.
+And the backstop arms on `password` and `passphrase` wording, so a "PIN", a one-time code or a program that asks in no words at all leaves it closed.
+The floor therefore stands whatever the mechanisms catch, and it is in the tool descriptions and the operator docs as well as here: **a terminal session's journal holds anything typed into it, and is to be treated as a credential store.**
+That is the part a surface should not soften.
 
 #### 4.3.2 Types that are durable but not yet parsed
 
@@ -171,25 +319,80 @@ Until then `parse()` returns `None` for it and a surface renders it raw, which i
 
 | `type` | `data` |
 | --- | --- |
-| `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
+| `llm/retry` | `turn`, `step`, `provider`, `code`, `message`, `request_id` (`null` when the provider named none), `retry`, `max_retries` (`null` under an unbounded policy), `delay_ms` |
 | `llm/retry-started` | `turn`, `step`, `retry` |
 | `approval/asked` | `id`, `tool_name`, plus `call_id` and `reason` when the asker had them |
 | `approval/decided` | `id`, `outcome` |
 | `approval/policy` | `policy` |
+| `context/snapshot` | `turn`, `parts` (each `name` and `text`) |
+| `user/steer` | `content`, `turn`, `taken` |
+| `request/context` | `turn`, `step`, `provider`, `model`, `context_window`, `system_tokens`, `tools_tokens` |
+| `compaction/start` | `shadowed_range` |
+| `compaction/summary` | `start_seq`, `summary`, `provider`, `model`, `shadowed_range`, `shadowed_seqs`, `shadowed_token_count` |
+| `compaction/end` | `start_seq`, plus `error` on an attempt that did not commit |
+| `compaction/prune` | `shadowed_range`, `shadowed_seqs`, `shadowed_token_count` |
+| `question/asked` | `id`, `questions` |
+| `question/answered` | `id`, `answers`, `answered` |
+| `permission/preset` | `preset` |
+| `hook/invoked` | `turn`, `point`, `dialect`, `handlerId`, plus `matcher` when the hook was selected by a pattern |
+| `todo/write` | `todos` (each `content` and `status`) |
+| `goal/changed` | `operation`, plus `goal` on a create or an update, plus `cleared` (`revision`, `objective`) on a clear |
+| `plan/mode` | `active` |
+| `plan/presented` | `plan` |
+| `feedback/recorded` | the entry itself: `text`, plus `author` where one was given |
+| `attachment/added` | `id`, `name`, `media_type`, `bytes`, plus `dimensions` for a picture whose header the build could read |
+| `hook/result` | `turn`, `point`, `handlerId`, `decision`, `durationMs`, plus `exitCode` when the process ran, plus `stderrSummary` when it printed anything |
+| `fs/mode` | `mode` (`read-only`, `workspace-write`, `danger-full-access`) |
 
 `llm/retry` is written before the wait, so a journal records an attempt the process never lived to make.
 `llm/retry-started` is written when the wait is over and the request is going out again; between the two, a surface may show the wait counting down.
 `retry` counts from one and is the attempt about to be made, not the one that failed.
 `code` is the stable failure classification of §4.5, and `message` is the provider's own words.
+`request_id` is the provider's id for the attempt that failed.
+It is on the record because a retried refusal is reported to nobody: the turn recovered, no error was ever returned, and the journal is then the only place that can answer which requests a provider refused and under what ids.
+It carries `null` where the provider named none, following `max_retries`, because a reader folding many records wants a uniform shape - where §4.5's error object omits the key instead, following `status`, because a surface reading `data` is rendering one failure rather than folding many.
 
 The three `approval/*` types are §4.4.7's audit.
 `approval/asked` and `approval/decided` are one pair sharing an `id`, and `approval/policy` is the durable form of a policy switch: the last one on the journal is the session's override.
 `outcome` is one of §4.4.7's four words and `policy` one of its two, both spelled exactly as the wire enums spell them.
 They carry no `turn` or `step`, as `tool/call` and `tool/result` carry none: their place is their position between the boundaries of the step that asked.
 
+`question/asked` and `question/answered` are written by the engine today, with the payloads this table fixes; they are staged rather than parsed for the reason above.
+
+The six feature types are what the built-in tools keep their state in, and a surface folds them because there is no call for that state yet (§5.1).
+Two shapes cost the presentation lane a second reading and are stated here so the next author does not pay it again.
+**`goal/changed` carries two shapes**: a create or an update writes `goal`, and a clear writes `cleared` with no `goal` key at all - the tombstone is deliberate, because it is what lets "no goal yet" and "the goal was put down" be told apart, and a consumer reading `data.goal` on a clear draws nothing.
+**`feedback/recorded` is the entry itself** rather than the entry under a key, where its neighbours all wrap.
+And `todo/write` carries only the list, so a surface folding events counts the statuses itself - the counts `SessionView` carries exist to keep that arithmetic in one place, which is an argument for the call in §5.1 rather than a defect here.
+
+The two `hook/*` types are log-only: nothing in a turn reads them back, neither carries `sourceEventSeqs`, and they exist so that "why was my tool call denied" has an answer on the journal.
+They are turn-enclosed and appear as an invoked/result pair correlated by `handlerId`.
+`dialect` says which bridge ran the hook - a native plugin at the same interception point is not a bridge and writes no `hook/*` events at all.
+Three fields are **omitted rather than null**, each because absent and present-but-empty are different facts: `matcher` for a match-all hook, since "matched everything" and "matched this pattern" would otherwise blur; `exitCode` when the hook could not be run, since a failed spawn must not read as a clean exit; and `stderrSummary` when the hook printed nothing.
+`decision` is always present - the hook's permission answer if it gave one, otherwise `stop` when it asked to halt, otherwise `pass` - so a reader never infers "nothing happened" from an absent field.
+
+`permission/preset`, `fs/mode` and `approval/policy` are the durable form of the two knobs a permission preset bundles, plus the intent behind them.
+`permission/preset` is intent and nothing executes on it: the knobs decide, each folded by its own reader, last-one-wins, exactly as §4.4.7 folds the policy.
+The intent is recorded separately because two presets can bundle the same pair, so without it a journal could not say which one a person chose - and the answer a surface shows back should be the words they used.
+Neither derives to a message and neither carries a `turn` or a `step`, for the reason the approval pair carries none.
+
+`context/snapshot` is §4.4.8's record of what a turn told the model about the world outside the conversation - the date, the working directory, the branch it is on.
+It carries the parts rather than the rendered text, joined the way §4.4.8 fixes, so a surface can show which provider contributed what and a reader can still reconstruct exactly what the model saw.
+It names its `turn`, because unlike the approval pair it belongs to the turn rather than to a moment inside a step.
+
 This step is not a version bump.
 `SessionEvent.type` is a free string by §4.3 and the vocabulary is stated there to grow, so a durable type that no boundary struct names changes nothing a peer compiles against.
 The second step is the minor bump, because a `KnownEvent` variant is an addition under §5.
+
+**`tool/result.code` is present only on a result nobody ran.**
+A call the engine dispatched has an outcome, and the outcome is `ok` and `content`.
+A result the engine *synthesized* - crash repair closing a call that was interrupted (§4.4.4), or a call refused before it ran (§4.4.7) - has no outcome to report, so it carries a code saying why there is none.
+The vocabulary grows with the reasons, so a surface reads an unknown code as "not run, for a reason this build does not know" rather than failing.
+
+`KnownEvent::ToolResult` does **not** carry it yet, and that is a gap rather than a decision.
+`parse()` drops the field, so a surface on the typed path cannot today tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, because the first is safe to retry and the second is not.
+The field is on the journal and on `SessionEvent.data`, so nothing is lost to a surface willing to read it there; what is missing is the compiler-checked path.
+It is deferred for the reason below rather than added here, and it lands in the version the presentation lane takes.
 
 **`tool/result.call_id` is the correlation id**, and it equals the `tool/call.id` that asked for it.
 A surface pairs a result to its call by that id and never by arrival order, because arrival order stops being pairing order the moment two calls are in flight.
@@ -215,7 +418,8 @@ The engine already holds the journal open when it lists; a picker paging every j
 **`TurnSummary`** is the closing shape of one turn.
 Most of it is reconstructable from the journal; the summary is the convenience form.
 `duration_ms` and `usage` are the two exceptions worth stating.
-Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once.
+`duration_ms` is **not** a restatement of what the journal already holds, though this document used to say it was.
+It is measured on a monotonic clock while the turn runs, and `SessionEvent.time` is wall clock; the two answer the same question and only one of them is right when a clock moves (§4.3).
 `usage` is **not** derivable from anything else here, so it is named now even where a provider does not report it: both fields are `Option`, and `None` means "this build did not measure it", never zero.
 `Usage` uses the provider's own words, `prompt_tokens` and `completion_tokens`, because the same object is what `assistant/message.usage` carries in the journal.
 
@@ -223,10 +427,27 @@ Elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only th
 `ProviderDescriptor.available` is false when a provider is registered but its credential is absent, so a picker can grey the entry instead of failing at the first turn.
 
 `ConfigEntry.value` never carries a secret.
-A key whose last word is `key`, `secret`, `token`, `password` or `credential` - words split on `.`, `_`, `-` and a capital that starts one, so `api_key`, `apiKey`, `APIKey` and `client-secret` all match while `api_key_env`, `max_tokens` and `monkey` do not - is published with `types::REDACTED`, the string `<redacted>`, in place of the value the document holds.
+A value is withheld - published as `types::REDACTED`, the string `<redacted>`, in place of what the document holds - when **either** of two rules says so.
+
+**The schema, where there is one.**
+The engine settles a known set of keys and knows what each is for, so for those the schema is the authority: a key declared to hold a credential is withheld whatever it is called.
+This is what catches a credential whose name says nothing, `llm.providers.acme.authorization` or plain `llm.providers.acme.a`, which no rule reading the name could find.
+
+**The name, for everything else.**
+A key whose last word is `key`, `secret`, `token`, `password` or `credential` - words split on `.`, `_`, `-` and a capital that starts one, so `api_key`, `apiKey`, `APIKey` and `client-secret` all match while `api_key_env`, `max_tokens` and `monkey` do not - is withheld too.
+A document may hold a credential under whatever name a future adapter reads, and the engine has no schema for a key it does not settle, so without this every unsettled key would be published in full.
+
+**The two compose by union, never by override, and that direction is the whole point.**
+A schema that could *un*-mark a key would mean adding a key to the schema is a way to start publishing it, and the mistake would be silent and permanent.
+Each rule alone fails one way: a schema misses what it does not describe, a name rule misses what is not named like a secret. Their union fails safe, and the cost - a non-secret key called `monkey_token` withheld for nothing - is a value a user can still see in their own file.
+
 The entry itself stays, because a surface still has to say that the key is set and which layer set it; only the value is withheld.
-The rule reads the name because the engine has no schema for a key it does not settle: a document may hold a provider's credential under whatever name a future adapter reads, and `config.dump` is answered over every carrier, so an unredacted value would reach every connected client.
-A surface renders the sentinel as it renders any other value, and must not take it for the setting.
+`config.dump` is answered over every carrier, so an unredacted value would reach every connected client.
+
+**A surface must not read the sentinel as proof.**
+Nothing distinguishes a withheld value from a document that literally contains the string `<redacted>`, and a surface that treated the sentinel as "this is a secret" would mislabel the second.
+The honest signal is a flag on the entry saying the value was withheld, and it is deliberately not added here: `ConfigEntry` is a type the presentation lane constructs, so by §5 the field is a change both lanes land together, and it lands in the version that lane takes it.
+Until then a surface renders the sentinel as it renders any other value, and must not take it for the setting.
 
 **`Question`**, **`QuestionOption`** and **`Answer`** are the ask vocabulary of §4.4.3.
 `label` is both the user-facing text and the value the answer carries, so a caller reads the same field whatever the surface renders.
@@ -273,8 +494,18 @@ A surface that only wants the answer can ignore the pushes and read the result.
 The pushed order inside a turn is the engine's documented turn flow, which `docs/turn-flow.md` specifies and the conformance suite asserts by equality.
 This contract does not restate it, so the two cannot drift.
 
+**A prompt with nothing in it is refused, and costs nothing.**
+`content` that is empty, or is only whitespace, is `InvalidParams` naming `content`.
+Nothing is appended, no turn is opened and no provider is called - the caller made a mistake it can see and fix, and paying for a turn to discover that is the wrong order.
+Whitespace counts as empty for the reason the credential rule already gives (§4.5's `MissingCredential` neighbours it): a value of nothing but spaces reads as present to every check that does not trim, and then spends a real request to be refused by somebody else.
+
+**Where the line falls between refusing and recording.**
+A *parameter* that is wrong is refused at the boundary and leaves no trace: the request never became work.
+A *decision* taken once a turn is under way is recorded, even when it stops the turn immediately - a listener that rejects the first claim still closes a durable turn that spent no step, because something happened and the journal is the record of what happened (§4.4.2).
+The two look similar from outside and are not: one is a caller that has not asked for anything yet, the other is a harness that considered a request and declined it.
+
 A second `agent.prompt` while a turn is in flight is answered `SessionBusy` (`-32003`).
-Queueing a follow-up into the running turn's inbox is a later addition, and will arrive as a new call rather than a change to this one.
+That is still true, and §4.4.10 is the promised separate call for a caller that wants the follow-up taken rather than refused.
 
 `agent.interrupt` stops the turn at the next step boundary.
 It does not abort an in-flight provider call in contract 1.0.
@@ -309,6 +540,30 @@ What the provider did send is still on the `assistant/chunk` events the message 
 `"max-tokens"` is a value of the growable `StopReason` (§7.5), not a new variant, so no wire type changes.
 The engine names it as a reason of its own, and §7.6's mapping carries it across as the fallback, the way §4.4.4's `"interrupted"` already travels.
 
+#### 4.4.2.1 `request/context` is written before the request, never after the answer
+
+A step writes it after the system prompt is assembled - because it prices that assembly - and before `agent/request`, because a listener that rewrites the request must not be able to change what the journal already said the request was.
+It is written before the provider is called at all, so a turn a provider failure ended still says what it tried to send.
+
+It is the anchor the context projections fold.
+Before it existed, the three token projections had no envelope to price against, which is what had blocked them.
+
+#### 4.4.2.2 A compaction record and its replacement are adjacent, and that is contractual
+
+`compaction/summary` and `compaction/prune` each name a range of surface events and state that range's heuristic price.
+**The next surface event on the log is the replacement for that range**, and nothing may be appended between them.
+
+This is not a tidiness rule.
+It is what lets a consumer with bounded state - one running total and at most one pending claim - price a replacement without retaining a price per message, which is the difference between a projection checkpoint that stays a fixed handful of numbers and one that grows for the life of a session.
+
+Two consequences a reader can rely on:
+
+- A record followed by anything other than a surface event shadows nothing. It described a replacement that never landed, and honouring it against a later event would shadow a range that event never named.
+- A replacement arriving with no adjacent record folds neutrally rather than failing. A journal written before this protocol existed has no record to find, and bounded state cannot reconstruct what was replaced; degrading to drift keeps replay working, where refusing would make old journals unreadable.
+
+The replacement takes the **position** of the range it shadows, not the end of the conversation.
+A checkpoint condensing the first twenty messages belongs where those twenty were, in front of the tail that was kept verbatim.
+
 #### 4.4.3 Asking the user
 
 ```text
@@ -319,6 +574,62 @@ client -> AskResult { answers }
 The ask is a server-to-client request because the engine blocks on it: a tool cannot proceed until the human decides.
 A client that advertises no `ui.ask` capability is never asked, and the engine denies the underlying action instead of hanging.
 A client that advertises the capability and then fails to answer must answer with an error; the engine treats any error as a denial.
+
+A turn a guard stopped closes too, and says which guard.
+A **guard** is a bound the deployment set on a turn rather than on a request: how long the whole turn may take, and how many times the model may do the same thing.
+`turn/end` carries `stop_reason: "timed-out"` or `"repeated"`, and `agent.prompt` answers a summary rather than an error - the turn produced whatever it produced, and what the reason adds is why it stopped short.
+
+The two are separate reasons because they need separate answers.
+`"timed-out"` says the work was not finished in the budget, and the usual response is a bigger budget or a smaller task.
+`"repeated"` says the model was looping - the same tool with the same arguments, over and over - and a bigger budget makes that strictly worse.
+Collapsing them into one reason would leave a reader unable to tell "this needs longer" from "longer will not help", which is the only decision the reason is for.
+
+A guard stops the turn at a step boundary, like `agent.interrupt`, and for the same reason: a step already dispatched has already had its effect.
+So a guarded turn is a whole turn with its journal balanced, not a truncated one, and §4.6's `running --turn/end--> idle` holds unchanged.
+
+Both are values of the growable `StopReason` (§7.5), not new variants, so no wire type changes and an older surface renders them through its fallback.
+Neither is an error and neither adds a code: a bound the deployment chose being reached is the bound working.
+The rest of this section is what an implementation has to decide, settled here rather than found out.
+The call is reserved, so nothing has been built against it yet and this costs nothing now; it would cost two lanes a rewrite later.
+
+**An answer covers every question, or it is not an answer.**
+A tool that asked three things needs three; given two it is in a state its author never wrote code for.
+An `AskResult` that leaves a question unanswered is treated as no answer at all - the same outcome as a client that errored - so a tool meets one of exactly two cases rather than a partial third.
+An answer naming a question that was not asked is ignored: the questions are the contract, and a client that answered more has not answered less.
+
+**An answer outside a closed list is not an answer.**
+`QuestionOption.label` is both the text and the value (§4.3), so a question that offers options accepts those labels and nothing else.
+A question with no options is free text and accepts anything.
+A single-select question given several labels is unanswered, not first-wins: a tool acting on a guess about which one the user meant is worse than a tool told it has no answer.
+
+**The pair is durable, and turn-enclosed.**
+`question/asked` and `question/answered` go on the journal (§4.3.2), one pair per ask, sharing an `id`.
+A tool acted on what the user said, and a transcript that shows the action without the question cannot explain it - the same reason §4.4.7 gives for the approval pair, and the same enclosure rule, because the turn is what §4.4.4's repair closes and a question outside one could never be closed.
+An ask a crash caught mid-question is closed on reopen the way an approval is.
+
+**An interrupt withdraws the question.**
+`agent.interrupt` settles an outstanding ask as unanswered at once, rather than waiting for an answer a stopped turn would not use, and a late answer is discarded.
+This is §4.4.7's rule and it is the same rule for the same reason.
+
+**Nothing else bounds the wait.**
+There is no timeout: a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault.
+The interrupt is the way out, which is why the previous rule is not optional.
+#### 4.4.3.1 `session.create` takes a preset
+
+`session.create` accepts one optional parameter beyond the ones §4.2 names.
+
+| Field | Type | Required | Meaning |
+| --- | --- | ---: | --- |
+| `preset` | string | no | The named agent preset this session is composed from: a model, a tool subset, a prompt shape and a persona, resolved server-side out of the settings document. Omit for the server's default preset, if it has one, and for no preset at all when it has none. |
+
+**An explicit `provider`, `model` or `max_steps` wins over what the preset says.**
+A caller that named both asked for that model on that agent.
+
+**A preset this server does not compose is `InvalidParams`**, with `data.field = "preset"`, `data.preset` naming what was asked for, and `data.known` listing the ids that exist, so a surface can offer them rather than making the user guess.
+
+**The choice is durable and is made once.**
+The id is written into the session's `session/start` header, a fork inherits it, and a document edited afterwards does not move a session that is already composed.
+`SessionInfo` is unchanged: a surface that needs the preset of a cold session reads the header through `session.events`.
 
 #### 4.4.4 Reopening a journal a crash left open
 
@@ -351,6 +662,27 @@ An `approval/asked` written between turns is inside nothing, so no repair would 
 `stop_reason: "interrupted"` is a new value of the growable `StopReason`, and §7.5 already fixes what an old surface does with one.
 A balanced journal is untouched, so this is invisible to every session that closed normally.
 
+#### 4.4.4.1 Reopening a journal this build did not write
+
+A journal outlives the build that wrote it. It is opened by a later version, by a deployment configured differently, or by a colleague's machine.
+
+**A resumed session runs under its header, not under this build's defaults.**
+`provider`, `model` and `max_steps` come from `session/start`, because the history the session is carrying was produced under them.
+This is the rule §4.4.6 already states for a fork - a child "inherits the parent's provider, model and `max_steps` along with its events" - and resuming is the same question asked far more often, so it is written down here rather than left to be inferred from the fork case.
+It also means a deployment that raises `agent.max_steps` does not silently change how an old session behaves when someone reopens it.
+
+**Opening a journal never needs its route; running a turn does.**
+`session.create`, `session.list`, `session.events` and `session.fork` work on a journal whose provider this build does not have.
+Reading is what a journal is for, and refusing to show someone their own history because the adapter that produced it is not installed would be the wrong trade entirely.
+`agent.prompt` is where the route is needed, and where the refusal belongs.
+
+**A route this build cannot serve is refused rather than substituted.**
+`agent.prompt` on such a session answers `InvalidParams`, whose `data` carries `field: "provider"` and the `provider` that is missing - one more key than §4.5's table describes for this code, because naming the field alone would leave the reader to go and read the journal to find out which provider it meant.
+
+Falling back to a working provider would be worse than the refusal.
+The conversation was produced by one model and would be continued by another, the journal would record no such switch, and a reader would see one provider's work followed by another's with nothing saying so.
+§4.4.6 already declines to offer the same history under another model deliberately; this is that decision arriving from the other direction, and the answer has to match.
+
 #### 4.4.5 Reading a journal: `from_seq`, `limit`, and the boundary
 
 `session.events` and `session.subscribe` both take a `from_seq`, and it means the same thing on each: a seq, not a count, and inclusive.
@@ -361,7 +693,16 @@ A `from_seq` past the end of the journal is a resync that had nothing to catch u
 `session.events` answers an empty page with `eof: true` and a `next_seq` at the tail, so a caller that asks from a seq the journal never reached is told where the journal actually ends.
 `session.subscribe` replays nothing and delivers live events from there.
 
-`limit` is a page size the server clamps to its own maximum, which is 500.
+`limit` is a page size the server clamps to its own maximum.
+That maximum is `methods::MAX_PAGE_SIZE`, and it is 500 in this build.
+
+**A surface reads the constant; it does not spell the number.**
+The same rule §5 gives `PROTOCOL_VERSION`, and for a sharper reason.
+A literal `500` in a consuming lane is not merely a value to update: it is a claim about a server the surface may not be talking to.
+The number is this build's, and the wording has said "its own maximum" since the clause was written, so a surface that hard-codes it is wrong the first time a deployment tunes it - and wrong silently, because asking for more than the maximum is clamped rather than refused.
+
+A surface that does not care never needs the number: `next_seq` and `eof` page a journal to its end whatever the server allows, which is why paging works today with no constant published at all.
+It is published for the surface that wants one round trip rather than two, and that surface is the one a hard-coded number would break.
 Zero is read as absent, so `limit: 0` and no limit both name that maximum.
 A page of no events is never what a caller meant, and answering one would stall a pager: `next_seq` would not advance and `eof` would stay false, so the loop would never end.
 `next_seq` is the `from_seq` of the next page, and `eof` says this page reached the end; a caller that wants the whole journal pages until `eof`.
@@ -369,6 +710,7 @@ A page of no events is never what a caller meant, and answering one would stall 
 `SessionSubscribeResult.last_seq` is the seq the subscription starts after (`-1` for a journal with no events).
 Every event with a higher seq arrives as a `session/event` push, so a caller needs no second call to find the boundary between what it was given and what it will be sent.
 Replay and live delivery join at that boundary with no gap and no repeat, whatever is appended while the replay runs.
+That qualifier is the load-bearing half - it is why the engine holds events arriving during a replay rather than delivering them straight through - and TC-SUB-10 is what exercises it, since TC-SUB-1 and TC-SUB-2 append before a subscription or after one and never during.
 
 A push carries the session it belongs to, and reaches only the subscriptions on that session.
 Both frames follow the rule: one connection may hold subscriptions on several sessions and never sees another session's `session/event` or `agent/status`.
@@ -416,7 +758,7 @@ What the call refuses, and which of §4.5's codes each refusal takes:
 The open-turn refusal names `through_seq` even when the caller omitted it, because naming an earlier one is the fix.
 
 A source whose seqs are not contiguous has no fork boundary to argue about, and takes the answer any read of it takes: `LogCorrupt`, naming the line, from the read that fetches the journal.
-A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written.
+A source this process holds open cannot reach that state at all, because each seq is assigned from the log's own length as the line is written - and §4.4.13 is why no other process can put it there either.
 
 A turn in flight on the source is not a refusal by itself.
 A journal is append-only, so a prefix of it is stable while it grows, and a caller that names a closed boundary gets exactly the child it asked for however busy the parent is.
@@ -483,6 +825,10 @@ This is the one place an interrupt takes effect inside a step rather than at its
 `never` is the unattended stance, and its point is that the answer is knowable without a human: a run in CI neither hangs nor waits for a client that will not answer.
 It settles `rejected` and not `unavailable`, because a deployment that chose it did decide.
 
+There is deliberately no third word meaning "grant without asking".
+It would put a bypass of the gate inside the enum the gate reads, and a deployment that wants unattended grants attaches an answerer that grants them - a decision with a name and a code path.
+That is also why the widest permission preset still asks: bundling `never` with `danger-full-access`, as upstream does, would make the widest preset refuse the calls the narrower one allows.
+
 A session's policy is the last `approval/policy` on its journal, and the deployment's `approval.policy` setting when the journal holds none.
 The fold is the whole state, so a resumed session is under the policy it was under, with nothing to replay but the log itself.
 `approval.set` writes that event; it is the only thing that does, and a caller reads the policy back by folding the events it already receives rather than by a call of its own.
@@ -496,8 +842,14 @@ An `id` is fresh per ask and is never reused, so two calls of the same tool in o
 The pair is inside the open turn, for the reason §4.4.4 gives: the turn is what repair closes, and a question outside one could never be closed.
 Asking with no turn open is `Internal`, and nothing is appended.
 
+**The question is put after `tools/pre-execute` and before `tools/execute`**, so what is decided is the call that would actually run.
+A listener may rewrite a call, and approving one call while executing another is the failure a gate exists to prevent.
+A denial skips `tools/execute` and `tools/post-execute` both: a post-execute listener observes an execution, and there was none.
+
 **A denied call is a `tool/result`, not an error.**
 The call is not dispatched, and the step gets a `tool/result` with `ok: false` whose `content` says the call was not permitted.
+The result carries `code: "TOOL_NOT_PERMITTED"`, because a call that never ran has no outcome to report.
+`ok: false` and the sentence are what the model reads; the code is what a surface routes on.
 §4.5 already fixes this shape: a binding rejection the model reads is not a failure of the call the surface made, so `agent.prompt` still answers a summary and the turn ends normally.
 The model is told, so it can do something else rather than wait on a result that is not coming.
 
@@ -506,6 +858,213 @@ A surface learns it from the ask.
 `ToolDescriptor` is a type the presentation lane constructs in its own cases, so §5's rule applies: an added field is minor on the wire and a build break in the lane that builds the value.
 The field lands when both lanes take it, in its own row here - the same deferral §4.4.6 makes for a forked session's lineage.
 
+#### 4.4.8 Telling the model where it is
+
+Some of what a model needs is not in the conversation and is not stable: today's date, the working directory, the branch, whether the sandbox is on.
+A **runtime context** is that, gathered once per turn and written to the journal as `context/snapshot`.
+
+```text
+session/event turn/start
+session/event context/snapshot   { turn, parts: [ { name, text }, ... ] }
+session/event step/start
+```
+
+**It is a user message, not part of the system prompt, and that is the whole design.**
+A provider caches a prompt by its longest stable prefix.
+The system prompt is the same on every turn of a session, so it caches; a sentence saying what time it is changes every turn, and putting it there would invalidate the cached prefix on every request of every session.
+Carrying it after the retained history instead leaves the prefix untouched, and costs a message.
+
+**Only the newest snapshot is history.**
+A turn writes one, so a long session accumulates them, and yesterday's date is worse than no date.
+When history is derived, the last `context/snapshot` on the journal becomes a `user` message and every earlier one is skipped.
+They stay on the journal, because the journal records what happened and a reader may want to know what the model was told at the time; they simply do not travel again.
+
+**The parts are the record; the joining rule is here.**
+`parts` is an ordered list of `name` and `text`.
+The message the model reads is the parts whose `text` is non-empty, joined with a blank line between them, in the order the list gives - the same rule §4.3 already fixes for prompt sections, because two joining rules would be one too many.
+A snapshot whose parts are all empty is not written at all, so a deployment that configures no providers pays nothing.
+
+Carrying the parts rather than the rendered text is deliberate.
+The rendering is reproducible from them by the rule above, so nothing is lost, and a surface that wants to show which provider said what has it.
+It is the same choice §4.3 makes when `turn/end` declines to repeat the answer that is already on the last `assistant/message`.
+
+**A snapshot is a fact, not a promise about the future.**
+It says what was true when the turn started.
+Nothing re-reads it mid-turn, so a step that runs for ten minutes is working from the time the turn began, and a tool that changes the working directory does not retroactively change what the model was told.
+
+**Ordering is the provider's, not the reader's.**
+`parts` arrives in the order the engine assembled it and a surface renders it in that order.
+There is no priority field on the wire: which provider comes first is a deployment's configuration, settled before the snapshot is written, and putting an order on the durable record would let two readers disagree about the text the model actually saw.
+
+This adds no call and no capability.
+A runtime context is contributed inside the engine, and what crosses this boundary is only the record of what was contributed.
+#### 4.4.9 What a journal says about where it came from
+
+A journal is read long after the process that wrote it, often on another machine.
+Four facts about its origin are worth writing down once, on `session/start`, rather than inferring later or losing.
+
+| Field | Says |
+| --- | --- |
+| `cwd` | the working directory the session was opened in |
+| `parent_session` | the session this journal's history was **copied from** (§4.4.6) |
+| `spawned_by` | the session that **started** this one as a subagent |
+| `depth` | how many levels of delegation deep this session is; absent means none |
+
+All four are optional, so every journal written before this parses unchanged.
+
+**`spawned_by` is not `parent_session`, and merging them would lose the distinction that matters.**
+A fork is a copy: the child begins holding the parent's history and is a second way of continuing one conversation.
+A subagent is a different conversation that another one asked for: it shares no history, and the two run at the same time.
+A reader that cannot tell them apart cannot answer either "what else came out of this conversation" or "why does this session exist", and those are the two questions lineage is for.
+A session can carry both - a fork of a subagent's journal is still a subagent's work - which is the case that rules out one field with a kind beside it.
+
+**`depth` counts delegation, and it is what bounds it.**
+A root session has none. A subagent it starts is at one, and one that subagent starts is at two.
+It is durable rather than held in memory because the bound has to survive a resume: a subagent whose harness restarted must not come back believing it is a root session and free to delegate again.
+What the limit is, and what happens at it, is a deployment's business and not this contract's; what is fixed here is that the number is on the journal and counts levels rather than siblings.
+
+**`cwd` is where the session was opened, not where it is now.**
+A tool may change directory; the header is not rewritten, and a reader must not take it for the current state.
+It is here because a journal full of relative paths is unreadable without it, and because "it worked on my machine" is usually a question about this field.
+
+**A fork inherits the origin facts it is a copy of.**
+§4.4.6 says the child's `session/start` replaces the parent's line for line, so the child writes its own header - and into it go the parent's `spawned_by`, `depth` and `cwd`, because a fork is the same work taken a second way and not a new piece of work.
+Its `parent_session` and `fork_seq` are its own, naming the journal it was copied from.
+
+Adding these is a minor change on the wire, and it happens also to be a safe one in Rust: the presentation lane matches `KnownEvent::SessionStart` with a rest pattern, so the added fields do not break its build.
+That is worth stating rather than assuming, because §5's rule is about types the other lane *constructs*, and the next addition to this payload has to check again rather than inherit the conclusion.
+
+None of this adds a call, and none of it appears on `SessionInfo`, for the reason §4.4.6 gives: a field added to a type the other lane builds is not the free addition it looks like, and lineage is read from the journal line.
+#### 4.4.10 Saying something while a turn is running
+
+`agent.prompt` refuses a second prompt with `SessionBusy`, and that is right for a caller that meant to start a turn.
+It is wrong for the commonest thing a person actually does, which is to notice something mid-answer and say so.
+`agent.steer` is that: a message handed to the turn already running.
+
+```text
+client -> agent.steer { session_id, content }
+server -> AgentSteerResult { turn, taken_at_step }
+
+  server -> session/event user/steer
+```
+
+**It joins the running turn; it does not start one.**
+The message is put in the turn's inbox and claimed at the next step boundary, so the model reads it as part of the conversation it is already having.
+A turn that has no further step - one already answering - cannot take it, and the call says so rather than silently dropping it or holding it for a turn that may never come.
+
+**A step boundary, not sooner.**
+A turn in the middle of a provider call cannot be given a message: the request has gone, and the answer coming back was formed without it.
+Nothing here interrupts a step, for the same reason §4.4.2 gives about `agent.interrupt`, and `taken_at_step` says which step actually read it so a surface can show the message landing where it landed rather than where it was typed.
+
+**It is durable before it is answered.**
+`user/steer` is on the journal whether or not a step ever reads it, carrying `taken` to say which happened.
+A message the caller was told was accepted, and which then vanished from the history because the turn ended first, would be the worst outcome available: the person believes they have said something and the transcript disagrees.
+
+**It is not a `user/message`.**
+The two derive to the same role, and a reader replaying the journal must still be able to tell a message that opened a turn from one that arrived during it - they answer different questions about how a conversation went, and only one of them can be refused for arriving too late.
+
+**Refusals.**
+
+| Refused | Code | `data` |
+| --- | --- | --- |
+| the session is not one this server can open | `SessionNotFound` | `{ session_id }` |
+| no turn is running | `SessionBusy` | `{ session_id, turn: null }` |
+| the running turn will take no further step | `SessionBusy` | `{ session_id, turn }` |
+| `content` is empty | `InvalidParams` | `{ field: "content" }` |
+
+The idle case is `SessionBusy` with a null turn rather than a code of its own, and the wording is worth reading twice: a session that is *not* busy is exactly what makes steering impossible, so the code names the condition the caller must fix - there is no turn to join - and the null says which way round it is.
+A caller that meant to start a turn calls `agent.prompt`, which is the call that does.
+
+No new error code, and no change to `agent.prompt`.
+#### 4.4.11 Stopping a server
+
+`tetanus serve` hosts carriers, and a process that hosts them gets asked to stop while a turn is running.
+What it owes its journals at that moment is worth fixing, because the alternative is that every deploy leaves a trail of half-turns.
+
+**A stopping server stops taking new work and finishes what it has.**
+It stops accepting connections, interrupts every running turn at the next step boundary - the mechanism `agent.interrupt` already uses, not a second one - and waits for those turns to close.
+
+**A shut-down turn is a closed turn.**
+`turn/end` carries `stop_reason: "shutdown"`, the step it interrupted gets its `step/end`, and `agent.prompt` answers a summary rather than an error, exactly as a cancelled turn does (§4.4.2).
+The point is the journal: a server that exits cleanly leaves nothing for §4.4.4's repair to do, so a restart is not preceded by a wave of synthesized closers on every session that happened to be busy.
+
+**`"shutdown"` is its own reason and not `"cancelled"`.**
+They are the same event to the engine and different facts to a reader.
+Someone pressed stop, or the machine went away underneath it - the first is a decision to respect, the second is something to go and look at, and a transcript that says "cancelled" for a rolling restart sends the reader after a user who did nothing.
+It is a value of the growable `StopReason` (§7.5), so it costs no type change and an older surface renders it through the fallback it already has.
+
+**Best effort, with the crash path still behind it.**
+A tool that will not return cannot be waited for indefinitely, so the drain is bounded and a server that runs out of time exits with turns still open.
+Those journals are exactly the case §4.4.4 exists for and are repaired on the next open.
+This section makes the clean path clean; it does not remove the need for the other one, and a deployment that sees `"interrupted"` after a restart is being told the drain did not finish.
+
+**A client sees the connection end, not an error.**
+There is no "server is stopping" code, deliberately.
+A call that arrives once the drain has begun would need one, and by §4.5 a new code is a change both lanes land together - so the carrier closes instead, which is a state every client already has to handle because a network does it unasked.
+A code becomes worth adding the day a client can usefully do something other than reconnect, and it lands in the version that can.
+#### 4.4.12 Retrying a call
+
+A carrier drops a connection, or an answer is lost on the way back, and the client does not know whether the call ran.
+Every RPC contract meets this, and the ones that do not say so leave each integrator to guess.
+
+**Reads may be repeated freely.**
+`rpc.hello`, `session.list`, `session.events`, `agent.status`, `catalog.tools`, `catalog.models` and `config.dump` change nothing, so a client repeats them without thinking.
+A second `rpc.hello` on one connection is accepted and settles the handshake again with the peer information it carried; the handshake is connection state (§4.4.1), and a client that re-greets has told the server the same thing twice rather than done something new.
+
+**These are safe because repeating them lands in the same place.**
+`session.create` reopens the id it is given, which is what makes a session resumable (§4.7), so a retry with the same id answers the same session rather than making a second one.
+`agent.interrupt` asks a turn to stop, and a turn asked twice is a turn asked once.
+`approval.set` writes nothing when the session already holds the policy (§4.4.7).
+`session.unsubscribe` answers `ok: false` for a subscription that is already gone, which is a fact and not a failure.
+
+**Three are not safe, and the contract owes a client the reason and the alternative.**
+
+| Call | What a blind retry does | What to do instead |
+| --- | --- | --- |
+| `agent.prompt` | runs the prompt a second time | read `agent.status`, or the journal from the seq you last saw |
+| `agent.steer` | delivers the message twice | read the journal for a `user/steer` carrying it |
+| `session.subscribe` | leaks the first subscription | unsubscribe the id you got, or drop the connection |
+
+`agent.prompt` is the one that costs money.
+A retry after the first call *completed* starts a genuine second turn - `SessionBusy` only protects the window where the first is still running, which is precisely the window a client that gave up waiting has already left.
+So a client that loses an answer asks what happened rather than asking again: `agent.status` says whether a turn is running, and `session.events` from the last seq the client saw says whether one ran and what it produced.
+That is always available, because the journal is the record of what happened and not a second copy of it (§7.2).
+
+**No idempotency key, and this is where it would go.**
+A key on `agent.prompt` would let the engine deduplicate and remove the whole problem.
+It is not added here because `AgentPromptParams` is a type the presentation lane constructs, so by §5 the field is a change both lanes land together - and because the read-then-decide route above is available today, needs nothing, and is what a client should do anyway before repeating work a user paid for.
+When it lands it goes here, and this paragraph is what it replaces.
+
+**A dropped connection unsubscribes.**
+§4.2 already says a carrier that loses a peer drops its sinks, so the leak above is bounded by the connection: a client that reconnects starts clean rather than accumulating deliveries for a socket nobody is reading.
+#### 4.4.13 Who may write a journal
+
+**One writer, many readers.**
+A journal is opened for writing by one process at a time. Any number may read it.
+
+This is not a performance choice, and the rule is here because its absence is silent.
+A `seq` is assigned from the log's own length as the line is written, and the length a process knows is the one it is holding in memory.
+Two processes appending to one file therefore both believe they are writing `seq` 41, and the journal ends up with two of them.
+Nothing notices at the time: both writes succeed, both fsync, both callers are told their event is durable.
+The damage surfaces later and somewhere else, when a reader replays the journal, finds the seq that is not contiguous, and gets `LogCorrupt` (§4.5) naming a line neither writer wrote.
+
+**Which is why a second writer is refused rather than allowed to try.**
+An engine that cannot take a journal for writing answers `Io` carrying the path, exactly as it does for a journal it cannot read.
+The situation is a file it may not have, and the caller's next move is the same: go and look at that path.
+
+**Reading is always allowed, and is safe by construction.**
+A journal is append-only, so a prefix of one is stable however busy its writer is - which §4.4.6 already relies on for forking a session another turn is running on.
+A reader that catches a half-written last line drops it as the crash tail (§4.4.4's neighbour rule), and reads it whole on the next pass.
+So `session.list`, `session.events` and `session.fork` work across processes, and only writing is exclusive.
+
+**What this costs a deployment.**
+Two `tetanus` processes may share a sessions root, and both may read every session in it; they may not have the same session open for work at the same time.
+A second one that tries is told so at `session.create`, before any turn starts, rather than at some later replay.
+
+**A dedicated code would say it better, and is deferred.**
+`Io` tells a surface the journal could not be opened and leaves it to the message to explain that another process has it - and by §4.5 a surface keys its wording on the code, not the message, so it cannot say "another tetanus is using this session" without one.
+A new code is a change both lanes land together, so it is not taken here; when it lands it goes in §4.5's table and this paragraph is what it replaces.
+Until then the message carries the reason and the code carries the path, which is enough to act on and less than a reader deserves.
 ### 4.5 Error view
 
 Every failure is a JSON-RPC error object: `code`, `message`, `data`.
@@ -517,7 +1076,7 @@ It is not a rendering: the presentation lane may replace it with its own wording
 | -32700 | `ParseError` | none | 2 |
 | -32600 | `InvalidRequest` | none | 2 |
 | -32601 | `MethodNotFound` | `{ method }` | 2 |
-| -32602 | `InvalidParams` | `{ field }` when one field is at fault | 2 |
+| -32602 | `InvalidParams` | `{ field }` when one field is at fault, plus `provider` when the fault is a route this build cannot serve (§4.4.4.1) | 2 |
 | -32603 | `Internal` | none | 1 |
 | -32000 | `UnsupportedProtocolVersion` | `{ server, client }` | 3 |
 | -32001 | `NotImplemented` | `{ method }` | 3 |
@@ -525,13 +1084,17 @@ It is not a rendering: the presentation lane may replace it with its own wording
 | -32003 | `SessionBusy` | `{ session_id, turn }` | 4 |
 | -32004 | `Cancelled` | none | 130 |
 | -32005 | `MissingCredential` | `{ provider, env }` | 5 |
-| -32006 | `ProviderError` | `{ provider, status }` | 6 |
+| -32006 | `ProviderError` | `{ provider, status }`, plus `request_id` when the provider named one | 6 |
 | -32007 | `ToolUnknown` | `{ name }` | 4 |
 | -32008 | `LogCorrupt` | `{ session_id, line }` | 1 |
 | -32009 | `Io` | `{ path }` when a path is at fault | 1 |
 
 A code's meaning is frozen for the life of a major version.
 A surface that meets a code it does not know reports the raw code and message, and exits 1; `RpcError::kind()` returns `None` rather than remapping it onto a known code.
+
+`request_id` on a `ProviderError` is the provider's own identifier for the request it refused, present only when the response carried one.
+It is `data` rather than part of the message because this section lets a surface replace the message, and an id a surface may delete is an id a user cannot quote - and it is the one fact about a refusal nobody can reconstruct, since the status is on the response and the words are in the body while the id exists only in the provider's logs.
+A refusal that never reached a provider - a transport or protocol failure - carries no id and no key, for the reason `status` is absent there: an absent key says the fact does not exist, where a null invites a surface to print one.
 
 The exit-status column is the contract, not a suggestion.
 `ErrorCode::exit_status()` is the single source, so no surface invents its own.
@@ -573,6 +1136,23 @@ idle  --agent.prompt-->  running  --turn/end-->  idle
 The state is live, not durable: it is not derivable from the journal while a turn is in flight, which is why it is pushed rather than folded from events.
 A surface that missed a push resynchronises with `agent.status`.
 
+**The two push kinds are ordered against each other, and a surface may rely on it.**
+
+- `running` arrives before any `session/event` of that turn.
+- `idle` arrives after that turn's `turn/end`.
+
+Both matter to anything that renders. A surface told `idle` while events were still arriving would stop its spinner and then keep drawing; one told `running` after `turn/start` would draw a turn's first events while showing an idle session. Neither is a subtle wrongness - they are the two visible glitches this ordering exists to prevent.
+
+**`idle` means the journal is on disk.**
+The turn is flushed before the transition is pushed, so a surface that reads the file when it sees `idle` finds the turn it just watched. That is what makes "watch the stream, then open the journal" a correct thing to do rather than a race.
+
+**`idle` is pushed however the turn ended.**
+Natural, cancelled, guarded, or failed - the transition is not conditional on success, so a surface can never be left showing `running` for a session that stopped. A turn that failed pushes `idle` and *then* the call answers its error (§4.5).
+
+**Ordering between a push and a call's reply is not guaranteed.**
+They travel by different paths - one to every subscriber, one to the caller - and a carrier may interleave them, so a surface must not infer anything from seeing `AgentPromptResult` before or after `idle`.
+The two carry different things and neither waits for the other: the reply is the authoritative summary, the pushes are the stream. A surface that needs both takes each as it comes.
+
 ### 4.7 The CLI boundary
 
 The `tetanus` binary is an in-process client of the same `Engine` trait the RPC server wraps.
@@ -587,12 +1167,18 @@ Each subcommand is defined as the calls it makes, and makes no others.
 | `tetanus tools` | `catalog.tools` |
 | `tetanus models` | `catalog.models` |
 | `tetanus config` | `config.dump` |
-| `tetanus serve` | hosts the stdio and WebSocket carriers |
+| `tetanus serve` | hosts the stdio carrier; with `--listen`, the WebSocket carrier; with `--listen --frontend`, the browser panel with the WebSocket and HTTP carriers on that one address |
 | `tetanus info` | none; build metadata only |
 
 `tetanus chat` is `tetanus run` held open: one `session.create` and one `session.subscribe`, then an `agent.prompt` for each message, all against the same session id.
 It needs no call of its own because a conversation is already what a session is: every `agent.prompt` against a session id is a turn on the journal that session has been writing since it was opened (§4.4.1, §4.4.2), and the engine answers each one in the light of the turns already on it.
 So nothing about the conversation is held by the surface, and a chat that names the same journal tomorrow is the same conversation.
+
+**`sessions.backend` selects the artifact a journal lives in.**
+`jsonl` is the default, one journal file per session; `sqlite` is one database under the sessions root holding every session.
+It is resolved at boot, and both an unserved name and a database this build cannot open are refused there rather than at the first `session.create`: a store this build cannot read is a deployment fault, and one that waits for the first turn to report itself is one a user finds first.
+Under `sqlite`, `session.create` with a `path` is `InvalidParams` naming that field - a session inside a database is named by its id, and answering a caller's named file with some other session's log would be worse than refusing.
+`config.dump` reports the key like any other settled one.
 
 A journal is addressed by id, never by path, because an id is what every other call takes.
 `SessionCreateParams.path` is the bridge: naming a path opens the journal there and returns its `SessionInfo`, with the id read from the journal's own `session/start` line.
@@ -607,7 +1193,22 @@ Machine-readable output is contract output.
 A subcommand that streams prints the `SessionEvent` carried by each `SessionEventPush`, as its own line as it arrives, and the call's result as the last line.
 The push envelope is not printed: `session_id` is already known to whoever invoked the run, and dropping it makes the stream byte-identical to the journal on disk.
 A subcommand that does not stream prints exactly one line.
-So a script reads lines until the stream ends and treats the last one as the answer, whichever subcommand it ran.
+
+**A failure never appears on stdout.**
+`--json` stdout carries results and streamed events and nothing else, so a consumer parsing it never has to tell one shape from another.
+A failure goes to stderr, as the §4.5 error object, and to the exit status from that section's table.
+Putting it on stdout would mean every line had to be discriminated before it could be used, to describe a case that ends the run anyway.
+
+**The exit status is read before the last line, not after.**
+This is the trap, and it is worth stating plainly because the obvious reading of the paragraph above is wrong.
+A streaming subcommand whose turn fails partway has already printed events, and has printed no result line - so the last line on stdout is an *event*, and a script that took it for the answer would report a chunk of a model's reply as the outcome of the run.
+The rule is therefore: a non-zero status means there is no answer on stdout, whatever is on it.
+A zero status means the last line is the answer, and for a streaming subcommand every line before it is a `SessionEvent`.
+
+**Which makes the two halves usable together.**
+A script that only wants the answer reads the last line and checks `$?`.
+A script that wants the stream reads every line as it arrives and stops caring at the end.
+Neither has to parse stderr, and a script that does want the structured failure has it there in one object rather than mixed into its data.
 Human-readable output is the presentation lane's, and this document says nothing about it beyond the exit statuses in §4.5.
 
 #### File ownership
@@ -628,6 +1229,26 @@ The presentation lane owns the binary and wires each subcommand to the calls §4
 
 Neither lane edits the other's files.
 A change that seems to need one is a gap in this document, and the fix is a contract pull request.
+
+#### 4.7.1 Which rules this document can enforce, and which it cannot
+
+Most of this contract is held by a case. Three rules are not, and cannot be, because they are properties of a consuming lane's *source* rather than of any value that crosses the boundary.
+
+| Rule | Where it is stated |
+| --- | --- |
+| Match a struct variant with a rest pattern | §5, rule 4 |
+| Never match an engine enum - `tetanus_turn::StopReason`, `tetanus_turn::TurnError`, `tetanus_session::SessionError` - to derive a code or a rendering | §3, §4.5 |
+| Derive a failure's code from `tetanus_engine::convert`, not from a match of your own | §4.5 |
+
+Nothing in `crates/protocol`, `crates/engine` or `crates/rpc` can observe any of these, so no conformance case can hold them.
+They are promises, and a promise that is described as a check is worse than one described as a promise - the second gets audited.
+
+**They are not currently kept, and that is recorded here rather than rediscovered.**
+`crates/cli` matches `tetanus_turn::StopReason` variants and `tetanus_session::SessionError` variants today.
+§4.5 already noted the second when the failure mapping was published, and it is still true; the first arrived with the growable-enum rule and outlived it.
+
+Neither is a defect this lane can fix - §4.7 forbids the engine lane editing that file - and neither is urgent: the engine enums have no fallback variant, so the failure mode is a build break in that lane on the day an engine names a new failure, which is loud and immediate rather than silent and wrong.
+What would be a defect is letting them sit unnamed, so that the next reader of §3 believes the rule is being kept because nothing says otherwise.
 
 ## 5. Versioning and compatibility
 
@@ -650,26 +1271,54 @@ The constant is in `tetanus-protocol`, and a literal `"1.0"` in a consuming lane
 The version is the one string in this contract that no peer should hard-code.
 
 **An added field is minor on the wire and not always minor in Rust.**
-A JSON reader ignores a field it was not sent; a Rust struct literal does not, so adding even an optional field to a type the *other* lane constructs - rather than only receives - stops that lane compiling.
+A JSON reader ignores a field it was not sent; Rust does not, so adding even an optional field can stop the other lane compiling.
 Wire-optional is not source-optional.
-So an addition to a constructed type is a change both lanes land together, and until they do, an addition goes on the types a surface only ever reads.
-That is why §4.4.6 puts a forked session's lineage on its `session/start` line and not on `SessionInfo`, which the presentation lane builds in its own cases.
+
+Two shapes break, not one, and the second was missed when this rule was first written.
+A **struct literal** must name every field, so a lane that *constructs* the type stops compiling.
+An **exhaustive destructuring pattern** must also name every field, so a lane that only ever *receives* the type stops compiling too.
+`crates/cli/src/render/timeline.rs` is the live example: it never builds a `KnownEvent`, and it still cannot survive a field being added to `KnownEvent::ToolResult`, because it matches that variant by naming all four.
+
+So the rule is about both, and a fourth rule joins the three below to make it avoidable: a consumer matches a struct variant with a rest pattern.
+Until a type's consumers do, an addition to it is a change both lanes land together, and an addition goes on the types nobody names field by field.
+That is why §4.4.6 puts a forked session's lineage on its `session/start` line rather than on `SessionInfo`, and why §4.3's `tool/result.code` is documented but not yet a `KnownEvent` field.
 
 **A major bump covers everything else.**
 Removing or renaming a method or field, changing a field's type, making an optional field required, narrowing an accepted value, or changing what an existing error code means is a major bump.
 
-Three rules make additions safe, and a surface must follow all three.
+Four rules make additions safe, and a surface must follow all four.
 
 1. Ignore unknown object fields.
 2. Ignore unknown notification methods, and answer unknown request methods `MethodNotFound`.
 3. Render unknown enum variants through the `Other(String)` fallback, and unknown error codes through their raw code.
+4. Match a struct variant with a rest pattern, so a field added to it is not a build break.
 
-The conformance cases in §6 hold these rules to their word.
+The conformance cases in §6 hold the first three to their word.
+The fourth cannot be checked from this side - it is a property of the consuming lane's source, not of any value that crosses the boundary - so it is a promise, and the cost of breaking it is paid by whoever adds the next field.
+
+### 5.1 Types that are deliberately not on this boundary yet
+
+**The feature state a surface reads.** `tetanus_features::view` holds `SessionView` and `WorkspaceView`: the todo list, the goal and its revision, plan mode, the feedback count, the attachments a session admitted, and the workspace sketch, folded from the journal with stable field names and no engine type in them.
+They are Rust types inside this workspace and nothing on this boundary carries them.
+
+Publishing them is three changes and they land together, in a version both lanes take: two calls in §4.2's table, `session.view` and `workspace.view`, both reads and both idempotent by §4.4.12; the structs in `crates/protocol::types`, which is minor by §5 for a client that matches with a rest pattern and a build break for one that does not; and a push, only if a panel is to be live rather than polled - and the honest cheaper answer is that a client already receives `session/event` and can re-fold, so a push should wait until somebody has measured the polling.
+
+**The presentation lane has answered, and it changes the order.** It built all six feature panels by the route above - subscribe from seq 0, receive `session/event`, re-fold - so nothing is blocked. But `workspace.view` is the call it would take *first*, ahead of `session.view`, because `session.view` has a working alternative and this has none: `WorkspaceView` is read from the filesystem rather than folded, a browser cannot read the project's directory, and `host.listDirectory` is a directory chooser that cannot say which marker identified the root, whether the listing was truncated, or which instruction files the project keeps - the three facts that tell a reader "this is a project" from "this is a directory". Skills are in the same position for the same reason.
+
+**A push is now measured rather than assumed.** The page re-folds all six panels over the whole journal on every open and it is not perceptible, so a push for these types would be a mechanism maintained for something nothing is waiting on. That answers the question §5.1 left open in the direction it guessed.
+
+**`as_of_seq` is what a page cannot reconstruct.** A page folding events knows the seq it last applied, so while re-folding is the only route the field is redundant; the moment `session.view` lands beside that route, a page holding both needs it to order them. It is recorded here so it is not discovered then.
+
+**The rename risk runs the other way in JavaScript.** §5's rest-pattern rule costs a page nothing - it reads the fields it knows - but a *renamed* field fails silently there, drawing an empty panel rather than breaking a build. The six the presentation lane would notice are `goal.objective`, `goal.phase`, `goal.blocker.message`, `todo.content`, `todo.status` and `attachment.name`.
+
+Two properties of those types are settled now so that publishing them changes nothing but the address.
+A view carries no bytes: an attachment is named, measured and content-addressed, and the content is fetched by id, because base64 in a fold is a frame nobody can read, a log line nobody can grep and a memory spike on every subscriber.
+And a view says how far it folded, so a surface receiving two folds out of order can tell which is newer.
 
 ## 6. Verification
 
 The cases run offline.
-Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`.
+Those over the boundary types alone live in `crates/protocol/tests/wire.rs`; those that hold the engine's own output to §4.3.1 live in `crates/engine/tests/contract_events.rs`, and those over §4.4.6 in `crates/engine/tests/fork.rs`.
 Those that hold a carrier to §4.1 live in `crates/rpc/tests/stdio.rs` and `crates/rpc/tests/websocket.rs`, which drive the same engine double, so a claim proved for one carrier and not the other is a failing case rather than an omission.
 Those that hold the published failure mapping to §4.5 live in `crates/engine/tests/faults.rs`.
 Those over the interaction and state views (§4.4, §4.6) live in `crates/engine/tests/facade.rs`, `agent.rs`, `subscribe.rs`, `sessions.rs` and `resume.rs`, with the closer synthesis §4.4.4 applies pinned on its own in `crates/turn/tests/upstream_repair.rs`.
@@ -682,6 +1331,8 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 error object shape and code round trip | TC-PROTO-3 |
 | §5 an unknown code is not remapped | TC-PROTO-4 |
 | §4.3 `SessionEvent` matches a journal line | TC-PROTO-5 |
+| §4.3 `seq` orders a journal and `time` does not | TC-PROTO-85 |
+| §4.3 a duration is measured, not subtracted | TC-PROTO-86 |
 | §5 unknown enum variants survive | TC-PROTO-6 |
 | §4.2 pushes name their session | TC-PROTO-7 |
 | §5 compatibility is decided by major alone | TC-PROTO-8 |
@@ -689,21 +1340,31 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.3.1 every durable payload parses from the journal shape | TC-PROTO-10 |
 | §4.3.1 an unknown type parses to `None` and keeps its data | TC-PROTO-11 |
 | §4.3.1 `tool/result` names the call it answers | TC-PROTO-12 |
+| §4.3 a synthesized result carries a code, and an unknown one is readable | TC-PROTO-50 |
+| §4.3 the typed path cannot see the code yet, and says so | TC-PROTO-51 |
 | §4.3.1 every event the engine writes parses, and all ten types appear | TC-CONTRACT-1 |
 | §4.3.1 the engine's own `tool/result` names and cites its call | TC-CONTRACT-2 |
 | §4.3.1 `TurnSummary.content` restates the last `assistant/message` | TC-CONTRACT-3 |
 | §4.3.1 `assistant/chunk` names the step it belongs to | TC-CONTRACT-4 |
+| §4.3, §4.7 a served event is byte-identical to the line on disk | TC-CONTRACT-5 |
 | §4.3.1 a chunk keeps its variant | TC-PROTO-13 |
 | §4.3.2 a staged type parses to `None` and keeps every documented key | TC-PROTO-16 |
 | §4.3 unmeasured facts are absent, never zero | TC-PROTO-14 |
 | §4.3 a withheld value is spelled one way and travels as an ordinary value | TC-PROTO-17 |
+| §4.3 the two redaction rules compose by union | TC-PROTO-45 |
+| §4.3 the sentinel is not proof, and says so | TC-PROTO-46 |
 | §4.3 the engine withholds a secret's value and keeps its entry | TC-CFG-SECRET-1 .. TC-CFG-SECRET-4 |
 | §4.1 stdio: one JSON object per line, correlated by id | TC-STDIO-1 |
 | §4.1 WebSocket: one JSON object per text frame, correlated by id | TC-WS-1 |
 | §4.1 a frame that asks nothing is answered with nothing | TC-STDIO-2, TC-WS-2 |
 | §4.1 either push arrives as a notification frame, on either carrier | TC-STDIO-3, TC-WS-3 |
 | §4.1 a binary frame is not a frame the WebSocket carrier defines | TC-WS-6 |
+| §4.1 the frame bound is published, and is one bound for every carrier | TC-PROTO-95 |
+| §4.1 a short page is not the end; `eof` is | TC-PROTO-96 |
+| §4.1.2 every call is available to any connected peer | TC-PROTO-100 |
+| §4.1.2 a refused handshake never reaches the JSON-RPC layer | TC-PROTO-101 |
 | §4.2 a peer that hangs up leaves no subscription open | TC-STDIO-4, TC-WS-4 |
+| §4.2 and leaves *no* subscription open, not merely one | TC-WS-8 |
 | §4.4.1 the handshake is connection state, one connection at a time | TC-WS-7 |
 | §4.4.2 a call is answered while an earlier one is still running | TC-STDIO-5, TC-WS-5 |
 | §4.1 the id a server answers when it cannot read one | TC-PROTO-15 |
@@ -713,41 +1374,81 @@ Of §4.7, the clauses about which calls a subcommand makes and what it prints ar
 | §4.5 a log that refused a chunk is `Internal` | TC-FAULT-4 |
 | §4.5 a corrupt journal carries `session_id` and `line` | TC-FAULT-5 |
 | §4.5 `Io` carries the path when the caller knows one | TC-FAULT-6 |
+| §4.4.13 a second writer is refused, naming the journal | TC-PROTO-75 |
+| §4.4.13 a reader is never refused for a writer being present | TC-PROTO-76 |
 | §4.5 every failure a turn can reach has a known code | TC-FAULT-7 |
 | §4.5 a document that cannot be booted on is `Io` with its path | TC-FAULT-8 |
 | §4.5 a value the key does not take is `InvalidParams` with that key | TC-FAULT-9 |
-| §4.2 every call the method table serves is served | TC-ENG-3 |
+| §4.2 every call in the method table is served | TC-ENG-3 |
 | §4.2 a reserved call answers `NotImplemented`, and is not advertised | TC-ENG-4 |
 | §4.2 a reserved method is routed, not unknown | TC-RPC-12 |
+| §4.2 every method the contract defines is routed | TC-RPC-13 |
 | §4.3.1 lineage on `session/start` is optional in both directions | TC-PROTO-19 |
+| §4.4.9 every origin fact is optional, and absent means absent | TC-PROTO-30 |
+| §4.4.9 a copy and a delegation are told apart | TC-PROTO-31 |
+| §4.4.9 depth counts levels and survives a round trip | TC-PROTO-32 |
+| §4.3.3 a journal with no `format` reads as the first one | TC-PROTO-105 |
+| §4.3.3 an envelope change is a different problem from a new type | TC-PROTO-106 |
 | §4.4.6 a fork names its source, and the boundary is `through_seq` | TC-PROTO-18 |
 | §4.4.7 an ask names its audit line, its tool and its call | TC-PROTO-20 |
 | §4.4.7 the four outcomes, and only one of them grants | TC-PROTO-21 |
 | §4.4.7 an outcome the engine does not know denies rather than failing to parse | TC-PROTO-22 |
 | §4.4.7 the two policies, and a third word that stays readable | TC-PROTO-23 |
 | §4.3.2 the three `approval/*` types stage like the other two | TC-PROTO-24 |
+| §4.4.6 lineage is on the child's header, and an empty parent forks | TC-PORT-FORK-1 |
+| §4.4.6 the child inherits the prefix, and the two journals are detached | TC-PORT-FORK-2, TC-PORT-FORK-3 |
+| §4.4.6 an earlier boundary stands while the parent's tail is open | TC-PORT-FORK-4 |
+| §4.4.6 a boundary must be a closed one | TC-PORT-FORK-5, TC-PORT-FORK-10 |
+| §4.4.6 the child's own work begins after the seed | TC-PORT-FORK-6 |
+| §4.4.6 what a fork refuses, and with which code | TC-PORT-FORK-7 .. TC-PORT-FORK-12 |
+| §4.4.6 a forked session is an ordinary session | TC-FORK-1, TC-FORK-2 |
+| §4.3.2 `context/snapshot` stages, and carries its parts | TC-PROTO-25 |
+| §4.4.8 the joining rule reproduces what the model read | TC-PROTO-26 |
+| §4.4.8 an empty part contributes nothing | TC-PROTO-27 |
 | §4.4.1 a matching major is accepted, and nothing else is | TC-ENG-1, TC-ENG-2 |
+| §4.4.12 which calls a client may repeat | TC-PROTO-70 |
+| §4.4.12 unsubscribing twice is a fact, not a failure | TC-PROTO-71 |
 | §4.4.2 a prompt runs the documented turn and answers with its summary | TC-AGENT-1 |
+| §4.4.2 a prompt with nothing in it is refused before anything is spent | TC-PROTO-90 |
+| §4.4.2 whitespace is nothing, as it is for a credential | TC-PROTO-91 |
 | §4.4.2 the pushes a subscriber gets are the journal the turn wrote | TC-AGENT-2 |
 | §4.4.2 a turn the output cap cut off ends `max-tokens`, on the call and on the journal | TC-CAP-1 |
 | §4.4.2 a step the cap cut off dispatches no tool calls | TC-PORT-CAP-3, TC-CAP-2 |
 | §4.4.2 the reason is the turn's, and does not carry into the next | TC-PORT-CAP-2 |
 | §4.4.2 the cut-off step's message carries no call | TC-PORT-CAP-4 |
+| §4.4.2 a guarded turn names which guard stopped it | TC-PROTO-40 |
+| §4.4.2 a guard reason is a value, not a variant | TC-PROTO-41 |
 | §4.4.3 a reserved call's capability is not advertised | TC-SUB-5 |
+| §4.4.3 a partial answer is no answer | TC-PROTO-55 |
+| §4.4.3 an answer outside a closed list is no answer | TC-PROTO-56 |
+| §4.4.3 the pair is durable in both outcomes | TC-PROTO-57 |
 | §4.4.4 which closers a journal needs, and which it does not | TC-PORT-REPAIR-1 .. TC-PORT-REPAIR-10 |
 | §4.4.4 `session.create` applies them, and `last_seq` counts them | TC-SESS-6 |
 | §4.4.4 a journal is repaired once, not once per open | TC-PORT-RESUME-3 |
+| §4.4.11 a shut-down turn is closed, and says so | TC-PROTO-65 |
+| §4.4.11 shutdown and cancellation are different facts | TC-PROTO-66 |
+| §4.4.4.1 a resumed session runs under its header | TC-PROTO-110 |
+| §4.4.4.1 a journal opens without its route, and only running needs one | TC-PROTO-111 |
 | §4.4.5 `from_seq` is a seq and is inclusive, on both calls | TC-PAGE-2, TC-SUB-6 |
 | §4.4.5 a `from_seq` past the tail is a catch-up with nothing to catch up on | TC-PAGE-7, TC-SUB-6 |
 | §4.4.5 `limit` is clamped down, and zero reads as absent | TC-PAGE-3, TC-PAGE-6 |
+| §4.4.5 the maximum is published, and is what the engine clamps to | TC-PROTO-60 |
 | §4.4.5 `next_seq` and `eof` page a journal to its end | TC-PAGE-2, TC-PAGE-4 |
 | §4.4.5 `last_seq` is the boundary replay and live delivery join at | TC-SUB-1, TC-SUB-2 |
+| §4.4.5 the join holds while the journal is being written | TC-SUB-10 |
 | §4.4.5 a push reaches only its own session's subscriptions | TC-SUB-7 |
+| §4.4.10 a steer names the turn and the step that read it | TC-PROTO-35 |
+| §4.4.10 a steer that was never read is still on the journal | TC-PROTO-36 |
+| §4.4.10 an idle session refuses with a null turn | TC-PROTO-37 |
 | §4.6 `agent/status` is pushed on both transitions | TC-AGENT-3 |
+| §4.6 `running` precedes the turn's events, `idle` follows them | TC-PROTO-80 |
+| §4.6 `idle` is pushed however the turn ended | TC-PROTO-81 |
 | §4.6 `agent.status` reads the live state a missed push lost | TC-AGENT-5 |
 | §4.7 naming a path opens that journal, under the id the journal carries | TC-PATH-1, TC-ID-1 |
 | §4.7 a path whose file is not a journal is `LogCorrupt` | TC-PATH-3 |
 | §4.7 every id `session.list` reports is one `session.events` opens | TC-ID-2 |
+| §4.7 a failure is not on stdout, and the status is read first | TC-PROTO-115 |
+| §4.7.1 the rules no case can hold, and their live exceptions | none - see §4.7.1 |
 
 ## 7. Design rationale
 
@@ -760,10 +1461,15 @@ That surface is powerful and undocumented as a protocol, and every upstream rele
 JSON-RPC 2.0 was picked over a bespoke framing because it already answers request correlation, one-way notifications, bidirectional calls and a structured error object, and because a presentation surface can drive it from any language without a generator.
 The cost is that it says nothing about streams; §4.4.2 answers that by streaming durable session events as notifications instead of inventing a stream type.
 
-### 7.1.1 One sink, three carriers
+### 7.1.1 One sink, the carriers that can push
 
 The first draft left `session.subscribe` off the `Engine` trait, on the reasoning that a subscription binds to a connection and an in-process caller has none.
-The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by importing `tetanus-core` and `tetanus-turn`, which is the lane boundary §3 draws.
+The presentation lane rejected that in review, correctly: it left the in-process renderer with no way to see a chunk arrive except by reaching into `tetanus-core` and `tetanus-turn` for the bus, which is the lane boundary §3 draws.
+
+That is narrower than it first reads, and the narrowing matters.
+`EventSink` removed the need to reach past the contract *to watch a session*.
+It did not remove those crates from the presentation lane's dependency list, and was never going to: §4.7's ownership table gives that lane "the whole binary ... and the wiring to the crates above", so composing an engine out of them is its job.
+The boundary is about **what a surface does with a type, not which crate it imports** - and §3 and §4.5 say the part that actually binds.
 
 `EventSink` is the fix. The subscription binds to a sink rather than to a connection, the carrier supplies the sink, and the wire never carries it.
 The alternative was a second in-process-only call, which would have meant two code paths to keep in step and a renderer that behaves differently depending on how it was launched.
@@ -799,7 +1505,13 @@ A fallback variant answers an unknown value, not an added variant, which is why 
 
 `SessionEvent` exists in `tetanus-session` and again in `tetanus-protocol`.
 Re-exporting would drag `tokio`, `tetanus-core` and the event bus into every consumer of the contract, and would tie the wire shape to an internal type that the engine must stay free to refactor.
-TC-PROTO-5 pins the wire shape to the journal line, and the engine-side conversion is covered where it lands.
+TC-PROTO-5 pins the wire shape against a literal, which is what a crate with no dependency on the journal's owner can do: it compares the boundary type to a hand-written copy of the journal's shape.
+That copy goes stale exactly when the shape changes, which is the moment the check was for, and it compares through `serde_json::to_value`, which is structural and blind to field order.
+So it does not, on its own, hold the two types together.
+
+TC-CONTRACT-5 is what holds them together, in `crates/engine`, where both types exist.
+It serializes a real journal line and the event `session.events` serves for it, and compares the two *strings* - so a reordered field, a changed rename or a differing `skip_serializing_if` fails there while every other suite stays green.
+That is not hypothetical: reordering two fields on the boundary type leaves all of `crates/protocol` passing.
 
 ## 8. Changelog
 
@@ -828,3 +1540,39 @@ Every boundary change adds a row here, in its own pull request.
 | 1.0 | States how a journal is read (§4.4.5): `from_seq` is a seq and is inclusive on both `session.events` and `session.subscribe`, a `from_seq` past the tail is a catch-up that had nothing to catch up on rather than a fault, `limit` is a page size clamped down to the server's maximum of 500, `next_seq` and `eof` page a journal to its end, `SessionSubscribeResult.last_seq` is the boundary replay and live delivery join at, and a push reaches only the subscriptions on its own session. No type changes: every field named here already exists, and this says which of several readings the engine is held to. One behaviour change travels with it: `limit: 0` now reads as an absent limit instead of answering an empty page, because that page stalled a pager - `next_seq` did not advance and `eof` stayed false, so a loop that paged until `eof` never ended. No surface passes a `limit` today, so no caller can observe the answer it replaces. TC-PAGE-3 already cited a "server clamps to its own maximum" promise this document had never made; §4.4.5 is that promise. |
 | 1.0 | Reserves `session.fork` (§4.2, §4.4.6): a child journal seeded with a prefix of another one's, so a conversation can be taken a second way without losing the first. The child is a copy, its own `session/start` replaces the parent's one line for one line - which is what keeps `seq` equal to the line index and lets the copied `sourceEventSeqs` stand unrewritten - and the header grows `parent_session` and `fork_seq` (§4.3.1), both optional, so every journal written before this still parses. The boundary is `through_seq` and not `from_seq`, because §4.4.5 spends that name on the *first* event a caller receives and this is the last one a child keeps. No error code is added: §4.4.6 tables each refusal against a row of §4.5. No minor bump either, and §5 now says why - a reserved call is answered `NotImplemented` whether a peer knows it or not, so the bump belongs to the version that serves it. Two more §5 rules travel with that one, both learned here: a surface reads `PROTOCOL_VERSION` rather than spelling it, and an added field is minor on the wire but a build break in a lane that constructs the type, which is why lineage is on the journal line and not on `SessionInfo`. The engine slice that serves the call lands next, and takes the `Served` row and the capability with it. |
 | 1.0 | Reserves the decision seam (§4.2, §4.4.7): `ui/approve`, a server-to-client request asking whether one tool call may run, and `approval.set`, the call that writes the session's policy. Four outcomes, of which `allowed-once` alone grants and grants only the call it was asked about; two policies, of which `never` settles every ask `rejected` without asking anyone, which is what makes an unattended run neither hang nor depend on a client answering. The seam fails closed on every way of not getting an answer - no capability, an error, a word outside the four, a connection that dropped - and §4.3 now fixes what reading a growable enum's fallback means, because these are the first two whose fallback the engine reads rather than renders. Three durable types join §4.3.2: `approval/asked` and `approval/decided`, one pair per ask with a shared `id`, and `approval/policy`, whose last occurrence is the session's override. No error code is added: a denial is the seam working, so it is a `tool/result` with `ok: false` and not a failure, and §4.4.7's refusals each take a row §4.5 already has. §4.4.4 grows one closer to match - an `approval/asked` a crash caught mid-question is closed `cancelled` on reopen - and that closer is the reason §4.4.7 requires an open turn to ask at all: the turn is the unit repair closes, so a question outside one could never be closed. Which tools ask is deliberately not on `ToolDescriptor` yet, for §5's reason: it is a type the presentation lane constructs. The engine slice that serves the seam lands next, and takes the `Served` rows and the capabilities with it.
+| 1.0 | Serves `session.fork` (§4.2, §4.4.6), and advertises the capability that promises it. The engine copies the prefix, writes the child's header over the parent's line 0 and opens the child through the ordinary create path, so a forked session is listed, paged, titled and prompted like any other and its first turn is numbered after the turns it inherited - a fork is a resume of a prefix. `session/start` now carries `parent_session` and `fork_seq` where one applies. TC-ENG-3 grows the row this change serves. TC-ENG-4 and TC-RPC-12 asserted the not-yet answer of that row and now assert it of `approval.set` instead: the two cases belong to whichever calls are reserved at the time, not to the first one that ever was, so serving a call moves them rather than retiring them. `Reserved` and its default trait body stay documented in §4.2 for the call that still needs them. |
+| 1.0 | Publishes `context/snapshot` (§4.3.2, §4.4.8): what a turn told the model about the world outside the conversation - the date, the working directory, the branch - recorded once per turn. It is carried as a user message after the retained history rather than in the system prompt, and that placement is the design rather than a detail: a provider caches a prompt by its longest stable prefix, and a sentence saying what time it is would invalidate that prefix on every request of every session. Only the newest snapshot derives to a message; earlier ones stay on the journal, because it records what happened, but do not travel again - yesterday's date is worse than no date. The record carries the parts and §4.4.8 fixes the joining rule, which is the rule §4.3 already gives prompt sections, so the rendering is reproducible and a surface can still show which provider contributed what. No type changes, no new call and no capability: a runtime context is contributed inside the engine and only the record of it crosses this boundary. `type` is a free string by §4.3, so the staged type is not a `KnownEvent` variant and §4.3.2's two-step rule applies as it did for `llm/retry`. The engine slice that writes it lands separately. |
+| 1.0 | States what a journal says about where it came from (§4.3.1, §4.4.9): `cwd`, `spawned_by` and `depth` join `parent_session` and `fork_seq` on `session/start`, all optional so every journal written before this parses unchanged. `spawned_by` is deliberately not `parent_session`: a fork is a copy that begins holding another journal's history, a subagent is a different conversation that another one asked for, and a reader that cannot tell them apart cannot answer either question lineage exists for. A session can be both, which rules out one field with a kind beside it. `depth` is durable rather than held in memory because the bound on delegation has to survive a resume - a subagent whose harness restarted must not come back believing it is a root session. `cwd` is where the session was opened and not where it is now, because a tool may change directory and the header is not rewritten. A fork inherits the origin facts it is a copy of and writes its own `parent_session`. Minor on the wire, and safe in Rust here because the presentation lane matches this payload with a rest pattern - stated rather than assumed, since §5's rule is about types the other lane constructs and the next addition must check again. No call is added and nothing appears on `SessionInfo`, for §4.4.6's reason. The engine slice that writes the fields lands separately. |
+| 1.0 | Reserves `agent.steer` (§4.2, §4.4.10), the separate call §4.4.2 promised for a follow-up sent while a turn is running. `agent.prompt` still refuses with `SessionBusy`, which is right for a caller that meant to start a turn and wrong for the commonest thing a person does - notice something mid-answer and say so. The message joins the running turn's inbox and is claimed at the next step boundary, never sooner: a turn inside a provider call cannot be given anything, since the request has gone and the answer was formed without it. `user/steer` joins §4.3.2 and is written whether or not a step ever reads it, carrying `taken` to say which - a message the caller was told was accepted and which then vanished from the history is the worst outcome available, because the person believes they have said something and the transcript disagrees. It is deliberately not a `user/message`: both derive to the same role, and a reader must still be able to tell a message that opened a turn from one that arrived during it. No error code is added; an idle session is `SessionBusy` with a null turn, because a session that is not busy is exactly what makes steering impossible and the code should name the condition to fix. The engine slice that serves the call takes the `Served` row and the capability with it. |
+| 1.0 | States what a turn a guard stopped looks like (§4.4.2): `turn/end` carries `stop_reason: "timed-out"` or `"repeated"`, and `agent.prompt` still answers a summary rather than an error, because a bound the deployment chose being reached is the bound working. A guard is a bound on the turn rather than on a request - how long the whole turn may take, and how many times the model may do the same thing - which is what distinguishes these from the request deadline the provider seam already has. The two reasons are separate because they need opposite answers: `"timed-out"` usually means a bigger budget or a smaller task, while `"repeated"` means the model was looping and a bigger budget makes it strictly worse, so collapsing them would leave a reader unable to tell "this needs longer" from "longer will not help". A guard stops at a step boundary like `agent.interrupt`, so the journal is balanced and §4.6 holds unchanged. No type changes and no error code: both are values of the growable `StopReason` by §7.5, carried across by §7.6's mapping exactly as `"interrupted"` and `"max-tokens"` already are. The engine slice that runs the guards lands separately, and it will add reasons to `tetanus_turn::StopReason`, which by §3 no surface may match - the arm belongs to the presentation lane. |
+| 1.0 | Settles how `config.dump` decides a value is a secret (§4.3): the schema where the engine has one, the name rule for everything else, and the two compose by **union, never by override**. That direction is the whole change. A schema that could un-mark a key would make adding a key to the schema a way to start publishing it, and the mistake would be silent and permanent. Each rule alone fails one way - a schema misses what it does not describe, a name rule misses a credential called `authorization` - and the union fails safe, at the cost of occasionally withholding a `monkey_token` the user can still read in their own file. The schema half is what catches a credential whose name says nothing, which no rule reading the name could find. One ambiguity in the previous wording is now stated rather than left implicit: nothing distinguishes a withheld value from a document that literally contains `<redacted>`, so a surface must not read the sentinel as proof of secrecy. The honest signal is a flag on the entry, and it is deliberately deferred - `ConfigEntry` is a type the presentation lane constructs, so by §5 that field is a change both lanes land together. No type changes here, and the engine slice that consults a schema lands separately; until it does, the name rule is what runs and its behaviour is unchanged. |
+| 1.0 | Corrects two things this document had wrong about itself. §4.3.1's payload table omitted `tool/result.code`, which §4.4.4 has promised since crash repair landed and the engine has written ever since - so the table was not a description of what the engine writes. The row now lists it, and §4.3 says when it is present: only on a result nobody ran, because a call that was dispatched reports its outcome in `ok` and `content` and needs no reason for not having one. And §5's rule about added fields was stated too narrowly. It said a field breaks the lane that *constructs* a type; an exhaustive destructuring pattern breaks the same way in a lane that only *receives* one, and `crates/cli/src/render/timeline.rs` is the live example - it never builds a `KnownEvent` and still could not survive a field on `ToolResult`. A fourth compatibility rule follows: a consumer matches a struct variant with a rest pattern. It cannot be verified from this side, because it is a property of the other lane's source rather than of anything crossing the boundary, so it is a promise whose cost is paid by whoever adds the next field. `KnownEvent::ToolResult` is therefore *not* given the field here: the gap is named instead, with what unblocks it. Today a surface on the typed path cannot tell `TOOL_NOT_STARTED` from `TOOL_OUTCOME_UNKNOWN` - the distinction §4.4.4 calls load-bearing, since one is safe to retry and the other is not - though the value is on `SessionEvent.data` for a reader willing to look. No type changes. |
+| 1.0 | Settles §4.4.3, which reserved `ui/ask` and then said almost nothing about it. The call is still reserved, so nothing has been built against it and this costs nothing now; the same decisions found out later cost two lanes a rewrite. An answer covers every question or it is no answer, so a tool meets one of exactly two cases rather than a partial third its author never wrote code for; an answer naming a question nobody asked is ignored, because the questions are the contract. A question offering options accepts those labels and nothing else, and a single-select question given several is unanswered rather than first-wins - a tool acting on a guess about which the user meant is worse than a tool told it has none. `question/asked` and `question/answered` join §4.3.2 as a durable pair sharing an `id`, turn-enclosed and closed by repair, for §4.4.7's reasons: a transcript that shows what a tool did but not what the user was asked cannot explain it. An interrupt withdraws an outstanding ask and a late answer is discarded, as it does for an approval. Nothing else bounds the wait, deliberately - a person may reasonably take a long time, and an engine that gave up would produce a tool failure that looks like the user's fault - which is why the interrupt rule is not optional. No type changes and no new code. |
+| 1.0 | Publishes the page maximum as `methods::MAX_PAGE_SIZE` (§4.4.5). §4.4.5 has said since it was written that the server clamps `limit` to "its own maximum, which is 500", and 500 lived only in the engine and in that sentence - so the machine-readable half of this contract did not carry a number the prose did. A surface reads the constant now, for the reason §5 already gives `PROTOCOL_VERSION` and one more: a literal `500` in a consuming lane is a claim about a server it may not be talking to, and it fails silently, because asking for more than the maximum is clamped rather than refused. A surface that pages with `next_seq` and `eof` still needs nothing, which is why this was not noticed earlier; the constant is for the surface that wants one round trip instead of two, and that is exactly the surface a hard-coded number would break. One added constant, no type changes, and no behaviour change - `MAX_PAGE_SIZE` is the value the engine already clamps to, and TC-PROTO-60 pins the two together so they cannot drift. |
+| 1.0 | States what a server owes its journals when it is asked to stop (§4.4.11). `tetanus serve` hosts carriers, so a process being stopped mid-turn is an ordinary Tuesday, and until now the only path was the crash path - every deploy left a trail of half-turns for §4.4.4 to synthesize closers over on the next open. A stopping server stops accepting connections, interrupts each running turn at the next step boundary using the mechanism `agent.interrupt` already has rather than a second one, and waits: `turn/end` carries `stop_reason: "shutdown"`, the interrupted step gets its `step/end`, and `agent.prompt` answers a summary as a cancelled turn does. `"shutdown"` is deliberately not `"cancelled"` - the same event to the engine, different facts to a reader, since one is a decision to respect and the other is something to go and look at, and a transcript blaming a rolling restart on a user who did nothing sends them after the wrong thing. It is a growable `StopReason` value by §7.5, so no type changes. The drain is bounded and best-effort: a tool that will not return cannot be waited for, so a server that runs out of time exits with turns open and §4.4.4 repairs them - seeing `"interrupted"` after a restart now means the drain did not finish. No error code is added: a call arriving mid-drain would need one, and by §4.5 that is a change both lanes land together, so the carrier closes instead - a state every client already handles because a network does it unasked. |
+| 1.0 | Says which calls a client may repeat (§4.4.12). A carrier drops a connection or an answer is lost, and the client cannot tell whether the call ran - every RPC contract meets this, and one that does not say so leaves each integrator to guess. The reads are free; `session.create`, `agent.interrupt`, `approval.set` and `session.unsubscribe` are safe because repeating them lands in the same place, which is stated per call rather than asserted in general. Three are not safe and now carry the reason and the alternative: `agent.prompt` runs a second turn, `agent.steer` delivers twice, `session.subscribe` leaks the first subscription. `agent.prompt` is the one that costs money, and the sharp edge is worth spelling out - `SessionBusy` only guards the window where the first call is still running, which is exactly the window a client that gave up waiting has already left, so a retry after completion starts a genuine second turn. The alternative needs nothing new: `agent.status` and `session.events` from the last seq seen say whether a turn ran and what it produced, because the journal is the record rather than a copy of it (§7.2). An idempotency key would remove the problem and is deliberately not added - `AgentPromptParams` is a type the presentation lane constructs, so by §5 it is a change both lanes land together, and the read-then-decide route is what a client should do anyway before repeating work a user paid for. A second `rpc.hello` on one connection is settled too: accepted, because the handshake is connection state and re-greeting says the same thing twice. No type changes. |
+| 1.0 | States who may write a journal (§4.4.13): one writer at a time, any number of readers. The rule is written down because its absence is silent and the damage is delayed. A `seq` is assigned from the length the writing process holds in memory, so two processes appending to one file both write `seq` 41; both succeed, both fsync, both callers are told the event is durable, and the failure appears later and elsewhere as `LogCorrupt` on a line neither of them wrote. §4.4.6 already half-said this - "a source *this process* holds open cannot reach that state" - and now says why no other process can put it there either. A second writer is refused at `session.create` with `Io` carrying the path, before any turn starts, rather than at some later replay. Reading stays unrestricted and is safe by construction: a journal is append-only, a prefix is stable however busy its writer is, and a half-written last line is the crash tail a reader already drops - so `session.list`, `session.events` and `session.fork` work across processes and only writing is exclusive. A dedicated error code would let a surface say "another tetanus is using this session" rather than "this path could not be opened", and is deferred for §4.5's reason: a code is a change both lanes land together. No type changes; the engine slice that takes the lock lands separately. |
+| 1.0 | Says how the two push kinds are ordered against each other (§4.6). `agent/status running` arrives before any `session/event` of its turn and `idle` after that turn's `turn/end`, which a surface may rely on: told `idle` while events were still arriving it would stop its spinner and keep drawing, and told `running` after `turn/start` it would draw a turn's first events while showing an idle session. Three more facts that were true and unwritten. `idle` means the journal is flushed, so "watch the stream, then open the file" is correct rather than a race. `idle` is pushed however the turn ended - natural, cancelled, guarded or failed - so a surface cannot be left showing `running` for a session that stopped; a failed turn pushes it and then the call answers its error. And ordering between a push and a call's *reply* is explicitly not guaranteed, because they travel by different paths and a carrier may interleave them - the reply is the authoritative summary, the pushes are the stream, and a surface that infers anything from their relative arrival is relying on something no carrier promises. No type changes; every claim describes behaviour the engine already has, and §6 now names cases for it. |
+| 1.0 | Corrects what this document said about time (§4.3). It claimed "elapsed time is derivable from `SessionEvent.time`, and `duration_ms` is only the engine saying it once", and both halves were wrong. `time` is wall clock from the writing machine and nothing makes it monotonic within a journal: a clock correction moves it backwards mid-session, a journal read elsewhere was stamped by a clock that never agreed, and - the case that is not hypothetical - **every forked journal is non-monotonic by construction**, because §4.4.6 copies the parent's events as they stand while seq 0 is the child's own header, written later. So a surface orders, bisects and pages by `seq`, and `time` is for telling a reader when something happened and for nothing that has to be correct. `duration_ms` is measured on a monotonic clock rather than derived, which makes it the answer to how long a turn took and the difference of two stamps merely an estimate that is usually close and occasionally negative. No type changes and no behaviour change: this describes what the engine has always done and withdraws a claim the document should not have made. |
+| 1.0 | Says what an empty prompt is (§4.4.2): `InvalidParams` naming `content`, refused before anything is spent. Today nothing checks it, so `agent.prompt` with an empty string opens a turn, writes a `user/message` saying nothing to the journal for ever, and spends a provider call to be told the obvious. Whitespace counts as empty, which is not pedantry but the same defect the credential rule already fixed once: a value of nothing but spaces reads as present to every check that does not trim, and then buys a real request in order to be refused by somebody else. The section also draws a line this contract had left implicit, because the two cases look alike from outside. A *parameter* that is wrong is refused at the boundary and leaves no trace - the request never became work. A *decision* taken once a turn is under way is recorded even when it ends the turn at once, which is why a listener rejecting the first claim still closes a durable turn that spent no step: something happened, and the journal is the record of what happened. No new code, no type changes; the engine slice that adds the check lands separately. |
+| 1.0 | Bounds a frame (§4.1), and publishes the bound as `methods::MAX_FRAME_BYTES`. The carriers disagreed under the same abuse and nothing said they should not: a WebSocket library refuses an over-long message by default, while the stdio line reader grows its buffer until the process dies, so "one contract, three carriers" was untrue for a peer that sends bytes and no newline. Inbound, an over-long frame is refused with `ParseError` and `id: null` - the answer §4.1 already gives a frame it cannot make sense of, and a frame nobody finished sending is one of those. Outbound, `session.events` stops filling a page when the next event would cross the bound, which makes explicit something that was already true of the page-maximum clamp and now has a second cause: **`eof` says whether a caller is done and a short page never does**. A pager that stopped on a short page would silently truncate a transcript, and only for the sessions with the most in them. The write side is what keeps the bound from ever binding: the engine does not write a durable event larger than a frame, so a journal never holds something the wire cannot carry, and a page of one event always fits - bounding a tool's output where it is captured has an obvious answer, while finding out at delivery time that a journal contains an unsendable event has none. One added constant; no type changes; the carrier and engine slices that enforce it land separately. |
+| 1.0 | Versions the journal's envelope (§4.3.1, §4.3.3). §4.3.2 already says how the durable *vocabulary* grows - a new `type` is a free string and a surface renders what it does not know - and that covers everything said inside an event and nothing about the shape around it. The two are different problems: an unknown type is a line a reader skips and still understands the rest of the journal, while a changed envelope is a journal it cannot parse at all, or worse can parse into something that means something else. `session/start.format` now names the envelope, absent reading as format 1 so nothing on disk becomes unreadable for lacking it. It is on the header rather than on every line because a journal is the largest file this harness writes and a per-event version would cost bytes forever to answer a question once, while every path that opens a journal reads the header first anyway. A format a reader does not know is refused rather than guessed at, because guessing is how a reader turns a journal it cannot understand into a history that looks fine and is not; the refusal is `LogCorrupt` naming line 0, which is not the right code and is the best available one. The section also records that four codes are now deferred for one reason - an exhaustive `ErrorCode` match in the presentation lane - and that they should land as a single change rather than four separate breaks of that lane's build. No type changes here; the engine slice that writes `format` lands separately. |
+| 1.0 | Says what happens when a journal is reopened by a build that did not write it (§4.4.4.1, §4.5). A resumed session runs under its *header* - `provider`, `model`, `max_steps` from `session/start` - because the history it carries was produced under them, so a deployment that raises `agent.max_steps` does not silently change how an old session behaves when someone reopens it. That is the rule §4.4.6 already states for a fork, and resuming is the same question asked far more often, so it stops being something to infer from the fork case. Opening a journal never needs its route and running a turn does: `session.create`, `session.list`, `session.events` and `session.fork` all work on a journal whose provider this build lacks, because refusing to show someone their own history for want of an adapter is the wrong trade. `agent.prompt` is where the refusal belongs, and it is `InvalidParams` carrying `field: "provider"` *and* the provider - one more key than §4.5's table described, now written down, because naming the field alone leaves a reader to open the journal to find out which provider it meant. Substituting a working provider would be worse than refusing: the conversation was produced by one model and would be continued by another with nothing in the journal saying so, and §4.4.6 already declines to offer the same history under another model. No type changes and no behaviour change - all of this describes what the engine already does. |
+| 1.0 | Says what machine-readable output does when a run fails (§4.7). A failure never appears on stdout: `--json` stdout carries results and streamed events and nothing else, so a consumer parsing it never has to tell one shape from another, and the failure goes to stderr as the §4.5 error object and to that section's exit status. The half worth stating plainly is the trap, because the obvious reading of the existing paragraph is wrong. It said a script "reads lines until the stream ends and treats the last one as the answer" - but a streaming subcommand whose turn fails partway has already printed events and never printed a result line, so the last line is an *event*, and a script following that rule would report a chunk of a model's reply as the outcome of the run. The rule is now explicit: a non-zero status means there is no answer on stdout whatever is on it, and a zero status means the last line is the answer. That keeps both consumers simple - one reads the last line and checks the status, the other reads every line as it arrives - and neither has to parse stderr, while a script that does want the structured failure finds it there in one object rather than mixed into its data. No type changes; the printing is the presentation lane's, as §4.7 already says, and this is the contract it prints to. |
+| 1.0 | Makes "byte-identical" true of something (§4.3, §4.7, §7.6). The document says it twice - a `SessionEvent` is byte-identical to one line of the JSONL journal, and dropping the push envelope makes a `--json` stream byte-identical to the journal on disk - and nothing anywhere checked it. §7.6 said TC-PROTO-5 did, and that was an overclaim: the case lives in `crates/protocol`, which deliberately does not depend on the crate owning the journal type, so it compares the boundary type against a hand-written literal - a copy of the journal's shape that goes stale precisely when the shape changes - and it compares through `serde_json::to_value`, which is structural and blind to field order. TC-CONTRACT-5 now holds the two together in `crates/engine`, where both types exist, by serializing a real journal line and the event `session.events` serves for it and comparing the two strings. The hole was real rather than theoretical: reordering two fields on the boundary type leaves all twenty-four cases in `crates/protocol` green and fails only the new one. No type changes and no behaviour change; §7.6's description of what its own case proves is corrected. |
+| 1.0 | No boundary change. Records in §6 that §4.4.5's qualifier is now exercised: the promise is no gap and no repeat "whatever is appended while the replay runs", and TC-SUB-1 and TC-SUB-2 append before a subscription or after one, never during - so the mechanism that exists for the qualifier, the engine's held buffer and its watermark, had no case reaching it. TC-SUB-10 makes the race rather than hoping for it: a writer spanning the replay window, a sink slow enough for the window to be wide, and a check that the overlap actually happened, so a run that quietly stopped being concurrent fails instead of passing. A first attempt without the widening caught a dropped-held-event mutation one run in three, which is close to useless as a gate and looks like coverage - the case now catches it five times in five. One mutation it does not catch is named in the case rather than left implied: removing the de-duplication of held events against the replay needs an append landing between the listener being registered and the log being snapshotted, two statements apart, which no test enters reliably. |
+| 1.0 | Publishes `methods::ALL` (§4.2), the method table as a value, and makes §4.2's completeness claims checkable by a machine. Both promises in that section are about *every* call - a served one answers, a reserved one answers `NotImplemented` rather than `MethodNotFound` - and both were held by cases that name methods one at a time: TC-ENG-3 for the served ones, TC-RPC-12 for the reserved ones. A routing arm is written by hand, so the arm that gets forgotten is the one no case names, and a hand-written case has exactly the same hole one level up. TC-RPC-13 iterates the list instead: a method added to the contract and wired into the codec's match nowhere now fails at once, naming itself, where previously every suite stayed green. That is not hypothetical - two methods have been added to this contract recently and each needed a routing arm written by hand. The single mistake this cannot catch is adding a constant without adding it to `ALL`, which is why the two sit adjacent and the list says so. One added constant, no type changes, no behaviour change. |
+| 1.0 | No boundary change. Records in §6 that §4.2's hangup promise is plural and is now checked as such. It says a carrier that drops a connection unsubscribes its sinks, and TC-STDIO-4 and TC-WS-4 each hold one subscription - the case a bug is least likely to reach, since a `close` that handled only the first, or stopped at the first failure, passes it while leaking every other subscription on the connection. TC-WS-8 takes three, has the peer close one itself, then hangs up, and asserts all three are closed exactly once: the two halves of the bookkeeping - forgetting an id the peer unsubscribed, forgetting the rest at hangup - shown agreeing rather than each alone. The mutation is the shape of the bug: closing only the first subscription fails the new case and leaves the old one green. The test double also had to be fixed first, because it answered `sub-1` to every subscribe, which would have made any case about several subscriptions agree with itself whatever the carrier did. §4.2's wording now says "every one it holds" and why it matters. |
+| 1.0 | Corrects §7.1.1 and adds §4.7.1. §7.1.1 justified `EventSink` by saying the alternative left the renderer importing `tetanus-core` and `tetanus-turn`, which reads as a claim that it no longer does - and `crates/cli` imports both. The claim was narrower than its wording: `EventSink` removed the need to reach past the contract *to watch a session*, and it never removed those crates from that lane's dependency list, because §4.7's ownership table gives it the wiring. The boundary is about what a surface does with a type, not which crate it imports, and the wording now says so. §4.7.1 then names the three rules no conformance case can hold - the rest-pattern rule, the ban on matching engine enums, and using `convert` rather than a private mapping - because each is a property of the consuming lane's source rather than of any value crossing the boundary. A promise described as a check is worse than one described as a promise, since only the second gets audited. It records that two of the three are not kept today: `crates/cli` matches `tetanus_turn::StopReason` and `tetanus_session::SessionError` variants. Neither is this lane's to fix, and neither is urgent - an engine enum has no fallback, so the failure is a loud build break rather than a silent wrong answer - but leaving them unnamed would let the next reader assume the rules are kept because nothing says otherwise. No type changes. |
+| 1.0 | States the trust boundary (§4.1.2), which this document had never mentioned. A peer that can open a connection can do everything the engine can do - start turns that run tools and spend money, read every journal in the server's directory, read the resolved configuration - because there is no per-call authorization and none is planned. That is defensible for a personal harness and only defensible if what decides who may connect is taken seriously, and today nothing does: the WebSocket carrier accepts any TCP connection and hands it the whole `Engine`. In-process and stdio inherit a boundary the operating system already drew; WebSocket draws its own. Two reasons it must. Loopback is not a trust boundary on a shared machine. And the same-origin policy does not restrict WebSocket connections, so a page the user is merely visiting can open `ws://127.0.0.1:<port>` and drive the agent - the fire UI is a web surface, so this carrier exists to be driven by a browser and the attack surface is real rather than theoretical. So it authenticates with a secret established out of band and refuses before the upgrade, which is why no §4.5 code is added: an unauthenticated peer never reaches the JSON-RPC layer, and the frame that would carry an error is never sent. It also checks `Origin` where a handshake carries one. The secret cannot travel in a header, because a browser's WebSocket API cannot set them - it goes in the URL or `Sec-WebSocket-Protocol`, and a URL is logged by more things than a header, which is a cost to weigh rather than a reason to pretend otherwise. No type changes; the carrier slice that enforces this lands separately, and until it does the carrier should be treated as trusting whoever reaches the port. |
+| 1.0 | Records a fourth carrier in §4.1 and widens §4.7's `tetanus serve` row. The HTTP carrier - `POST /api/<method>`, params as the request body, the answer as the response body - was built for the browser panel and for clients that cannot hold a connection open, and it moves the same frames through the same codec, so no payload, method or code changes and `crates/protocol` is untouched. Three properties are written down because they are decisions rather than mechanics: it has no push, so a `session.subscribe` over it has nowhere to deliver and a surface that wants events uses the socket served on the same address; every call must declare `application/json`, refused with 415 before dispatch, because that is what forces a cross-site attempt through a preflight the origin rules refuse; and an HTTP status describes the carrier alone, with a failed call answering 200 and the contract's error object, so that "the model refused" and "the server is broken" cannot be confused. §4.1.2's posture applies to it unchanged and is enforced before the JSON-RPC layer, with the token in the query or as a bearer header. §7.1.1's title and the two "three carriers" sentences are corrected to say which carriers can push. |
+| 1.0 | Records the permission gate the engine now runs, and the two knobs behind it. §4.3.1 gains `TOOL_NOT_PERMITTED` on the `tool/result` of a call a decision refused before it ran - a value joining a vocabulary §4.3.2 states is open, not a new mechanism. §4.4.7 says where the gate sits, which it had left unsaid: the question is put after `tools/pre-execute` and before `tools/execute`, so what is decided is the call that would actually run, and a denial skips `tools/execute` and `tools/post-execute` both. §4.3.2 gains `permission/preset` and `fs/mode`, the durable form of the pair a permission preset bundles, with the intent recorded separately because two presets can bundle the same pair and the answer a surface shows back should be the words the person used; `question/asked` and `question/answered` are noted as written, with the payloads that table already fixed. Nothing else is proposed: no third `ApprovalPolicy` word, because it would put a bypass of the gate inside the enum the gate reads; no `needs_approval` on `ToolDescriptor`, for §5's reason; and `ui/approve` and `ui/ask` stay reserved. No wire type changes and no version bump. |
+| 1.0 | Publishes five durable types the engine writes (§4.3.1, §4.3.2) and the two rules a reader of them needs (§4.4.2.1, §4.4.2.2). `request/context` is the request envelope - route, context window, and what the system prompt and the tool catalog cost - written after the prompt is assembled and before `agent/request`, because a listener that rewrites the request must not change what the journal already said the request was, and before the provider is called at all, so a turn a provider failure ended still says what it tried to send. It is the anchor the three token projections had been blocked on. The four `compaction/*` types carry the transaction, and their contractual rule is adjacency: the next surface event after a `summary` or a `prune` is the replacement for the range it shadows, and nothing may be appended between them, because that is what lets a bounded fold price a replacement with one running total and one pending claim instead of a price per message. Two consequences are stated for readers: a record followed by anything else shadows nothing, and a replacement with no adjacent record folds neutrally rather than failing, so a journal written before the protocol stays readable. §4.7 gains `sessions.backend`, resolved at boot, with `session.create` refusing a `path` under `sqlite`. Additive by §4.3.2's own mechanism; no struct, method, code or existing payload changes. |
+| 1.0 | `session.create` gains an optional `preset`, naming the agent a session is composed from (§4.4.3.1). Additive; the field is absent on every request written before it, and a server that does not know the field ignores it per §7.5. An explicit `provider`, `model` or `max_steps` wins over what the preset says, because a caller that named both asked for that model on that agent. The refusal for an unknown id carries the known ids so a surface can offer them rather than making the user guess. The choice is durable and made once: the id is written into `session/start` and a fork inherits it, so a document edited afterwards does not move a session that is already composed. `SessionInfo` is unchanged; a surface that needs the preset of a cold session reads the header. |
+| 1.0 | Names, in a new §5.1, the boundary types that are deliberately not here yet: `SessionView` and `WorkspaceView`, the folded feature state a panel reads. They live in `crates/features` and nothing on this boundary carries them, so this records what publishing them costs - two idempotent read calls in §4.2, the structs in `crates/protocol::types`, and a push only if polling has been measured and found wanting - and settles the two properties that make the eventual move an address change and nothing else: a view carries no bytes, and it says how far it folded. Written down now because a type the presentation lane constructs lands when both lanes take it, and the other lane should be able to say what it needs before that is settled. No type changes. |
+| 1.0 | Publishes the provider's own id for a refused request in the two places a refusal is reported (§4.5, §4.3.2): `request_id` on `ProviderError.data` when the provider named one, and on the `llm/retry` record for a refusal a policy recovered from. Additive and minor by §5 - both are `serde_json` payloads, no Rust type in `crates/protocol` changes, no code is added and nothing is renamed. The id is `data` and not part of the message because §4.5 already lets a surface replace the message with its own wording keyed on the code, so a fact carried in the sentence is a fact a conforming surface may delete - and this is the one fact about a refusal nobody can reconstruct, since the status is on the response and the words are in the body but the id exists only in the provider's logs. It is also the only thing a user can quote to a provider's support, which the harness discarded until now. The wait a throttled provider asks for stays unpublished, and the contrast is the argument: a surface can say "retrying" from what it already has. Two spellings on purpose - the durable record carries `null` for a provider that named none, following `max_retries`, and the error object omits the key, following `status`, because one is folded by a reader of many records and the other is rendered as one failure. Rendering the id is the presentation lane's change and is not asked for here. |
+| 1.0 | Publishes the two `hook/*` journal types (§4.3.1, §4.3.2), written when an out-of-process hook runs: `hook/invoked` and `hook/result`, turn-enclosed, log-only and correlated by `handlerId`, so that "why was my tool call denied" has an answer on the journal. Nothing in `crates/protocol` changes - these are journal types the contract describes by name and payload - and nothing in a turn reads them back. Three fields are omitted rather than null, each because absent and empty are different facts: `matcher` for a match-all hook, `exitCode` for a hook that could not be run, and `stderrSummary` for one that printed nothing. `decision` is always present, so a reader never has to infer "nothing happened" from a missing field. Additive under all four §5 rules: no existing payload changes, no enum gains a variant, an unknown journal type is already rendered raw, and nothing destructures these because nothing produced them until now. |
+| 1.0 | Publishes the six durable types the built-in feature tools write (§4.3.2): `todo/write`, `goal/changed`, `plan/mode`, `plan/presented`, `feedback/recorded` and `attachment/added`. The presentation lane had been folding them out of prose and the Rust, which is how the two shapes now stated here cost it a second reading: `goal/changed` writes `goal` on a create or an update and `cleared` on a clear, with no `goal` key at all, because the tombstone is what lets "no goal yet" and "the goal was put down" be told apart; and `feedback/recorded` is the entry itself where its neighbours all wrap. Staged rather than parsed, by §4.3.2's two-step rule. §5.1 records that lane's reply to the deferred view types, which changes the order they should land in: `workspace.view` first, because `session.view` has a working alternative - subscribe from seq 0 and re-fold - and a browser cannot read the project's directory at all. It also answers the push question with a measurement rather than a guess: re-folding six panels over a whole journal on every open is not perceptible, so a push is a mechanism nothing is waiting on. |
+| 1.0 | Records, in a new §4.3.4, that a `terminal_send` answering a password prompt puts the credential on the journal in plain text, and that every surface drawing tool calls draws it. No change is made to how it is drawn, deliberately: while the journal holds the credential, drawing it faithfully is the accurate rendering, and hiding it on screen would make a reader believe something is protected that is written in full a directory away. The two fixes that would work are named with what each costs - an optional `secret: true` honoured at record time, or redaction the engine decides from the `[wait: stdin_read]` sequence - and both belong to whoever owns `crates/exec` and this vocabulary. Until one lands the document takes the honest floor and says the thing nothing anywhere said before: a terminal session's journal is to be treated as a credential store. |
+| 1.0 | Answers §4.3.4's question rather than leaving it open: a tool declares what the journal may keep of one call's arguments (`Tool::recorded`), asked at record time, with the tool still receiving what the model sent. `terminal_send` withholds `text` on `secret: true` and `shell`/`shell_run` withhold `command` on the same flag, because a command line carries credentials just as often; a `sudo`-style backstop withholds a send into a terminal whose last output line asked for a password whether or not the flag was set; and the two compose by union, never override, which is the direction §4.3 already fixes for its own pair - a rule that could un-redact would make adding one a way to start publishing. Two alternatives are recorded as measured dead: the `[wait: stdin_read]` sequence has its premise inverted here, and `ECHO`-off is pinned to a constant by readline and by `stty -echo`. The withheld value is `types::REDACTED`, and §4.3's warning about the sentinel is narrowed rather than repeated - in a tool argument the sentinel is minted by the engine, so the residual ambiguity is against a model that typed the string itself, which no surface behaviour turns on. It appears in three places, `tool/call`, `assistant/message` and `assistant/chunk`, which is where a first fix leaked. No type changes: the flag is a tool-side declaration and the sentinel is a string this document already publishes. |
+| 1.0 | No boundary change. Folds every note under `docs/contract-updates/` into this document and deletes them: the notes existed because lanes in flight collide on this file, and a note nobody has folded is a contract change nobody can read here. |

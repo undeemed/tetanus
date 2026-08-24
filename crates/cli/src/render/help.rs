@@ -164,7 +164,20 @@ const CHAT_EXAMPLES: &[(&str, &str)] = &[
 /// command, indented, and folded to what is left: two lines that say which is
 /// which, rather than one wrapped into nonsense.
 fn examples(theme: &Theme, width: usize, rows: &[(&str, &str)]) -> String {
-    let heading = theme.paint(Role::Heading, "Examples:");
+    columns(theme, width, "Examples:", rows)
+}
+
+/// A headed block of two columns, stacked where the window has no room for
+/// the second one.
+///
+/// The examples and the environment are the same shape - a thing to type, and
+/// what it does - and they were not composed the same way. The environment
+/// block was written out with its own spaces, so a narrow window handed it to
+/// clap, which folds a row it is given at column zero: `--adapter deepseek`
+/// arrived under `DEEPSEEK_API_KEY` in the column where a variable's name
+/// goes, and reads as another variable.
+fn columns(theme: &Theme, width: usize, heading: &str, rows: &[(&str, &str)]) -> String {
+    let heading = theme.paint(Role::Heading, heading);
     // Two spaces in, and two clear of the widest command, which is where a
     // description starts when there is room for one beside it.
     let column = 2 + rows.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0) + 2;
@@ -177,7 +190,14 @@ fn examples(theme: &Theme, width: usize, rows: &[(&str, &str)]) -> String {
         }
     } else {
         for (command, what) in rows {
-            lines.push(format!("  {command}"));
+            // The command folds too, and under itself. A command wider than
+            // the window is handed to clap whole otherwise, and clap folds it
+            // at column zero, where the rest of `tetanus run -a deepseek -m
+            // deepseek-v4-pro` starts a line that reads as another example.
+            let mut folded = wrap(command, width.saturating_sub(2).max(1)).into_iter();
+            let first = folded.next().unwrap_or_default();
+            lines.push(format!("  {first}"));
+            lines.extend(folded.map(|line| format!("    {line}")));
             lines.extend(
                 wrap(what, width.saturating_sub(STACKED).max(1))
                     .into_iter()
@@ -196,20 +216,41 @@ const STACKED: usize = 6;
 /// The block under the root help: what to type, and what the environment
 /// changes. Upstream `dsh` closes its help with examples too, and it is the
 /// fastest part of a help page to read.
+///
+/// Every variable this binary reads is listed, and the list is asserted
+/// against the resolver that reads them: a user whose output came out plain,
+/// or in ASCII, or the wrong width, comes to this page to find out which
+/// variable did it, and one that is missing sends them to the source.
 pub fn root_epilogue(theme: &Theme, width: usize) -> String {
-    let environment = theme.paint(Role::Heading, "Environment:");
     format!(
-        "\
-{}
-
-{environment}
-  DEEPSEEK_API_KEY  credential for `--adapter deepseek`
-  NO_COLOR          set to anything non-empty for plain output
-  CLICOLOR_FORCE    set to keep colour through a pipe
-  COLUMNS           override the detected line width",
-        examples(theme, width, ROOT_EXAMPLES)
+        "{}\n\n{}",
+        examples(theme, width, ROOT_EXAMPLES),
+        columns(theme, width, "Environment:", ENVIRONMENT),
     )
 }
+
+/// Every variable this binary reads, and what it changes.
+///
+/// The list is the resolver's, one row per variable `Env::from_process` and
+/// the credential lookup ask for. A user whose output came out plain, or in
+/// ASCII, or the wrong width, reads this page to find out which variable did
+/// it, and one that is missing sends them to the source instead.
+const ENVIRONMENT: &[(&str, &str)] = &[
+    (
+        "TETANUS_HOME",
+        "where the settings document lives, unless `--settings` says",
+    ),
+    ("DEEPSEEK_API_KEY", "credential for `--adapter deepseek`"),
+    ("NO_COLOR", "set to anything non-empty for plain output"),
+    ("CLICOLOR_FORCE", "set to keep colour through a pipe"),
+    ("CLICOLOR", "set to 0 for plain output"),
+    ("TERM", "`dumb`, or unset: no colour, and ASCII glyphs"),
+    (
+        "LC_ALL, LC_CTYPE, LANG",
+        "the first one set picks the glyphs; non-UTF-8 is ASCII",
+    ),
+    ("COLUMNS", "override the detected line width"),
+];
 
 /// The block under `tetanus chat --help`, and what a conversation is.
 pub fn chat_epilogue(theme: &Theme, width: usize) -> String {

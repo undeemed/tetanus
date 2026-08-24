@@ -53,27 +53,83 @@ The one live case is the position of `system-prompt/assemble`
 
 ```text
 crates/cli      tetanus-hardness   the `tetanus` binary
+  -> crates/toolset  tetanus-toolset   the one assembly of the tools this build offers
+       -> crates/fs, crates/exec, crates/features, crates/mcp, crates/web
   -> crates/turn     tetanus-turn      turn engine, events, LLM seam, tools, boot, trace
-       -> crates/session  tetanus-session   durable event vocabulary + JSONL journal
+       -> crates/session  tetanus-session   durable event vocabulary, JSONL and SQLite journals, projections
        -> crates/core     tetanus-core      registry, services, event bus, effects
   -> crates/config   tetanus-config    layered config with provenance
+  -> crates/fs       tetanus-fs        filesystem service, its two backends, file tools, presets
+  -> crates/features tetanus-features  the built-in feature tools over the session journal
   -> crates/engine   tetanus-engine    the `Engine` implementation behind the contract
+  -> crates/exec     tetanus-exec      subprocess and piped seams, shell backends, persistent shells
+                                       and terminals, the shell and terminal tools
+       -> crates/sandbox  tetanus-sandbox   the sandbox policy and the Landlock boundary
   -> crates/rpc      tetanus-rpc       JSON-RPC codec and carriers, hosted by `tetanus serve`
   -> crates/ui       tetanus-ui        colour policy, theme, width, redrawable block, scrollable page,
                                        full-screen view loop
 
+crates/mcp        tetanus-mcp        an MCP server on stdio: client, tool bridge, reconnect supervisor
+crates/web        tetanus-web        web_fetch and web_search over one transport seam
+
 crates/protocol   tetanus-protocol   the engine/presentation contract (§4.8)
+
+crates/query      tetanus-query      a session journal read as data (§4.13)
+crates/sdk        tetanus-sdk        the in-process client and the request surface as a catalog (§4.13)
+crates/acp        tetanus-acp        the Agent Client Protocol, both halves, over the rpc carrier (§4.13)
 ```
+
+`tetanus-toolset` is the one place that says which tools this build offers. Every tool crate is a
+named *source* in `sources()` - one line each - and the binary composes that set for both the
+catalogue `tetanus tools` prints and the registry each session's turns dispatch from, so the two
+cannot disagree. A duplicate name across two sources is refused at composition naming both crates,
+rather than resolved by registration order, because the model would otherwise be offered one tool's
+schema and run another's body. A deployment selects by source (`tools.sources`), since a crate is
+what lands and what a user recognises.
+
+It is the *binary's* assembly and not the engine's on purpose. `tetanus-engine` keeps an offline
+minimum - the `builtin` source's tools - because it has no session to key the file tools'
+observations on or to fold the feature tools over, and because depending on the assembly would give
+it a dependency on every tool crate, which is the line the paragraph below draws. A case holds the
+engine's default against `builtin`, so neither may grow a private expression of the other's set.
+
+`tetanus-mcp` and `tetanus-web` are the two crates that leave the machine, and both are composed
+into a harness rather than depended on by one: each contributes `tetanus_turn::tools::Tool`
+implementations and reads its own section of the settings document. Both are declared as sources
+and contribute nothing until the document names them. Everything either of them
+decides sits above a seam - a `Link` for a server on a pipe, an `HttpTransport` for a request - so
+the whole policy is asserted with no socket in the suite, and a failure out there is a failed tool
+call carrying a class rather than a turn that ended.
 
 `tetanus-core` depends on nothing in the workspace.
 `tetanus-config` depends on no other workspace crate; the CLI and the engine both read it.
 It holds one document per layer rather than one folded map, because a layer that is re-read can
 *drop* a key and the value under it has to come back; a folded map has nothing to come back to
 ([crates/config/src/lib.rs](crates/config/src/lib.rs)).
+`tetanus-fs` depends on `tetanus-turn` and nothing depends on it: it is a *consumer* of the tool seam,
+not a layer under it, which is what keeps a harness composed without file tools a harness that still
+builds and runs.
+It reuses the containment walk `tetanus-turn` already carries rather than growing a second one
+([crates/fs/src/local.rs](crates/fs/src/local.rs)), so the fenced and unfenced backends differ only in
+which root a path is judged against.
+`tetanus-features` depends on `tetanus-turn` and nothing depends on it, so a harness composed
+without the feature tools still builds and runs.
+Every module in it has one shape - a durable event type, a fold over the log, a tool that appends and
+answers - because state a replay cannot reproduce is state the harness would lose, and a cache beside
+the journal is a second copy that can disagree with it
+([crates/features/src/lib.rs](crates/features/src/lib.rs)).
+A surface reads that state through one module - [crates/features/src/view.rs](crates/features/src/view.rs) -
+rather than through the folds themselves, so the vocabulary a panel is written against is a published
+shape with stable field names instead of this crate's own types.
 `tetanus-protocol` deliberately depends on no engine crate, so refactoring the engine cannot break a
 surface.
 `tetanus-ui` holds the same line from the other side: it depends on no engine crate and holds no
 engine type, so it formats what it is given and the two lanes stay independently reviewable.
+`tetanus-query`, `tetanus-sdk` and `tetanus-acp` sit *above* the contract rather than inside it, and
+nothing in the harness depends on them: they are how something that is not the terminal drives or
+reads a session, so a build without them is the same harness with fewer front doors.
+`tetanus-acp` brings no carrier of its own - it is a `FrameHandler` on the one `tetanus-rpc` already
+serves.
 Nothing depends on `tetanus-hardness`.
 
 ### 4.3 Logical view - composition primitives
@@ -167,11 +223,95 @@ payload, and `sourceEventSeqs` on the surface events that cite their inputs.
 `replay()` reads a journal back and verifies `seq` contiguity: a gap means the file is not a faithful
 copy of the log that produced it.
 
+`SessionLog` is a seam and not a description of that one writer.
+`SqliteSessionStore` ([crates/session/src/sqlite.rs](crates/session/src/sqlite.rs)) keeps every
+session of a deployment in one database behind the same trait, and `sessions.backend` picks between
+them at boot.
+Everything the JSONL journal promises is promised there, including per-append durability: each
+append is its own commit under `synchronous = FULL`, because a backend a caller cannot tell apart
+must not quietly promise less.
+`import_jsonl` and `export_jsonl` move a session between the two, losslessly in both directions -
+both writers serialize the same `SessionEvent`, so the round trip is byte-identical.
+
 Model history is *derived* from the log by `derive_messages`
 ([crates/turn/src/log.rs](crates/turn/src/log.rs)), never stored beside it.
 Model-visible means logged.
+The converse is not true, and the `approval/*` events are the case that shows it: they are durable
+and replayable and derive to nothing, because what the model learns about a denial is the
+`tool/result` it gets, not the audit of how that was decided.
+
+That audit is the decision seam ([crates/turn/src/approval.rs](crates/turn/src/approval.rs)), which
+decides whether one tool call may run.
+It is worth reading for one structural reason: the session's policy is a *fold over its own journal*
+rather than a field anywhere, so a resumed session is under the policy it was under with nothing to
+replay but the log.
+The seam fails closed - a grant is one specific word from an answerer that ran and returned, and
+every other path denies - and the `never` policy is applied by `request` itself rather than by a
+listener, because a listener registered later could be ordered ahead of a gate listener and answer
+first.
+It is also the one place `waterfall` is contained rather than loud: a question that cannot be
+answered has a defined answer, so a panicking answerer denies its call instead of failing the turn.
+
+The turn engine applies that seam between `tools/pre-execute` and the dispatch: a tool says whether
+one pending call needs deciding, and a call nobody granted is never dispatched at all - the step gets
+a `tool/result` with `ok: false` and a `code`, which is what §4.4.7 of the contract means by a denial
+being a result rather than a failure.
+After `tools/pre-execute`, deliberately, so that what is decided is what would actually run.
+Asking the user something ([crates/turn/src/questions.rs](crates/turn/src/questions.rs)) is the same
+shape for a different question, down to the durable pair and the enclosure rule, and differs in what
+counts as an answer: every question covered, every selection a label that was offered.
+Both are unbounded waits with exactly one way out, which is why an interrupt withdraws an outstanding
+question rather than only stopping the turn at its next step boundary.
 Raw `assistant/chunk` events stay on the log so a UI can replay a stream exactly as it arrived, while
 the `assistant/message` that cites them is what enters history.
+
+Derivation is also where compaction happens
+([crates/turn/src/compaction.rs](crates/turn/src/compaction.rs)), and that is the whole design.
+A journal is append-only, so a conversation that has outgrown its context window cannot have its
+older span deleted or rewritten.
+Instead a `compaction/summary` record names the events it shadows and the surface event immediately
+after it stands in their place; `compaction::surface` applies that rule wherever history is derived.
+A replay therefore reproduces the compacted history from the same records rather than from a second
+stored copy that could disagree with them.
+The adjacency of a record and its replacement is contractual rather than tidy: it is what lets a
+consumer with bounded state price a replacement without keeping a price per message.
+A cut never separates a tool call from its result, judged over the current surface rather than over
+step markers, because compaction moves surface positions and step markers do not follow.
+
+The folds a reader wants over that log are projections
+([crates/session/src/projection.rs](crates/session/src/projection.rs)): a named `init`/`apply`/`view`
+per domain, driven forward as events commit.
+A unit contributes mathematics and nothing else - no clock, no subscription, JSON state - which is
+what lets a value be checkpointed at all, since anything a projection knows could have been
+recomputed rather than remembered.
+The two that price nothing are [crates/session/src/units.rs](crates/session/src/units.rs), so a
+listing that wants a title need not link a provider adapter; the three that do are
+[crates/turn/src/projections.rs](crates/turn/src/projections.rs), beside the estimator they share.
+Each step writes a `request/context` record before it dispatches, carrying the route, its window and
+what the system prompt and tool catalog cost, which is what the context breakdown anchors on and
+what lets a turn a provider failure ended still say what it tried to send.
+
+What a run *works out* rather than what happened to it goes in the key-value store
+([crates/core/src/storage.rs](crates/core/src/storage.rs)): declared tables of JSON in one file,
+replaced whole by an atomic rename.
+A projection checkpoint, a computed title and a cache each belong there - reproducible from the log,
+expensive enough to keep, and not facts, so not journal entries.
+A payload too large to carry goes to the spill store
+([crates/core/src/spill.rs](crates/core/src/spill.rs)), which keeps the whole thing in an owner-only
+file and hands the model a bounded preview and a locator. It has two doors, and which one a caller
+uses follows from who holds the bytes: a finished payload is `save`d, while a producer that is
+*dropping* bytes as it goes - `crates/exec` bounding a command's output - `open`s a writer and
+streams into it, because by the time a result exists what it dropped is gone.
+
+A credential goes in neither, and in particular not in the settings document
+([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).
+The document is read into layers, published by `config.dump`, quoted in diagnostics and pasted into
+bug reports; `crates/config/src/secret.rs` exists to redact values that should never have been there.
+The credential store is the process environment over an owner-only file, and its values never enter
+a layer at all, so there is nothing for a surface to forget to redact.
+The environment wins and is visibly read-only: a key supplied at launch is the run's explicit intent
+and nothing in the process can edit it, so a write against a reference it supplies is refused rather
+than accepted into a file that resolution would then ignore.
 
 The other durable record is the settings document: `settings.yaml` (or `.json`) under the harness
 home, which is `$TETANUS_HOME` or `~/.tetanus`
@@ -189,6 +329,35 @@ The retry policy is resolved there too ([crates/engine/src/retry.rs](crates/engi
 under the `llm.retry` keys upstream uses, because the decision and the executor
 ([crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs)) read no settings themselves.
 Which binary calls it, and with which flags, is the presentation lane's wiring.
+
+`tetanus config` is the first of that wiring, and it lives in [crates/cli/src/settings.rs](crates/cli/src/settings.rs) rather than in `main.rs`:
+`main.rs` is the binary's hub, and a command that keeps its body there widens the hub for every other command.
+It reads the document through `boot::document`, settles it through `EngineConfig::from_settings`, and prints the provenance the engine resolved rather than a list of its own -
+so the keys the page shows and the keys a document may set are one list, and a key the engine gains appears without this crate being told.
+Both steps can fail and neither failure is stepped over.
+A document that cannot be read is `Io`, exit 1, and names the path once, because the engine's own sentence already names it.
+A value a key does not take is `InvalidParams`, exit 2, and names the field; its next step names the document rather than `--help`, since nothing in a document is a flag.
+
+Every other subcommand that builds an engine boots the same way, through one reader in `crates/cli/src/main.rs`.
+A subcommand that resolved settings of its own would make `tetanus config` describe a harness the next command does not run.
+Which document that reader opens is settled once for the whole process, before any subcommand starts: `--settings <path>` names it, and without that flag it is `settings.yaml` under the harness home.
+The flag is global, so the same path governs whichever subcommand it was typed at and on whichever side of it, and one answer for the process is what keeps `tetanus config` describing the document the next command will read.
+A document nobody named may be absent, because a first run has none and the answer is then the compiled defaults; a document the user named may not, and a path with nothing there is `Io`, exit 1, reported before the harness has quietly started on those defaults.
+The flags the user typed go on top as the `Flag` layer, which outranks `File`: `--dir` sets `sessions.root`, so it still wins over a document and `config.dump` reports the key as `flag` rather than as `file`.
+A flag that was not passed sets nothing at all, which is what leaves the document able to win - a clap `default_value` on that layer would be a document that could never win, so the flags that override a setting are optional and their defaults are the engine's.
+Whoever set a refused value is who the report is for: a value off a flag reads as any other bad argument, and a value off the document names the document.
+The page itself is the engine's own `config.dump` rather than a copy of the resolved layers, so a key whose name says it holds a credential keeps its row and its layer and loses its value, as section 4.3 of the interface contract requires.
+`tetanus config --dir <path>` asks the question rather than giving an instruction: it lists nothing and opens nothing, and it is how the `flag` layer can be read at all, since a flag is only on the layer of the process it was typed at.
+`tetanus config --defaults` asks the other question a reader has here: not what is set, but what this build settles when nothing is.
+It reads no document at all, so it answers about the build rather than about the machine, and it still answers when the document that would have covered it cannot be read - which is when the question is most often asked.
+A page that is not what the harness will run on has to say so, and it says it on stderr, so the bytes a script reads are the bytes the other page gives it.
+`--dir` with it is a usage error: a flag that overrides a setting and a page that reads no settings are two questions, and answering one while being asked both would print a `flag` row on a page whose whole claim is that nothing was set.
+
+The two subcommands that run turns, `run` and `chat`, take four settings that way: the provider, the model, the step budget, and the root the journal is written under.
+Each has a command default that is not the engine's - `run` falls back to the mock adapter because a first run must need no credential, and `chat` falls back to DeepSeek because a conversation with the mock is a demonstration rather than a use.
+So the compiled default of a key cannot decide between them, and what is read instead is the layer: a key still on the `Default` layer is a key nobody has an opinion about and the command's own fallback stands, while anything above it - a document, an environment, a flag - is somebody's opinion and outranks a default this binary happens to compile in.
+A model nobody set stays unset rather than becoming the engine's compiled one, because that model belongs to the engine's compiled provider and offering it to an adapter that never advertised it would name a model that does not exist; an unset model is the adapter's first catalogue entry.
+A provider name no adapter in this build answers to is refused where the document is named, since clap refuses an unknown `--adapter` and a name that got this far came out of a document or an environment.
 
 The three events that derive a message - `user/message`, `assistant/message`, `tool/result` - are the
 *surface*: the part of the log the model sees.
@@ -213,7 +382,8 @@ Two adapters ship:
 - [crates/turn/src/llm/mock.rs](crates/turn/src/llm/mock.rs) - deterministic and offline. It calls a
   tool on step 1 and answers on step 2, so one offline run covers the tool pipeline and the loop-back.
   Every turn runs that shape, not only the first: it reads this step's own messages, never the whole
-  conversation.
+  conversation. Which tool it calls is the prompt's to choose: a prompt opening with `!` asks for
+  `shell` with the rest as the command, so a build with no key still exercises the process seam.
 - [crates/turn/src/llm/deepseek.rs](crates/turn/src/llm/deepseek.rs) - DeepSeek chat completions
   behind an `SseTransport` seam, so the request body and the stream decoder are tested without
   network. Credentials are referenced by environment variable name; config never carries a literal
@@ -227,6 +397,12 @@ decoded.
 Every failure carries a stable code (`LlmError::code`), and
 [crates/turn/src/llm/retry.rs](crates/turn/src/llm/retry.rs) decides from that code whether another
 attempt is worth making and how long to wait first.
+A refusal also carries the provider's own id for the request it refused, read off the response
+headers (`llm::REQUEST_ID_HEADERS`), because that id exists only in the provider's logs and is the
+one fact about a failure this harness cannot reconstruct from what arrived.
+It travels three ways: to a recovery listener on `RequestFailure`, onto the `llm/retry` record when a
+policy recovered and nobody was told, and into the published error's `data` when the failure reached
+the caller ([docs/interface-contract.md](docs/interface-contract.md) section 4.5).
 The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
 which is what keeps its cases offline and free of a clock.
 
@@ -254,11 +430,71 @@ identified there by the contract calls it makes rather than by what it prints. S
 `tetanus run` shows one turn three ways, and every settled line in all three comes from the same
 `Reader` in [crates/cli/src/render/timeline.rs](crates/cli/src/render/timeline.rs), so a turn watched
 live reads like the same turn replayed tomorrow.
-The default is a block under the shell prompt, redrawn in place by `Screen`.
+The default is a block under the shell prompt, redrawn in place by `Screen`, which holds it to the
+terminal it is drawn on: the last rows of what it was handed, one row kept for the prompt the
+cursor sits on.
+A block as tall as the terminal scrolls its own top away, and the cursor arithmetic that redraws
+the next frame then counts from the wrong row - the view duplicates itself down the screen and does
+not stop until the run does.
+The caller keeps the block short for its own reasons; "short" is a number chosen against a terminal
+it cannot see, and this type can see it.
+That block says what the turn is waiting on, how long it has been waiting, and what it has spent so
+far ([crates/cli/src/render/live.rs](crates/cli/src/render/live.rs)): a reader watching a turn is
+watching it spend money, and a figure that arrives only once the turn is over tells them
+afterwards.
+The count moves a step at a time, because a step is billed when its message settles, and it is the
+same running total - and the same wording - the closing line reports; a build whose messages carry
+no usage says nothing rather than saying nothing was spent.
+The browser panel draws the same figure on its turn card, from the same events.
+
+A failed turn ends the turn, not the chat.
+The engine is still booted and the journal is still open, so the fault is settled onto the page
+under the question that drew it and the next line is asked for: a provider that could not be
+reached is the ordinary failure here, and dropping a reader back to a shell to retype
+`tetanus chat -s <path>` answers a network blip by throwing away the conversation.
+Piped input keeps the other behaviour, because there is nobody there to ask again - the status
+§4.5 gives the code is what a script reads, and a run whose turns all failed must not exit 0.
+
+Only one way of ending is painted as a turn that ended well.
+A model that stopped because it had finished is `natural`; every other reason means the answer on
+the page is missing something a reader cannot see is missing - the provider's cap cut it off, a
+step budget ran out, a listener refused the step, somebody interrupted - so the reason is drawn in
+the warning colour rather than the colour of a job done.
+The cap is worded rather than echoed (`cut off at the output cap`, not the wire's `max-tokens`) and
+carries a sentence of its own, because the contract asks for exactly that in §4.4.2: a surface that
+renders it as an ordinary end tells the reader that a sentence the model never finished is the
+whole reply.
+
+A turn's closing line adds how fast the model was, on the turns slow enough for that to be a fact:
+the wait for the first token, and the rate the answer decoded at
+([timeline.rs](crates/cli/src/render/timeline.rs)).
+Upstream's own turn footer carries the same pair and folds it the same way - the first step's wait,
+because a later step is waiting on a tool rather than on the model, and a rate over the steps that
+recorded both halves of it.
+Both are derived from event times the journal already holds, so a surface cannot disagree with the
+journal it read, and both sit behind the threshold the duration sits behind: under a second they
+are noise, and two runs of one turn must print the same bytes.
+
+`/stats` on the full-screen chat is the same arithmetic over the whole journal rather than one turn:
+how much was asked, how long the model and the tools each took, the average wait for a first token,
+the rate, and what was billed
+([`stats`](crates/cli/src/render/timeline.rs)).
+Upstream keeps those figures on a strip beside its composer; a terminal has no room for a strip that
+keeps itself up to date, so this is a snapshot that stays where it was asked for - and a reader who
+wants the figure again asks again, which is cheaper to read than a number moving in a corner.
+A group with nothing in it is left out whole: `0 tokens` reads as a conversation that was free,
+where a conversation whose every request failed is one that never got an answer.
 `--ui` takes the whole terminal instead and composes each frame with `Page`
 ([crates/ui/src/page.rs](crates/ui/src/page.rs)), which is what makes a turn scrollable while it is
 still running.
 `--json` prints the contract's own result types and draws nothing.
+
+A `--ui` is refused where there is no screen to hold it, at the moment the flag is read: a
+redirected stdout, and a terminal whose `TERM` says it cannot address a cursor - `dumb`, or unset.
+Both are §4.5's exit 2, because a flag the terminal cannot honour is a bad argument rather than a
+failed command, and the two are worded apart: a pipe is something the reader undoes, `TERM` is
+something they set, and telling somebody sitting at a terminal that this needs one reads as a bug
+in the binary.
 All three read their events from the session log the engine is writing rather than from the bus: the
 journal is the durable record, and polling it is what keeps the presentation lane out of the engine.
 Which is also why the `--ui` view has to be told when the turn is over: a turn that fails writes no
@@ -266,7 +502,163 @@ closing event, so the only record of the failure is the value the future returne
 polling a journal that stopped growing would keep saying the turn was running.
 The reason is settled onto the page in the wording [crates/cli/src/render/fault.rs](crates/cli/src/render/fault.rs)
 gives every other surface, because stderr is behind the alternate screen until the reader gives up.
+Being told is also what lets the view go quiet: from there the frame it composes every 80ms is the
+frame already on the terminal, and `Frame` is comparable so that the paint is skipped rather than
+sent again.
+The two views driven by `tetanus_ui::show` never need this - a page over something finished waits an
+hour for a keystroke - and this one cannot wait, because the turn is still arriving.
 
+Whichever of those a run was asked for, stderr is told the same thing by the same rule
+(`status_line` in [crates/cli/src/main.rs](crates/cli/src/main.rs)).
+The four ways of running a turn once held three answers between them and one of them held none, so
+`tetanus run --json > events 2> log` left `log` empty while dropping `--json` filled it.
+The rule asks one question - does this view already show the turn on stdout - and writes the status
+unless that would put a second spinner on a screen that already has one.
+A stderr that is not a terminal never can, so it always gets the line, degraded to one plain
+sentence: which human view stdout was asked for is not a reason to write a different log.
+
+Whatever the view, the wait itself is one line on stderr
+([crates/ui/src/progress.rs](crates/ui/src/progress.rs)): the phase, a spinner while the stream is a
+terminal, and - once the phase has run longer than two seconds - how long it has been running.
+A spinner says the process is alive and not whether this call has been going for four seconds or
+four minutes, which is the question a reader waiting on a model actually has; a slow answer and one
+that will never arrive look identical until something counts.
+The plain form a redirected stream gets carries no clock: a log wants one line per phase, and a
+duration in it would make two runs of one turn print different bytes.
+
+`tetanus chat --ui` ([crates/cli/src/render/fire.rs](crates/cli/src/render/fire.rs)) is the whole
+conversation as one screen: the transcript above, kept by the view because the alternate screen has
+no scrollback to keep it, the turn arriving in the block under it, and one row at the foot that is
+always the row you type on.
+The editor answers a key before the view does, which is what makes it a place a person can type:
+every printable key belongs to the line, `?` and `q` included, and only the keys `Line` does not
+answer - the arrows, the page keys, Escape - move the window.
+It is the one full-screen view with a cursor, and `Frame::cursor` exists for it: the prompt row is
+the one place on a screen where the terminal's own caret says something true, and a drawn stand-in
+blinks at the repaint's rate, hides the character under it and is invisible to a screen reader.
+The commands are the chat's own, so a reader who knows `/help` and `/exit` needs no second
+vocabulary; the keys, the statuses and the wording are the ordinary chat's too, which is what lets
+a script wrap either.
+The view keeps what was said rather than the rows it drew - an event, a card, a note, a fault - and
+composes the rows again whenever the width changes, so a terminal that is narrowed folds the
+conversation into it rather than cutting each row's tail off, and one that is widened puts the
+folds back.
+`Page` does not rewrap, and says why: a live view must not rewrite history under a reader who is
+still reading it. A resize is not the stream rewriting anything, it is the reader asking for a new
+shape at the moment they ask - the same reading [`browse`](crates/cli/src/render/browse.rs) makes
+of the same rule.
+
+What each key does is `/keys`, and looking through what was said is `/find word`.
+Both are commands rather than keys for the same reason `?` is not the key card here: `/` is a character in the line being typed, and a view that
+took it is one where a reader cannot ask about a path.
+The matches are marked where they are drawn, walked with ctrl-n and ctrl-p - two of the keys the
+editor does not answer - and counted on the footer, which is also where a word no line holds is
+said in words rather than as `0 of 0`.
+They are kept as line numbers and found again after a rewrap, because a resize moves every line and
+a reader who widened their terminal did not ask to lose their search.
+
+The up and down keys walk what this reader has asked, because that is what they do at every other
+prompt a person has used and a chat is a prompt; the page keys scroll, which is what scrolls a page
+everywhere else.
+A half-written line is kept when the walk starts and comes back at the end of it - a reader who
+pressed up to check what they asked last time has not thrown away the question they were writing -
+and a question asked twice in a row is kept once, because pressing up means the question before
+this one.
+
+Every view that polls a journal asks the filesystem whether it has grown before it asks the log for
+its events ([`appended`](crates/cli/src/main.rs)).
+A journal is append-only, so a file the same length as last time holds nothing this view has not
+seen; the rule is that the length *changed*, not that it grew, so a journal truncated or replaced
+under the view is read again rather than trusted - and `SessionLog::events` copies every event it holds, which a view polling twelve times a
+second turns into a cost that grows with the conversation.
+Measured on a journal of six thousand events: a sixth of a core, spent on a conversation nobody was
+having; one `stat` a frame instead.
+`run --ui` had the same burn for as long as its view was left up - the view outlives the turn, and
+the poll outlives both - and the plain block and the `--json` stream poll through the same helper
+now.
+What a second process appends is not on this page either way: those lines are on the file and not
+in this log's memory, and reading a file back is what `tetanus replay` is for.
+
+A conversation with nothing asked in it opens on a page that says so, names the journal every turn
+will be appended to, and points at the two commands.
+A blank screen with a prompt on it is a screen that might be broken; the browser panel says
+`Nothing said yet. Ask something below.` for the same reason, and a terminal has the room to say
+the rest of what a reader needs.
+It is one of the things that were said rather than a case in the frame, so it rewraps with
+everything else - and the first turn takes it away rather than leaving it further up the transcript,
+because what it says stops being true the moment one exists.
+
+The prompt grows for a question longer than a row, up to five of them, and the transcript gives up
+those rows: what is being written is what the reader is looking at, and a one-row prompt that
+scrolls sideways is one they cannot check the sentence in.
+It is broken at the column rather than between words, because these rows are a text box and not a
+paragraph - a word break moves every character after it, so the caret a reader is steering would
+jump a row as they typed a space.
+Past five rows it scrolls inside them, keeping the rows the caret is on, the way the single row
+scrolled sideways.
+
+The caret is placed from where the prompt began rather than from the bottom of the screen, and only
+when that row was drawn: a terminal too short for the whole arrangement drops what does not fit -
+the footer first - so a caret counted from the footer lands on the rule above the prompt, and a
+terminal with no room for a prompt at all has nowhere to put one.
+A terminal no columns wide draws nothing and is pointed at with nothing; terminals report that
+width while they are being resized, and a view that fell over there would take the conversation
+with it.
+
+Every arrangement in the binary is swept at those sizes now, and each has a case of its own:
+[`Page`](crates/ui/src/page.rs), which every view over a stream is built from, and the key card
+([`keys`](crates/cli/src/render/keys.rs)), which spends four rows on furniture and counts the keys
+it could not show.
+The other two full-screen views hold as well:
+the journal ([`browse`](crates/cli/src/render/browse.rs)), which refills on every width change, and
+the picker ([`pick`](crates/cli/src/render/pick.rs)), which composes its own frame so that the
+window can follow the cursor.
+Neither costs anything while it is up: they wait on a key rather than polling a journal, which is
+what a view over something already written can do.
+
+`/think` and `/more` open what is already on the page: the model's thinking, folded to its first
+line, and a tool's result, capped at sixteen lines so one long result cannot push the answer it led
+to off the screen.
+Both are toggles and both compose the conversation again, which is what makes them a reader
+changing their mind rather than a flag they had to know about before they started - `--think` is
+the flag, and a screen that can rewrite what it drew does not need one.
+The browser panel opens the same card by clicking it; a terminal has a command instead, and the
+ordinary chat, whose page is the reader's own scrollback, answers both by naming the flag.
+
+The keys card lands on the conversation rather than over it, which is the other difference from
+every full-screen view that opens one with `?`: a reader who asks what a key does while reading
+something should still be reading it afterwards.
+It names the editing keys as well, because those are the ones nothing else on the screen says - the
+footer says Enter asks, and nothing says alt-b walks back a word.
+
+Tab and Shift-Tab walk the turns, which is this terminal's answer to the message list the web panel
+puts beside a conversation: there is no list to put there and no pointer to click it with, and what
+a reader reaches for is the start of a turn three or thirty back.
+A turn's opening line goes to the top of the body, because what follows it is the turn.
+Walking past the last turn lands on the foot of the conversation and walking before the first lands
+on its top: a reader going one way or the other is heading for that end, and neither is a refusal
+to move.
+The turn's own line numbers are kept beside the search's, and found again for the same reason.
+
+One row of the screen says nothing: the rule between the conversation and the row being typed on.
+What a reader is typing has not been said yet, and without a line between them a half-written
+question reads as the newest thing on the transcript - the web panel draws the same separation and
+gets it from a border where a terminal has to spend a row.
+The heading carries the model and how many turns are on the journal, which is the one fact about a
+resumed conversation that is nowhere else on the screen once its opening page has scrolled away.
+
+A paste is a paste and not typing.
+[`Tty`](crates/ui/src/terminal.rs) takes bracketed paste with raw mode and the alternate screen, so
+a terminal hands a pasted block over as one event; it becomes the characters it is made of, its
+newlines among them, and never an Enter.
+Without that, every newline in a pasted stack trace is a question, and forty lines are forty turns
+against a model that charges for each of them.
+`Line` keeps the breaks - what is sent is what was pasted, and the journal records it - and draws
+them as spaces, because the prompt is one row and a line feed written into it lands the rest of the
+prompt over whatever the view drew underneath.
+The row is measured the way it is drawn, so the cursor sits where the reader sees it rather than a
+column short for every break.
+The prompt on the reader's own scrollback takes the same mode, for the same reason.
 `tetanus chat` ([crates/cli/src/chat.rs](crates/cli/src/chat.rs)) is that same live view, asked for
 again after every answer: one engine over one journal, and a loop that reads a line, runs a turn and
 comes back for the next.
@@ -282,8 +674,19 @@ session driven through a pty.
 `tetanus replay` reads a finished journal through that same `Reader`, printed whole, played back at
 the pace it happened (`--live`), or on a page of its own (`--ui`,
 [crates/cli/src/render/browse.rs](crates/cli/src/render/browse.rs)).
+It is handed a path or an id, and a target that is nothing on disk is looked for under the settled `sessions.root` as `<root>/<target>.jsonl` - the path a store resolves an id to - so the ids `tetanus sessions` prints are the ids this command opens.
+A target that is a path is opened as it was given and the settings document is not read at all: a journal the reader can see is the one they meant, whatever a document says about roots.
 Its full-screen view is driven by `tetanus_ui::show` rather than by a loop of its own, which is what
 a view over something already finished can do and a view over a turn in flight cannot.
+The printed list keeps every id whole, because an id is the one thing on that page a reader retypes,
+and stacks the row where the window has no room left for a title
+([crates/cli/src/render/sessions.rs](crates/cli/src/render/sessions.rs)): the id on a line of its
+own and the counters, the state and the title indented under it.
+A table folded by the terminal at column zero reads as another session; two lines that say which is
+which do not.
+The picker does not stack - its rows are a cursor's rows, one session each, and its frame cuts what
+overruns.
+
 `tetanus sessions --ui` ([crates/cli/src/render/pick.rs](crates/cli/src/render/pick.rs)) puts a
 cursor on the list that `tetanus sessions` prints, so a directory holding more journals than the
 screen is read a screenful at a time rather than scrolled back through once it has all gone past.
@@ -354,10 +757,34 @@ under `--color never`, which the surface promises will write none.
 An escape sequence is therefore taken out whole - it drew nothing, so nothing is what it leaves -
 and a stray control character becomes a space, which keeps two words from being joined by a byte
 between them; newlines survive, because they are what a paragraph is folded on.
+A tab becomes the spaces that reach the next eight-column stop, counted from the start of its own
+line: a tab left alone is a width the terminal decides and no renderer here can predict, and a tab
+squashed to one space is a width that is predictably wrong - a Makefile, a Go file and a stack
+trace are all indented with tabs, and one column per level throws away the nesting they are read
+by.
 It is done inside [`truncate`](crates/ui/src/text.rs) and [`wrap`](crates/ui/src/text.rs) rather
 than at each renderer, because those two are exactly the functions that size foreign text, and a
 sequence taken out after it was measured would already have been paid for in columns the reader
 never sees.
+
+A fold keeps the column each line was written in, and lays what folds out of a line under it.
+Not every line a model writes is prose: a fenced block, a diff, a stack trace and a table carry
+meaning in their leading spaces, so a fold that dropped them would be changing the answer rather
+than laying it out - `    println!()` inside a function came back flush with the `fn` above it,
+which is a different program to read.
+The indent is put back only on a row that has something after it, because an indent alone is
+trailing space that draws nothing and still spends columns.
+
+Width is counted over what a terminal draws as one thing, not per character
+([`clusters`](crates/ui/src/text.rs)).
+A family emoji is three people and two joiners - six columns counted per character, two columns
+drawn - so a row measured the other way is padded four columns short and every column after it on
+that row lands wrong; a skin tone and a flag are the same mistake in smaller print.
+It is also where a cut has to land: between clusters, never inside one, because a cut through a
+join leaves a man, a woman and a girl where a family was.
+Only the joins that change what is drawn are read, not the whole of UAX #29: a combining mark, a
+variation selector or a skin tone belongs to the character before it, a zero-width joiner takes the
+character after it, and two regional indicators are one flag.
 `fit`, `light`, `plain` and `visible_width` keep the sequences they read, because those are the
 theme's own.
 A tool's colour is dropped rather than honoured: upstream's terminal card parses ANSI and draws the
@@ -399,15 +826,27 @@ message, or a value out of the error's `data`: a path, a session id, a tool, a m
 the protocol version a server speaks - so `wording` tames what the match returned, where a code
 added to the contract cannot get past it.
 The way out beside it is this module's own words and is left alone.
-The same seam folds the sentence onto one line, because it is drawn after the `error:` tag on a stream and
+A diagnostic longer than the terminal is folded under its own tag by the writer that draws it
+([`Ui::note`](crates/ui/src/writer.rs)), with the rest of the sentence indented past `note: ` rather
+than starting at column zero, where a terminal's own fold would put it: in the column a tag goes
+in, reading as a second diagnostic this build wrote without one.
+These are the sentences a reader meets when something has already gone wrong, and the values inside
+them are cut to the width by whoever composed them, which is where the width of a value is known.
+
+The taming seam folds the sentence onto one line, because it is drawn after the `error:` tag on a stream and
 as a single row of a frame: a newline puts a second line on stderr that reads like a report of its
 own - a message ending in `note: run this` would be read as this build's advice - and inside a
 frame it is a line feed with no carriage return, which is the one thing
 [`Frame`](crates/ui/src/frame.rs) is careful never to write.
 
+One arm carries a string this build did not word.
+`Io` is the operating system's own message, so the sentence is lowered onto the page's voice and the `(os error N)` tail is dropped: the words in front of it have already said it, the number a script reads is the exit status of §4.5's table, and a caller on the wire still gets the message whole.
+The capital is lowered only when the first word is an ordinary one, because a message opening on a path, on `I/O` or on the name of an environment variable would be naming something else once it was rewritten.
+Which file the failure is about is the surface's to supply: `session.create` reports what the filesystem said about a path without carrying that path, so `run` and `chat` fill in the `path` field §4.5 asks for from the journal they asked it to open ([`main.rs`](crates/cli/src/main.rs)), and one mistake reads one way whichever view met it.
+
 Taming and that fold together are [`tame_line`](crates/ui/src/text.rs), which is what a value drawn
 as one whole row goes through, and a failure is not the only one.
-A journal is headed by what the reader chose - the path `replay` was handed on the command line, or
+A journal is headed by what the reader chose - the target `replay` was handed on the command line, or
 the id the session list read out of that journal's own header - so the heading is tamed at the one
 place a journal is built ([`browse.rs`](crates/cli/src/render/browse.rs)), which is the constructor
 both callers use.
@@ -429,6 +868,22 @@ folding a long one leaves it readable, and a cut one sends them back to the flag
 do - the config table and the build page hand it a row they painted themselves, and taming it there
 would take that paint out along with the sequences.
 
+A page that lists what is in a place says which place, beside its heading.
+`tetanus config` names the settings document it read and `tetanus sessions` the directory it
+listed, both through [`Ui::heading_at`](crates/ui/src/writer.rs) - one method rather than two
+compositions, because two shapes here would read as two kinds of answer.
+The place is a path off a document, an environment or a flag, so
+[`place`](crates/cli/src/main.rs) makes it absolute without asking the filesystem to resolve it,
+tames it, and marks it when nothing is there yet: a relative path only answers "where do I change
+it" from a working directory the page never prints, and a path with nothing at it is still the file
+to write.
+That mark is the reason the seam is worth having, because a config page of nothing but `default`
+rows and a session list with no rows read exactly the same whether the place is empty or the reader
+is looking at the wrong one.
+`config --defaults` keeps the bare title, since it read no document and naming one would name a
+file the answer did not come from; `--json` is unchanged in both views, which is what keeps a
+caller that asked for the machine form reading one object per line.
+
 Taming can leave nothing behind: a file whose whole name is an escape sequence is a file a reader
 can make, and after the fold there is no character of it to print.
 A row that stopped where its value should be reads as a value the reader failed to see rather than
@@ -436,6 +891,18 @@ one there was nothing to show, and it ends in the blank space that was meant to 
 [`or_empty`](crates/ui/src/text.rs) gives that case a word.
 [`Writer::field`](crates/ui/src/writer.rs) draws it muted, so it reads as this build's word and not
 as the value, and the heading a chat opens with says it the same way.
+
+The two blocks that close the root page - the examples and the environment - are composed by one
+function, not written out with their own spaces
+([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)).
+A block handed to clap already spaced is a block clap folds at column zero when the window is
+narrow, and `--adapter deepseek` arriving under `DEEPSEEK_API_KEY`, in the column where a
+variable's name goes, reads as another variable.
+Composed, each row is two columns while they fit and stacked under itself when they do not, and a
+command too wide for the window folds under itself rather than at column zero.
+The environment list is every variable the binary reads, and the case that asserts it names each
+one: a user whose output came out plain, or in ASCII, or the wrong width, reads this page to find
+out which variable did it.
 
 What the binary exits with is on the page too, under `Exit status:`
 ([crates/cli/src/render/help.rs](crates/cli/src/render/help.rs)), because the caller of `tetanus run
@@ -446,11 +913,19 @@ fails TC-CLI-HELP-8. Several codes share a status, so a row says what they have 
 than naming a code a reader of a help page has never met. Only `--help` carries the block; `-h` is
 the summary a person skims for a flag, and a status is for the script around them.
 
+A flag whose value the work cannot be done with is refused at the flag.
+`--speed 0` makes a duration nothing can wait for; `--max-steps 0` asks for a turn that cannot
+happen, because a budget is spent by taking a step and checked afterwards, so every turn takes at
+least one - accepted, it writes a journal recording the step the command line said it could not
+have and closes it `step budget spent`.
+Both are §4.5's exit 2, refused by a `value_parser` before any work starts, which is also what puts
+the sentence beside the flag that carries the mistake.
+
 A status the caller reads has to be the same status for the same mistake.
 Every flag that takes a path takes a `PathBuf`, and clap refuses an empty one before this build is
 reached; the three values that stay text (`run --model`, the journal `replay` reads, and the address
 `serve` binds) took the empty string and carried it further on, so one mistake had four answers: a
-run announced on a model with no name, `error: no journal at ` with nothing after it, `error: :
+run announced on a model with no name, `error: no journal at` with nothing after it, `error: :
 invalid socket address`, and clap's own refusal for the other two.
 All five now take clap's rule ([crates/cli/src/main.rs](crates/cli/src/main.rs)) and refuse it in
 clap's words with the status §4.5 gives a wrong command line.
@@ -494,7 +969,7 @@ live participation.
 carrier. `tetanus serve` hosts the stdio one, and `tetanus serve --listen` the WebSocket one. §4.8
 covers the contract all three speak.
 
-[web/chat](web/chat/README.md) is the second surface, and it is a page rather than a program:
+[web/app](web/app/README.md) is the second surface, and it is a page rather than a program:
 `index.html` and `chat.js` speak that WebSocket carrier directly, with no build step, no framework
 and no dependency, so what a reviewer opens is the file in the repository.
 It makes the four calls `tetanus chat` makes - `rpc.hello`, `session.create`, `session.subscribe`
@@ -506,8 +981,31 @@ and no page of history can race the first live push.
 The transcript is the terminal's transcript - the same rows, the same order, the same closing line -
 because a turn that read differently in a browser would be a second description of the same events
 for a reader to reconcile.
-`web/chat/serve.py` is the development server that opens it: it starts `tetanus serve --listen`,
-reads the bound address out of the banner, and hands it to the page.
+`tetanus serve --frontend` is what serves it, and it is the harness's own host rather than a script beside it
+([crates/host](crates/host), [crates/cli/src/web.rs](crates/cli/src/web.rs)).
+The page goes out on the host's single fallback seat with the shell's locked semantics - a miss is
+the page with 200, so a deep link belongs to the router in the browser and not to the server - and
+the address of the carrier reaches it through the boot manifest an index tap writes.
+That indirection is the point: the development server this replaced string-replaced a global into
+the HTML as it served it, which works exactly once, because the page then only runs when served by
+that one program. A manifest is a published seam any assembly can write to and the page reads as
+data.
+
+The socket is on that same server, at `/api/ws`, and that is not tidiness.
+A page served from one origin and dialling another is a cross-origin WebSocket, which is the case
+the carrier's own origin check exists to refuse (§4.1.2); same origin, and the check protects the
+deployment instead of fighting the page.
+An upgrade route is handed the raw socket with nothing read off it, so `crates/rpc` performs its own
+handshake, origin check and token check exactly as it does under `tetanus serve --listen`.
+That is why the carrier peeks at a request head rather than reading it, and consumes the head only
+for the requests it answers itself.
+
+The host itself ([crates/host](crates/host)) is upstream's `host/webserver` and `host/frontend-static`:
+a route carrier that knows no harness concepts, serves no files and prints nothing.
+What it owns is the table and the order - exact, then longest prefix, then the one fallback - because
+a carrier whose answer depends on which plugin started first is one nobody can compose against, and
+a duplicate path is refused at registration rather than shadowed at the first request that goes to
+the wrong owner.
 
 ### 4.8 Interface view - the engine/presentation contract
 
@@ -524,6 +1022,273 @@ The contract's own status table and changelog are authoritative for what is serv
 
 A boundary change is its own pull request touching the document and the types together
 ([AGENTS.md](AGENTS.md)).
+
+Crossing an engine type to a wire type is the engine's, and published: `convert::session_event`,
+`convert::stop_reason`, and the three error mappings §4.5 names.
+The binary calls them and never matches an engine enum for itself.
+Two reasons, and the second is the one that bites: two tables deciding what a script acts on is one
+table too many, and an engine enum has no fallback arm, so a match on one outside the engine crate
+stops compiling the day the engine names a new case - after quietly deciding, until then, what that
+case means to a reader.
+
+### 4.9 Interface view - the process seam
+
+Everything that leaves the harness goes through `tetanus-exec`, in three layers.
+
+`proc::Command` ([crates/exec/src/proc.rs](crates/exec/src/proc.rs)) runs one command: an argv nothing
+re-splits, an environment the caller listed rather than one inherited and scrubbed, a bounded
+capture that keeps the tail, and a sink that is handed each piece of output as it arrives.
+Every child leads its own process group, so termination is a SIGTERM to the group, a grace period,
+then a SIGKILL to the group: a command that starts grandchildren and a command that traps SIGTERM
+both end. When the leader exits but something it started still holds the output pipe, the group is
+swept and the caller is told - otherwise an orphan would hold a turn open for ever.
+
+`proc::Command`'s bound is not the end of what it captured. When a stream outgrows it the whole
+stream is written to the storage lane's spill store
+([crates/core/src/spill.rs](crates/core/src/spill.rs)) and the truncation notice a model reads
+carries the locator. The file is opened on the first overflow and never before, so a command whose
+output fits touches no filesystem - and because the buffer still holds everything at that instant,
+what lands on disk is the complete stream. Only the producer can do this: a policy above the seam
+sees a result whose beginning is already gone. A spill that fails leaves the command exactly as it
+was.
+
+`piped::PipedCommand` ([crates/exec/src/piped.rs](crates/exec/src/piped.rs)) is the other shape of
+child: one this harness *talks to* rather than waits for. A protocol peer on stdio - an MCP server
+today, an out-of-process hook later - is a long conversation where stdout is the wire and closing
+stdin is the request to leave. It is a seam rather than a `spawn` in each consumer because of what
+the seam guarantees: the peer leads its own process group and is ended over that group, so a server
+that starts helpers of its own does not leave them behind. `crates/mcp` starts its servers through
+it and keeps only the framing.
+
+Every child of every one of these seams is started with a signal disposition of its own
+([crates/exec/src/signals.rs](crates/exec/src/signals.rs)): the ignorable signals reset to
+`SIG_DFL` and the mask emptied, between `fork` and `exec`, in system calls only. It is not a
+nicety. A `SIG_IGN` disposition survives `exec`, and a shell running a command in the background
+ignores `SIGINT` for it - so a harness started with `&`, by a unit file or by CI handed every shell
+it opened an interrupt that could not be delivered, while `killpg` reported success and the tool
+reported `delivered`. Stopping a turn silently did nothing in every backgrounded deployment. The
+rule it leaves behind is worth more than the fix: what the harness inherits, its children inherit,
+so any promise a tool makes about a child is a promise about inherited state as much as about code.
+
+`hooks::ShellHookExecutor` ([crates/exec/src/hooks.rs](crates/exec/src/hooks.rs)) is the third
+consumer of the same machinery, and it exists because
+[crates/hooks](crates/hooks) deliberately owns no process: that crate decides which hook fires and
+what its exit status means, and declares a narrow `HookExecutor` for the running. A hook is a
+deployment's program rather than a model's, which is what shapes the two defaults that differ from a
+tool call - the environment is a named list rather than a scrub, because nothing here is inherited
+and a denylist exposes every credential added after it was written; and the timeout ceiling is the
+hook protocol's ten minutes rather than the shell tool's, because clamping a configured hook to a
+model command's budget would shorten it silently. Where a hook fires is the hook protocol's own
+question and is not answered here.
+
+`backend::ShellBackend` ([crates/exec/src/backend.rs](crates/exec/src/backend.rs)) is which shell a
+command goes through. `Bash` and `PowerShell` ship; a backend whose binary is absent refuses,
+naming the program and where it looked, and never substitutes another shell - a bash script run
+under dash fails later, elsewhere, with a message about syntax.
+`shell::ShellExec` resolves a request against the deployment's defaults and caps before running it,
+and renders the result into upstream's markers (`[stderr]`, `[timed out after Nms]`,
+`[killed by signal: X]`, `[exit code: N]`), which `shell::parse_exit` reads back out of a replayed
+result.
+
+`session::ShellSessions` ([crates/exec/src/session.rs](crates/exec/src/session.rs)) is the
+persistent half: a long-lived shell reading commands from a pipe, with a per-command nonce marker
+around each one so its output and its exit status are exactly attributable. The working directory
+and the exported variables survive between tool calls because the process does. A shell that dies
+is reported and stays dead; nothing is restarted underneath the caller, because a fresh shell in a
+state the model did not create is worse than being told.
+
+`tools::ShellTools` ([crates/exec/src/tools.rs](crates/exec/src/tools.rs)) registers what the model
+calls: `shell`, and `shell_open`/`shell_run`/`shell_close`/`shell_list`. They run in the ordinary
+tool pipeline - `shell` and `shell_run` are barriers, `shell_list` is parallel-safe - and they hold
+the turn's own interrupt, so stopping a turn kills the command it started rather than only ending
+the loop. A composition supplies that switch through `boot_with`
+([crates/turn/src/boot.rs](crates/turn/src/boot.rs)); the engine mints one per session, because one
+switch shared across sessions would let an interrupt in one stop another.
+
+The fourth layer is a terminal rather than a pipe, and it exists because a program behaves
+differently when it believes it has one - it colours, it pages, it prompts without echoing, and an
+interactive program may refuse to run at all.
+[crates/exec/src/pty.rs](crates/exec/src/pty.rs) allocates one: the child `setsid`s and takes the
+slave as its controlling terminal, the size is set before anything starts, the master is drained
+continuously so the kernel's buffer never blocks the child, and a signal goes to whichever process
+group owns the terminal now. Closing sweeps the terminal's whole *session* rather than one process
+group, because job control puts each job in a group of its own and a group kill would leave a
+background `sleep` behind.
+
+`terminal::TerminalSession` ([crates/exec/src/terminal.rs](crates/exec/src/terminal.rs)) is a shell
+on one, driven one send at a time. Readiness is announced rather than guessed: the shell is told to
+print an OSC 133 marker before every prompt, so a send settles when the shell says the command is
+over and the marker carries its exit status. `crates/exec/src/sanitize.rs` reads that marker out of
+the stream and takes the terminal's control language with it, carrying a sequence split across two
+reads rather than half-printing it. Silence and an absolute deadline are the fallbacks for a program
+that prints no marker, and the turn's interrupt is the fourth ending - it aims `SIGINT` at the
+foreground group, so a stopped turn costs the command and not the session. `terminals::Terminals`
+([crates/exec/src/terminals.rs](crates/exec/src/terminals.rs)) is who may touch which session: an
+`Owner` is compared exactly, ids are never re-used, and names are unique within one owner.
+`terminal_tools::TerminalTools`
+([crates/exec/src/terminal_tools.rs](crates/exec/src/terminal_tools.rs)) registers the six the model
+calls - `terminal_open`, `terminal_send`, `terminal_read`, `terminal_signal`, `terminal_close`,
+`terminal_list` - with typing as a barrier and reading, listing and signalling parallel-safe.
+
+**A terminal journal is a credential store.** A model answers `[sudo] password
+for ci:` with an ordinary `terminal_send`, so the answer is an ordinary argument
+and the journal is forever. `Tool::recorded`
+([crates/turn/src/tools.rs](crates/turn/src/tools.rs)) is what the engine asks
+before it appends: `terminal_send` withholds its `text` when the call sets
+`secret`, `shell` and `shell_run` withhold their command line on the same flag,
+and the substitution happens in all three places a call is recorded - the call,
+the assistant message that carried it, and the streamed chunk. A send the model does not mark is caught by a backstop when the terminal's last
+output line asked for a password: `sudo`'s mechanism, chosen for `sudo`'s
+reason - it had the tty's `ECHO` flag available and built a regex over the
+program's output instead, because an interactive shell holds echo off anyway
+and this crate's own `stty -echo` pins it off for the session. The two rules
+compose by union, never override, as the contract fixes for its own pair of
+redaction rules. Neither catches a prompt worded some other way, so the floor
+is also a statement, and it is in the tool descriptions where the model reads
+it.
+
+The two persistent families are not redundant. A pipe-backed session ends when a turn is stopped,
+because a shell reading a pipe has nothing to interrupt; a terminal-backed one interrupts the
+command and stays open. Most work wants the first, which is cheaper and needs no session to close;
+anything interactive needs the second.
+
+### 4.10 Interface view - the sandbox
+
+`tetanus_turn::fs` fences a *path* this process was asked to open, which is a complete answer while
+the code doing the opening is ours. A command a model wrote is not: it is arbitrary code, and only
+the kernel can tell it no. `crates/sandbox` is that boundary, and the two are complementary.
+
+`policy::Policy` ([crates/sandbox/src/policy.rs](crates/sandbox/src/policy.rs)) is upstream's mode
+vocabulary - `read-only`, `workspace-write`, `danger-full-access` - resolved once where a call
+enters and handed down whole. It carries the workspace root, the roots the mode makes writable
+(including the temp areas a build actually uses, derived here so two layers cannot disagree), a
+network decision, and whether partial enforcement is acceptable.
+
+`landlock` ([crates/sandbox/src/landlock.rs](crates/sandbox/src/landlock.rs)) is the Linux backend.
+The three system calls are made by hand because of the fork/exec split: the ruleset is built in the
+parent, where opening directories and allocating is safe, and the child's half between `fork` and
+`exec` is `prctl` plus two syscalls with no library code - after a fork in a threaded process, a
+child that allocates can deadlock on a lock another thread held. Deny-by-default is the ABI's own
+shape: the handled set is every right the running kernel knows, so anything no rule grants is
+denied, which is why creating, removing and renaming are governed and not only writing.
+
+Enforcement runs through both consumers of the policy. `crates/exec` applies it to processes:
+`Command::confined` for one command, and one boundary per persistent shell, inherited by every
+command that shell later runs. `crates/fs` applies it to the file service
+([crates/fs/src/kernel.rs](crates/fs/src/kernel.rs)): Landlock restricts a thread irreversibly and
+the harness must keep writing its own journal, so the boundary belongs to one worker thread that
+restricts itself before accepting work, and every file operation runs there. One `Policy` value
+feeds both, which is what stops "the write tool cannot write /tmp but bash can". A denial is
+rendered with upstream's marker naming the mode, so a model reads policy rather than a bug in its
+own command; on the file side it arrives as `FS_PERMISSION_DENIED`, the class that already meant
+"the operating system refused" rather than "this build decided".
+
+A host that cannot honour a policy refuses: `Unavailable` for a kernel without Landlock, `Degraded`
+for an ABI that cannot govern what was asked, and a compile-time refusal naming the missing backend
+on a platform that has none ([crates/sandbox/src/unsupported.rs](crates/sandbox/src/unsupported.rs)).
+There is no path where asking for confinement and getting none is a success; the one way to run
+unconfined is to write `danger-full-access`.
+
+### 4.11 Interface view - outside the machine
+
+Two capabilities reach past this process: a Model Context Protocol server, which is a program
+somebody else wrote answering on a pipe this process owns, and an HTTP request. Both are built the
+same way, and the shape is the point.
+
+**Everything is decided above a seam.** An MCP server is a `Link`
+([crates/mcp/src/link.rs](crates/mcp/src/link.rs)) - a pair of message channels - and the stdio
+transport is one implementation of it; every HTTP request goes through an `HttpTransport`
+([crates/web/src/http.rs](crates/web/src/http.rs)). The handshake, the revision check, paginated
+discovery, the request budget, the redirect rule, the size cap, the content-type list and the
+charset decode are all decisions made above those two traits, so the whole policy is asserted with
+no socket in the suite and the live transports stay thin enough to read in one sitting.
+
+**A failure out there is a failed tool call, never a failed turn.** `McpFault::class` and
+`WebFault::code` name the failure on the result the model reads and the journal keeps. A server that
+dies, hangs, or writes a line that is not a message ends its call with a class; the step commits and
+the loop continues. TC-PORT-MCP-32 is that promise stated as behaviour against a real child process.
+
+**Nothing this process starts outlives it.** A server is spawned with `kill_on_drop` and shut down
+through a close-input, wait, kill ladder, with the departure reported rather than assumed; seven
+cases spend a real child process to assert against `/proc` that it is gone, including on the path
+where the handshake failed and no client was ever returned. A `Supervisor`
+([crates/mcp/src/supervisor.rs](crates/mcp/src/supervisor.rs)) reconnects on a bounded budget:
+delays double to a ceiling, an attempt cap ends the retrying for good, and only real uptime past
+that ceiling buys a fresh budget, so a server that connects and dies four times a second exhausts
+its cap rather than restarting for ever.
+
+A server's tools reach the model through the ordinary registry, under `mcp__<server>__<raw>`
+([crates/mcp/src/tools.rs](crates/mcp/src/tools.rs)), so nothing in the turn engine knows an MCP tool
+from a native one. Both crates read their own section of the settings document
+(`mcp.servers.<name>`, `web.tools.*`) and are composed into a harness rather than depended on by
+one.
+
+### 4.12 Interface view - the agent a session is composed from
+
+A *preset* is a named agent: a model, a provider, a step budget, a tool subset, a prompt shape and a
+persona, written inline in the settings document or in a preset directory under the same keys. A
+caller names one on `session.create`; an explicit `model`, `provider` or `max_steps` on the same
+call wins over what the preset says, because a caller that named both asked for that model on that
+agent.
+
+The id is resolved once, at creation, and written into the session's `session/start` header
+([crates/engine/src/preset.rs](crates/engine/src/preset.rs)). A fork inherits it, and a document
+edited afterwards does not move a session that is already composed: a session whose agent changed
+under it half way through would leave a journal that is a record of two agents with nothing marking
+the boundary. The tool subset is applied to the registry that session's turns are booted on, so the
+model is never offered a tool it may not call - being offered one and refused is a step spent on a
+refusal - and a preset naming a tool the harness does not have is refused where it is used rather
+than quietly narrowed. The persona is a prompt section of its own at order zero, beside what plugins
+contribute rather than replacing them.
+
+### 4.13 Interface view - the external contract surfaces
+
+Three crates are how a caller that is not the terminal drives or reads a session. Each is a
+*consumer* of the contract in §4.8, never a second definition of it, which is what keeps them from
+drifting from what a carrier serves.
+
+`tetanus-query` ([crates/query](crates/query)) reads a journal as data. `session.events` will hand
+any caller every line; what it will not do is answer a question about the lines, so every surface
+that wanted one paged the whole log and folded it by hand. The fold is written once here. Position
+is *derived*, not carried: contract section 4.3.1 puts `turn` and `step` on the structural events
+and on nothing else, so a `tool/call` names no turn, and one forward pass works the boundaries out
+and hangs them on every event ([crates/query/src/journal.rs](crates/query/src/journal.rs)). Adding
+the fields to the journal instead would be a wire change for something the order of the lines
+already implies. Filters AND their clauses and OR their values, an absent clause and an empty one
+ask different questions, and three aggregates are named because they are the questions asked most:
+every tool call paired to its result, every turn a named tool failed in, and what a range of turns
+cost. It opens no file: it reads through `EventSource`, which the engine already satisfies, so one
+query runs in process and over a carrier.
+
+`tetanus-sdk` ([crates/sdk](crates/sdk)) is the same operations, typed, with no process boundary in
+the way. `Client` is the protocol client - one method per contract call, the handshake enforced
+exactly as a carrier enforces it, subscriptions it closes on the way out. `Harness` is the owned-run
+API over it, and it exists for one ordering bug: the subscription has to be open *before* the
+prompt or the first events are already gone. `gateway`
+([crates/sdk/src/gateway.rs](crates/sdk/src/gateway.rs)) is the request surface as data - the
+codec's `match` over method names cannot be enumerated, so nothing else can answer "what calls are
+there and what arguments do they take" - and it validates a call's named arguments against that
+answer before dispatching. The SDK holds an `Arc<dyn Engine>` and calls it, so a test drives the
+code path a carrier drives and the two cannot serve different contracts.
+
+`tetanus-acp` ([crates/acp](crates/acp)) speaks the Agent Client Protocol, both halves.
+`AcpBridge` ([crates/acp/src/bridge.rs](crates/acp/src/bridge.rs)) is the agent: initialize,
+`session/new`, `session/prompt`, a one-way cancel, and the turn rendered as `session/update`
+notifications carrying committed assistant messages and tool activity. It is a
+`tetanus_rpc::FrameHandler`, not a carrier - ACP is JSON-RPC 2.0 over stdio, which is a carrier this
+workspace already has, and a second one would be a second place for framing to be wrong. The ACP
+session id *is* the engine's session id, so an operator holding one can find its journal and there
+is no mapping table to fall out of step. `AcpClient` ([crates/acp/src/client.rs](crates/acp/src/client.rs))
+is the peer that spawns an agent and drives it: it answers `session/request_permission` rather than
+only sending, because an agent that asked and got nothing waits for ever; it demultiplexes
+responses, notifications and inbound requests from one pipe with one reader; every call and the
+teardown carry a deadline, because a child that has stopped answering looks exactly like a model
+thinking; and closing walks stdin-EOF to kill so no child is left behind.
+
+What these do not cover is named rather than implied: image and audio prompts wait on the durable
+attachment store, ACP session load, fork and resume are unbuilt, and the bridge's permission channel
+has no engine-side approval seam to be driven from yet
+([docs/parity-updates/acp-surfaces.md](docs/parity-updates/acp-surfaces.md)).
 
 ## 5. Verification - the conformance approach
 
@@ -573,7 +1338,18 @@ not protocol-level.
 
 ## 7. Not built yet
 
-A settings-file watcher, live subtree remount, the rest of the tool pipeline
-(permissions, cancellation), further adapters, MCP, sandboxing, the web UI, and the WASM plugin host.
+A settings-file watcher, live subtree remount, cancellation inside a step, further adapters,
+background jobs, and the WASM plugin host.
+The MCP client exists over stdio (§4.11); its streamable-HTTP transport, and image and audio results
+admitted into a durable attachment store, are the named follow-ups.
+Agent presets are composed per session (§4.12); authoring one, and switching the preset of a running
+session, are not served.
+Kernel sandboxing exists for processes and for the file service (§4.10), and the per-call escalation
+stamp is served through the ordinary approval gate; what is left is named in the `sandbox/*` row of
+[docs/parity.md](docs/parity.md).
+The file tools exist and are composed by whoever builds a registry
+([crates/fs/src/tools.rs](crates/fs/src/tools.rs)); which of them the shipped binary offers by default
+is the presentation lane's wiring, per §4.7's ownership table in
+[docs/interface-contract.md](docs/interface-contract.md).
 [README.md](README.md#current-status) has the status table; [docs/PLAN.md](docs/PLAN.md) has the phase
 plan.

@@ -12,7 +12,7 @@ use tetanus_core::events::{DispatchMode, Event};
 
 use crate::llm::{ChunkSink, LlmError, ModelRequest, ModelResponse};
 use crate::prompt::{interpolate, PromptError, Variables};
-use crate::tools::{ToolCall, ToolError, ToolOutcome, ToolSchema};
+use crate::tools::{Permission, ToolCall, ToolError, ToolOutcome, ToolSchema};
 
 /// One named piece of the system prompt. Plugins contribute sections; the
 /// engine never hard-codes prompt text beyond the base section.
@@ -146,6 +146,14 @@ pub struct RequestFailure {
     /// one, from [`LlmError::retry_after_ms`]. A failure that asked for
     /// nothing leaves a policy on its own backoff.
     pub provider_retry_after_ms: Option<f64>,
+    /// The provider's own id for the refused request, from
+    /// [`LlmError::request_id`].
+    ///
+    /// Carried to a listener because that is where it becomes useful: what a
+    /// person does with a refusal they cannot explain is quote this to the
+    /// provider, and by the time the failure reaches a log line the response
+    /// it came on is long gone.
+    pub provider_request_id: Option<String>,
 }
 
 impl From<&LlmError> for RequestFailure {
@@ -154,6 +162,7 @@ impl From<&LlmError> for RequestFailure {
             code: error.code().to_string(),
             message: error.to_string(),
             provider_retry_after_ms: error.retry_after_ms(),
+            provider_request_id: error.request_id().map(str::to_string),
         }
     }
 }
@@ -195,6 +204,33 @@ impl Event for RequestError {
     type Output = Option<RequestErrorAction>;
 }
 
+/// What may run, decided for **every** call rather than only the ones a
+/// registry pre-declares as questionable.
+///
+/// The registry's own answer is the starting point, not the verdict: it is
+/// static, and a policy that arrives at composition time - a deployment's
+/// permission table, an out-of-process `PreToolUse` hook - knows things the
+/// tool author could not. So the declared permission is carried in and a
+/// listener may return a stricter one.
+///
+/// Stricter only. A listener that could *widen* a permission would let a
+/// plugin quietly un-gate the irreversible call a tool author deliberately
+/// gated, and the fold is `most_restrictive` for exactly that reason. It is
+/// the listener's own responsibility to combine rather than replace, which
+/// [`crate::tools::Permission::most_restrictive`] exists to make one call.
+pub struct ToolsPermission {
+    pub turn: u64,
+    pub call: ToolCall,
+    /// What [`crate::tools::ToolRegistry::permission`] said, before any
+    /// listener saw it.
+    pub declared: Permission,
+}
+impl Event for ToolsPermission {
+    const TOPIC: &'static str = "tools/permission";
+    const MODE: DispatchMode = DispatchMode::Waterfall;
+    type Output = Permission;
+}
+
 /// Hooks, permission and sandbox policy run here, before the call starts.
 pub struct ToolsPreExecute {
     pub turn: u64,
@@ -217,6 +253,47 @@ impl Event for ToolsExecute {
     type Output = Result<ToolOutcome, ToolError>;
 }
 
+/// What a `tools/post-execute` listener leaves for the loop.
+///
+/// Two things, because a listener has two different things to say. The
+/// `outcome` is what the *model* reads as this call's result. The contexts are
+/// what the loop should put in front of the model *next*, which is not the
+/// same thing and must not be smuggled into the result: a guard that appended
+/// "you have called this five times" to a tool's output would be corrupting
+/// the tool's answer to make a point about the caller, and a tool author
+/// parsing that output back would find a sentence nobody wrote.
+///
+/// Parity: upstream's `PostToolDecision.additionalContexts`, which its
+/// repeat-tool guard and its hook bridges both write and nothing else reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostToolDecision {
+    pub outcome: ToolOutcome,
+    /// Messages to deliver at the next step boundary, in the order given.
+    ///
+    /// They ride the *decision* rather than being appended by the listener,
+    /// so a call whose result is never committed - one behind an earlier
+    /// call's fault - contributes no context either. A listener that wrote
+    /// straight to the journal could not be held to that.
+    pub additional_contexts: Vec<crate::llm::Message>,
+}
+
+impl PostToolDecision {
+    /// The decision that changes nothing: this outcome, no context.
+    pub fn keep(outcome: ToolOutcome) -> Self {
+        Self {
+            outcome,
+            additional_contexts: Vec::new(),
+        }
+    }
+
+    /// Put one message in front of the model at the next boundary, keeping
+    /// whatever a later listener already asked for.
+    pub fn with_context(mut self, message: crate::llm::Message) -> Self {
+        self.additional_contexts.push(message);
+        self
+    }
+}
+
 /// Accept, block, replace, or add context to the result before it is logged.
 pub struct ToolsPostExecute {
     pub turn: u64,
@@ -226,7 +303,7 @@ pub struct ToolsPostExecute {
 impl Event for ToolsPostExecute {
     const TOPIC: &'static str = "tools/post-execute";
     const MODE: DispatchMode = DispatchMode::Waterfall;
-    type Output = ToolOutcome;
+    type Output = PostToolDecision;
 }
 
 /// A listener bails here to hold a turn open. Phase ① records the veto on

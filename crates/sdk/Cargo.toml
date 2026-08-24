@@ -1,0 +1,18 @@
+[package]
+name = "tetanus-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The in-process client a Rust caller drives tetanus with, and the descriptor-driven request surface behind it: the same operations a carrier exposes, typed."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tetanus-protocol = { path = "../protocol" }
+tetanus-query = { path = "../query" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile = { workspace = true }
+tetanus-engine = { path = "../engine" }

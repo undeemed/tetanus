@@ -1,0 +1,15 @@
+[package]
+name = "tetanus-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The HTTP route carrier the web GUI rides on: named routes, one fallback, and upgrade seats."
+
+[dependencies]
+httparse.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true }

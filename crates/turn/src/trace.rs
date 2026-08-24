@@ -11,8 +11,8 @@ use tetanus_core::{EffectHandle, Event, EventBus};
 use tetanus_session::SessionEventDispatch;
 
 use crate::events::{
-    AgentRequest, AssemblePrompt, LlmStream, PreStep, RequestError, ToolsExecute, ToolsPostExecute,
-    ToolsPreExecute, TurnStopping,
+    AgentRequest, AssemblePrompt, LlmStream, PreStep, RequestError, ToolsExecute, ToolsPermission,
+    ToolsPostExecute, ToolsPreExecute, TurnStopping,
 };
 
 /// One observed event. Durable events carry their journal sequence number and
@@ -93,6 +93,7 @@ impl TurnTrace {
             watch_waterfall!(AgentRequest, "agent/request"),
             watch_waterfall!(LlmStream, "llm/stream"),
             watch_waterfall!(RequestError, "agent/request-error"),
+            watch_waterfall!(ToolsPermission, "tools/permission"),
             watch_waterfall!(ToolsPreExecute, "tools/pre-execute"),
             watch_waterfall!(ToolsExecute, "tools/execute"),
             watch_waterfall!(ToolsPostExecute, "tools/post-execute"),

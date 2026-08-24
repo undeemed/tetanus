@@ -289,6 +289,31 @@ pub enum KnownEvent {
         /// it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fork_seq: Option<u64>,
+        /// The working directory the session was opened in (section 4.4.9).
+        ///
+        /// Where it was opened, never where it is now: a tool may change
+        /// directory and this header is not rewritten. It is recorded because
+        /// a journal full of relative paths cannot be read without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// The session that started this one as a subagent (section 4.4.9).
+        ///
+        /// Deliberately not `parent_session`. A fork is a *copy* and begins
+        /// holding another journal's history; a subagent is a different
+        /// conversation that another one asked for and shares no history. A
+        /// session may carry both, which is why they are two fields rather
+        /// than one field with a kind beside it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawned_by: Option<String>,
+        /// How many levels of delegation deep this session is; absent means
+        /// none (section 4.4.9).
+        ///
+        /// Durable rather than held in memory because the bound on delegation
+        /// has to survive a resume: a subagent whose harness restarted must
+        /// not come back believing it is a root session and free to delegate
+        /// again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
     },
     #[serde(rename = "turn/start")]
     TurnStart { turn: u64 },

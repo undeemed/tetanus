@@ -1,0 +1,307 @@
+/* How the atoms in `primitives.js` are drawn.
+ *
+ * Every value here is a token from `tokens.css`. A literal colour in this file
+ * would be a colour that survives the next palette change, which is the whole
+ * failure the token layer exists to prevent.
+ */
+
+/* --- the state dot --------------------------------------------------- */
+
+.dot { display:inline-flex; align-items:center; gap:var(--gap-tight);
+  font:var(--size-small)/1.2 var(--font-code); color:var(--text-muted); }
+.dot-mark { width:8px; height:8px; border-radius:50%; background:var(--state-idle); }
+.dot-ok   .dot-mark { background:var(--state-ok); }
+.dot-busy .dot-mark { background:var(--state-busy); }
+.dot-bad  .dot-mark { background:var(--state-bad); }
+
+/* --- the pill -------------------------------------------------------- */
+
+.pill { display:inline-block; padding:1px 7px; border-radius:999px;
+  border:1px solid var(--line); background:var(--surface-raised);
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text-muted); }
+.pill-ok  { border-color:var(--state-ok);  color:var(--state-ok); }
+.pill-bad { border-color:var(--state-bad); color:var(--state-bad); }
+.pill-busy{ border-color:var(--state-busy);color:var(--state-busy); }
+
+/* --- the button ------------------------------------------------------ */
+
+.btn { padding:8px 14px; border-radius:var(--radius-tight);
+  border:1px solid var(--line-bright); background:var(--surface-raised);
+  color:var(--text); font:var(--size-body)/1.2 var(--font-prose); cursor:pointer; }
+.btn:hover:not(:disabled) { background:var(--surface-panel); }
+/* The press is the one place this page moves: a control that does not answer
+   a click reads as one that did not receive it. */
+.btn:active:not(:disabled) { transform:scale(.97); }
+.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.btn:disabled { color:var(--text-muted); border-color:var(--line); cursor:default; }
+.btn-primary { border-color:var(--accent); color:var(--text-bright); }
+
+/* --- the field ------------------------------------------------------- */
+
+.field { padding:8px 10px; border-radius:var(--radius-tight);
+  border:1px solid var(--line); background:var(--surface-sunken);
+  color:var(--text); font:var(--size-body)/1.4 var(--font-prose); }
+.field:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+
+/* --- the disclosure -------------------------------------------------- */
+
+.disclose { border-left:2px solid var(--line); padding-left:var(--gap); }
+/* A row, so a caller can put a second thing beside the label and have it
+   truncate instead of pushing the fold onto two lines. */
+.disclose-head { cursor:pointer; color:var(--text-muted); display:flex;
+  gap:var(--gap); align-items:baseline;
+  font:var(--size-small)/1.6 var(--font-code); list-style:none; }
+.disclose-head::-webkit-details-marker { display:none; }
+.disclose-head:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.disclose-mark { flex:0 0 auto; width:1em; transition:transform .12s ease; }
+.disclose[open] > .disclose-head .disclose-mark { transform:rotate(90deg); }
+.disclose-body { padding:var(--gap-tight) 0 var(--gap) 0; }
+.disclose-bad { border-left-color:var(--state-bad); }
+.disclose-bad > .disclose-head { color:var(--state-bad); }
+@media (prefers-reduced-motion: reduce) { .disclose-mark { transition:none; } }
+
+/* --- the toast ------------------------------------------------------- */
+
+.toast { position:fixed; top:120px; left:50%; transform:translateX(-50%);
+  padding:10px 16px; border-radius:var(--radius);
+  border:1px solid var(--line-bright); background:var(--surface-raised);
+  color:var(--text); font:var(--size-body)/1.4 var(--font-prose);
+  pointer-events:none; z-index:40; animation:toast-in .18s ease-out; }
+.toast-bad { border-color:var(--state-bad); color:var(--state-bad); }
+.toast-going { opacity:0; transition:opacity 1s ease; }
+.toast-still { animation:none; }
+@keyframes toast-in { from { transform:translate(-50%,-8px); opacity:0; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation:none; } }
+
+/* --- the modal ------------------------------------------------------- */
+
+.modal { border:1px solid var(--line); border-radius:12px; padding:0;
+  width:min(760px,92vw); background:var(--surface-panel); color:var(--text); }
+.modal::backdrop { background:rgba(0,0,0,.55); }
+.modal-head { padding:var(--gap-wide); border-bottom:1px solid var(--line); }
+.modal-title { margin:0; font:var(--size-head)/1.3 var(--font-prose); color:var(--text-bright); }
+.modal-body { padding:0; }
+.modal-foot { display:flex; gap:var(--gap); align-items:center;
+  padding:11px var(--gap-wide); border-top:1px solid var(--line); }
+
+/* --- the json tree --------------------------------------------------- */
+
+.json-node { display:block; }
+.json-row { display:flex; gap:var(--gap); align-items:baseline;
+  font:var(--size-small)/1.7 var(--font-code); }
+.json-key { color:var(--text-muted); }
+.json-key::after { content:":"; }
+.json-string { color:var(--text); }
+.json-number, .json-boolean { color:var(--accent); }
+.json-null, .json-empty, .json-deep { color:var(--text-muted); }
+/* A nested row steps in, so the shape is readable without drawing brackets. */
+.json-row > .json-node { border-left:1px solid var(--line); padding-left:var(--gap); }
+
+/* --- text a person wrote --------------------------------------------- */
+
+.said { white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-body)/1.55 var(--font-prose); color:var(--text); }
+
+/* --- a tool's call and result ---------------------------------------- */
+
+.tool-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+.tool-failed > .disclose-head { color:var(--state-bad); }
+/* The summary beside a tool's name. Truncated rather than wrapped: a fold is
+   one row, and a two-row fold moves every row under it as the reader scans. */
+.tool-said { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; color:var(--text); font-family:var(--font-code); }
+
+/* --- a file, a listing, a set of matches -------------------------------- */
+
+/* A caption or an aside the tool wrote, kept as prose so it does not read as
+   another row of the result. */
+.fs-note { margin:0 0 var(--gap-tight) 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-prose); overflow-wrap:anywhere; }
+.fs-file { font:var(--size-small)/1.6 var(--font-code); }
+.fs-line { display:flex; gap:var(--gap); align-items:baseline; }
+/* The gutter is a column of its own so the code starts at one place whatever
+   the numbers are; tab alignment cannot do that outside a terminal. */
+.fs-no { flex:0 0 auto; min-width:4ch; text-align:right; color:var(--text-muted);
+  user-select:none; }
+.fs-code { flex:1 1 auto; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); }
+.fs-list { font:var(--size-small)/1.7 var(--font-code); }
+/* The fact sits beside the name and not at the far edge of the window: a size
+   flushed right across nine hundred pixels stops being a fact about that file
+   and becomes a column to trace with a finger. */
+.fs-entry { display:flex; gap:var(--gap); align-items:baseline; }
+.fs-name { flex:0 1 auto; overflow-wrap:anywhere; color:var(--text); }
+.fs-fact { flex:0 0 auto; color:var(--text-muted); }
+.fs-dir > .fs-name { color:var(--accent); }
+.fs-other > .fs-name { color:var(--text-muted); }
+.fs-edit > .fs-half:last-of-type { margin-top:var(--gap); }
+
+/* --- a command and what it printed --------------------------------------- */
+
+.sh-marks { display:flex; flex-wrap:wrap; gap:var(--gap-tight);
+  margin-bottom:var(--gap-tight); }
+.sh-stream { margin:var(--gap-tight) 0; }
+.sh-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+/* stderr is captioned and ruled rather than coloured red: plenty of programs
+   write progress there, and a page that painted all of it as failure would be
+   wrong more often than right. */
+.sh-caption { margin:0 0 2px 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-code); }
+.sh-bad { border-left:2px solid var(--line); padding-left:var(--gap); }
+.sh-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-prose); overflow-wrap:anywhere; }
+.sh-list { font:var(--size-small)/1.7 var(--font-code); }
+.sh-session { display:flex; gap:var(--gap-wide); align-items:baseline; }
+.sh-id { flex:0 0 auto; color:var(--text); }
+.sh-backend { flex:0 0 auto; color:var(--text-muted); }
+.sh-cwd { flex:0 1 auto; overflow-wrap:anywhere; color:var(--text-muted); }
+
+/* --- a list of conversations ------------------------------------------ */
+
+.list { max-height:min(52vh,420px); overflow:auto; }
+.list-row { display:flex; gap:var(--gap-wide); align-items:baseline; width:100%;
+  text-align:left; border:0; border-bottom:1px solid var(--line); background:transparent;
+  color:var(--text); padding:10px var(--gap-wide); cursor:pointer;
+  font:var(--size-body)/1.4 var(--font-prose); }
+.list-row:hover { background:var(--surface-raised); }
+.list-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.list-here { background:var(--surface-raised); }
+.list-said { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.list-quiet { color:var(--text-muted); }
+.list-facts { flex:0 0 auto; display:flex; gap:var(--gap-tight); align-items:center; }
+.list-empty { margin:0; padding:var(--gap-wide); color:var(--text-muted);
+  font:var(--size-body)/1.4 var(--font-prose); }
+
+/* --- being asked something -------------------------------------------- */
+
+.ask { border:1px solid var(--state-busy); border-radius:var(--radius);
+  background:var(--surface-raised); padding:var(--gap-wide); margin:var(--gap) 0; }
+.ask-head { margin:0 0 var(--gap) 0; font:var(--size-head)/1.3 var(--font-prose);
+  color:var(--text-bright); }
+.ask-one { border:0; margin:0 0 var(--gap) 0; padding:0; }
+.ask-one legend { padding:0; font:var(--size-body)/1.5 var(--font-prose); color:var(--text); }
+.ask-detail { margin:var(--gap-tight) 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); }
+.ask-option { display:flex; gap:var(--gap); align-items:baseline; padding:3px 0;
+  font:var(--size-body)/1.5 var(--font-prose); cursor:pointer; }
+.ask-why { color:var(--text-muted); font-size:var(--size-small); }
+.ask-foot { display:flex; gap:var(--gap); margin-top:var(--gap); }
+/* Answered, and kept on the page: what was decided is part of the transcript. */
+.ask-done { border-color:var(--line); opacity:.75; }
+.ask-decided { margin:var(--gap-tight) 0; }
+
+/* --- the run's path --------------------------------------------------- */
+
+.trace-turn { border-bottom:1px solid var(--line); padding:var(--gap) var(--gap-wide); }
+.trace-head { display:flex; flex-wrap:wrap; gap:var(--gap); align-items:baseline;
+  font:var(--size-body)/1.5 var(--font-prose); color:var(--text-bright); }
+.trace-step { display:flex; flex-wrap:wrap; gap:var(--gap); align-items:baseline;
+  padding-left:var(--gap-wide); font:var(--size-small)/1.7 var(--font-code);
+  color:var(--text-muted); }
+.trace-name { color:var(--text); }
+.trace-took { color:var(--text-muted); }
+.trace-tool { color:var(--accent); }
+.trace-ok { color:var(--state-ok); }
+.trace-bad { color:var(--state-bad); }
+.trace-note { display:block; padding-left:var(--gap-wide);
+  font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
+
+/* --- what a deployment's own hooks did ----------------------------------- */
+
+.hook-fact { margin:0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-code); overflow-wrap:anywhere; }
+/* A hook's own words on stderr. Ruled rather than coloured: it is the reason
+   the hook gives, and plenty of hooks write to stderr while allowing. */
+.hook-said { margin:var(--gap-tight) 0 0 0; padding-left:var(--gap);
+  border-left:2px solid var(--line); color:var(--text);
+  font:var(--size-small)/1.5 var(--font-code); white-space:pre-wrap;
+  overflow-wrap:anywhere; }
+
+/* --- a page fetched, and a search ---------------------------------------- */
+
+.web-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap;
+  margin-bottom:var(--gap-tight); font:var(--size-small)/1.6 var(--font-code); }
+.web-head a { color:var(--accent); overflow-wrap:anywhere; }
+.web-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:var(--size-small)/1.6 var(--font-prose); color:var(--text); }
+.web-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.web-sources { margin:var(--gap) 0 0 0; padding-left:var(--gap-block);
+  font:var(--size-small)/1.6 var(--font-prose); }
+.web-sources li { margin:var(--gap-tight) 0; }
+.web-title { color:var(--text); }
+/* The host, beside the title. Muted but present: it is the fact that decides
+   whether to believe a claim, and burying it in the URL below makes a reader
+   parse one to find it. */
+.web-host { margin-left:var(--gap); color:var(--text-muted); font-family:var(--font-code); }
+.web-url { overflow-wrap:anywhere; }
+.web-url a { color:var(--accent); font:var(--size-small)/1.5 var(--font-code); }
+
+/* --- what the run is working toward -------------------------------------- */
+
+.feat, .feat-file { padding:var(--gap-tight) 0; }
+.feat-file + .feat-file { border-top:1px solid var(--line); }
+.feat-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap; }
+.feat-said { margin:0; color:var(--text);
+  font:var(--size-body)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-quiet { margin:0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-bad { margin:var(--gap-tight) 0 0 0; color:var(--state-bad);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.feat-todo { display:flex; gap:var(--gap); align-items:baseline;
+  font:var(--size-body)/1.6 var(--font-prose); }
+.feat-mark { flex:0 0 auto; width:1em; text-align:center; font-family:var(--font-code); }
+.feat-completed { color:var(--state-ok); }
+.feat-in_progress { color:var(--state-busy); }
+.feat-pending, .feat-unknown { color:var(--text-muted); }
+/* A finished task is struck through and dimmed rather than removed: the list
+   is what the model said it would do, and what it has already done is how a
+   reader judges how far along it is. */
+.feat-done { color:var(--text-muted); text-decoration:line-through;
+  overflow-wrap:anywhere; }
+/* Neither half grows. The status belongs beside the task, not at the far edge
+   of the panel - the same call the file listing and the session list make, and
+   for the same reason: a word that far from its row stops being about it. */
+.feat-todo > .feat-said, .feat-todo > .feat-done { flex:0 1 auto; }
+/* The word beside the glyph. Small and muted, because it repeats what the
+   colour and the mark already say to anyone who can see them - and is the
+   only thing that says it to anyone who cannot. */
+.feat-state { flex:0 0 auto; color:var(--text-muted); font-size:var(--size-small);
+  font-family:var(--font-code); }
+
+/* --- a rendered answer ------------------------------------------------- */
+
+.md { font:var(--size-body)/1.6 var(--font-prose); color:var(--text); }
+.md > :first-child { margin-top:0; }
+.md > :last-child { margin-bottom:0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin:var(--gap-wide) 0 var(--gap) 0; color:var(--text-bright);
+  font-size:var(--size-head); }
+.md p { margin:var(--gap) 0; overflow-wrap:anywhere; }
+.md ul, .md ol { margin:var(--gap) 0; padding-left:var(--gap-block); }
+.md li { margin:2px 0; }
+.md blockquote { margin:var(--gap) 0; padding-left:var(--gap-wide);
+  border-left:2px solid var(--line); color:var(--text-muted); }
+.md hr { border:0; border-top:1px solid var(--line); margin:var(--gap-wide) 0; }
+.md code { font:var(--size-small)/1.5 var(--font-code); background:var(--surface-sunken);
+  border:1px solid var(--line); border-radius:4px; padding:0 4px; }
+.md a { color:var(--accent); }
+/* A link the page could not vouch for keeps its text and says so quietly:
+   underlined but not coloured, so it does not read as clickable. */
+.md-inert { text-decoration:underline dotted var(--text-muted); }
+
+.code { margin:var(--gap) 0; border:1px solid var(--line); border-radius:var(--radius);
+  overflow:hidden; background:var(--surface-sunken); }
+.code-head { display:flex; align-items:center; justify-content:space-between;
+  gap:var(--gap); padding:5px var(--gap); border-bottom:1px solid var(--line);
+  background:var(--surface-panel); font:var(--size-small)/1.6 var(--font-code);
+  color:var(--text-muted); }
+.code-head .btn { padding:2px 9px; font-size:var(--size-small); }
+.code pre { margin:0; padding:var(--gap) var(--gap-wide); overflow-x:auto; }
+.code code { border:0; background:none; padding:0;
+  font:var(--size-small)/1.6 var(--font-code); color:var(--text); }
+
+/* A value the engine withheld. Struck through rather than coloured: it is not
+   a fault, it is a value nobody is allowed to read. */
+.set-withheld { font-style:italic; color:var(--text-muted); }

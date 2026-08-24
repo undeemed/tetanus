@@ -10,6 +10,8 @@ use tetanus_config::ConfigError;
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types as wire;
 use tetanus_session::SessionError;
+use tetanus_turn::approval::ApprovalError;
+use tetanus_turn::inbox::InboxError;
 use tetanus_turn::llm::LlmError;
 use tetanus_turn::TurnError;
 
@@ -43,6 +45,18 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
             wire::StopReason::Other(reason.as_str().to_string())
         }
     }
+}
+
+/// A `session.create` naming a preset this harness does not compose. The
+/// caller asked for an agent by name, and the ids that exist travel with the
+/// refusal so a surface can offer them.
+pub fn unknown_preset(error: crate::preset::PresetError) -> RpcError {
+    let crate::preset::PresetError::Unknown { id, known } = &error;
+    RpcError::new(ErrorCode::InvalidParams, error.to_string()).with_data(serde_json::json!({
+        "field": "preset",
+        "preset": id,
+        "known": known,
+    }))
 }
 
 /// Contract section 4.5: a journal that is not a faithful copy of a log is
@@ -108,6 +122,36 @@ pub fn turn_error(
         // the one every internal fault asks for: report it. Retrying sends the
         // same sections through the same registry.
         TurnError::Prompt(e) => internal(format!("the system prompt could not be assembled: {e}")),
+        // A listener with a bug is this build's fault, not the caller's and not
+        // the provider's, so it takes the code every internal fault takes.
+        // Retrying would run the same listener over the same input, so there is
+        // nothing for the reader to do but report it - which is exactly what
+        // `Internal` tells a surface.
+        TurnError::Plugin(fault) => internal(format!("a plugin listener panicked: {fault}")),
+        // The decision seam failed, which is not a denial: a denial is an
+        // outcome the model reads as a `tool/result` (§4.4.7) and never reaches
+        // this table. A journal that refused the audit pair is the journal
+        // failing, and reads as one; the other two are this build asking a
+        // question it had no right to ask, which §4.4.7 says is `Internal`.
+        TurnError::Approval(ApprovalError::Log(e)) => journal_error(session_id, journal, e),
+        TurnError::Approval(e) => internal(format!("a tool-call decision failed: {e}")),
+        // The queue of waiting input, and the same three-way split the rest of
+        // this table makes: what the reader does next differs by cause. A
+        // refused append is the journal failing and reads as one. A splice
+        // that does not apply is the journal *damaged*, so it takes the code a
+        // corrupt line takes and carries the seq for the same reason that one
+        // carries the line - it is the only place to look. A duplicate
+        // identity is neither: this build minted an id it had already used, so
+        // there is nothing for the reader to do but report it.
+        TurnError::Inbox(InboxError::Journal(message)) => RpcError::new(
+            ErrorCode::Io,
+            format!("the journal refused queued input: {message}"),
+        ),
+        TurnError::Inbox(e @ InboxError::InvalidPersisted { seq, .. }) => {
+            RpcError::new(ErrorCode::LogCorrupt, e.to_string())
+                .with_data(serde_json::json!({ "session_id": session_id, "seq": seq }))
+        }
+        TurnError::Inbox(e) => internal(format!("queued input could not be served: {e}")),
         TurnError::Llm(LlmError::MissingCredential(env) | LlmError::InvalidCredential(env)) => {
             RpcError::new(
                 ErrorCode::MissingCredential,
@@ -115,16 +159,33 @@ pub fn turn_error(
             )
             .with_data(serde_json::json!({ "provider": provider, "env": env }))
         }
-        // The wait the provider asked for is not published: section 4.5 fixes
-        // the fields this error's `data` carries, so adding one is a change to
-        // the contract and not to this table.
+        // The wait the provider asked for is still not published: section 4.5
+        // fixes the fields this error's `data` carries, so adding one is a
+        // change to the contract and not to this table. `request_id` is
+        // published because that change was made - and it is the field worth
+        // making it for, since a surface can render a wait as "try again
+        // later" but nothing can reconstruct an id the response carried away.
+        // The key is absent rather than null when the provider named none, for
+        // TC-FAULT-3's reason: an absent key says the fact does not exist,
+        // where a null invites a surface to print one.
         TurnError::Llm(LlmError::Provider {
-            status, message, ..
-        }) => RpcError::new(
-            ErrorCode::ProviderError,
-            format!("provider `{provider}` answered {status}: {message}"),
-        )
-        .with_data(serde_json::json!({ "provider": provider, "status": status })),
+            status,
+            message,
+            request_id,
+            ..
+        }) => {
+            let mut data = serde_json::Map::new();
+            data.insert("provider".to_string(), provider.into());
+            data.insert("status".to_string(), (*status).into());
+            if let Some(id) = request_id {
+                data.insert("request_id".to_string(), id.as_str().into());
+            }
+            RpcError::new(
+                ErrorCode::ProviderError,
+                format!("provider `{provider}` answered {status}: {message}"),
+            )
+            .with_data(serde_json::Value::Object(data))
+        }
         TurnError::Llm(LlmError::Sink(e)) => internal(format!("session log refused a chunk: {e}")),
         // No status: the provider never answered, so the field the table
         // names is absent rather than invented.

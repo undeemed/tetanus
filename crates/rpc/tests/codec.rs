@@ -16,8 +16,8 @@ use tetanus_protocol::methods::{
     method, Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
     ConfigDumpResult, Engine, EventSink, HelloParams, HelloResult, ModelCatalogResult, PeerInfo,
     SessionCreateParams, SessionEventPush, SessionEventsParams, SessionEventsResult,
-    SessionListResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
-    SessionUnsubscribeParams, ToolCatalogResult,
+    SessionForkParams, SessionListResult, SessionRef, SessionSubscribeParams,
+    SessionSubscribeResult, SessionUnsubscribeParams, ToolCatalogResult,
 };
 use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_protocol::types::{AgentState, SessionInfo, StopReason, TurnSummary};
@@ -97,6 +97,10 @@ impl Engine for Script {
     }
     async fn session_create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
         self.record(method::SESSION_CREATE, params)?;
+        Ok(info())
+    }
+    async fn session_fork(&self, params: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        self.record(method::SESSION_FORK, params)?;
         Ok(info())
     }
     async fn session_list(&self) -> Result<SessionListResult, RpcError> {
@@ -350,29 +354,14 @@ async fn an_unknown_method_names_itself() {
 /// this call", and 2 on the second, meaning the caller is wrong. A reserved
 /// call that fell through to the unknown arm would tell every surface building
 /// against the frozen shape that the shape does not exist.
+///
+/// The subject is whichever call is reserved now. `session.fork` was it until
+/// the slice that served it, and a routing arm is added by hand, so the arm
+/// that gets forgotten is the one no case names.
 #[tokio::test]
 async fn a_reserved_method_is_routed_rather_than_unknown() {
     let (codec, _engine) = greeted().await;
 
-    let answer = send(
-        &codec,
-        json!({
-            "jsonrpc": "2.0", "id": 3, "method": method::SESSION_FORK,
-            "params": { "session_id": "s1" }
-        }),
-    )
-    .await;
-
-    assert_eq!(answer["id"], 3);
-    assert_eq!(
-        answer["error"]["code"],
-        ErrorCode::NotImplemented as i32,
-        "{answer}"
-    );
-    assert_eq!(answer["error"]["data"]["method"], method::SESSION_FORK);
-
-    // Every reserved call, not just the first one written: a routing arm is
-    // added by hand, so the one that is forgotten is the one no case names.
     let answer = send(
         &codec,
         json!({
@@ -389,6 +378,23 @@ async fn a_reserved_method_is_routed_rather_than_unknown() {
         "{answer}"
     );
     assert_eq!(answer["error"]["data"]["method"], method::APPROVAL_SET);
+
+    let answer = send(
+        &codec,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": method::AGENT_STEER,
+            "params": { "session_id": "s1", "content": "mid-turn" }
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["id"], 5);
+    assert_eq!(
+        answer["error"]["code"],
+        ErrorCode::NotImplemented as i32,
+        "{answer}"
+    );
+    assert_eq!(answer["error"]["data"]["method"], method::AGENT_STEER);
 }
 
 /// TC-RPC-6: contract section 4.5. Params that do not fit the call are refused
@@ -455,6 +461,7 @@ async fn every_method_reaches_its_own_call() {
             method::SESSION_EVENTS,
             json!({ "session_id": "s1", "from_seq": 0 }),
         ),
+        (method::SESSION_FORK, json!({ "session_id": "s1" })),
         (method::SESSION_SUBSCRIBE, json!({ "session_id": "s1" })),
         (
             method::SESSION_UNSUBSCRIBE,
@@ -579,5 +586,64 @@ async fn closing_a_connection_ends_its_subscriptions() {
         engine.reached().len(),
         4,
         "a second close has nothing left to end"
+    );
+}
+
+/// TC-RPC-13: every method the contract defines is routed.
+///
+/// Section 4.2 promises two things about routing: a served call answers, and a
+/// reserved one answers `NotImplemented` rather than `MethodNotFound`, because
+/// those are a whole decision apart for a caller. Both were checked by naming
+/// methods one at a time - TC-ENG-3 for the served ones, TC-RPC-12 for the
+/// reserved ones - which is a completeness claim resting on a hand-maintained
+/// list.
+///
+/// A routing arm is written by hand, so the arm that gets forgotten is the one
+/// no case names; a case that names them one by one has exactly the same hole
+/// one level up. This iterates `method::ALL` instead, so a method added to the
+/// contract and wired into the codec's match nowhere fails here immediately,
+/// without anyone remembering to extend a test.
+///
+/// Expected: no method in the contract answers `MethodNotFound`, and a method
+/// that is not in it does.
+#[tokio::test]
+async fn every_method_the_contract_defines_is_routed() {
+    let (codec, _engine) = greeted().await;
+
+    for (n, name) in method::ALL.iter().enumerate() {
+        // Params are deliberately empty: a routed call may well answer
+        // `InvalidParams`, and that is a pass here. What must not happen is
+        // the codec failing to recognise the method at all.
+        let answer = send(
+            &codec,
+            json!({ "jsonrpc": "2.0", "id": n + 100, "method": name, "params": {} }),
+        )
+        .await;
+
+        let code = answer["error"]["code"].as_i64();
+        assert_ne!(
+            code,
+            Some(ErrorCode::MethodNotFound as i32 as i64),
+            "`{name}` is in the contract and the codec does not route it: {answer}"
+        );
+    }
+
+    // The complement, so the case is measuring something: a method the
+    // contract does not define is still unknown.
+    let answer = send(
+        &codec,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "session.destroy", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        answer["error"]["code"].as_i64(),
+        Some(ErrorCode::MethodNotFound as i32 as i64),
+        "a method nobody defined is unknown: {answer}"
+    );
+
+    // And the list is the whole surface rather than a sample of it.
+    assert!(
+        method::ALL.contains(&method::HELLO) && method::ALL.len() >= 13,
+        "`method::ALL` is the contract's table, not a subset"
     );
 }
