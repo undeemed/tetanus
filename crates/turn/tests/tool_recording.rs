@@ -136,6 +136,14 @@ fn what_counts_as_a_credential_prompt() {
     use tetanus_turn::tools::looks_like_a_password_prompt as prompt;
 
     for real in [
+        // The words other credential prompts use, which the row's gap named
+        // as ones the backstop did not recognise.
+        "Enter PIN:",
+        "Enter your PIN: ",
+        "Verification code:",
+        "One-time code: ",
+        "Enter passcode:",
+        "OTP:",
         "[sudo] password for ci:",
         "[sudo] password for ci: ",
         "Password:",
@@ -150,6 +158,11 @@ fn what_counts_as_a_credential_prompt() {
     }
 
     for not in [
+        // A word inside another word is not that word: three-letter entries
+        // like `pin` earn their keep only if the edges are checked.
+        "spinning up the container",
+        "unpinned dependencies:",
+        "the pincer movement failed",
         "",
         "\n\n",
         "the password was wrong, try again with -v",
