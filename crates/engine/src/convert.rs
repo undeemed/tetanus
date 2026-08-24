@@ -223,6 +223,19 @@ pub fn config_error(error: &ConfigError) -> RpcError {
             format!("must be {expected}, not {found}"),
         )
         .with_data(serde_json::json!({ "field": key })),
+        // A scalar where a section belongs is the same class as a value the
+        // key does not take, and for the same reason: the key is the thing to
+        // edit, and the reader is told which one.
+        ConfigError::SectionExpected { key, found } => RpcError::new(
+            ErrorCode::InvalidParams,
+            format!("is a section with keys under it, so it cannot be set to {found}"),
+        )
+        .with_data(serde_json::json!({ "field": key })),
+        // Several faults in one document carry no single field, so the message
+        // is the whole list and `field` is absent rather than arbitrary: a
+        // surface that highlighted the first key would be pointing at one of
+        // several equally wrong lines.
+        ConfigError::Rejected { .. } => RpcError::new(ErrorCode::InvalidParams, error.to_string()),
         ConfigError::UnsupportedExtension { path, .. }
         | ConfigError::IsADirectory { path }
         | ConfigError::Unreadable { path, .. }

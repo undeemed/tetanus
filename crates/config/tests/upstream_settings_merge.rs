@@ -168,22 +168,17 @@ fn a_key_written_with_no_value_is_a_null_not_an_absence() {
     );
 }
 
-/// TC-PORT-SET-5: a scalar written where a section belongs shadows nothing.
+/// TC-PORT-SET-5b: with no schema, a scalar written where a section belongs
+/// still shadows nothing.
 ///
-/// This is the limitation the flat model implies, pinned so it is a known
-/// answer rather than a surprise. Upstream would refuse the write: its
-/// namespace carries a schema, and a string is not an object.
-///
-/// Input: a document writing `llm: off`, over defaults that set keys inside
-/// `llm`.
-/// Expected: the document contributes the key `llm`, which nothing reads, and
-/// every key under `llm.` still resolves from `Default`. tetanus resolves per
-/// key and has no schema to say that `llm` is a section, so it cannot refuse
-/// the write; what it must not do is let the scalar half-apply. Refusing a key
-/// no reader claims is a schema decision, and `docs/parity.md` carries it as
-/// the open one it is.
+/// The refusal TC-PORT-SET-5 now pins (`crates/config/tests/schema.rs`) needs a
+/// schema to know that `llm` is a section. This case is the other half of that
+/// answer, and it is worth keeping: a deployment whose keys no namespace
+/// declares is checked against nothing, and what it must not do is
+/// *half*-apply the write. The scalar contributes a key nothing reads, and
+/// every key under `llm.` goes on resolving from the layer below.
 #[test]
-fn a_scalar_written_where_a_section_belongs_shadows_nothing() {
+fn with_no_schema_a_scalar_where_a_section_belongs_shadows_nothing() {
     let dir = TempDir::new().expect("temp dir");
     let mut config = defaults();
 

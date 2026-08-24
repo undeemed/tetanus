@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use tetanus_config::{file, home, Config, ConfigError, Document, Layer};
 
+use tetanus_config::schema::{Field, Kind, Schema};
+
 use crate::catalog::key;
 use crate::session::SessionBackend;
 use crate::EngineConfig;
@@ -36,8 +38,33 @@ pub fn settings(home: Option<&Path>) -> Result<Config, ConfigError> {
 pub fn document(path: &Path) -> Result<Config, ConfigError> {
     let mut config = Config::default();
     config.load(Layer::Default, defaults());
-    config.load(Layer::File, file::read(path)?);
+    // Checked against the schema before it is loaded, so a document that
+    // conflicts with a declared shape stops the boot with the key named rather
+    // than half-applying and being discovered mid-run by whichever reader got
+    // there first.
+    config.load(Layer::File, schema().accept(file::read(path)?)?);
     Ok(config)
+}
+
+/// What the engine's own settings claim about themselves.
+///
+/// Every key this crate resolves is declared here, which is what lets a scalar
+/// written where a section belongs be refused (`llm: off` over `llm.model`) and
+/// what makes redaction a declaration rather than a guess about a key's name. A
+/// key no namespace declares is still accepted: the schema narrows what can go
+/// wrong, and is not a register a plugin must join before it can be
+/// configured.
+pub fn schema() -> Schema {
+    let mut schema = Schema::new();
+    schema
+        .declare(key::SESSIONS_ROOT, Field::new(Kind::Text))
+        .declare(key::PROVIDER, Field::new(Kind::Text))
+        .declare(key::MODEL, Field::new(Kind::Text))
+        .declare(key::MAX_STEPS, Field::new(Kind::Integer))
+        .declare(key::MAX_PARALLEL_TOOL_CALLS, Field::new(Kind::Integer));
+    crate::retry::declare(&mut schema);
+    crate::tools::declare(&mut schema);
+    schema
 }
 
 /// The engine's compiled defaults as a layer document, so a value nobody

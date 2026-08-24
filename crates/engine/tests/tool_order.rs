@@ -82,12 +82,17 @@ async fn a_document_names_the_order() {
 /// TC-ORDER-3: an order the engine cannot run is refused, and the message says
 /// which key was wrong.
 ///
-/// Input: five documents - a name nobody registered, a list with no rest
-/// entry, a name listed twice, a value that is not a list, and a list holding
-/// something that is not a name.
+/// Input: four documents the engine must judge - a name nobody registered, a
+/// list with no rest entry, a name listed twice, and a list holding something
+/// that is not a name.
 /// Expected: each is `ConfigError::BadValue` whose message leads with
 /// `tools.order`. An order silently dropped would offer the model a list its
 /// author did not write.
+///
+/// A value that is not a list at all is no longer here: `tools.order` is
+/// declared a list, so that shape is refused as the document is read and never
+/// reaches the engine. TC-ORDER-3b holds it. What is left needs the registry to
+/// judge, which is why it stays with the engine.
 #[test]
 fn an_order_the_engine_cannot_run_is_refused() {
     let dir = TempDir::new().expect("temp dir");
@@ -101,7 +106,6 @@ fn an_order_the_engine_cannot_run_is_refused() {
             "a name listed twice",
             format!(r#"{{"tools": {{"order": ["echo", "echo", "{TOOL_ORDER_REST}"]}}}}"#),
         ),
-        ("not a list", r#"{"tools": {"order": "echo"}}"#.into()),
         (
             "a list of something else",
             r#"{"tools": {"order": ["echo", 7]}}"#.into(),
@@ -193,6 +197,28 @@ async fn the_document_order_reaches_the_model() {
         ["ping", "echo"],
         "the document's order, not canonical"
     );
+}
+
+/// TC-ORDER-3b: a value that is not a list is refused as the document is read.
+///
+/// Input: `tools.order` written as a string.
+/// Expected: `BadValue` naming the key, from `boot::document`. The shape is
+/// declared, so it is judged before an engine exists; the orders that need the
+/// registry to judge stay with the engine, and TC-ORDER-3 holds those. Between
+/// them no wrong order reaches the model.
+#[test]
+fn an_order_that_is_not_a_list_is_refused_as_the_document_is_read() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"tools": {"order": "echo"}}"#).expect("write");
+
+    let error = boot::document(&path).expect_err("a string is not an order");
+
+    assert!(
+        error.to_string().starts_with(tools::key::ORDER),
+        "the message leads with the key: {error}"
+    );
+    assert!(error.to_string().contains("a list"), "{error}");
 }
 
 /// Write `text` as the settings document, and resolve it.

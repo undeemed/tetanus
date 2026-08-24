@@ -110,29 +110,32 @@ fn a_cap_of_none_is_refused() {
     assert!(said.contains('0'), "{said}");
 }
 
-/// TC-PARALLEL-4: a value that is not a whole number of calls is refused.
+/// TC-PARALLEL-4: a value that is not a whole number of calls is refused as
+/// the document is read.
 ///
 /// Input: a document setting the cap to the text `"two"`.
-/// Expected: `ConfigError::BadValue` naming the key. A value of the wrong type
-/// is not ignored: ignoring it would run the engine on a setting the user did
-/// not write.
+/// Expected: `ConfigError::BadValue` naming the key, from the read rather than
+/// from `from_settings`. The key is declared a whole number
+/// (`crates/engine/src/boot.rs`), so the shape is judged before an engine
+/// exists; TC-PARALLEL-3 stays where it was, because zero is a whole number and
+/// only the reader that wants a cap knows it is useless. Either way the value is
+/// not ignored: ignoring it would run the engine on a setting the user did not
+/// write.
 #[test]
 fn a_cap_that_is_not_a_number_is_refused() {
     let dir = TempDir::new().expect("temp dir");
-    let resolved = settings(
-        dir.path(),
-        r#"{"agent": {"max_parallel_tool_calls": "two"}}"#,
-    );
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"agent": {"max_parallel_tool_calls": "two"}}"#).expect("write");
 
-    let error = EngineConfig::from_settings(resolved)
-        .err()
-        .expect("text is not a cap");
+    let error = boot::document(&path).expect_err("text is not a cap");
+
     assert!(
         error
             .to_string()
             .contains(catalog::key::MAX_PARALLEL_TOOL_CALLS),
         "{error}"
     );
+    assert!(error.to_string().contains("a whole number"), "{error}");
 }
 
 /// TC-PARALLEL-6: where the document and the engine differ, the dump reports

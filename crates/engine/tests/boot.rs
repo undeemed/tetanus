@@ -75,23 +75,32 @@ fn a_document_sets_what_it_names_and_no_more() {
     );
 }
 
-/// TC-BOOT-3: a value of the wrong type is refused, naming the key and what it
-/// takes. Ignoring it would run the engine on a setting the user did not write.
+/// TC-BOOT-3: a value the key does not take is refused, naming the key, at
+/// whichever of the two stages can tell.
+///
+/// The stages are different questions and they are asked in order. Reading the
+/// document checks it against the declared *shape*: a whole number written as
+/// text is wrong whatever anything later does with it, and refusing it there
+/// names the key before an engine exists. Resolving the settings then checks
+/// what the value *means*: zero is an integer and an empty name is text, and
+/// only the reader that wants them knows they are useless.
+///
+/// Running on a setting the user did not write is the failure both stages
+/// exist to prevent, so each case asserts which stage caught it as well as
+/// that it was caught.
 #[test]
 fn a_value_of_the_wrong_type_is_refused() {
     let dir = TempDir::new().expect("temp dir");
 
+    // Wrong shape: the schema refuses these as the document is read.
     for (document, key) in [
         ("agent:\n  max_steps: many\n", key::MAX_STEPS),
-        ("agent:\n  max_steps: 0\n", key::MAX_STEPS),
         ("agent:\n  max_steps: 2.5\n", key::MAX_STEPS),
         ("provider:\n  default: 7\n", key::PROVIDER),
-        ("model:\n  default: '  '\n", key::MODEL),
     ] {
-        let resolved = settings(dir.path(), "settings.yaml", document).expect("read");
-        let error = EngineConfig::from_settings(resolved)
+        let error = settings(dir.path(), "settings.yaml", document)
             .err()
-            .unwrap_or_else(|| panic!("`{document}` must be refused"));
+            .unwrap_or_else(|| panic!("`{document}` must be refused as it is read"));
         assert!(
             matches!(&error, ConfigError::BadValue { key: named, .. } if named == key),
             "`{document}` must name `{key}`, said: {error}"
@@ -101,6 +110,46 @@ fn a_value_of_the_wrong_type_is_refused() {
             "the message leads with the key: {error}"
         );
     }
+
+    // Right shape, useless value: the reader that wants it refuses these.
+    for (document, key) in [
+        ("agent:\n  max_steps: 0\n", key::MAX_STEPS),
+        ("model:\n  default: '  '\n", key::MODEL),
+    ] {
+        let resolved = settings(dir.path(), "settings.yaml", document).expect("the shape is fine");
+        let error = EngineConfig::from_settings(resolved)
+            .err()
+            .unwrap_or_else(|| panic!("`{document}` must be refused as it is resolved"));
+        assert!(
+            matches!(&error, ConfigError::BadValue { key: named, .. } if named == key),
+            "`{document}` must name `{key}`, said: {error}"
+        );
+    }
+}
+
+/// TC-BOOT-3b: a scalar written where a section belongs is refused, and says
+/// what to write instead.
+///
+/// Until the schema existed this was ignored: the write contributed the key
+/// `llm`, which no reader claims, while every `llm.*` key went on resolving
+/// from the layer below - so a user who thought they had turned retries off
+/// had changed nothing and nothing said so. `TC-PORT-SET-5` pinned that
+/// behaviour as the open question it was; it now pins the refusal.
+#[test]
+fn a_scalar_where_a_section_belongs_is_refused() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let error = settings(dir.path(), "settings.yaml", "llm:\n  retry: off\n")
+        .expect_err("a section cannot be set to a scalar");
+
+    assert!(
+        matches!(&error, ConfigError::SectionExpected { key, .. } if key == "llm.retry"),
+        "said: {error}"
+    );
+    assert!(
+        error.to_string().contains("Write the keys inside it"),
+        "it says what to do instead: {error}"
+    );
 }
 
 /// TC-BOOT-4: contract §4.7. What a document set reaches `config.dump` as the

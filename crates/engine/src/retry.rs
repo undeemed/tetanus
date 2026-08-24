@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
+use tetanus_config::schema::{Field, Kind, Schema};
 use tetanus_config::{Config, ConfigError, Document, Layer};
 use tetanus_turn::llm::retry::{
     Backoff, RetryPolicy, DEFAULT_INITIAL_DELAY_MS, DEFAULT_JITTER_RATIO, DEFAULT_MAX_DELAY_MS,
@@ -60,6 +61,23 @@ pub mod key {
 /// The two modes, as a document spells them.
 pub const NORMAL: &str = "normal";
 pub const ALWAYS: &str = "always";
+
+/// What the retry block claims about its own keys.
+///
+/// A provider's own block is not declared: the provider names are a
+/// deployment's, not this crate's, so `llm.providers.<name>.retry.*` is checked
+/// by `provider_policies` when it reads them. What the declaration buys here is
+/// the general block - a document that writes `llm.retry: off` is refused
+/// instead of quietly leaving every retry key at its default.
+pub fn declare(schema: &mut Schema) {
+    schema
+        .declare(key::MODE, Field::new(Kind::Text))
+        .declare(key::MAX_RETRIES, Field::new(Kind::Integer))
+        .declare(key::RETRYABLE_CODES, Field::new(Kind::List))
+        .declare(key::INITIAL_DELAY_MS, Field::new(Kind::Integer))
+        .declare(key::MAX_DELAY_MS, Field::new(Kind::Integer))
+        .declare(key::JITTER_RATIO, Field::new(Kind::Number));
+}
 
 /// The compiled defaults as a layer document, so every key above reports where
 /// it came from even when no document mentions it.
