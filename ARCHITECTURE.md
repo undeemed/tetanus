@@ -330,6 +330,14 @@ them in a database that writes one row, opened lazily so a store nobody writes t
 file.
 Which medium a deployment wants is a deployment's decision, so both mount by name in
 `StorageRegistry` and a consumer holds a `dyn KvStore` that cannot tell them apart.
+A component does not hold one directly: `storage::domain` is the layer it calls, and it adds the
+four things a table of JSON has no opinion about - a declaration naming the tables and what may go
+in them, a version stamped on the medium so data another build wrote refuses at open rather than
+being guessed at, a `storage/changed` event per durable write carrying the new value only, and a
+`DomainRouter` saying which store serves which domain, resolved at open so a bad route fails before
+a user has been told the write worked. Records are validated in both directions: what cannot be
+written also will not be served, because a component reading a record it would have refused to
+write is acting on data it does not understand.
 The rules belong to the seam rather than to either backend - declared tables, an undeclared one as a
 caller mistake, a declared-but-absent one reading empty, another component's table kept, nothing
 written until something is stored - and
