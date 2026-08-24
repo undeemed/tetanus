@@ -56,8 +56,18 @@ impl Located {
     /// range clause is refused by an event that has no such coordinate at all -
     /// and one long chain of `if let` made those rules nine separate places to
     /// get right instead of two.
-    fn matches(&self, filter: &EventFilter) -> bool {
+    pub(crate) fn matches(&self, filter: &EventFilter) -> bool {
         self.is_named_by(filter) && self.sits_within(filter) && self.reads_as(filter)
+    }
+
+    /// [`Located::text`] folded to lowercase, folded once when this event was
+    /// positioned.
+    ///
+    /// Shared with the search module rather than refolded there: one corpus,
+    /// one casing rule, and a search that matched something the `text` filter
+    /// clause would not is a difference nobody could explain.
+    pub(crate) fn lowered(&self) -> Option<&str> {
+        self.search.as_deref()
     }
 
     /// The clauses about what the event is: its type, its role, its tool.
@@ -126,6 +136,13 @@ fn bounded<T: Copy + PartialOrd>(clause: &Option<Bound<T>>, value: Option<T>) ->
 pub struct Journal {
     session_id: String,
     events: Vec<Located>,
+    /// The seqs the model can still see, when a caller supplied them.
+    ///
+    /// `None` is not "nothing is visible", it is "nobody said" - see
+    /// [`crate::Surface::Unknown`]. This crate never works the set out itself,
+    /// because the engine's `compaction::surface` is the one reader of that
+    /// and a second one disagrees with it the day a session compacts.
+    current: Option<std::collections::BTreeSet<u64>>,
 }
 
 impl Journal {
@@ -135,7 +152,38 @@ impl Journal {
         Self {
             session_id: session_id.into(),
             events: locate(events),
+            current: None,
         }
+    }
+
+    /// Tell this journal which of its events the model can still see.
+    ///
+    /// `current_seqs` is what `tetanus_turn::compaction::surface` selected,
+    /// mapped to seqs. Supplying it is what turns [`crate::Surface::Unknown`]
+    /// on a search hit into `Current` or `Shadowed`.
+    ///
+    /// Taken as an argument rather than derived here on purpose. Deriving it
+    /// would mean either a second implementation of the surface fold - which
+    /// `AGENTS.md` forbids, because two folds disagree the first time a session
+    /// compacts - or a dependency on `tetanus-turn`, which would drag an HTTP
+    /// client into a crate whose whole virtue is that it opens nothing.
+    pub fn with_surface(mut self, current_seqs: impl IntoIterator<Item = u64>) -> Self {
+        self.current = Some(current_seqs.into_iter().collect());
+        self
+    }
+
+    /// Search this session's words.
+    ///
+    /// `from` resumes a previous page, and must be the cursor that page
+    /// returned: a cursor is bound to the query that issued it, because paging
+    /// one search with another's cursor produces a plausible wrong answer
+    /// rather than an error.
+    pub fn search(
+        &self,
+        query: &crate::search::SearchQuery,
+        from: Option<&crate::search::Cursor>,
+    ) -> Result<crate::search::SearchPage, QueryError> {
+        crate::search::search(&self.events, self.current.as_ref(), query, from)
     }
 
     pub fn session_id(&self) -> &str {

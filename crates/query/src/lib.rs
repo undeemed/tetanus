@@ -35,9 +35,11 @@
 pub mod aggregate;
 pub mod filter;
 pub mod journal;
+pub mod search;
 pub mod source;
 
 pub use aggregate::{ToolCallRecord, TurnCost, TurnRow};
 pub use filter::{Bound, EventFilter, QueryError, Role};
 pub use journal::{Journal, Located, Page, PageResult, Selection};
+pub use search::{Cursor, Hit, SearchPage, SearchQuery, Surface, MAX_HITS};
 pub use source::EventSource;
