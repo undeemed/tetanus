@@ -42,6 +42,15 @@ pub mod topic {
     pub const QUESTION_ASKED: &str = "question/asked";
     pub const QUESTION_ANSWERED: &str = "question/answered";
 
+    /// What a turn told the model about the world outside the conversation,
+    /// gathered once per turn (contract section 4.4.8, [`crate::context`]).
+    ///
+    /// It does derive to a message, and it is the only durable type whose
+    /// derivation depends on where it sits: the *last* one on the journal
+    /// becomes a `user` message and every earlier one is skipped. A long
+    /// session accumulates them, and yesterday's date is worse than no date.
+    pub const CONTEXT_SNAPSHOT: &str = "context/snapshot";
+
     /// One mutation of the queue of input waiting for a boundary the loop has
     /// not reached yet ([`crate::inbox`]). The queues are a replay-once fold
     /// of these, so the record carries normalized coordinates rather than what
@@ -71,7 +80,26 @@ pub mod topic {
 /// order.
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
     let mut out = Vec::new();
+    let mut context = newest_context(events);
     for index in crate::compaction::surface(events) {
+        // The runtime context enters the history where it sits on the journal:
+        // after everything the turn inherited, immediately before the message
+        // that opened this turn. Section 4.4.8 puts it after the retained
+        // history for a caching reason - a sentence that changes every turn
+        // must not sit in the prompt prefix a provider caches - and the
+        // journal's own order already satisfies that.
+        //
+        // Not at the very end, which is the other reading of the same clause:
+        // a request whose last message is a machine-written status block ends
+        // in something no one asked for, and both a model and this crate's own
+        // mock read the last message as the thing to answer.
+        if let Some((at, text)) = context.take() {
+            if index > at {
+                out.push(Message::user(text));
+            } else {
+                context = Some((at, text));
+            }
+        }
         let event = &events[index];
         match event.ty.as_str() {
             topic::USER_MESSAGE => {
@@ -98,7 +126,38 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
             _ => {}
         }
     }
+    // A snapshot with nothing after it - the ordinary case, since it is written
+    // at the top of a turn whose first message has not been logged yet.
+    if let Some((_, text)) = context {
+        out.push(Message::user(text));
+    }
     out
+}
+
+/// The message the last `context/snapshot` derives to, and where that snapshot
+/// sits on the journal.
+///
+/// Only the newest one travels. A turn writes one, so a long session
+/// accumulates them, and yesterday's date is worse than no date. The earlier
+/// ones stay on the journal, because the journal records what happened and a
+/// reader may want to know what the model was told at the time.
+///
+/// Rendering here rather than storing the rendered text is the choice section
+/// 4.4.8 fixes: the parts are the record, the joining rule reproduces the text,
+/// and a surface that wants to show which provider said what still can.
+fn newest_context(events: &[SessionEvent]) -> Option<(usize, String)> {
+    let (at, snapshot) = events
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| event.ty == topic::CONTEXT_SNAPSHOT)?;
+    let parts: Vec<crate::context::ContextPart> = snapshot
+        .data
+        .get("parts")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let text = crate::context::render(&parts);
+    (!text.is_empty()).then_some((at, text))
 }
 
 /// Prepend the system prompt to derived history for the wire request.

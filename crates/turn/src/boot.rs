@@ -9,6 +9,7 @@ use tetanus_core::effects::EffectError;
 use tetanus_core::{Context, EventBus, Plugin, PluginId, Registry, RegistryError, Service};
 use tetanus_session::SessionLog;
 
+use crate::context::ContextRegistry;
 use crate::interrupt::Interrupt;
 use crate::llm::LlmAdapter;
 use crate::prompt::PromptRegistry;
@@ -33,6 +34,20 @@ pub struct PromptService;
 impl Service for PromptService {
     const KEY: &'static str = "system-prompt";
     type Provider = PromptRegistry;
+}
+
+/// The runtime-context providers a turn gathers before its first step
+/// (contract section 4.4.8).
+///
+/// Optional, and deliberately so: a composition that provides none writes no
+/// `context/snapshot` and the model is told nothing it was not told before.
+/// The engine defaults to an empty registry rather than requiring one, because
+/// every composition that existed before runtime context did is a composition
+/// that provides no context and must keep working unchanged.
+pub struct ContextService;
+impl Service for ContextService {
+    const KEY: &'static str = "runtime-context";
+    type Provider = ContextRegistry;
 }
 
 /// The durable session log.
@@ -64,6 +79,9 @@ pub fn tools_plugin_id() -> PluginId {
 }
 pub fn prompt_plugin_id() -> PluginId {
     PluginId::from("system-prompt")
+}
+pub fn context_plugin_id() -> PluginId {
+    PluginId::from("runtime-context")
 }
 pub fn session_plugin_id() -> PluginId {
     PluginId::from("session")
@@ -99,6 +117,20 @@ impl Plugin for ToolsPlugin {
     fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
         ctx.services
             .provide::<ToolsService>(Arc::clone(&self.tools))
+            .map_err(|e| EffectError::Failed(e.to_string()))
+    }
+}
+
+pub struct ContextPlugin {
+    pub providers: Arc<ContextRegistry>,
+}
+impl Plugin for ContextPlugin {
+    fn id(&self) -> PluginId {
+        context_plugin_id()
+    }
+    fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
+        ctx.services
+            .provide::<ContextService>(Arc::clone(&self.providers))
             .map_err(|e| EffectError::Failed(e.to_string()))
     }
 }
@@ -233,6 +265,12 @@ fn boot_composed(
     registry.insert(Box::new(ToolsPlugin { tools }))?;
     registry.insert(Box::new(PromptPlugin {
         sections: PromptRegistry::new(),
+    }))?;
+    // Provided empty rather than left absent, so a composition adds a context
+    // provider by reaching for the service every other capability is reached
+    // through. An empty registry writes nothing, so the default costs nothing.
+    registry.insert(Box::new(ContextPlugin {
+        providers: Arc::new(ContextRegistry::new()),
     }))?;
     registry.insert(Box::new(SessionPlugin { log }))?;
     registry.insert(Box::new(AgentLoopPlugin))?;

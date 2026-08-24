@@ -13,7 +13,9 @@
 //! or a title does not recompute the whole journal to get it.
 
 pub mod projection;
+pub mod projection_cache;
 pub mod sqlite;
+pub mod telemetry;
 pub mod units;
 
 use std::io::Write;

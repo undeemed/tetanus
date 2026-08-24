@@ -27,10 +27,13 @@ fn fixture() -> (tempfile::TempDir, EventBus, Arc<dyn SessionLog>) {
     (dir, bus, log)
 }
 
-/// TC-BOOT-1: a full boot provides the four services under their documented
+/// TC-BOOT-1: a full boot provides the five services under their documented
 /// keys and yields an engine.
-/// Expected: keys `["llm", "sessions", "system-prompt", "tools"]`; the engine
-/// resolves, fills the base prompt slot, and runs.
+/// Expected: keys `["llm", "runtime-context", "sessions", "system-prompt",
+/// "tools"]`; the engine resolves, fills the base prompt slot, and runs.
+/// `runtime-context` is provided empty, so a composition that wants to tell
+/// the model what time it is reaches for a service rather than for a
+/// constructor, and one that does not pays no journal line and no message.
 #[tokio::test]
 async fn boot_provides_every_service_the_loop_needs() {
     let (_dir, bus, log) = fixture();
@@ -40,7 +43,13 @@ async fn boot_provides_every_service_the_loop_needs() {
 
     assert_eq!(
         ctx.services.keys().collect::<Vec<_>>(),
-        vec!["llm", "sessions", "system-prompt", "tools"]
+        vec![
+            "llm",
+            "runtime-context",
+            "sessions",
+            "system-prompt",
+            "tools"
+        ]
     );
     assert_eq!(
         ctx.services.require::<LlmService>().unwrap().provider(),

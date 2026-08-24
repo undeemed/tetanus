@@ -1560,6 +1560,7 @@ name = "tetanus-core"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -1780,6 +1781,7 @@ dependencies = [
  "tetanus-core",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

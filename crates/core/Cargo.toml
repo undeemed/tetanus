@@ -11,6 +11,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 futures-util = { workspace = true }
+rusqlite.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

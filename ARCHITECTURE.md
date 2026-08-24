@@ -201,10 +201,30 @@ The engine resolves four services from the registry and names no implementation:
 | `ToolsService` | `tools` | `ToolRegistry` | `EchoTool` |
 | `SessionService` | `sessions` | `dyn SessionLog` | `JsonlSessionLog` |
 | `PromptService` | `system-prompt` | `PromptRegistry` | the engine's own base section |
+| `ContextService` | `runtime-context` | `ContextRegistry` | the clock reading a turn is prepared at |
 
-`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the four providers plus
-`AgentLoopPlugin`, which provides nothing and declares the other four as dependencies, so a missing
-provider fails at boot naming `agent-loop` rather than mid-turn.
+`boot()` ([crates/turn/src/boot.rs](crates/turn/src/boot.rs)) mounts the five providers plus
+`AgentLoopPlugin`, which provides nothing and declares the four the loop cannot run without as
+dependencies, so a missing provider fails at boot naming `agent-loop` rather than mid-turn.
+`ContextService` is the one a turn runs happily without: it is provided empty, and an empty one
+writes nothing.
+
+One provider is worth naming because it is not a reading of the world but a correction: an
+`InstructionWatch` ([crates/turn/src/instructions.rs](crates/turn/src/instructions.rs)) reports the
+workspace instruction files a tool edited, added or deleted since the last turn, with the new
+content, so a session whose own tools rewrite `AGENTS.md` stops following the version it read at
+startup. A change is reported once, at a turn boundary rather than inside the step that made it.
+
+`ContextRegistry` ([crates/turn/src/context.rs](crates/turn/src/context.rs)) is what a turn tells
+the model about the world outside the conversation - the date now, the working directory and the
+branch later. It is gathered once, between `turn/start` and the first `step/start`, and recorded as
+`context/snapshot` ([docs/interface-contract.md](docs/interface-contract.md) section 4.4.8). It is
+carried as a user message and never as a prompt section, which is the whole design: a provider
+caches a prompt by its longest stable prefix, and a sentence saying what time it is would
+invalidate that prefix on every request of every session. Only the newest snapshot derives to a
+message - yesterday's date is worse than no date - and the earlier ones stay on the journal, which
+records what happened. The parts are the record and the rendering is derived from them by section
+4.3's joining rule, so a replay shows the model exactly what the run did.
 
 `PromptRegistry` ([crates/turn/src/prompt.rs](crates/turn/src/prompt.rs)) is what one assembly
 starts from. A section has a unique name, an explicit order, and text that is either fixed or asked
@@ -303,8 +323,19 @@ what the system prompt and tool catalog cost, which is what the context breakdow
 what lets a turn a provider failure ended still say what it tried to send.
 
 What a run *works out* rather than what happened to it goes in the key-value store
-([crates/core/src/storage.rs](crates/core/src/storage.rs)): declared tables of JSON in one file,
-replaced whole by an atomic rename.
+([crates/core/src/storage](crates/core/src/storage)): declared tables of JSON, behind one seam with
+two media under it.
+`json::Store` keeps them in one file replaced whole by an atomic rename; `sqlite::SqliteStore` keeps
+them in a database that writes one row, opened lazily so a store nobody writes to still leaves no
+file.
+Which medium a deployment wants is a deployment's decision, so both mount by name in
+`StorageRegistry` and a consumer holds a `dyn KvStore` that cannot tell them apart.
+The rules belong to the seam rather than to either backend - declared tables, an undeclared one as a
+caller mistake, a declared-but-absent one reading empty, another component's table kept, nothing
+written until something is stored - and
+[crates/core/tests/storage_backends.rs](crates/core/tests/storage_backends.rs) asserts each of them
+against both, which is the arrangement that caught the file backend materializing a store for a
+`remove` that found nothing.
 A projection checkpoint, a computed title and a cache each belong there - reproducible from the log,
 expensive enough to keep, and not facts, so not journal entries.
 A payload too large to carry goes to the spill store
@@ -313,6 +344,16 @@ file and hands the model a bounded preview and a locator. It has two doors, and 
 uses follows from who holds the bytes: a finished payload is `save`d, while a producer that is
 *dropping* bytes as it goes - `crates/exec` bounding a command's output - `open`s a writer and
 streams into it, because by the time a result exists what it dropped is gone.
+
+What leaves the process for a collector goes through
+[crates/session/src/telemetry.rs](crates/session/src/telemetry.rs), which is the capture half only:
+a ledger record mirrors one journal event and carries its seq, an ops record carries a signal with
+no home on the log and deliberately carries none, severity is mapped where the outcome is still
+visible, and one redaction seam - shipping no rules of its own - is where a deployment says what may
+not leave. Everything downstream of `TelemetrySink::emit` is a reporting SDK's, which is why this
+layer needs no dependency; the OpenTelemetry exporter upstream ships separately stays a dependency
+decision. Redaction touches the exported copy only: a journal rewritten to satisfy an exporter is no
+longer a record of what happened.
 
 A credential goes in neither, and in particular not in the settings document
 ([crates/config/src/credentials.rs](crates/config/src/credentials.rs)).

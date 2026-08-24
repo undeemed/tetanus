@@ -56,6 +56,10 @@ pub struct EngineConfig {
     /// by [`crate::boot`], which opens a database before the engine is built
     /// so an unreadable store is a boot fault and not a first-turn surprise.
     pub sessions_backend: SessionBackend,
+    /// Where this run came from, recorded on every journal it opens (contract
+    /// section 4.4.9). The default records the process's own directory and no
+    /// delegation, which is what an ordinary run is.
+    pub session_origin: crate::session::SessionOrigin,
     /// Provider a `session.create` with no override resolves to.
     pub default_provider: String,
     /// Model a `session.create` with no override resolves to.
@@ -110,6 +114,7 @@ impl Default for EngineConfig {
         Self {
             sessions_root: PathBuf::from(DEFAULT_SESSIONS_ROOT),
             sessions_backend: SessionBackend::Jsonl,
+            session_origin: crate::session::SessionOrigin::default(),
             default_provider: tetanus_turn::llm::mock::PROVIDER.to_string(),
             default_model: tetanus_turn::llm::mock::MODEL.to_string(),
             max_steps: 8,
@@ -153,7 +158,7 @@ pub struct HarnessEngine {
 impl HarnessEngine {
     pub fn new(config: EngineConfig) -> Self {
         Self {
-            sessions: Arc::new(SessionStore::with_backend(
+            sessions: Arc::new(SessionStore::with_origin(
                 config.sessions_root.clone(),
                 SessionDefaults {
                     provider: config.default_provider.clone(),
@@ -162,6 +167,7 @@ impl HarnessEngine {
                     presets: config.presets.clone(),
                 },
                 config.sessions_backend.clone(),
+                config.session_origin.clone(),
             )),
             hub: Arc::new(Hub::new()),
             runtime: Arc::new(Runtime::new(&config)),

@@ -90,6 +90,10 @@ impl EngineConfig {
         Ok(Self {
             sessions_backend: backend(&settings, &sessions_root)?,
             sessions_root,
+            // Not read from the document: where a run was opened is a fact
+            // about the process, and a settings key for it would let a
+            // deployment write a directory its journals were never opened in.
+            session_origin: base.session_origin,
             default_provider: text(&settings, key::PROVIDER)?.unwrap_or(base.default_provider),
             default_model: text(&settings, key::MODEL)?.unwrap_or(base.default_model),
             max_steps: steps(&settings, key::MAX_STEPS)?.unwrap_or(base.max_steps),
