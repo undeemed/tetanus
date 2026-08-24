@@ -12,6 +12,7 @@ use tetanus_session::SessionLog;
 use crate::interrupt::Interrupt;
 use crate::llm::LlmAdapter;
 use crate::prompt::PromptRegistry;
+use crate::runtime_context::ContextRegistry;
 use crate::tools::ToolRegistry;
 
 /// The model-provider seam.
@@ -54,6 +55,21 @@ pub struct InterruptService;
 impl Service for InterruptService {
     const KEY: &'static str = "interrupt";
     type Provider = Interrupt;
+}
+
+/// The providers that tell the model where it is (contract section 4.4.8).
+///
+/// Optional, like [`InterruptService`]: a composition that installs none gets
+/// an empty registry and writes no `context/snapshot`, rather than having to
+/// register something in order to say it wants nothing.
+pub struct ContextService;
+impl Service for ContextService {
+    const KEY: &'static str = "runtimeContext";
+    type Provider = ContextRegistry;
+}
+
+pub fn context_plugin_id() -> PluginId {
+    PluginId::from("runtimeContext")
 }
 
 pub fn llm_plugin_id() -> PluginId {
@@ -127,6 +143,21 @@ impl Plugin for SessionPlugin {
     fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
         ctx.services
             .provide::<SessionService>(Arc::clone(&self.log))
+            .map_err(|e| EffectError::Failed(e.to_string()))
+    }
+}
+
+/// Installs a composition's runtime-context providers.
+pub struct ContextPlugin {
+    pub context: Arc<ContextRegistry>,
+}
+impl Plugin for ContextPlugin {
+    fn id(&self) -> PluginId {
+        context_plugin_id()
+    }
+    fn start(&self, ctx: &mut Context) -> Result<(), EffectError> {
+        ctx.services
+            .provide::<ContextService>(Arc::clone(&self.context))
             .map_err(|e| EffectError::Failed(e.to_string()))
     }
 }
@@ -235,6 +266,13 @@ fn boot_composed(
         sections: PromptRegistry::new(),
     }))?;
     registry.insert(Box::new(SessionPlugin { log }))?;
+    // Always installed and always empty to begin with, the same way prompt
+    // sections are: a composition registers providers on it after boot rather
+    // than choosing a different boot function, which is what stops one
+    // optional extra from doubling the number of ways to start a harness.
+    registry.insert(Box::new(ContextPlugin {
+        context: Arc::new(ContextRegistry::new()),
+    }))?;
     registry.insert(Box::new(AgentLoopPlugin))?;
 
     let mut ctx = Context::with_bus(bus);

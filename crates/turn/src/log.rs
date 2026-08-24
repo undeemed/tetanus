@@ -52,6 +52,16 @@ pub mod topic {
     /// the queue as well would show it every message twice, once while it was
     /// still waiting.
     pub const INBOX_SPLICED: &str = "agent/inbox/spliced";
+
+    /// What a turn told the model about the world outside the conversation
+    /// (contract section 4.4.8): the date, the working directory, the branch.
+    ///
+    /// It *does* derive to a message - a `user` one, carried after the
+    /// retained history so the cached system prefix stays untouched - but only
+    /// the newest one on the journal does. Yesterday's date is worse than no
+    /// date, so every earlier snapshot stays on the journal as a record of
+    /// what the model was told at the time and never travels again.
+    pub const CONTEXT_SNAPSHOT: &str = "context/snapshot";
 }
 
 /// Derive the model history from the log. Replay is re-derivation from the
@@ -70,9 +80,47 @@ pub mod topic {
 /// exactly as it always did, because its surface is every surface event in log
 /// order.
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
+    // Contract section 4.4.8: the last snapshot is history and every earlier
+    // one is skipped. Found before the walk, because "is this the newest" is
+    // not answerable from inside a forward pass.
+    //
+    // A snapshot is deliberately *not* a surface event. Surface events cite
+    // their sources and can be shadowed by a compaction; a snapshot does
+    // neither, and admitting it to `surface` would let a summary swallow the
+    // one message whose whole job is to be current. So it is spliced back in
+    // at its journal position instead: after the history retained before it,
+    // which is what leaves the cached prefix untouched, and before the prompt
+    // of the turn that wrote it.
+    let mut order = crate::compaction::surface(events);
+    if let Some(newest) = events
+        .iter()
+        .rposition(|event| event.ty == topic::CONTEXT_SNAPSHOT)
+    {
+        let at = order
+            .iter()
+            .position(|index| *index > newest)
+            .unwrap_or(order.len());
+        order.insert(at, newest);
+    }
+
     let mut out = Vec::new();
-    for index in crate::compaction::surface(events) {
+    for index in order {
         let event = &events[index];
+        if event.ty == topic::CONTEXT_SNAPSHOT {
+            // Only the newest reaches here at all - `order` holds that one and
+            // no other - so this is the message, not a candidate for one.
+            // Carried after the retained history rather than in the system
+            // prompt, which is the caching decision 4.4.8 turns on.
+            let parts: Vec<crate::runtime_context::ContextPart> = event
+                .data
+                .get("parts")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            if let Some(text) = crate::runtime_context::render(&parts) {
+                out.push(Message::user(text));
+            }
+            continue;
+        }
         match event.ty.as_str() {
             topic::USER_MESSAGE => {
                 out.push(Message::user(string_field(event, "content")));

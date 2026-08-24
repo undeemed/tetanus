@@ -8,9 +8,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
-use tetanus_turn::boot::{boot, PromptService};
+use tetanus_turn::boot::{boot, ContextService, PromptService};
 use tetanus_turn::llm::mock::MockAdapter;
 use tetanus_turn::prompt::PromptRegistry;
+use tetanus_turn::runtime_context::ContextRegistry;
 use tetanus_turn::tools::{EchoTool, ToolRegistry};
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 
@@ -87,6 +88,10 @@ pub struct Harness {
     /// of a shared fixture it does not use.
     #[allow(dead_code)]
     pub sections: Arc<PromptRegistry>,
+    /// The runtime-context providers this engine will ask, registered on after
+    /// boot. Only the runtime-context suite reaches for it.
+    #[allow(dead_code)]
+    pub context: Arc<ContextRegistry>,
     #[allow(dead_code)]
     trace: TurnTrace,
     // Not every suite sharing this fixture listens on the bus, and a test
@@ -127,12 +132,14 @@ impl Harness {
 
         let trace = TurnTrace::attach(&bus);
         let sections = ctx.services.require::<PromptService>().expect("sections");
+        let context = ctx.services.require::<ContextService>().expect("context");
         let engine = TurnEngine::from_context(&ctx, config).expect("engine");
 
         Self {
             engine,
             log_path,
             sections,
+            context,
             trace,
             bus,
             _dir: dir,

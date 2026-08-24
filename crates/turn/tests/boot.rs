@@ -27,10 +27,18 @@ fn fixture() -> (tempfile::TempDir, EventBus, Arc<dyn SessionLog>) {
     (dir, bus, log)
 }
 
-/// TC-BOOT-1: a full boot provides the four services under their documented
+/// TC-BOOT-1: a full boot provides the five services under their documented
 /// keys and yields an engine.
-/// Expected: keys `["llm", "sessions", "system-prompt", "tools"]`; the engine
-/// resolves, fills the base prompt slot, and runs.
+///
+/// The list is asserted whole rather than by membership, so a service added or
+/// renamed shows up here as a decision somebody made rather than as a silent
+/// widening of what a composition depends on. `runtimeContext` joined it with
+/// contract section 4.4.8: it is always installed and always empty to begin
+/// with, the same way prompt sections are, so a deployment registers providers
+/// on it after boot instead of choosing a different boot function.
+///
+/// Expected: keys `["llm", "runtimeContext", "sessions", "system-prompt",
+/// "tools"]`; the engine resolves, fills the base prompt slot, and runs.
 #[tokio::test]
 async fn boot_provides_every_service_the_loop_needs() {
     let (_dir, bus, log) = fixture();
@@ -40,7 +48,13 @@ async fn boot_provides_every_service_the_loop_needs() {
 
     assert_eq!(
         ctx.services.keys().collect::<Vec<_>>(),
-        vec!["llm", "sessions", "system-prompt", "tools"]
+        vec![
+            "llm",
+            "runtimeContext",
+            "sessions",
+            "system-prompt",
+            "tools"
+        ]
     );
     assert_eq!(
         ctx.services.require::<LlmService>().unwrap().provider(),

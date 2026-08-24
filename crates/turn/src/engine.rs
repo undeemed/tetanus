@@ -36,7 +36,9 @@ use tetanus_core::{Context, EffectHandle, EventBus, ServiceError};
 use tetanus_session::{SessionError, SessionLog};
 
 use crate::approval::{ApprovalError, ApprovalPolicy, ApprovalRequest, ApprovalService};
-use crate::boot::{InterruptService, LlmService, PromptService, SessionService, ToolsService};
+use crate::boot::{
+    ContextService, InterruptService, LlmService, PromptService, SessionService, ToolsService,
+};
 use crate::compaction::{self, CompactionBudget, Summarizer};
 use crate::events::{
     AgentRequest, AssemblePrompt, LlmStream, PostToolDecision, PreStep, PreStepDecision,
@@ -51,6 +53,7 @@ use crate::llm::{
 use crate::log::{derive_messages, topic, with_system};
 use crate::prompt::{AssembleAt, PromptError, PromptRegistry};
 use crate::prune::PruneBudget;
+use crate::runtime_context::ContextRegistry;
 use crate::tools::{
     Permission, ToolCall, ToolMode, ToolOrder, ToolOutcome, ToolRegistry, ToolSchema,
 };
@@ -233,6 +236,10 @@ pub struct TurnEngine {
     /// session keeps what was waiting when it stopped - which is the whole
     /// reason the queue is durable rather than a field on the running loop.
     inbox: Mutex<Inbox>,
+    /// What this turn tells the model about the world outside the
+    /// conversation ([`crate::runtime_context`]). One per engine, because the
+    /// providers are the composition's and the snapshot is this session's.
+    context: Arc<ContextRegistry>,
 }
 
 impl TurnEngine {
@@ -272,6 +279,10 @@ impl TurnEngine {
             // the process to stop.
             interrupt: ctx.services.get::<InterruptService>().unwrap_or_default(),
             inbox: Mutex::new(inbox),
+            // Optional: a composition that installed no providers gets an
+            // empty registry and writes no snapshots, rather than having to
+            // register one to say it wants none.
+            context: ctx.services.get::<ContextService>().unwrap_or_default(),
         })
     }
 
@@ -419,6 +430,19 @@ impl TurnEngine {
         let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         self.log
             .append(topic::TURN_START, serde_json::json!({ "turn": turn }))?;
+
+        // Contract section 4.4.8: gathered once per turn, between `turn/start`
+        // and the first `step/start`. A snapshot whose parts are all empty is
+        // not written at all - not an empty array, no event - so a deployment
+        // that installed no providers has a journal byte-identical to the one
+        // it had before this existed.
+        let parts = self.context.gather();
+        if crate::runtime_context::render(&parts).is_some() {
+            self.log.append(
+                topic::CONTEXT_SNAPSHOT,
+                serde_json::json!({ "turn": turn, "parts": parts }),
+            )?;
+        }
 
         let mut progress = Progress::default();
         // `AssertUnwindSafe` is the deliberate part. A panic mid-turn leaves

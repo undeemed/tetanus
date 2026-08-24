@@ -22,6 +22,7 @@
 //! - [`prune`] shrinks a tool result that is too long to keep whole.
 //! - [`questions`] asks the user something a tool cannot decide alone.
 //! - [`repair`] writes the closers an interrupted journal is missing.
+//! - [`runtime_context`] tells the model where it is, once per turn.
 //! - [`instructions`] reads the conventions a project keeps in its repository.
 //! - [`llm`] is the model-provider seam, with a deterministic offline adapter
 //!   and the DeepSeek chat-completions adapter.
@@ -46,6 +47,7 @@ pub mod prompt;
 pub mod prune;
 pub mod questions;
 pub mod repair;
+pub mod runtime_context;
 pub mod schema;
 pub mod tokens;
 pub mod tools;
