@@ -32,6 +32,7 @@
 pub mod access;
 pub mod error;
 pub mod glob;
+pub mod image;
 pub mod kernel;
 pub mod local;
 pub mod observation;

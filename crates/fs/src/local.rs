@@ -32,7 +32,7 @@ use crate::error::FsError;
 use crate::glob::Pattern;
 use crate::service::{
     Deleted, DirEntry, EditOutcome, EditRequest, FileKind, FileSystem, FsInfo, FsTarget, FsVersion,
-    WriteIntent, WriteOperation, WriteOutcome, MAX_GLOB_MATCHES, MAX_TEXT_BYTES,
+    WriteIntent, WriteOperation, WriteOutcome, MAX_GLOB_MATCHES, MAX_TEXT_BYTES, MAX_WINDOW_BYTES,
 };
 
 /// The most directory entries one glob visits before it stops walking.
@@ -207,6 +207,60 @@ pub(crate) fn read_text(target: &FsTarget) -> Result<(String, FsVersion), FsErro
         path: target.display().to_string(),
     })?;
     Ok((text, version_of(&meta)))
+}
+
+/// Read a window of a regular file's bytes, with the version it had.
+///
+/// Seeks rather than reading the file and slicing it: the caller that wants
+/// the first thirty-two bytes of a large picture should pay for thirty-two
+/// bytes, and the text path already refuses anything past its cap for the
+/// reason this one must not - a picture is bigger than a source file and is
+/// still the thing being asked for.
+pub(crate) fn read_window(
+    target: &FsTarget,
+    offset: u64,
+    len: u64,
+) -> Result<(Vec<u8>, FsVersion), FsError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = target.path();
+    let meta = std::fs::metadata(path).map_err(|source| FsError::from_io(path, "read", &source))?;
+    let kind = kind_of(&meta);
+    if kind != FileKind::File {
+        return Err(match kind {
+            FileKind::Directory => FsError::NotRegularFile {
+                path: target.display().to_string(),
+                kind: "directory",
+            },
+            _ => FsError::NotRegularFile {
+                path: target.display().to_string(),
+                kind: "special file",
+            },
+        });
+    }
+    if len > MAX_WINDOW_BYTES {
+        return Err(FsError::TooLarge {
+            path: target.display().to_string(),
+            size: len,
+            limit: MAX_WINDOW_BYTES,
+        });
+    }
+    let version = version_of(&meta);
+    // Past the end is an empty answer rather than a refusal: a caller
+    // windowing through a file meets this on its last read every time, and a
+    // failure there would make the ordinary path the exceptional one.
+    if offset >= meta.len() {
+        return Ok((Vec::new(), version));
+    }
+    let mut file =
+        std::fs::File::open(path).map_err(|source| FsError::from_io(path, "read", &source))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| FsError::from_io(path, "read", &source))?;
+    let want = len.min(meta.len() - offset);
+    let mut bytes = vec![0u8; want as usize];
+    file.read_exact(&mut bytes)
+        .map_err(|source| FsError::from_io(path, "read", &source))?;
+    Ok((bytes, version))
 }
 
 /// The content a write reports as `before`, or `None` when there is none this
@@ -554,6 +608,15 @@ impl FileSystem for LocalFs {
 
     fn read(&self, target: &FsTarget) -> Result<(String, FsVersion), FsError> {
         read_text(target)
+    }
+
+    fn read_bytes(
+        &self,
+        target: &FsTarget,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Vec<u8>, FsVersion), FsError> {
+        read_window(target, offset, len)
     }
 
     fn write(

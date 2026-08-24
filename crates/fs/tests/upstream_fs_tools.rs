@@ -63,12 +63,12 @@ async fn run(registry: &ToolRegistry, name: &str, arguments: serde_json::Value) 
 /// parameters.
 ///
 /// Input: a registry with the suite composed.
-/// Expected: exactly the eight names, each with an object schema that declares
+/// Expected: exactly the nine names, each with an object schema that declares
 /// the arguments the tool actually reads. The roster is asserted whole so a
 /// tool added or renamed is a decision somebody made rather than a change that
 /// slipped in.
 #[tokio::test]
-async fn the_suite_offers_eight_named_tools_with_declared_arguments() {
+async fn the_suite_offers_nine_named_tools_with_declared_arguments() {
     let fixture = Fixture::new();
     let registry = registry(&fixture);
 
@@ -77,7 +77,17 @@ async fn the_suite_offers_eight_named_tools_with_declared_arguments() {
     let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        ["delete", "edit", "glob", "list", "read", "search", "stat", "write"]
+        [
+            "delete",
+            "edit",
+            "glob",
+            "list",
+            "read",
+            "read_image",
+            "search",
+            "stat",
+            "write"
+        ]
     );
     assert_eq!(names, FsTools::NAMES);
     for schema in &schemas {
@@ -665,4 +675,193 @@ async fn the_fence_judges_a_search_and_a_search_is_not_a_read() {
         overwrite.content
     );
     assert_eq!(fixture.read("owned.txt"), "needle\nrest\n");
+}
+
+/// A picture's first bytes: the PNG signature, which is deliberately not valid
+/// UTF-8 - that is what the format uses it for, and it is why `read` cannot
+/// serve this and `read_bytes` can.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake";
+
+/// A sink that keeps what it is given, so a case can assert what the tool does
+/// with a store's answer rather than what a store does.
+struct Kept(std::sync::Mutex<Vec<(String, usize)>>);
+
+impl tetanus_fs::image::ImageSink for Kept {
+    fn admit(&self, name: &str, bytes: Vec<u8>) -> Result<tetanus_fs::image::Stored, String> {
+        self.0
+            .lock()
+            .expect("the sink is not poisoned")
+            .push((name.to_string(), bytes.len()));
+        Ok(tetanus_fs::image::Stored {
+            id: "img-1".into(),
+            media_type: "image/png".into(),
+            bytes: bytes.len(),
+            dimensions: Some((2, 3)),
+        })
+    }
+}
+
+/// TC-PORT-FS-58: a byte window is a window, and past the end is an answer.
+///
+/// Upstream's `readBytes` serves a consumer that knows what it is looking at.
+/// Input: a file, read in windows, including one starting past its end.
+/// Expected: exactly the bytes asked for, a short read at the tail, and an
+/// empty answer past the end rather than a refusal - a caller windowing
+/// through a file meets that boundary on its last read every time.
+#[tokio::test]
+async fn a_byte_window_reads_what_was_asked_for_and_ends_quietly() {
+    let fixture = Fixture::new();
+    fixture.write("data.bin", "abcdefghij");
+    let fs = fixture.sandboxed();
+    let target = fs.resolve("data.bin").expect("resolves");
+
+    let head = fs.read_bytes(&target, 0, 4).expect("head");
+    let middle = fs.read_bytes(&target, 4, 3).expect("middle");
+    let tail = fs
+        .read_bytes(&target, 8, 100)
+        .expect("a short read at the tail");
+    let past = fs
+        .read_bytes(&target, 999, 4)
+        .expect("past the end is an answer");
+
+    assert_eq!(head.0, b"abcd");
+    assert_eq!(middle.0, b"efg");
+    assert_eq!(tail.0, b"ij");
+    assert!(past.0.is_empty());
+    assert_eq!(
+        head.1, past.1,
+        "the version is the file's, not the window's"
+    );
+}
+
+/// TC-PORT-FS-59: bytes are read where text is refused.
+///
+/// The two limits `read` carries - UTF-8, and the text cap - are the wrong
+/// ones for a picture, and this is the case that says the byte path does not
+/// inherit them.
+///
+/// Input: a file of bytes that are not UTF-8.
+/// Expected: `read` refuses it as not text; `read_bytes` answers with them.
+#[tokio::test]
+async fn bytes_are_readable_where_text_is_refused() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root().join("blob.bin"), [0xff, 0xfe, 0x00, 0x01]).expect("write");
+    let fs = fixture.sandboxed();
+    let target = fs.resolve("blob.bin").expect("resolves");
+
+    let as_text = fs.read(&target);
+    let as_bytes = fs.read_bytes(&target, 0, 16).expect("bytes are bytes");
+
+    assert!(matches!(
+        as_text,
+        Err(tetanus_fs::error::FsError::NotText { .. })
+    ));
+    assert_eq!(as_bytes.0, vec![0xff, 0xfe, 0x00, 0x01]);
+}
+
+/// TC-PORT-FS-60: a picture is described to the model and never carried to it.
+///
+/// Input: a file admitted through a sink that reports what it was given.
+/// Expected: the sink saw the bytes; the model reads an id, a media type, a
+/// size and dimensions, and nothing that contains the picture. Upstream's
+/// `read_image` returns an attachment reference for the same reason: a base64
+/// image in a tool result is a journal line nobody can read and a context
+/// window spent on something the model asked to look at.
+#[tokio::test]
+async fn a_picture_is_described_by_id_and_never_carried() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root().join("shot.png"), PNG).expect("write the picture");
+    let sink = Arc::new(Kept(std::sync::Mutex::new(Vec::new())));
+    let mut registry = ToolRegistry::new();
+    FsTools::new(
+        fixture.sandboxed(),
+        Arc::new(ObservedState::new()),
+        "session-a",
+    )
+    .with_images(sink.clone())
+    .register(&mut registry);
+
+    let read = run(&registry, "read_image", json!({ "path": "shot.png" })).await;
+
+    assert!(read.ok, "{}", read.content);
+    assert_eq!(
+        sink.0.lock().expect("sink").as_slice(),
+        [("shot.png".to_string(), 12)],
+        "the store saw the bytes"
+    );
+    assert!(read.content.contains("img-1"), "{}", read.content);
+    assert!(read.content.contains("2x3"), "{}", read.content);
+    assert!(read.content.contains("image/png"), "{}", read.content);
+    assert!(
+        !read.content.contains("PNG"),
+        "the bytes are not in the answer"
+    );
+}
+
+/// TC-PORT-FS-61: with no store composed, the tool explains itself rather than
+/// vanishing.
+///
+/// A model offered a tool that is not there learns nothing, and a build that
+/// silently dropped it looks to its author exactly like one that never had it.
+///
+/// Input: the suite composed without a sink.
+/// Expected: `read_image` is still in the roster, and a call fails in words
+/// that name what is missing and what to do instead.
+#[tokio::test]
+async fn without_a_store_the_picture_tool_says_so() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root().join("shot.png"), PNG).expect("write the picture");
+    let registry = registry(&fixture);
+
+    let names: Vec<String> = registry.schemas().into_iter().map(|s| s.name).collect();
+    let refused = run(&registry, "read_image", json!({ "path": "shot.png" })).await;
+
+    assert!(names.contains(&"read_image".to_string()));
+    assert!(!refused.ok);
+    assert!(
+        refused.content.starts_with("FS_IMAGE_REFUSED:"),
+        "{}",
+        refused.content
+    );
+    assert!(refused.content.contains("no attachment store"));
+}
+
+/// TC-PORT-FS-62: the fence judges a picture exactly as it judges a file.
+///
+/// Input: a picture outside the workspace.
+/// Expected: refused by the fence before any byte is read, with the same class
+/// a text read outside the workspace gets. A second path into the filesystem
+/// with its own idea of what is allowed is the failure this pins against.
+#[tokio::test]
+async fn a_picture_outside_the_workspace_is_refused_by_the_fence() {
+    let fixture = Fixture::new();
+    let outside = fixture.outside().join("secret.png");
+    std::fs::write(&outside, PNG).expect("write outside");
+    let sink = Arc::new(Kept(std::sync::Mutex::new(Vec::new())));
+    let mut registry = ToolRegistry::new();
+    FsTools::new(
+        fixture.sandboxed(),
+        Arc::new(ObservedState::new()),
+        "session-a",
+    )
+    .with_images(sink.clone())
+    .register(&mut registry);
+
+    let refused = run(
+        &registry,
+        "read_image",
+        json!({ "path": outside.display().to_string() }),
+    )
+    .await;
+
+    assert!(!refused.ok);
+    assert!(
+        refused.content.starts_with("FS_SANDBOX_DENIED:"),
+        "{}",
+        refused.content
+    );
+    assert!(
+        sink.0.lock().expect("sink").is_empty(),
+        "nothing reached the store"
+    );
 }
