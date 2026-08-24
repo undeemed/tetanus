@@ -14,6 +14,12 @@ tetanus-core = { path = "../core" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 tetanus-sandbox = { path = "../sandbox" }
+# The `regex` crate rather than a hand-rolled matcher, for the property its
+# own documentation leads with: matching is linear in the input, because it
+# has no backreferences and no lookaround. A model supplies the pattern here,
+# so a matcher that can be made to backtrack exponentially is a tool call that
+# never returns.
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

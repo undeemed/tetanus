@@ -46,6 +46,21 @@ pub const READ_LIMIT: usize = 2000;
 /// so the model knows the line continued.
 pub const MAX_LINE_LENGTH: usize = 2000;
 
+/// The most matching lines one `search` answers with.
+///
+/// A search is worth having because it is cheaper than reading the files, and
+/// a search that answers with two thousand lines has spent the saving. Past
+/// this the answer says it stopped, which is what lets a model narrow the
+/// pattern rather than believe it has seen everything.
+pub const MAX_SEARCH_MATCHES: usize = 100;
+
+/// The most files one `search` opens.
+///
+/// The bound is on files rather than on bytes because it is the one a caller
+/// can act on: a pattern that reaches this was too broad, and the answer says
+/// so with the number.
+pub const MAX_SEARCH_FILES: usize = 2000;
+
 /// The tools, and everything they share.
 ///
 /// One value per session: the owner key is the session id, so two sessions in
@@ -94,7 +109,7 @@ impl FsTools {
         &self.fs
     }
 
-    /// Register all seven into a registry.
+    /// Register all eight into a registry.
     ///
     /// One call, so a deployment cannot compose five of them and wonder why
     /// the model keeps asking for the sixth.
@@ -106,13 +121,15 @@ impl FsTools {
         registry.register(Arc::new(GlobTool(Arc::clone(self))));
         registry.register(Arc::new(StatTool(Arc::clone(self))));
         registry.register(Arc::new(DeleteTool(Arc::clone(self))));
+        registry.register(Arc::new(SearchTool(Arc::clone(self))));
     }
 
     /// The names these tools register under, in canonical order. A deployment
     /// writing a `tools.order` needs them, and a test asserting the roster
     /// needs them to come from one place.
-    pub const NAMES: &'static [&'static str] =
-        &["delete", "edit", "glob", "list", "read", "stat", "write"];
+    pub const NAMES: &'static [&'static str] = &[
+        "delete", "edit", "glob", "list", "read", "search", "stat", "write",
+    ];
 
     fn record(&self, target: &FsTarget, observation: Observation) {
         if let Some(state) = &self.observed {
@@ -213,6 +230,7 @@ fs_tool!(EditTool, "edit");
 fs_tool!(ListTool, "list");
 fs_tool!(GlobTool, "glob");
 fs_tool!(StatTool, "stat");
+fs_tool!(SearchTool, "search");
 fs_tool!(DeleteTool, "delete");
 
 #[async_trait::async_trait]
@@ -516,6 +534,250 @@ impl Tool for GlobTool {
             Err(error) => Ok(refused(&error)),
         }
     }
+}
+
+#[async_trait::async_trait]
+impl Tool for SearchTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: Self::NAME.into(),
+            description: "Search file *contents* for a regular expression and return the matching \
+                          lines with their file and line number. Use `glob` to find files by name \
+                          instead. The pattern is a Rust regex: `\\bfn \\w+` finds function \
+                          definitions. Binary files are skipped."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The regular expression to look for in each line.",
+                    },
+                    "path": path_property("The directory to search under. Defaults to the \
+                                           workspace root."),
+                    "glob": {
+                        "type": "string",
+                        "description": "Only search files matching this name pattern, such as \
+                                        `**/*.rs`. Defaults to every file under `path`.",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Match case exactly. Defaults to false.",
+                    },
+                },
+                "required": ["pattern"],
+            }),
+        }
+    }
+
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        ToolMode::Parallel
+    }
+
+    async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let pattern = required_str(Self::NAME, arguments, "pattern")?;
+        let matcher = match matcher_for(pattern, !flag(arguments, "case_sensitive")) {
+            Ok(matcher) => matcher,
+            Err(said) => return Ok(ToolOutcome::failed(said)),
+        };
+        let root = match self.0.fs.resolve(argument_or(arguments, "path", ".")) {
+            Ok(target) => target,
+            Err(error) => return Ok(refused(&error)),
+        };
+        let files = match self
+            .0
+            .fs
+            .glob(&root, argument_or(arguments, "glob", "**/*"))
+        {
+            Ok(files) => files,
+            Err(error) => return Ok(refused(&error)),
+        };
+
+        let found = self.scan(&files, &matcher);
+
+        // A search does *not* count as observing a file for the
+        // read-before-write rule, deliberately. It shows a model a handful of
+        // lines out of a file it has otherwise never seen, and letting that
+        // license a whole-file overwrite would turn the guard into a
+        // formality - a model could grep for one word and replace everything.
+        Ok(ToolOutcome::ok(render_search(
+            &found,
+            root.display(),
+            pattern,
+            files.len(),
+        )))
+    }
+}
+
+/// What one search found, and what it could not look at.
+struct Found {
+    lines: Vec<String>,
+    files: usize,
+    skipped: usize,
+    scanned: usize,
+    truncated: bool,
+}
+
+/// Whether a globbed entry is something this search can read.
+enum Readable {
+    Yes(String),
+    No,
+    NotAFile,
+}
+
+impl SearchTool {
+    /// Read each file through the service and keep the lines that match.
+    ///
+    /// Through the service and not around it: the fence, the observation
+    /// policy and the Landlock worker all live behind that seam, so a search
+    /// that walked the directory itself would be a second answer to "may this
+    /// be read".
+    fn scan(&self, files: &[FsTarget], matcher: &regex::Regex) -> Found {
+        let mut found = Found {
+            lines: Vec::new(),
+            files: 0,
+            skipped: 0,
+            scanned: 0,
+            truncated: false,
+        };
+        for file in files.iter().take(MAX_SEARCH_FILES) {
+            match self.readable(file) {
+                Readable::Yes(text) => {
+                    found.scanned += 1;
+                    if keep_matches(&mut found, file, &text, matcher) {
+                        found.files += 1;
+                    }
+                }
+                // Counted and reported, never fatal and never silent: one
+                // image in a source tree must not fail the call, and a search
+                // that steps over a file quietly has answered "no matches"
+                // about something it never looked at.
+                Readable::No => found.skipped += 1,
+                // Not a file at all. A glob answers with directories too, and
+                // a directory is not a file this search could not read, so it
+                // stays out of the count a reader acts on.
+                Readable::NotAFile => {}
+            }
+            if found.truncated {
+                break;
+            }
+        }
+        found
+    }
+
+    fn readable(&self, file: &FsTarget) -> Readable {
+        match self.0.fs.stat(file) {
+            Ok(Some(info)) if info.kind == FileKind::File => match self.0.fs.read(file) {
+                Ok((text, _)) => Readable::Yes(text),
+                Err(_) => Readable::No,
+            },
+            Ok(_) => Readable::NotAFile,
+            Err(_) => Readable::No,
+        }
+    }
+}
+
+/// Keep this file's matching lines, and say whether it matched at all.
+fn keep_matches(found: &mut Found, file: &FsTarget, text: &str, matcher: &regex::Regex) -> bool {
+    let mut hit = false;
+    for (number, line) in text.lines().enumerate() {
+        if !matcher.is_match(line) {
+            continue;
+        }
+        hit = true;
+        if found.lines.len() == MAX_SEARCH_MATCHES {
+            found.truncated = true;
+            break;
+        }
+        found.lines.push(format!(
+            "{}:{}: {}",
+            file.display(),
+            number + 1,
+            truncate_line(line)
+        ));
+    }
+    hit
+}
+
+/// The pattern the model supplied, or the reason it is not one.
+///
+/// Case folding is an argument as well as a regex flag, because a model asking
+/// for a case-insensitive search should not have to know that `(?i)` exists -
+/// and `(?i)` in the pattern still works, since this only sets the default.
+fn matcher_for(pattern: &str, fold_case: bool) -> Result<regex::Regex, String> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(fold_case)
+        .size_limit(1 << 20)
+        .build()
+        // A bad pattern is the model's mistake and is answered as one, with
+        // the regex crate's own explanation: it names the offset and what it
+        // expected, which is what lets the next attempt differ from this one.
+        .map_err(|error| {
+            format!("FS_BAD_PATTERN: {pattern:?} is not a valid regular expression: {error}")
+        })
+}
+
+fn argument_or<'a>(arguments: &'a Value, key: &str, fallback: &'a str) -> &'a str {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(fallback)
+}
+
+/// What the model reads: the count, then the lines, then why it is not more.
+fn render_search(found: &Found, display: &str, pattern: &str, total_files: usize) -> String {
+    if found.lines.is_empty() {
+        return format!(
+            "no line under {display} matches {pattern:?}{}",
+            skipped_note(found.skipped)
+        );
+    }
+    let mut out = format!(
+        "{} matching {} in {} {}{}\n",
+        found.lines.len(),
+        plural(found.lines.len(), "line", "lines"),
+        found.files,
+        plural(found.files, "file", "files"),
+        skipped_note(found.skipped)
+    );
+    out.push_str(&found.lines.join("\n"));
+    if found.truncated {
+        out.push_str(&format!(
+            "\n... stopped at {MAX_SEARCH_MATCHES} matches; narrow the pattern or the glob to see \
+             the rest"
+        ));
+    } else if total_files > MAX_SEARCH_FILES {
+        out.push_str(&format!(
+            "\n... searched the first {} files of {total_files}; narrow the glob to reach the rest",
+            found.scanned
+        ));
+    }
+    out
+}
+
+/// What a search says about the files it could not read.
+///
+/// Said rather than left out: a search that quietly skipped a file is a search
+/// that answered "no matches" about something it never looked at.
+fn skipped_note(skipped: usize) -> String {
+    if skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({skipped} unreadable or non-text {} skipped)",
+            plural(skipped, "file", "files")
+        )
+    }
+}
+
+/// One matching line, bounded the way a read's lines are bounded.
+fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= MAX_LINE_LENGTH {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(MAX_LINE_LENGTH).collect();
+    format!("{kept} ... [line truncated]")
 }
 
 #[async_trait::async_trait]

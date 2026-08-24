@@ -96,6 +96,10 @@ cargo test -p tetanus-turn --test upstream_compaction      # a conversation that
 cargo test -p tetanus-turn --test upstream_projections     # the folds a reader asks a session for
 cargo test -p tetanus-session --test upstream_sqlite       # the second persistence backend
 cargo test -p tetanus-engine --test credential_containment # a secret in none of the artifacts
+cargo test -p tetanus-core --test jobs                     # work the harness owes, across a restart
+cargo test -p tetanus-core --test schedule                 # time-triggered work, by moving the clock
+cargo test -p tetanus-turn --test upstream_workflow        # multi-step work outside a turn
+cargo test -p tetanus-turn --test upstream_lsp             # a language server, and one that dies
 ```
 
 Three rules keep it a gate rather than a formality.
@@ -164,6 +168,13 @@ found the defect runs first from then on.
 - A change to the engine/presentation boundary is its own PR. It touches
   [docs/interface-contract.md](docs/interface-contract.md) and `crates/protocol` together, adds a
   changelog row, and lands before anything that depends on it.
+- **If your change moves a row in [docs/parity.md](docs/parity.md) or the boundary document and you
+  cannot edit them without colliding, write a note under `docs/parity-updates/` or
+  `docs/contract-updates/` and say so where your work is reported.** Those files are how a lane in
+  flight records a row it cannot land, and a reconciliation slice folds them in and deletes them.
+  Until it does, the note is the only copy of what it knows, and one nobody has been told about is
+  knowledge that is not in the project. Write the row you want, in the words you want it in: the
+  fold restates as little as it can.
 
 ## Commit hygiene
 

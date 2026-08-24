@@ -249,7 +249,7 @@ It does not mean the capability is refused: if one of these turns into a real re
 **Where a lane writes a change it cannot make here.**
 `docs/parity-updates/` and `docs/contract-updates/` are how a lane in flight records a row it would otherwise collide on, and a reconciliation slice folds them in and empties the directories.
 Both are empty as of 2026-08-22, which is a statement about what had *landed* on `master` by then and not a claim that the job is finished: two of the notes folded that day - the presentation lane's reply about the feature panels, and its question about what a `terminal_send` puts on the journal - landed while the fold itself was being rebased, and lanes still in flight are writing more now, so the directories refill the moment those branches land.
-So this file is behind by whatever is sitting in those two directories, and reading it honestly means reading them too.
+So this file is behind by whatever is sitting in those two directories, and reading it honestly means reading them too - including the notes on branches that have not landed, which is why a lane that writes one says so where its work is reported rather than leaving the file to be found.
 
 Every change to this file adds a row to [parity-changelog.md](parity-changelog.md).
 
