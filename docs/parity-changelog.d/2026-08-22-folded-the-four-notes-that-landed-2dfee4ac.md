@@ -1,0 +1,5 @@
+---
+date: 2026-08-22
+order: 118
+---
+Folded the four notes that landed while the reconciliation slice was being written: the request id (`llm/*`), the closing of the `shell/*`, `terminal/*`, `subprocess/*` gap column, the two `hook/*` journal types and the contract half of the request id. The shell row is the one worth reading twice - three of its four remaining clauses are served (spill artifacts that keep the whole stream rather than reporting a loss, a piped seam for a child this harness talks to which `crates/mcp` now starts its servers through and which closed a helper leak, and terminals owned by the session that opened them) and the fourth is half served, because `run_in_background` on a terminal needs no store while the one-shot `shell` genuinely does. What is left is named with what it waits on rather than as a to-do: the job store from `workflow/*`, a screen model for programs that draw with a cursor, a PowerShell prompt marker that `-NoProfile` will not load, and a Windows host.

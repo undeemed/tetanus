@@ -1,0 +1,5 @@
+---
+date: 2026-08-21
+order: 72
+---
+A refusal the account cannot spend its way out of is told apart from one a backoff fixes (`QUOTA`, `CONTEXT_WINDOW_EXCEEDED`, TC-PORT-QUOTA-1..6). Both arrive as ordinary provider refusals and both were being retried: a dead key spent the entire retry budget before reporting `RATE_LIMIT`, which points a reader at throughput when the problem is billing, and an oversized request was retried although it cannot fit next time either. `LlmError::code` reads the provider's own words before the status, since one status covers both an empty account and a caller going too fast. Neither new code is in the default retryable set, and TC-PORT-QUOTA-5 asserts that as behaviour rather than trusting the name. Upstream classifies with regular expressions; this normalizes - lowercase, punctuation and separators as spaces - and matches phrases, which needs no dependency and accepts the same wordings. The false-positive direction is guarded hardest: `limit` is deliberately not a resource, because reading a rate limit as an exhausted account would fail a turn that a backoff would have fixed.

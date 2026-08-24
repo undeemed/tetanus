@@ -1,13 +1,15 @@
-# Append-only tables, merged rather than adjudicated.
+# `docs/parity-changelog.md` is generated, not written.
 #
-# Every slice in flight appends one row to the end of this file, and git merges
-# by line: two branches appending after the same last line conflict on every
-# rebase, whatever they actually changed. `union` is git's built-in driver that
-# keeps both sides in order instead, which is what resolving one of these by
-# hand amounted to.
+# It used to be a table every slice appended a row to, marked `merge=union`
+# here so git kept both sides instead of raising a conflict. That helped where
+# the driver ran - a merge driver is client-side configuration read from this
+# file, so a forge performing a merge need not apply it - and it never helped
+# with the underlying fact, which is that eight of ten open pull requests were
+# editing the same lines of the same file.
 #
-# It never reports a conflict, so it cannot warn about a change that is not an
-# append. That is why only this file carries it: `docs/parity.md` and
-# `docs/interface-contract.md` are edited in place, and a conflict in those is
-# information.
-docs/parity-changelog.md merge=union
+# Entries now live one per file in `docs/parity-changelog.d/`, so two lanes
+# writing at once share no line and there is nothing for a driver to be right
+# about. `docs/tools/parity-changelog.py build` renders the published file.
+#
+# No `merge=union` anywhere, deliberately. It cannot warn about a change that
+# is not an append, and nothing here needs it any more.

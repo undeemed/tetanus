@@ -1,0 +1,5 @@
+---
+date: 2026-08-21
+order: 70
+---
+A whole-request deadline added beside the idle window (`DEFAULT_REQUEST_DEADLINE_MS`, `DeepSeekConfig::request_deadline_ms`, TC-DS-DEADLINE-1..4), closing the last liveness gap in the `llm/*` row. The idle window catches a provider that stops speaking; nothing caught one that never does. A route answering a byte every four minutes resets the window on every byte, so the turn ran for ever - the same unbounded turn the idle window was added to prevent, reached from the other side. Ten minutes by default: longer than any legitimate completion including extended reasoning, short enough that a wedged route fails while someone is still watching. A zero reads as the default rather than as a deadline of no time, exactly as the idle window reads one, so "unset" and "unbounded" stay different things. Both bounds are `TIMEOUT` so the retry policy treats them alike, and the message names which was reached because that is what tells a reader whether to raise the budget or to ask why the provider went quiet. Upstream has no equivalent, so this is the gap section 3 named rather than a port.
