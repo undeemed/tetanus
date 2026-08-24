@@ -26,6 +26,24 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: build
         run: cargo build --workspace
+      # A hosted runner ships with about 25 GB of toolchains this workspace
+      # never uses, and the debug artifacts of a workspace this size do not fit
+      # beside them: the linker dies with `SIGBUS` on a full disk, at whichever
+      # target happened to be linking, which reads as a compiler crash rather
+      # than as the out-of-space it is.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
       # The merge gate. No API key is set, so every case runs offline.
+      #
+      # Test binaries are built without debug info. The workspace links over two
+      # hundred of them and each carries a copy, which is most of what fills the
+      # disk; the cost is line numbers in a backtrace on a CI failure, and a
+      # failure worth reading is reproduced locally anyway.
       - name: test
         run: cargo test --workspace
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
