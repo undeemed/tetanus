@@ -517,6 +517,47 @@ async fn a_truncated_result_says_where_the_rest_of_the_output_is() {
     );
 }
 
+/// TC-PORT-SHELL-21: an interactive invocation is one a terminal can start.
+///
+/// A shell reading a pipe and a shell driving a terminal are asked for
+/// differently, and the pipe invocation is the default of the seam - so a
+/// backend that forgets to say how it starts interactively inherits arguments
+/// that can be impossible on a terminal. PowerShell is that case: `-Command -`
+/// means "read the script from redirected standard input", pwsh checks that
+/// standard input really is redirected, and on a pseudo-terminal it prints its
+/// usage and exits 64 before any prompt exists. A caller reads that as a shell
+/// that died starting, which is neither of the two answers a terminal request
+/// has - a session, or a host that has no such program.
+///
+/// It is checked here rather than by opening one, because the host that has a
+/// PowerShell is the CI runner and not the developer's box: this case fails on
+/// every host, which is what a regression needs.
+///
+/// Input: both backends, asked for their interactive argv.
+/// Expected: bash keeps `-i`, which is what buys job control; pwsh asks for
+/// neither `-Command` nor `-NonInteractive`, so what starts is the REPL.
+#[test]
+fn an_interactive_invocation_is_one_a_terminal_can_start() {
+    let bash = Bash::new();
+    assert!(
+        bash.interactive().contains(&"-i".to_string()),
+        "job control is what gives a command a process group of its own"
+    );
+
+    let pwsh = PowerShell::new().interactive();
+    assert!(
+        !pwsh.iter().any(|arg| arg.eq_ignore_ascii_case("-Command")),
+        "`-Command -` needs a redirected standard input, which a terminal is not: {pwsh:?}"
+    );
+    assert!(
+        !pwsh
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("-NonInteractive")),
+        "a terminal session is the interactive one: {pwsh:?}"
+    );
+    assert_eq!(pwsh, vec!["-NoLogo", "-NoProfile"]);
+}
+
 /// A bash executor over the given configuration, resolved.
 fn bash_exec(config: ShellConfig) -> ShellExec {
     ShellExec::new(Arc::new(Bash::new()), config).expect("this host has a bash")

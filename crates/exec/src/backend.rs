@@ -356,6 +356,17 @@ impl ShellBackend for PowerShell {
         ]
     }
 
+    fn interactive(&self) -> Vec<String> {
+        // Not `session()`: `-Command -` means "read the script from redirected
+        // standard input", and PowerShell checks that standard input really
+        // is redirected. On a terminal it is not, so the process prints its
+        // usage and exits 64 before a prompt exists - which a caller reads as
+        // a shell that died starting rather than as an unusable invocation.
+        // A terminal session wants the REPL, which is what pwsh runs when it
+        // is given neither `-Command` nor `-NonInteractive`.
+        vec!["-NoLogo".to_string(), "-NoProfile".to_string()]
+    }
+
     fn setup(&self) -> Vec<String> {
         // PowerShell has no `exec 2>&1`: a redirection applies to a command,
         // not to the shell, so its two pipes are drained separately and the
