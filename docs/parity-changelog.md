@@ -1,29 +1,42 @@
 # Parity changelog
 
-Every change to [parity.md](parity.md) adds a row here, newest last.
-This is the append-only half of that document, and it is a separate file for a
-mechanical reason rather than an editorial one.
+Every change to [parity.md](parity.md) adds an entry here, newest last.
 
-**Why this is not a section of `parity.md`.**
-Every slice in flight appends one row to the end of this table, and git merges
-by line. Two branches that both append after the same last line conflict every
-time either of them is rebased, whatever they actually changed - so a queue of
-five unrelated slices produced five conflicts per merge, all of them in the same
-place, none of them a real disagreement.
+**This file is generated. Do not edit it.**
+One entry is one file in [`parity-changelog.d/`](parity-changelog.d), and
+[`docs/tools/parity-changelog.py`](tools/parity-changelog.py) renders them into
+the table below.
 
-**How that is fixed.**
-[`.gitattributes`](../.gitattributes) marks this file `merge=union`, git's
-built-in driver that keeps both sides of an overlapping change in order instead
-of raising a conflict. That is exactly what resolving one of these by hand
-amounted to, so the driver does it and nobody adjudicates an append again.
+**Why one file per entry.**
+This was a single table that every slice in flight appended a row to, which
+made it the most-shared line in the repository: at the worst measurement, eight
+of ten open pull requests touched it, so every merge forced the other seven to
+hand-resolve the same non-disagreement before they could land. `.gitattributes`
+marked it `merge=union` to keep both sides automatically, and that works where
+the driver runs - but a merge driver is client-side configuration, and the real
+problem was that the lines were shared at all. One file per entry means two
+lanes writing at once touch nothing in common, so no driver has to be right.
 
-**The one thing to know about that.**
-Union merge never reports a conflict, so it cannot warn about a change that is
-not an append. Editing or reordering an existing row on two branches at once
-would keep both versions silently. Rows here are historical facts, so they are
-written once and not revised; a correction is a new row that says what it
-corrects. `parity.md` itself keeps ordinary merge semantics, because its
-sections 3 and 4 are edited in place and a conflict there is information.
+**Adding one.**
+`python3 docs/tools/parity-changelog.py add "your entry"`. The filename carries
+a hash of the text, so two lanes cannot pick the same name without having
+written the same entry. Rendering is a separate step run by a single writer -
+if it were required for a green build, every pull request would regenerate this
+file and it would become the shared line again. That is why the table below may
+lag the directory; `parity-changelog.py check` says whether it does.
+
+**The one thing to know about the order.**
+Entries migrated from the old table carry an `order` field recording the
+position they held in it. That table was in *append* order rather than date
+order - union merges interleaved it, and its dates go backwards in seven places
+- so sorting the migration by date would have silently rewritten the sequence
+of forty-odd historical rows while the entry count stayed the same. New entries
+carry no position and sort after every migrated one, by date and then filename.
+
+**Entries are historical facts.**
+Write one, never revise one; a correction is a new entry saying what it
+corrects. `parity.md` itself is edited in place, and a conflict there is
+information.
 
 | Date | Change |
 | --- | --- |

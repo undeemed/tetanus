@@ -1,0 +1,5 @@
+---
+date: 2026-08-21
+order: 59
+---
+A session can be forked (`session.fork`, contract §4.4.6; `crates/engine/tests/fork.rs`, TC-PORT-FORK-1..12 and TC-FORK-1..2), opening `fork.spec.ts` in section 4 and closing it in the same pass. A child journal is the parent's prefix with the parent's `session/start` replaced, one line for one line, by the child's own - which is what keeps `seq` equal to the index of the line and lets the copied `sourceEventSeqs` stand unrewritten, since nothing ever cites seq 0. The boundary must be a closed one, judged from the log alone: the last `turn/start` or `turn/end` at or before it decides. The child is opened through the ordinary create path, so it is listed, paged, titled and prompted like any other session and its first turn is numbered after the turns it inherited - a fork is a resume of a prefix. `tetanus_session::seed` is the one new writer: an append assigns `seq` and `time`, and a copied event has to keep the ones it was written under. A mutation check confirms the suite bites: dropping the open-turn rule fails TC-PORT-FORK-10, and copying the parent's header line as well fails nine of the fourteen.

@@ -1,0 +1,5 @@
+---
+date: 2026-08-21
+order: 71
+---
+The environment layer implemented (`crates/config/src/env.rs`, TC-ENV-1..8). `Layer::Env` has existed since the layered config did, `tetanus config` has always been able to render `env` as a provenance, and nothing ever set a key there - the documented stack of defaults, file, environment and flags was three layers with a hole in the middle, so a container or a CI job had no way to set a value short of writing a document. `TETANUS_AGENT__MAX_STEPS` now does it, with `__` separating segments because a single underscore cannot tell a section boundary from a word boundary in keys like `agent.max_parallel_tool_calls`. A name with no separator sets nothing, which is what stops `TETANUS_HOME` becoming a setting called `home`. Values parse as JSON when they can, so numbers and booleans arrive as themselves rather than failing type resolution as strings, and TC-ENV-4 pins the quoting escape that bargain costs. The tested surface takes its variables as an argument: reading the real environment in a case would mutate state every other case in the binary shares.

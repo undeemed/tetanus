@@ -1,0 +1,5 @@
+---
+date: 2026-08-23
+order: 122
+---
+The served catalogue made one answer (`crates/cli/src/tools.rs::served`, TC-CLI-CAT-12). On a twenty-six-tool build `tetanus serve --frontend` answered `catalog.tools` with one tool while `tetanus serve` answered with twenty-six, so the browser panel and everything on `/api/` saw an empty toolbox. The assembly was one thing; the binary was not, because it builds an engine in five places and only one of them was given the assembly. The lesson is narrower than "share code": a comment saying two things cannot disagree is worth nothing when agreeing is a property of one call site rather than of a function both callers go through. The case is shaped to match - it asks every surface of one build and compares the answers to each other, not to a number, so it fails on disagreement rather than going stale when a tool crate lands. Found by the UI lane, which refused to paper over it with a page-side fallback; that was right, because a fallback there would have made the page correct and left `catalog.tools` lying to every other client.
