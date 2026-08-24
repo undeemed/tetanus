@@ -241,6 +241,10 @@ pub async fn chat<W: Write>(
     let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
         .map_err(|err| crate::fail(policy, &crate::journal_fault(&err, &settled.journal)))?;
 
+    // The MCP servers this document declares, started once for the whole
+    // conversation rather than per turn.
+    let servers = crate::tools::servers(policy, document, &settled.settings.resolved).await?;
+
     // The tools and the loop share one stop switch, so Ctrl-C reaches a
     // command a turn started rather than only the step boundary.
     let interrupt = tetanus_turn::interrupt::Interrupt::new();
@@ -252,6 +256,7 @@ pub async fn chat<W: Write>(
             document,
             &crate::tools::whose(
                 &settled.settings.resolved,
+                &servers.tools,
                 &opened.session_id,
                 log.clone(),
                 settled.journal.parent(),
@@ -399,6 +404,11 @@ pub async fn chat<W: Write>(
             }
         }
     }
+
+    // The conversation is over, so the servers it opened are too. Over the
+    // ladder while this process is still here to run it; the `?` paths above
+    // fall back on `kill_on_drop`.
+    servers.shutdown().await;
 
     crate::journal(out, &log);
     Ok(())

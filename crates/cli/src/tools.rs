@@ -20,9 +20,9 @@ use tetanus_engine::agent::ToolScope;
 use tetanus_protocol::methods::ToolCatalogResult;
 use tetanus_protocol::types as protocol;
 use tetanus_session::SessionLog;
-use tetanus_toolset::Composition;
+use tetanus_toolset::{Composition, Servers};
 use tetanus_turn::interrupt::Interrupt;
-use tetanus_turn::tools::ToolRegistry;
+use tetanus_turn::tools::{Tool, ToolRegistry};
 
 use crate::{misconfigured, Policy, Reported};
 
@@ -37,9 +37,10 @@ pub fn catalog(
     policy: &Policy,
     document: &Path,
     settings: &Arc<Config>,
+    servers: &Servers,
 ) -> Result<ToolCatalogResult, Reported> {
     Ok(ToolCatalogResult {
-        tools: registry(policy, document, &listing(settings))?
+        tools: registry(policy, document, &listing(settings, servers))?
             .schemas()
             .into_iter()
             .map(|schema| protocol::ToolDescriptor {
@@ -59,11 +60,37 @@ pub fn catalog(
 /// called. Every tool is still *constructed*, because a catalogue that
 /// constructed a different set from the one a turn gets is the drift the
 /// assembly exists to prevent.
-pub fn listing(settings: &Arc<Config>) -> Composition {
+pub fn listing(settings: &Arc<Config>, servers: &Servers) -> Composition {
     Composition::catalogue()
         .settings(Arc::clone(settings))
         .workspace(tetanus_toolset::workspace_root(None))
         .home(Some(tetanus_config::home::home(None)))
+        .mcp(servers.tools.clone())
+}
+
+/// Start the MCP servers this document declares, saying which did not.
+///
+/// A server that will not start is a warning and not an error: the run goes
+/// on with the tools it does have, which is `crates/mcp`'s rule. What this
+/// adds is that it is said at boot, on stderr, rather than discovered later as
+/// a tool the model kept not calling.
+pub async fn servers(
+    policy: &Policy,
+    document: &Path,
+    settings: &Arc<Config>,
+) -> Result<Servers, Reported> {
+    let started = Servers::start(settings).await.map_err(|err| {
+        misconfigured(
+            policy,
+            document,
+            &tetanus_engine::convert::config_error(&err),
+        )
+    })?;
+    let mut err = policy.stderr();
+    for fault in started.faults() {
+        err.warn(&fault).ok();
+    }
+    Ok(started)
 }
 
 /// The composition one named session's turns run against.
@@ -76,6 +103,7 @@ pub fn listing(settings: &Arc<Config>) -> Composition {
 /// reader is already looking - rather than in a directory this binary invented.
 pub fn whose(
     settings: &Arc<Config>,
+    mcp: &[Arc<dyn Tool>],
     session_id: &str,
     log: Arc<dyn SessionLog>,
     artifacts: Option<&Path>,
@@ -86,6 +114,11 @@ pub fn whose(
         .workspace(tetanus_toolset::workspace_root(None))
         .home(Some(tetanus_config::home::home(None)))
         .artifacts(artifacts)
+        // One connection per server per process, shared by every session: an
+        // MCP tool belongs to its supervisor, not to whoever called it, and
+        // starting a server per session would multiply the child processes by
+        // the number of conversations.
+        .mcp(mcp.to_vec())
 }
 
 /// The one registry, so what is listed and what is callable are one thing.
@@ -123,6 +156,7 @@ pub fn session_tools(
     policy: &Policy,
     document: &Path,
     settings: &Arc<Config>,
+    servers: &Servers,
 ) -> Result<tetanus_engine::agent::SessionTools, Reported> {
     tetanus_toolset::check(settings).map_err(|err| {
         misconfigured(
@@ -132,11 +166,15 @@ pub fn session_tools(
         )
     })?;
     let settings = Arc::clone(settings);
+    // Cloned once, not per session: the tools hold `Arc`s to the supervisors
+    // this process started, so every session shares one connection per server.
+    let mcp = servers.tools.clone();
     Ok(Arc::new(
         move |scope: &ToolScope<'_>, interrupt: &Arc<Interrupt>| {
             Arc::new(
                 tetanus_toolset::registry(&whose(
                     &settings,
+                    &mcp,
                     scope.session_id,
                     Arc::clone(scope.log),
                     scope.artifacts,
@@ -171,10 +209,15 @@ pub fn served(
     policy: &Policy,
     document: &Path,
     booted: tetanus_engine::EngineConfig,
+    servers: &Servers,
 ) -> Result<tetanus_engine::EngineConfig, Reported> {
     Ok(tetanus_engine::EngineConfig {
-        tools: Arc::new(registry(policy, document, &listing(&booted.resolved))?),
-        session_tools: Some(session_tools(policy, document, &booted.resolved)?),
+        tools: Arc::new(registry(
+            policy,
+            document,
+            &listing(&booted.resolved, servers),
+        )?),
+        session_tools: Some(session_tools(policy, document, &booted.resolved, servers)?),
         // Everything else is what the document settled: the provider, model
         // and journal root a served session runs on are its answer and not
         // this file's, which is why the two fields above are set *over*
