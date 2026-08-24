@@ -2,6 +2,7 @@
 
 mod bridge;
 mod chat;
+mod mcp;
 mod prompt;
 mod render;
 mod settings;
@@ -414,7 +415,22 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
         }
         Cmd::Tools { json } => {
             let booted = settings::booted(policy, &document, &[])?;
-            let catalog = catalog(policy, &document, &booted.resolved)?;
+            // The listing starts the declared MCP servers, briefly, for the
+            // reason the assembly exists: a catalogue that composed a
+            // different set from the one a turn gets is the drift it prevents,
+            // and a deployment reading `tetanus tools` to find out whether its
+            // server is configured correctly is asking exactly that question.
+            // A build with no servers declared starts nothing and pays
+            // nothing.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| report(policy, &err.to_string(), None))?;
+            let servers =
+                runtime.block_on(mcp::Servers::start(policy, &document, &booted.resolved))?;
+            servers.report(policy);
+            let catalog = catalog(policy, &document, &booted.resolved, servers.tools.clone())?;
+            runtime.block_on(servers.shutdown());
             if json {
                 return render::json::line(&mut out, &catalog)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -707,10 +723,16 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: tetanus_protocol::PROTOCOL_VERSION,
                 providers: providers().providers.len(),
+                // The local set only. `tetanus info` says what this build is,
+                // and starting a deployment's servers to count their tools
+                // would make a build description depend on whether somebody
+                // else's program is up; `tetanus tools` is the page that asks
+                // that question, and it says so per server.
                 tools: catalog(
                     policy,
                     &document,
                     &settings::booted(policy, &document, &[])?.resolved,
+                    Vec::new(),
                 )?
                 .tools
                 .len(),
@@ -1785,6 +1807,13 @@ async fn run<W: std::io::Write>(
     .await
     .map_err(|err| fail(policy, &about(err, &settled.journal)))?;
 
+    // Started before the registry, because the assembly takes their tools as a
+    // value: a server that connects after the registry is built contributes
+    // nothing to it, and the model would be offered a set that does not match
+    // what the document asked for.
+    let servers = mcp::Servers::start(policy, document, &settled.settings.resolved).await?;
+    servers.report(policy);
+
     let bus = EventBus::new();
     let log = JsonlSessionLog::create(&opened.session_id, &settled.journal, bus.clone())
         .map_err(|err| fail(policy, &journal_fault(&err, &settled.journal)))?;
@@ -1809,7 +1838,8 @@ async fn run<W: std::io::Write>(
                 log.clone(),
                 settled.journal.parent(),
                 &interrupt,
-            ),
+            )
+            .mcp(servers.tools.clone()),
         )?),
         log.clone(),
         Arc::clone(&interrupt),
@@ -1924,6 +1954,11 @@ async fn run<W: std::io::Write>(
                 outcome.content,
             ),
         };
+        // Before the answer, not after: the servers this run started are
+        // children of it, and a surface that printed its result and then
+        // exited would leave the ladder to `kill_on_drop` - which kills rather
+        // than letting a server finish writing what it was writing.
+        servers.shutdown().await;
         return render::json::line(out, &result)
             .map_err(|err| report(policy, &err.to_string(), None));
     }
@@ -1935,6 +1970,7 @@ async fn run<W: std::io::Write>(
         out.line(&outcome.content).ok();
     }
 
+    servers.shutdown().await;
     journal(out, &log);
     Ok(())
 }

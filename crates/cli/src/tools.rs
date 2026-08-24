@@ -37,9 +37,10 @@ pub fn catalog(
     policy: &Policy,
     document: &Path,
     settings: &Arc<Config>,
+    mcp: Vec<Arc<dyn tetanus_turn::tools::Tool>>,
 ) -> Result<ToolCatalogResult, Reported> {
     Ok(ToolCatalogResult {
-        tools: registry(policy, document, &listing(settings))?
+        tools: registry(policy, document, &listing(settings).mcp(mcp))?
             .schemas()
             .into_iter()
             .map(|schema| protocol::ToolDescriptor {

@@ -14,8 +14,8 @@
 //!
 //! **Nothing this process starts outlives it.** [`Servers::shutdown`] runs the
 //! close-input, wait, kill ladder over every supervisor before the surface
-//! returns. `kill_on_drop` is the backstop for the paths that never get there
-//! - a panic, a signal - but the ordinary exit goes through the ladder, so a
+//! returns. `kill_on_drop` is the backstop for the paths that never get there,
+//! a panic or a signal, but the ordinary exit goes through the ladder, so a
 //! server gets to finish writing whatever it was writing.
 
 use std::sync::Arc;
@@ -108,6 +108,19 @@ impl Servers {
     /// has to be visible before the run, not deduced after it.
     pub fn report(&self, policy: &Policy) {
         let mut err = policy.stderr();
+        // What *did* start is said too, one line per server, because it is the
+        // answer to "why is this tool here" and to "did my configuration take
+        // effect" - and a deployment that did not want the lines did not
+        // declare a server. It costs nothing on the ordinary run, which
+        // declares none.
+        for (name, tools) in self.serving() {
+            err.warn(&format!(
+                "the MCP server {name:?} is serving {} {}",
+                tools.len(),
+                if tools.len() == 1 { "tool" } else { "tools" }
+            ))
+            .ok();
+        }
         for server in &self.refused {
             err.warn(&format!(
                 "the MCP server {:?} did not start [{}]: {}",

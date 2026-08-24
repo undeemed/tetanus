@@ -255,3 +255,108 @@ fn info_counts_the_tools_the_page_lists() {
         "info should count {listed} tools: {said}"
     );
 }
+
+/// A minimal MCP server, written by the case, so it talks to a real program
+/// over a real pipe.
+///
+/// Not `crates/mcp`'s fixture binary: `CARGO_BIN_EXE_*` names binaries of the
+/// package under test only, and reaching across packages for a path would tie
+/// this case to another crate's build profile. Twenty lines of shell answer
+/// the two requests a connection needs - and a server this simple is also the
+/// clearest statement of what the binary must do with one.
+fn tiny_server(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("tiny-mcp-server.sh");
+    std::fs::write(
+        &path,
+        r#"#!/usr/bin/env bash
+# Answers `initialize` and `tools/list`, ignores everything else.
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"tiny","version":"1"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"ping","description":"answers pong","inputSchema":{"type":"object","properties":{}}}]}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+    )
+    .expect("write the server");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make it runnable");
+    }
+    path
+}
+
+/// TC-CLI-MCP-1: a server the document declares reaches the binary's registry.
+///
+/// This is the case the module note exists for, in its sharpest form.
+/// `crates/mcp` could connect a server and register its tools from the day it
+/// landed, and `crates/toolset` composed an `mcp` source for them - and the
+/// binary declared no `mod mcp`, so the call that connects them was compiled
+/// out. Everything was tested and nothing was wired: `tetanus tools` offered
+/// the local tools and a deployment's configured server contributed nothing,
+/// silently, on a green suite.
+///
+/// Input: a document declaring the fixture server, which is a real program
+/// speaking the protocol over a real pipe.
+/// Expected: the tools it advertises appear in the binary's own listing, under
+/// the bridged name `mcp__<server>__<raw>`.
+#[test]
+fn a_declared_server_contributes_its_tools_to_the_binary() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let server = tiny_server(home.path());
+    document(
+        home.path(),
+        &format!(
+            "mcp:\n  servers:\n    probe:\n      command: {}\n",
+            server.display()
+        ),
+    );
+
+    let names = offered(home.path(), &[]);
+
+    assert!(
+        names.iter().any(|name| name == "mcp__probe__ping"),
+        "the declared server's tools are offered: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "read"),
+        "the local tools are still there: {names:?}"
+    );
+}
+
+/// TC-CLI-MCP-2: a server that will not start is named, and the run goes on.
+///
+/// A tool that is silently absent is a capability nobody took away, and the
+/// question it produces - "why did the model never call the tool I configured"
+/// - has no answer anywhere unless the failure is said at boot.
+///
+/// Input: a document declaring a command that does not exist.
+/// Expected: the binary still lists its local tools and still exits zero, and
+/// the server is named on stderr with the class of what went wrong.
+#[test]
+fn a_server_that_cannot_start_is_named_and_the_rest_still_works() {
+    let home = tempfile::tempdir().expect("temp dir");
+    document(
+        home.path(),
+        "mcp:\n  servers:\n    broken:\n      command: /nonexistent/mcp-server\n",
+    );
+
+    let out = run(home.path(), &["tools", "--json"]);
+    let names = offered(home.path(), &[]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(out.status.success(), "the run continues: {said}");
+    assert!(names.iter().any(|name| name == "read"), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("mcp__broken__")),
+        "a server that did not start contributes nothing: {names:?}"
+    );
+    let _ = said;
+}

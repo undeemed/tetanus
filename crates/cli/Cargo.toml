@@ -20,6 +20,11 @@ tetanus-engine = { path = "../engine" }
 tetanus-session = { path = "../session" }
 tetanus-turn = { path = "../turn" }
 tetanus-toolset = { path = "../toolset" }
+# The binary starts the MCP servers a document declares. `crates/toolset`
+# composes their tools but cannot start them - a handshake is asynchronous and
+# a composition is not - so the connecting belongs to the surface that has a
+# runtime, which is this one.
+tetanus-mcp = { path = "../mcp" }
 # The confinement vocabulary, for the `--sandbox` flag's value parser: a typed
 # mode is refused with the list of what exists before a journal is opened.
 tetanus-sandbox = { path = "../sandbox" }
