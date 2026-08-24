@@ -41,9 +41,15 @@ use tetanus_turn::tools::{Tool, ToolError};
 /// Written here rather than fetched, so the suite is offline and the server's
 /// behaviour is stated where the cases that depend on it are read.
 const MOCK_SERVER: &str = r#"
-import sys, json, os
+import sys, json
 
-MODE = os.environ.get("MOCK_MODE", "ok")
+# The mode is an argument rather than an environment variable, and that is
+# load-bearing: cargo runs this file's cases in parallel threads of one
+# process, so a variable set by `std::env::set_var` belongs to all of them at
+# once. A case would arm `die-on-init` for its own server and a neighbour's
+# server, three tests wide, and whichever case read the variable last decided
+# what every other case's server did. An argument belongs to one invocation.
+MODE = sys.argv[1] if len(sys.argv) > 1 else "ok"
 
 def read_message():
     header = b""
@@ -124,10 +130,12 @@ fn workspace(mode: &str) -> (tempfile::TempDir, LspConfig, PathBuf) {
     let source = dir.path().join("thing.py");
     std::fs::write(&source, "def thing():\n    pass\n\nthing()\n").expect("write source");
 
-    // The mode reaches the server through its environment, which the client
-    // passes on from this process.
-    std::env::set_var("MOCK_MODE", mode);
-    let config = LspConfig::new("python3", dir.path()).with_args([server.display().to_string()]);
+    // The mode reaches the server on its own command line, so it belongs to
+    // this server and no other. It used to reach it through this process's
+    // environment, which every case in this file shares - see the note on
+    // `MOCK_SERVER`, and `docs/parity-changelog.md` for what that cost.
+    let config = LspConfig::new("python3", dir.path())
+        .with_args([server.display().to_string(), mode.to_string()]);
     (dir, config, source)
 }
 
@@ -616,6 +624,67 @@ async fn an_empty_answer_says_so() {
 
     assert!(outcome.ok);
     assert_eq!(outcome.content, "no definition found at that position");
+}
+
+/// TC-PORT-LSP-17: two servers running at once do not share one mode.
+///
+/// The property the whole file rests on, named rather than left emergent. It
+/// used to be false: the mode reached each server through
+/// `std::env::set_var("MOCK_MODE", ...)`, and cargo runs a file's cases in
+/// parallel threads of *one* process, so the variable belonged to all of them
+/// at once. Whichever case wrote it last decided what every other case's
+/// server did - which is why `an_empty_answer_says_so` used to read back
+/// "mock server refuses to start", a sentence only the `die-on-init` server
+/// says.
+///
+/// It failed three full workspace runs out of three on `f0b58c49` and passed
+/// `--test-threads=1` sixteen out of sixteen, which is the signature of shared
+/// state rather than of a slow machine - and it is invisible to CI, which runs
+/// the same command on fewer cores and keeps winning the interleaving.
+///
+/// Input: two servers started concurrently, one told to die on initialize and
+/// one told to answer.
+/// Expected: each behaves as *it* was told, in either completion order.
+#[tokio::test]
+async fn two_servers_at_once_do_not_share_one_mode() {
+    let (_dying, dying_config, dying_source) = workspace("die-on-init");
+    let (_answering, answering_config, answering_source) = workspace("ok");
+
+    let dying = LspClient::new(dying_config);
+    let answering = LspClient::new(answering_config);
+    let (died, answered) = tokio::join!(
+        dying.query(
+            LspOperation::Definition,
+            &dying_source,
+            Position {
+                line: 3,
+                character: 0
+            }
+        ),
+        answering.query(
+            LspOperation::Definition,
+            &answering_source,
+            Position {
+                line: 3,
+                character: 0
+            }
+        ),
+    );
+
+    match died {
+        Err(LspError::Died(said)) => assert!(
+            said.contains("refuses to start"),
+            "the dying server was told to die: {said}"
+        ),
+        other => panic!("this server was told to die on initialize, and did not: {other:?}"),
+    }
+    match answered.expect("the answering server was told to answer, and should have") {
+        LspAnswer::Locations(locations) => assert!(
+            !locations.is_empty(),
+            "a server told to answer returns a location"
+        ),
+        other => panic!("a definition query answers with locations, not {other:?}"),
+    }
 }
 
 /// TC-PORT-LSP-16: the client works against a real language server.
