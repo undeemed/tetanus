@@ -6,6 +6,18 @@ hosts.
 It is a page, not a program: `index.html` and `chat.js`, no build step, no framework and no
 dependency, so the thing a reviewer opens is the file in this directory.
 
+Three pairs of names are kept apart on purpose, because a stylesheet has one namespace and no
+compiler: `.row` is a line of the transcript and `.choice` is a control you pick; `.said` is a
+transcript row's text and `.message` is what `messageText` draws; `.dot` is the state indicator and
+`.quiet` is a hidden entry in the chooser. Each pair shared a name once, and each time the rule that
+lost was silent and order-dependent.
+
+Three probe cases hold that line now: no class is *defined bare* by both `primitives.css` and the
+page's own `<style>`; no element wears a page class and a primitives class at once; and every id a
+script reaches for is an id the page has. A page rule that scopes a primitive on purpose -
+`.row > .disclose` - is allowed, because that is the cascade being used rather than a second
+definition.
+
 ## Running it
 
 ```sh
@@ -83,6 +95,15 @@ the one that says 2.
 Both trackers name the types they draw rather than matching a prefix, so a type added to either
 family later is not claimed and silently dropped - it falls through to the raw rendering §4.3.2 asks
 for.
+
+There are **two** durable pairs and the audit draws both: `approval/asked`/`approval/decided` for
+whether a tool may run, and `question/asked`/`question/answered` for what a person said when the
+harness asked them something. A question record carries a *batch*, each question with an id its
+answer echoes, so the answers are written onto the questions they belong to rather than listed under
+them. `answered: false` says **no answer reached the tool** - `crates/turn` uses it for nobody
+listening, a partial answer, an answer outside the options, a panicking answerer and an interrupt,
+and that sentence is the one thing true of all five. An answer with no labels is a different thing
+again and says *nothing chosen*: that is what Dismiss sends, and §4.4.3 reads it as a refusal.
 
 `approval/asked` and `approval/decided` are "one pair per question, sharing an `id`", and the audit
 is a **tracker** rather than a function per event for that reason: the two halves are separated on
@@ -170,6 +191,52 @@ inside a JSON tree. Those tools answer **rendered prose**, not structures, so ea
 a *reader* of a format the engine owns and can change - which is why a row that does not parse is
 printed exactly as it arrived rather than dropped or guessed at, and why a failed result is never
 handed to a view at all.
+
+## What the model can still see
+
+[context.js](context.js) draws the five records in the context family, and the one that matters is
+`compaction/summary`: it says the older half of the history has been replaced by a summary. A reader
+who does not know that reads an answer that ignores something they said and concludes the model is
+stupid - it is not, it cannot see it. So the row says how many events and roughly how many tokens
+are now shadowed, which model wrote the summary, and shows the summary in full.
+
+`compaction/end` draws only when it carries an error, because a clean end has nothing to add to the
+summary above it and a failed one changes what happens next: the window is still full. A
+`compaction/prune` is quieter - an over-long tool result was shortened - and `compaction/start` says
+nothing at all, since its partner says everything.
+
+`request/context` leaves the transcript entirely. It is written before every request, so a five-step
+turn printed five near-identical lines of JSON into the middle of the conversation. It is a fact
+that is *current* rather than an event, so it goes in the header as a meter, the way upstream's
+`ContextMeter` does. A route that declares no window gets **no meter**, not a meter reading zero:
+"nobody said how big it is" and "it is empty" are different, and only one is a reason to relax. The
+meter reports what the envelope actually carries - the system prompt and the tool catalogue - and
+does not add this page's own estimate of the conversation on top, because that would be a guess
+standing next to a measurement.
+
+## What you can type that is not a question
+
+[commands.js](commands.js) is the command line, matching `tetanus chat`'s. `/help`, `/stats`,
+`/keys` and `/clear` run here; `/find`, `/exit`, `/think` and `/more` **answer** by saying where they
+went, because the failure to avoid is a reader typing a command they know from the terminal and
+watching it go to the model as a question. `/find` points at Ctrl-F: re-implementing find-in-page
+inside a page that has it would be worse at it.
+
+`//` is the escape, and it is not optional - the moment a leading slash means something, a message
+that starts with one needs a way through. The command is the first word, so `/stats now` is that
+command and not a message.
+
+`/stats` folds the journal the page already holds, by `crates/cli/src/render/timeline.rs`'s rules,
+event for event. That is a **second implementation of one fold**, said out loud rather than left to
+be discovered: there is no `session.stats` on the boundary, so the choice was to fold or to not have
+the figures. If the two ever disagree, the terminal is right and this is the copy to fix.
+
+## At the width of a phone
+
+The transcript wraps and the chooser does not stay in two columns. Below 560px the level being
+chosen takes the whole dialog and the crumb trail above it is what steps back - the parent pane
+exists so that stepping back does not lose the reader's place, and at 190px a column it loses it a
+different way.
 
 ## Stopping a turn
 

@@ -1,8 +1,11 @@
 import { jsonBlock, pill, stateDot, toast } from "./primitives.js";
 import { toolCall, toolResult } from "./tools.js";
 import { sessionList } from "./sidebar.js";
-import { approvals, askCard } from "./questions.js";
+import { askCard, audit } from "./questions.js";
 import { hooks } from "./tool-hooks.js";
+import { help, parse, stats, told } from "./commands.js";
+import { context } from "./context.js";
+import { CHORDS } from "./keys.js";
 import { trace, trajectory } from "./trajectory.js";
 import { panel } from "./features.js";
 import { markdown } from "./markdown.js";
@@ -36,7 +39,7 @@ const at = (id) => document.getElementById(id);
 const view = {
   where: at("where"), who: at("who"), state: at("state"), turns: at("turns"),
   scroll: at("scroll"), asked: at("asked"), send: at("send"), hint: at("hint"),
-  form: at("composer"), stop: at("stop"),
+  form: at("composer"), stop: at("stop"), window: at("window"),
 };
 
 const query = new URLSearchParams(location.search);
@@ -303,7 +306,7 @@ function drawn(event) {
     boundary(event.type, data) ||
     conversation(event.type, data) ||
     toolWork(event.type, data) ||
-    audited(event.type, data);
+    tracked(event.type, data);
   // A durable type nobody has taken yet is drawn raw, which is what §4.3.2
   // asks of a surface and what makes a landed event visible on day one.
   if (!drew) row("other", null, `${event.type}  ${JSON.stringify(data)}`);
@@ -432,13 +435,14 @@ function toolWork(type, data) {
 }
 
 /**
- * The durable audit of a decision about whether a tool may run (§4.3.2).
+ * The durable audit of what was decided (§4.3.2): whether a tool may run, and
+ * what a person answered when the harness asked them something.
  *
- * One tracker for the page and not one per turn: an approval asked in one turn
- * can be decided in the next, and a tracker that was thrown away at the turn
+ * One tracker for the page and not one per turn: a question asked in one turn
+ * can be answered in the next, and a tracker that was thrown away at the turn
  * boundary would lose exactly the pairs that took longest to settle.
  */
-const audit = approvals();
+const decisions = audit();
 
 /**
  * The same, for the deployment's own hooks - and one tracker for the page for
@@ -446,16 +450,32 @@ const audit = approvals();
  */
 const hooked = hooks();
 
-function audited(type, data) {
-  // Each tracker names the types it draws, so a type added to either family
-  // later is not claimed here - it falls through to the raw rendering every
-  // unrecognised durable type gets.
-  const tracker = [audit, hooked].find((one) => one.handles(type));
+/**
+ * The context family: how full the window is, and what the model can no longer
+ * see.
+ *
+ * The meter goes in the header because it is a fact that is *current* rather
+ * than an event - a reader wants to know how full the window is now, not what
+ * it was five steps ago - and the transcript stops carrying one copy of it per
+ * request.
+ */
+const windowed = context((shown) => view.window.replaceChildren(...(shown ? [shown] : [])));
+
+/**
+ * The durable records a tracker has taken: decisions, hooks, and the context.
+ *
+ * Each tracker names the types it draws, so a type added to any of those
+ * families later is not claimed here - it falls through to the raw rendering
+ * every unrecognised durable type gets, which is what §4.3.2 asks for and what
+ * kept `question/asked` visible for the weeks before anything drew it.
+ */
+function tracked(type, data) {
+  const tracker = [decisions, hooked, windowed].find((one) => one.handles(type));
   if (!tracker) return false;
   const said = tracker.row(type, data);
-  // `null` means the tracker completed a row already on the page rather than
-  // producing a new one. The event was drawn either way, which is what the
-  // caller is asking.
+  // `null` means the tracker completed a row already on the page, or decided
+  // the record belongs somewhere other than the transcript. The event was
+  // taken either way, which is what the caller is asking.
   if (said) (card || turnCard(undefined)).el.append(said);
   return true;
 }
@@ -636,10 +656,83 @@ function grow() {
   view.asked.style.height = `${Math.min(view.asked.scrollHeight, 180)}px`;
 }
 
-view.form.addEventListener("submit", (typed) => {
-  typed.preventDefault();
-  const said = view.asked.value.trim();
-  if (said && !busy) ask(said);
+// ---------------------------------------------------------------------------
+// What you can type that is not a question.
+//
+// The parser is in `commands.js` and every kind it answers is handled here.
+// A line that reaches `ask` has been decided to be a question; nothing falls
+// through, which is the property that keeps `/stats` from ever being sent to a
+// model.
+// ---------------------------------------------------------------------------
+
+/** Say something to the reader, on the transcript, in this page's own voice. */
+function told_(said) {
+  row("note", "·", said);
+  toBottom();
+}
+
+function ran(name) {
+  switch (name) {
+    case "/help":
+      told_(help());
+      return;
+    case "/stats":
+      told_(told(stats(seen)));
+      return;
+    case "/keys":
+      told_(
+        ["Enter sends · Shift+Enter is a new line"]
+          .concat(CHORDS.map((chord) => `Alt+${chord.letter.toUpperCase()} - ${chord.says}`))
+          .join("\n"),
+      );
+      return;
+    case "/clear":
+      // The screen, not the conversation. Said out loud, because a reader who
+      // thought this deleted the journal would be wrong in the direction that
+      // matters, and a reload brings all of it back.
+      view.turns.replaceChildren();
+      card = null;
+      told_("Cleared the screen. The journal keeps every turn; reload to read them again.");
+      return;
+    default:
+      return;
+  }
+}
+
+function typed(line) {
+  const read = parse(line);
+  switch (read.kind) {
+    case "blank":
+      return;
+    case "ask":
+      if (!busy) ask(read.said);
+      return;
+    case "run":
+      view.asked.value = "";
+      grow();
+      told_(read.said);
+      ran(read.name);
+      return;
+    case "elsewhere":
+      view.asked.value = "";
+      grow();
+      told_(read.said);
+      return;
+    case "unknown":
+      view.asked.value = "";
+      grow();
+      // The word, not the line: a reader who typed `/statss` needs to see
+      // which word was not understood, and `/help` is the way out.
+      told_(`${read.name} is not a command here. Type /help for the ones that are.`);
+      return;
+    default:
+      return;
+  }
+}
+
+view.form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  typed(view.asked.value);
 });
 view.asked.addEventListener("input", grow);
 view.asked.addEventListener("keydown", (key) => {
@@ -702,7 +795,7 @@ async function walk(path) {
 function draw(listing, above) {
   crumbsBar.replaceChildren(...listing.crumbs.map((crumb) => {
     const jump = document.createElement("button");
-    jump.className = "row";
+    jump.className = "choice";
     jump.style.width = "auto";
     jump.textContent = crumb.name;
     jump.onclick = () => walk(crumb.path);
@@ -727,14 +820,14 @@ function fill(pane, listing, mark) {
   const rows = listing.entries.filter((row) => dots.checked || !row.hidden);
   if (rows.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "row dot";
+    empty.className = "choice quiet";
     empty.textContent = listing.entries.length ? "· every entry here is hidden" : "· nothing here";
     pane.replaceChildren(empty);
     return;
   }
   pane.replaceChildren(...rows.map((row) => {
     const go = document.createElement("button");
-    go.className = "row" + (row.hidden ? " dot" : "") + (row.path === mark ? " here" : "");
+    go.className = "choice" + (row.hidden ? " quiet" : "") + (row.path === mark ? " here" : "");
     go.textContent = row.name;
     go.onclick = () => walk(row.path);
     return go;

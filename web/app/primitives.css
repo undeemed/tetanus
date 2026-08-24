@@ -99,7 +99,11 @@
 
 /* --- text a person wrote --------------------------------------------- */
 
-.said { white-space:pre-wrap; overflow-wrap:anywhere;
+/* `.message`, not `.said`. It was `.said`, and the page's transcript rows have
+   a `.said` of their own in a monospace row - so this rule reached inside them
+   and drew every message in a proportional font, because a direct rule beats
+   an inherited one. One name, two meanings, and the transcript lost silently. */
+.message { white-space:pre-wrap; overflow-wrap:anywhere;
   font:var(--size-body)/1.55 var(--font-prose); color:var(--text); }
 
 /* --- a tool's call and result ---------------------------------------- */
@@ -181,15 +185,25 @@
   color:var(--text-bright); }
 .ask-one { border:0; margin:0 0 var(--gap) 0; padding:0; }
 .ask-one legend { padding:0; font:var(--size-body)/1.5 var(--font-prose); color:var(--text); }
+/* The question itself, in the audit. It is the subject of its block, so it is
+   the text colour rather than the muted one. */
+.ask-one > .ask-detail:first-child { color:var(--text); }
 .ask-detail { margin:var(--gap-tight) 0; color:var(--text-muted);
   font:var(--size-small)/1.5 var(--font-prose); }
 .ask-option { display:flex; gap:var(--gap); align-items:baseline; padding:3px 0;
   font:var(--size-body)/1.5 var(--font-prose); cursor:pointer; }
-.ask-why { color:var(--text-muted); font-size:var(--size-small); }
+.ask-why { margin:0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
 .ask-foot { display:flex; gap:var(--gap); margin-top:var(--gap); }
 /* Answered, and kept on the page: what was decided is part of the transcript. */
 .ask-done { border-color:var(--line); opacity:.75; }
-.ask-decided { margin:var(--gap-tight) 0; }
+/* What was decided or chosen. Brighter than the question, and no larger than
+   it: an answer set in the body's default size next to a question set in the
+   small one reads as a heading over it, which is backwards - the question is
+   what the answer is about. */
+.ask-decided { margin:var(--gap-tight) 0; color:var(--text-bright);
+  font:var(--size-small)/1.5 var(--font-prose); }
+.ask-decided:empty { display:none; }
 
 /* --- the run's path --------------------------------------------------- */
 
@@ -206,6 +220,25 @@
 .trace-bad { color:var(--state-bad); }
 .trace-note { display:block; padding-left:var(--gap-wide);
   font:var(--size-small)/1.7 var(--font-code); color:var(--text-muted); }
+
+/* --- what the model can still see --------------------------------------- */
+
+.ctx { margin:var(--gap-tight) 0; padding-left:var(--gap);
+  border-left:2px solid var(--state-busy); }
+/* A compaction that failed is the one that needs a different colour: the
+   window is still full and the next request is the one that does not fit. */
+.ctx-bad { border-left-color:var(--state-bad); }
+.ctx-head { display:flex; gap:var(--gap); align-items:baseline; flex-wrap:wrap; }
+.ctx-said { margin:0; color:var(--text);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+.ctx-note { margin:var(--gap-tight) 0 0 0; color:var(--text-muted);
+  font:var(--size-small)/1.5 var(--font-prose); overflow-wrap:anywhere; }
+/* The summary itself is what the model now reads in place of the history, so
+   it is shown in full rather than folded: a reader checking whether the model
+   still knows something needs to read it, not to be told it exists. */
+.ctx-summary { margin:var(--gap-tight) 0 0 0; white-space:pre-wrap;
+  overflow-wrap:anywhere; color:var(--text-muted);
+  font:var(--size-small)/1.6 var(--font-code); }
 
 /* --- what a deployment's own hooks did ----------------------------------- */
 

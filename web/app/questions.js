@@ -11,7 +11,10 @@
 // - **The audit on the journal.** `approval/asked`, `approval/decided`,
 //   `approval/policy`, `question/asked` and `question/answered` are durable
 //   (§4.3.2), so a conversation opened tomorrow still shows what was asked and
-//   what was decided. That half needs no live socket at all.
+//   what was decided. That half needs no live socket at all, and all five are
+//   drawn - the question pair was named here from the first line of this file
+//   and went undrawn for as long as it took somebody to diff the vocabulary
+//   the engine writes against the one this page reads.
 //
 // # What is real here and what is not
 //
@@ -174,19 +177,33 @@ function one(question, chosen) {
  * opened a conversation part-way through gets a row naming the id rather than
  * nothing at all.
  */
-export function approvals() {
+export function audit() {
   const open = new Map();
   return {
-    // Named, not matched on the `approval/` prefix, so a type added to the
-    // family later is not claimed and silently dropped - it falls through to
-    // the raw rendering §4.3.2 asks for.
-    handles: (type) => APPROVAL_TYPES.includes(type),
+    // Named, not matched on a prefix, so a type added to either family later
+    // is not claimed and silently dropped - it falls through to the raw
+    // rendering §4.3.2 asks for.
+    handles: (type) => AUDITED.includes(type),
     row: (type, data) => row(open, type, data),
   };
 }
 
-/** The three durable types of the decision audit (§4.3.2). */
-const APPROVAL_TYPES = ["approval/asked", "approval/decided", "approval/policy"];
+/**
+ * The five durable types of the decision audit (§4.3.2).
+ *
+ * Both pairs, because they are the same shape and the same reader: a tool
+ * asking whether it may run, and the harness asking a person a question.
+ * `crates/turn` words them identically - "one pair per ask, sharing an `id`" -
+ * and this file's own note has claimed both since it was written while drawing
+ * only the approvals.
+ */
+const AUDITED = [
+  "approval/asked",
+  "approval/decided",
+  "approval/policy",
+  "question/asked",
+  "question/answered",
+];
 
 function row(open, type, data) {
   switch (type) {
@@ -244,7 +261,120 @@ function row(open, type, data) {
       root.append(pill(`approvals: ${data.policy}`));
       return root;
     }
+    case "question/asked":
+      return questionAsked(open, data);
+    case "question/answered":
+      return questionAnswered(open, data);
     default:
       return null;
   }
+}
+
+/**
+ * The durable record of a question put to a person.
+ *
+ * One record carries a *batch*: `{ id, questions: […] }`, where each question
+ * has an id of its own that its answer echoes. So the row is folded - a batch
+ * of five questions and their options is longer than anything else on a
+ * transcript - and each question keeps its own id, because that is what the
+ * answer will be matched on.
+ */
+function questionAsked(open, data) {
+  const questions = Array.isArray(data.questions) ? data.questions : [];
+  const root = disclosure(
+    questions.length === 1
+      ? `asked: ${first(questions[0])}`
+      : `asked ${questions.length} questions`,
+    { open: true },
+  );
+  const waiting = pill("waiting for an answer", "busy");
+  root.head.append(waiting);
+  const shown = new Map();
+  // One question is named on the fold, so the body does not print it again a
+  // line below itself. A batch is counted there instead, and then every
+  // question needs its own text.
+  const named = questions.length === 1;
+  for (const question of questions) {
+    const block = document.createElement("div");
+    block.className = "ask-one";
+    if (!named) {
+      const said = document.createElement("p");
+      said.className = "ask-detail";
+      said.textContent = first(question);
+      block.append(said);
+    }
+    if (question?.detail) {
+      const why = document.createElement("p");
+      why.className = "ask-why";
+      why.textContent = question.detail;
+      block.append(why);
+    }
+    // The options are shown as text and never as controls. This is the record
+    // of a question that has already been put; a radio button here would be a
+    // control that answers nothing, which is worse than no control.
+    for (const option of question?.options || []) {
+      const one = document.createElement("p");
+      one.className = "ask-why";
+      one.textContent = option?.description
+        ? `\u00b7 ${option.label} - ${option.description}`
+        : `\u00b7 ${option?.label ?? ""}`;
+      block.append(one);
+    }
+    const chose = document.createElement("p");
+    chose.className = "ask-decided";
+    block.append(chose);
+    if (question?.id !== undefined) shown.set(String(question.id), chose);
+    root.body.append(block);
+  }
+  if (data.id !== undefined) open.set(`q:${data.id}`, { root, waiting, shown });
+  return root;
+}
+
+/**
+ * What came back, written onto the questions it answers.
+ *
+ * `answered: false` is the case worth drawing carefully. It is not "they said
+ * nothing": `crates/turn` uses it for nobody listening, a partial answer, an
+ * answer outside the options, a panicking answerer and an interrupt - five
+ * situations a tool cannot tell apart and neither can this page. So it says
+ * the one thing that is true of all of them, which is that the tool got no
+ * answer.
+ */
+function questionAnswered(open, data) {
+  const answered = data.answered !== false;
+  const outcome = answered
+    ? pill("answered", "ok")
+    : pill("no answer reached the tool", "bad");
+  const asked = data.id === undefined ? undefined : open.get(`q:${data.id}`);
+  if (!asked) {
+    const root = document.createElement("div");
+    root.className = "ask-decided";
+    if (data.id !== undefined) {
+      const which = document.createElement("span");
+      which.className = "ask-why";
+      which.textContent = `question ${data.id}`;
+      root.append(which);
+    }
+    root.append(outcome);
+    return root;
+  }
+  open.delete(`q:${data.id}`);
+  asked.waiting.replaceWith(outcome);
+  asked.root.open = false;
+  for (const answer of Array.isArray(data.answers) ? data.answers : []) {
+    const where = asked.shown.get(String(answer?.id));
+    if (!where) continue;
+    const labels = Array.isArray(answer?.labels) ? answer.labels : [];
+    // An answer with no labels is a real answer and a common one - it is what
+    // Dismiss sends, and §4.4.3 reads it as a refusal. Saying "nothing chosen"
+    // tells that apart from a question that was never reached.
+    where.textContent = labels.length > 0 ? labels.join(", ") : "nothing chosen";
+  }
+  return null;
+}
+
+/** The text of one question, however little of it there is. */
+function first(question) {
+  const said = typeof question?.question === "string" ? question.question.trim() : "";
+  return said === "" ? "a question with no text" : said;
 }
