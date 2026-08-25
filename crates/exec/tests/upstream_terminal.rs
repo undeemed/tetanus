@@ -459,6 +459,83 @@ async fn one_command_at_a_time_on_one_shell() {
     );
 }
 
+/// TC-PORT-TERM-47: what a session's bound drops is kept, and the result says
+/// where.
+///
+/// The other half of TC-PORT-TERM-10. A bounded transcript is right - a
+/// session that ran for an hour must not be an hour of resident memory - but
+/// "the beginning is gone" is a poor answer for the commands that reach the
+/// bound at all, which are the builds, the test runs and the log tails whose
+/// beginnings are exactly where the first error is.
+///
+/// `crate::shell` has kept the whole of a one-shot command's output since the
+/// spill store landed, and the argument transfers without change: only the
+/// producer holds the bytes it is dropping. By the time a result exists the
+/// prefix is gone, so nothing above this seam can file it.
+///
+/// Input: one session with a small bound and a spill store; a command printing
+/// far past it; then a command that fits.
+/// Expected: the big command's result is bounded and names an artifact; the
+/// artifact holds the first line the result no longer has, and the last;
+/// the command that fits names nothing and leaves no artifact behind.
+#[tokio::test]
+async fn what_a_sessions_bound_drops_is_kept_and_the_result_says_where() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("artifacts");
+    let sessions = ShellSessions::new();
+    let session = sessions
+        .open(
+            Arc::new(Bash::new()),
+            SessionConfig {
+                cwd: dir.path().to_path_buf(),
+                max_scrollback: 4096,
+                spill: Some(tetanus_exec::shell::SpillTo {
+                    store: Arc::new(tetanus_core::spill::SpillStore::at(&root)),
+                    session: "a-session".to_string(),
+                }),
+                ..SessionConfig::default()
+            },
+        )
+        .await
+        .expect("a session starts");
+
+    let big = session
+        .run("for i in $(seq 1 3000); do echo line-$i; done; echo THE-LAST-LINE")
+        .await
+        .expect("ran");
+
+    assert!(big.truncated, "far more was printed than the bound keeps");
+    assert!(
+        !big.text.contains("line-1\n"),
+        "the result keeps the tail, so the first line is gone from it"
+    );
+    let locator = big.spilled.as_ref().expect("the whole of it was kept");
+    let whole = std::fs::read_to_string(locator).expect("the artifact is readable");
+    assert!(
+        whole.contains("line-1\n") && whole.contains("THE-LAST-LINE"),
+        "the artifact is this command's whole output, not the part after the bound was hit"
+    );
+    assert_eq!(
+        whole
+            .lines()
+            .filter(|line| line.starts_with("line-"))
+            .count(),
+        3000,
+        "every line exactly once"
+    );
+
+    let small = session.run("echo just-this").await.expect("ran");
+    assert!(!small.truncated);
+    assert_eq!(
+        small.spilled, None,
+        "a command that fits is not filed anywhere"
+    );
+    let filed = std::fs::read_dir(root.join("session-a-session"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(filed, 1, "one artifact for the one command that needed it");
+}
+
 /// TC-PORT-TERM-10: the transcript is bounded, and the bound keeps the end.
 ///
 /// Upstream: a backend-owned scrollback bound, with `truncated` reported.

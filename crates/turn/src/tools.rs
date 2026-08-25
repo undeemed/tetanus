@@ -239,18 +239,47 @@ pub fn looks_like_a_password_prompt(output: &str) -> bool {
         return false;
     };
     let last = last.trim_end().to_ascii_lowercase();
-    // `sudo`'s default is `[Pp]assword[: ]*`; this is that, plus the
-    // passphrase wording `ssh` and `gpg` use, and it requires the prompt's own
-    // punctuation so a sentence *about* a password is not a prompt for one.
-    ["password", "passphrase"]
-        .iter()
-        .any(|word| match last.rfind(word) {
-            None => false,
-            Some(at) => {
-                let after = last[at + word.len()..].trim_end();
-                after.is_empty() || after.ends_with(':') || after.ends_with('?')
-            }
-        })
+    ASKING.iter().any(|word| asks_for(&last, word))
+}
+
+/// The words a program uses when it wants a credential.
+///
+/// `sudo`'s own default is `[Pp]assword[: ]*`, and the rest are what the other
+/// things that ask use: a hardware key or a banking tool asks for a PIN, an
+/// authenticator asks for a code, several VPN clients say passcode. Each was
+/// named in `docs/parity.md`'s gap as a prompt the backstop did not recognise.
+///
+/// Adding a word can only ever *withhold* more, never less, which is why the
+/// list is allowed to be generous: a false positive costs the auditability of
+/// one command, and a miss writes a credential into a permanent file.
+const ASKING: [&str; 7] = [
+    "password",
+    "passphrase",
+    "passcode",
+    "pin",
+    "verification code",
+    "one-time code",
+    "otp",
+];
+
+/// Whether `line` ends by asking for `word`.
+///
+/// Two edges, and the short words are why both are checked. A prompt ends with
+/// its own punctuation, so `password` in the middle of a sentence is not a
+/// prompt - and a word inside a longer word is not the word at all, or `pin`
+/// would match `spinning up the container` and redact the next command a model
+/// ran.
+fn asks_for(line: &str, word: &str) -> bool {
+    let Some(at) = line.rfind(word) else {
+        return false;
+    };
+    let standalone = line[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|before| !before.is_alphanumeric());
+    let after = line[at + word.len()..].trim_end();
+    let punctuated = after.is_empty() || after.ends_with(':') || after.ends_with('?');
+    standalone && punctuated
 }
 
 /// What stands in the journal for a value a tool withheld.

@@ -13,14 +13,28 @@
 //! bound ate part of it rather than being handed a shorter answer that looks
 //! complete.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
+
+/// Told what the bound is about to forget, and where it started.
+///
+/// The only moment the dropped bytes still exist is inside `push`, between the
+/// buffer overflowing and the drain. A reader polling from outside always
+/// arrives after they are gone - which is a mistake this crate made once and
+/// caught in a case: an artifact meant to hold a command's whole output held
+/// its last 1,915 lines of 3,000, because the writer was opened when the drop
+/// was *noticed* rather than when it happened.
+pub type Overflow = Arc<dyn Fn(usize, &str) + Send + Sync>;
 
 /// Everything a shell has printed, bounded, with a way to wait for more.
 pub struct Transcript {
     bound: usize,
     state: Mutex<TranscriptState>,
+    /// Who to tell when the bound forgets something. `None` for the terminal
+    /// transcript, which has a screen model beside it, and set for the length
+    /// of one command by a session that is keeping the whole of it.
+    overflow: Mutex<Option<Overflow>>,
     pub changed: Notify,
 }
 
@@ -75,8 +89,18 @@ impl Transcript {
         Self {
             bound,
             state: Mutex::new(TranscriptState::default()),
+            overflow: Mutex::new(None),
             changed: Notify::new(),
         }
+    }
+
+    /// Hear about what the bound forgets, for as long as the handle is set.
+    ///
+    /// One at a time: a session installs one for the length of a command and
+    /// takes it away afterwards, because what is dropped belongs to whichever
+    /// command was running.
+    pub fn watch_overflow(&self, sink: Option<Overflow>) {
+        *self.overflow.lock().expect("no panic holds this lock") = sink;
     }
 
     pub fn push(&self, text: &str) {
@@ -88,6 +112,16 @@ impl Transcript {
                 let at = (excess..=state.kept.len())
                     .find(|at| state.kept.is_char_boundary(*at))
                     .unwrap_or(state.kept.len());
+                // Told before it is forgotten, which is the only moment it
+                // exists.
+                if let Some(sink) = self
+                    .overflow
+                    .lock()
+                    .expect("no panic holds this lock")
+                    .as_ref()
+                {
+                    sink(state.dropped, &state.kept[..at]);
+                }
                 state.kept.drain(..at);
                 state.dropped += at;
             }
