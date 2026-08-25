@@ -391,6 +391,17 @@ impl TurnEngine {
         self.interrupt.stop()
     }
 
+    /// Ask a running turn to stop because the process is stopping.
+    ///
+    /// The same mechanism [`TurnEngine::cancel`] uses and deliberately not a
+    /// second one (contract section 4.4.11): what differs is the reason the
+    /// journal records, because a transcript that blames a rolling restart on
+    /// a user sends its reader after the wrong thing.
+    pub fn stop_for_shutdown(&self) -> bool {
+        self.interrupt
+            .stop_because(crate::interrupt::Cause::Shutdown)
+    }
+
     /// The switch [`TurnEngine::cancel`] throws, for a composition that has to
     /// hand it to something outside the loop.
     pub fn interrupt(&self) -> &Arc<Interrupt> {
@@ -760,7 +771,13 @@ impl TurnEngine {
             // The step boundary is where an interrupt lands. A turn that was
             // finished anyway is not reported as cancelled.
             if self.interrupt.stopped() {
-                reason = StopReason::Cancelled;
+                // The same mechanism, two facts. A drain and a caller's
+                // interrupt stop a turn at the same boundary, and section
+                // 4.4.11 requires the journal to say which one it was.
+                reason = match self.interrupt.cause() {
+                    Some(crate::interrupt::Cause::Shutdown) => StopReason::Shutdown,
+                    _ => StopReason::Cancelled,
+                };
                 break;
             }
             // And where a guard lands, for the same reason: a step already

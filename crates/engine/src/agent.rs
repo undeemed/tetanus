@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tetanus_protocol::methods::{
     Ack, AgentPromptParams, AgentPromptResult, AgentStatusPush, AgentStatusResult,
@@ -334,6 +334,57 @@ impl Runtime {
         let asked =
             agent.is_some_and(|agent| agent.busy.load(Ordering::Acquire) && agent.engine.cancel());
         Ok(Ack { ok: asked })
+    }
+
+    /// Stop taking new work and close the turns already running, then answer
+    /// what is still open.
+    ///
+    /// Contract section 4.4.11: a stopping server interrupts every running
+    /// turn at the next step boundary - through the mechanism
+    /// `agent.interrupt` already uses, not a second one - and waits for them
+    /// to close, so a clean exit leaves nothing for section 4.4.4's repair to
+    /// synthesize on the next open.
+    ///
+    /// **Best effort, with the crash path still behind it.** A tool that will
+    /// not return cannot be waited for indefinitely, so the wait is bounded
+    /// and a drain that runs out of time answers the turns it could not close.
+    /// Those journals are exactly what repair exists for, which is why a
+    /// deployment that sees `"interrupted"` after a restart is being told the
+    /// drain did not finish.
+    ///
+    /// Answers the number of turns still running when the budget ran out;
+    /// zero means every turn closed itself.
+    pub async fn drain(&self, budget: Duration) -> usize {
+        let running: Vec<Arc<SessionAgent>> = self
+            .agents
+            .lock()
+            .expect("agents")
+            .values()
+            .filter(|agent| agent.busy.load(Ordering::Acquire))
+            .cloned()
+            .collect();
+        for agent in &running {
+            agent.engine.stop_for_shutdown();
+        }
+
+        // Polled rather than notified: a turn closes by returning from
+        // `run_turn` on a task this engine does not own, so there is nothing
+        // to await on. The interval is short enough that a drain is not
+        // perceptibly slower than the turns it waits for.
+        let deadline = Instant::now() + budget;
+        loop {
+            let open = running
+                .iter()
+                .filter(|agent| agent.busy.load(Ordering::Acquire))
+                .count();
+            if open == 0 {
+                return 0;
+            }
+            if Instant::now() >= deadline {
+                return open;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     fn is_busy(&self, session_id: &str) -> bool {

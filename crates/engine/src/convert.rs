@@ -44,7 +44,8 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
         reason @ (tetanus_turn::StopReason::MaxTokens
         | tetanus_turn::StopReason::Interrupted
         | tetanus_turn::StopReason::TimedOut
-        | tetanus_turn::StopReason::Repeated) => {
+        | tetanus_turn::StopReason::Repeated
+        | tetanus_turn::StopReason::Shutdown) => {
             wire::StopReason::Other(reason.as_str().to_string())
         }
     }

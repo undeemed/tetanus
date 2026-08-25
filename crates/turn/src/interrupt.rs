@@ -7,7 +7,7 @@
 //! the retry executor's backoff - because a caller who has just asked the
 //! turn to stop should not sit through ten seconds of it first.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -18,14 +18,33 @@ use tokio::sync::watch;
 /// pair, because a waiter must not be able to miss the interrupt that arrived
 /// while it was starting to wait: a `watch` receiver sees a value that changed
 /// before it began.
+/// Why a turn was asked to stop.
+///
+/// The engine treats the two identically - both stop at the next step boundary
+/// through this one mechanism - and a reader must be able to tell them apart:
+/// one is a decision to respect and the other is something to go and look at
+/// (contract section 4.4.11). A transcript that says "cancelled" for a rolling
+/// restart sends its reader after a user who did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// A caller asked this turn to stop (`agent.interrupt`).
+    Cancelled,
+    /// The process is stopping and is closing its turns on the way out.
+    Shutdown,
+}
+
 pub struct Interrupt {
     stopped: watch::Sender<bool>,
+    /// Why, for the turn that has to name a stop reason. Read only when
+    /// `stopped` is set, and reset with it.
+    cause: Mutex<Option<Cause>>,
 }
 
 impl Default for Interrupt {
     fn default() -> Self {
         Self {
             stopped: watch::channel(false).0,
+            cause: Mutex::new(None),
         }
     }
 }
@@ -38,7 +57,26 @@ impl Interrupt {
     /// Ask the turn to stop. Answers `true` when this call is what stopped it,
     /// and `false` when it was already asked.
     pub fn stop(&self) -> bool {
-        !self.stopped.send_replace(true)
+        self.stop_because(Cause::Cancelled)
+    }
+
+    /// Ask the turn to stop, saying why.
+    ///
+    /// The first caller's reason is the one that stands. A drain that arrives
+    /// after a user already pressed stop has not changed why that turn is
+    /// ending, and overwriting it would relabel the user's own decision as a
+    /// deployment's restart.
+    pub fn stop_because(&self, cause: Cause) -> bool {
+        let first = !self.stopped.send_replace(true);
+        if first {
+            *self.cause.lock().expect("interrupt cause") = Some(cause);
+        }
+        first
+    }
+
+    /// Why the turn was stopped, when it was.
+    pub fn cause(&self) -> Option<Cause> {
+        *self.cause.lock().expect("interrupt cause")
     }
 
     /// Whether the turn has been asked to stop.
@@ -51,6 +89,7 @@ impl Interrupt {
     /// not stop the turn that follows it.
     pub fn clear(&self) {
         self.stopped.send_replace(false);
+        *self.cause.lock().expect("interrupt cause") = None;
     }
 
     /// Resolve when the turn is interrupted, and never otherwise.

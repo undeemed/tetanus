@@ -18,6 +18,10 @@ tetanus-turn = { path = "../turn" }
 # The confinement vocabulary, so a document's `sandbox.mode` is settled here
 # with every other key rather than parsed again by each composition.
 tetanus-sandbox = { path = "../sandbox" }
+# The drain waits for turns it does not own to close (contract section 4.4.11),
+# which needs a timer rather than a channel: a turn ends by returning on
+# somebody else's task.
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
