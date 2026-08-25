@@ -15,12 +15,12 @@ use tetanus_protocol::types as protocol;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use tetanus_core::EventBus;
 use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot_with;
 use tetanus_turn::interrupt::Interrupt;
-use tetanus_turn::llm::{deepseek, mock, LlmAdapter};
+use tetanus_turn::llm::LlmAdapter;
 use tetanus_turn::{TurnConfig, TurnEngine, TurnTrace};
 use tetanus_ui::{
     tame_line, when_killed, ColorChoice, Flow, Frame, Held, Key, Keys, Page, Policy, Role, Screen,
@@ -181,11 +181,12 @@ struct RunArgs {
     /// What to ask the agent, named rather than positional
     #[arg(short, long, value_name = "TEXT", conflicts_with = "ask")]
     prompt: Option<String>,
-    /// Which model provider to resolve into the registry. Defaults to
-    /// `provider.default` in the settings document, and to the mock adapter
-    /// when nothing sets it
-    #[arg(short, long, value_enum)]
-    adapter: Option<AdapterChoice>,
+    /// Which model provider to resolve into the registry: mock, deepseek, or
+    /// any name the settings document declares under `llm.providers.<name>`.
+    /// Defaults to `provider.default` in the settings document, and to the
+    /// mock adapter when nothing sets it
+    #[arg(short, long, value_name = "NAME", value_parser = named())]
+    adapter: Option<String>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID", value_parser = named())]
     model: Option<String>,
@@ -218,25 +219,6 @@ struct RunArgs {
     /// block under the shell prompt
     #[arg(long, conflicts_with_all = ["trace", "json"])]
     ui: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum AdapterChoice {
-    /// Deterministic built-in adapter. No key, no network.
-    Mock,
-    /// DeepSeek chat completions. Needs `DEEPSEEK_API_KEY`.
-    Deepseek,
-}
-
-impl AdapterChoice {
-    /// The provider route this choice names. `tetanus models` prints these,
-    /// and `--adapter` accepts them, so what a user reads is what they type.
-    fn route(self) -> &'static str {
-        match self {
-            Self::Mock => "mock",
-            Self::Deepseek => "deepseek",
-        }
-    }
 }
 
 /// A failure already reported to the user, carrying the status to exit with.
@@ -404,7 +386,9 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             json,
         } => settings::page(policy, &document, &mut out, dir.as_deref(), defaults, json),
         Cmd::Models { json } => {
-            let catalog = providers();
+            // The document's own registry, so a provider it declares is on
+            // this page and not only in the panel.
+            let catalog = providers(&settings::booted(policy, &document, &[])?);
             if json {
                 return render::json::line(&mut out, &catalog)
                     .map_err(|err| report(policy, &err.to_string(), None));
@@ -724,7 +708,10 @@ fn run_command(policy: &Policy, cli: Cli) -> Result<(), Reported> {
             let build = render::info::Build {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: tetanus_protocol::PROTOCOL_VERSION,
-                providers: providers().providers.len(),
+                providers: {
+                    let booted = settings::booted(policy, &document, &[])?;
+                    providers(&booted).providers.len()
+                },
                 tools: {
                     let booted = settings::booted(policy, &document, &[])?;
                     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -783,81 +770,44 @@ fn reason(reason: tetanus_turn::StopReason) -> protocol::StopReason {
 
 /// Every provider this build registers, in the contract's shape.
 ///
-/// One list, read by `tetanus models` and by the turn that picks a default
-/// model, so the page cannot advertise a catalog the run does not use. It
-/// answers `catalog.models` and moves behind the engine when that call is
-/// served; nothing in `render` changes when it does.
+/// The engine's own answer to `catalog.models`, asked of the registry the
+/// settings document composed. `tetanus models`, the browser panel's picker
+/// and the turn that picks a default model therefore read one list, and a
+/// provider a document declares appears on all three the moment it is written
+/// - which is the whole point of registering it in one place.
 ///
-/// Availability is read here and not cached: a user who exports the key and
-/// runs the command again must see the answer change.
-fn providers() -> ModelCatalogResult {
-    let deepseek = deepseek::DeepSeekConfig::default();
-    let keyed = !std::env::var(&deepseek.api_key_env)
-        .unwrap_or_default()
-        .is_empty();
-    ModelCatalogResult {
-        providers: vec![
-            protocol::ProviderDescriptor {
-                provider: AdapterChoice::Mock.route().into(),
-                models: vec![mock::MODEL.into()],
-                credential_env: None,
-                available: true,
-            },
-            protocol::ProviderDescriptor {
-                provider: AdapterChoice::Deepseek.route().into(),
-                models: deepseek.models.clone(),
-                credential_env: Some(deepseek.api_key_env.clone()),
-                available: keyed,
-            },
-        ],
-    }
+/// Availability is read at the moment it is asked for and never cached: a user
+/// who exports the key and runs the command again must see the answer change.
+fn providers(booted: &tetanus_engine::EngineConfig) -> ModelCatalogResult {
+    tetanus_engine::catalog::Catalogs::new(booted).models()
 }
 
-/// What one adapter advertises, taken from the list above rather than from a
-/// second copy of it.
-fn advertised(choice: AdapterChoice) -> Vec<String> {
-    providers()
-        .providers
-        .into_iter()
-        .find(|provider| provider.provider == choice.route())
-        .map(|provider| provider.models)
-        .unwrap_or_default()
-}
-
-/// Resolve a named adapter and the model it will run, or report why it cannot.
+/// The model a resolved route will run, or the report saying why it cannot.
 ///
 /// Both commands that run a turn ask this, so a credential that is missing
 /// fails the same way and a model that was not named defaults the same way,
 /// whichever of them was typed. Everything it can refuse is refused before a
 /// journal is opened: a chat that cannot reach a model must not first write a
 /// session holding no turns.
+///
+/// The route arrives already resolved from [`settings::provider_named`], which
+/// is what leaves nothing here to say about a name nothing serves.
 fn adapter(
     policy: &Policy,
-    choice: AdapterChoice,
+    route: &settings::Route,
     model: Option<String>,
 ) -> Result<(Arc<dyn LlmAdapter>, String), Reported> {
-    let adapter: Arc<dyn LlmAdapter> = match choice {
-        AdapterChoice::Mock => Arc::new(mock::MockAdapter::new()),
-        AdapterChoice::Deepseek => {
-            let config = deepseek::DeepSeekConfig::default();
-            if std::env::var(&config.api_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                let missing = RpcError::new(
-                    ErrorCode::MissingCredential,
-                    format!("{} is not set", config.api_key_env),
-                )
-                .with_data(serde_json::json!({
-                    "provider": choice.route(),
-                    "env": config.api_key_env,
-                }));
-                return Err(fail(policy, &missing));
-            }
-            Arc::new(deepseek::DeepSeekAdapter::with_http(config))
+    let adapter = route.adapter();
+    // A key the adapter says it needs and the environment does not hold is a
+    // turn that cannot happen, reported at the point the adapter was named.
+    if let Some(env) = adapter.credential_env() {
+        if std::env::var(env).unwrap_or_default().is_empty() {
+            let missing = RpcError::new(ErrorCode::MissingCredential, format!("{env} is not set"))
+                .with_data(serde_json::json!({ "provider": route.route(), "env": env }));
+            return Err(fail(policy, &missing));
         }
-    };
-    let model = match model.or_else(|| advertised(choice).first().cloned()) {
+    }
+    let model = match model.or_else(|| adapter.models().first().cloned()) {
         Some(model) => model,
         None => {
             let unusable = RpcError::new(
@@ -1788,11 +1738,11 @@ async fn run<W: std::io::Write>(
         },
         // A first run must need no credential, so an unconfigured `run` is
         // the mock adapter.
-        AdapterChoice::Mock,
+        "mock",
         "turn.jsonl",
     )?;
 
-    let (adapter, model) = adapter(policy, settled.provider, settled.model.clone())?;
+    let (adapter, model) = adapter(policy, &settled.provider, settled.model.clone())?;
 
     // The journal is the engine's to open. `session.create` writes the
     // `session/start` header that makes the file self-describing - the model

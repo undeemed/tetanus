@@ -383,6 +383,228 @@ fn every_script_is_reachable_from_the_page() {
     );
 }
 
+/// TC-WEB-14: the picker starts what it picked.
+///
+/// The catalogue's "Start here" writes `provider` and `model` into the query
+/// and reloads. Until this case, nothing read them back: `session.create` was
+/// sent `{}` for a fresh session, so every conversation opened on the server's
+/// default however the reader had chosen, and the picker was a control that
+/// looked like it worked.
+///
+/// Stated over the text of the two scripts, which is what this file can read.
+/// What it cannot see is a browser actually doing it - that is the VNC pass -
+/// so the assertion is deliberately about the two halves matching: whatever
+/// name the catalogue puts in the query, the page must take out of it and put
+/// in the call.
+#[test]
+fn the_page_passes_the_picked_provider_and_model_into_session_create() {
+    let chat = read("chat.js");
+    let catalogue = read("catalogue.js");
+
+    // The catalogue is what names the two parameters, and `chat.js` writes
+    // them; both halves of the round trip live in this repository, so the
+    // names are checked against each other rather than against a constant.
+    for param in ["provider", "model"] {
+        assert!(
+            chat.contains(&format!("searchParams.set(\"{param}\"")),
+            "the picker never writes {param} into the query"
+        );
+        assert!(
+            chat.contains(&format!("query.get(\"{param}\")")),
+            "the page never reads {param} back out of the query"
+        );
+    }
+
+    // And what it read reaches the call. `session.create` is the only place
+    // the contract takes them, so a page that read the query and did not put
+    // them there would be exactly the defect this case exists for.
+    let opening = chat
+        .split_once("function opening()")
+        .expect("chat.js composes session.create params in one function")
+        .1;
+    let body = &opening[..opening.find("\n}").expect("the function closes")];
+    for param in ["provider", "model"] {
+        assert!(
+            body.contains(&format!("params.{param}")),
+            "{param} never reaches session.create: {body}"
+        );
+    }
+    assert!(
+        chat.contains("call(\"session.create\", opening())"),
+        "session.create is sent something other than those params"
+    );
+
+    // The button is still what sets them, so the two ends stay one feature.
+    assert!(
+        catalogue.contains("onStart(provider.provider, model)"),
+        "the catalogue no longer hands a route and a model to its caller"
+    );
+}
+
+/// TC-WEB-15: the catalogue marks the current conversation by route and model.
+///
+/// A model id is unique to a provider and not to a deployment: an official
+/// route and a gateway both offering `gpt-5` is the ordinary case once a
+/// document can declare providers, and marking by model alone puts "this
+/// conversation" on both of them.
+#[test]
+fn the_catalogue_marks_the_current_entry_by_provider_and_model() {
+    let catalogue = read("catalogue.js");
+    let chat = read("chat.js");
+
+    assert!(
+        catalogue.contains("currentProvider"),
+        "the catalogue still marks by model alone"
+    );
+    assert!(
+        catalogue.contains("currentProvider === provider.provider"),
+        "the mark does not compare the route"
+    );
+    assert!(
+        chat.contains("currentProvider: runningProvider"),
+        "the page never tells the catalogue which route it is on"
+    );
+    assert!(
+        chat.contains("runningProvider = info.provider"),
+        "the route is not taken from the session the server opened"
+    );
+}
+
+/// TC-WEB-12: every script the page ships actually parses as a module.
+///
+/// This file says out loud that its readers are scans and not parsers, and
+/// that is the right trade for the six structural claims above. It is the
+/// wrong trade for one thing: a module that does not **parse** never runs at
+/// all, so every other case here passes while the panel is a blank page. It
+/// shipped exactly that way once - a new `const asked` beside the existing
+/// `function asked` is `SyntaxError: Identifier 'asked' has already been
+/// declared`, which stops `chat.js` before its first import, so no module is
+/// fetched, no socket is dialled, and the page sits on the placeholders in
+/// `index.html` with an empty console. Every scan in this file read that page
+/// as correct.
+///
+/// The parser is the one already on the machine. `node --check` on a copy
+/// named `.mjs` parses a module without resolving a single import, so this
+/// needs no `node_modules`, no network and no dependency in this workspace -
+/// which is what keeps it inside the project's "no Node runtime to install"
+/// rule: a Node here is used if it happens to exist and is never required.
+///
+/// Where there is no Node, the case says so on stderr and falls back to
+/// [`duplicated_top_level`], which catches the specific fault above without a
+/// parser. It never passes on nothing.
+#[test]
+fn every_script_parses_as_a_module() {
+    let Some(node) = node() else {
+        eprintln!(
+            "TC-WEB-12: no `node` on PATH, so the scripts were NOT parsed. \
+             Falling back to the duplicate-declaration check, which is \
+             narrower: install Node to get the whole claim."
+        );
+        assert_eq!(duplicated_top_level(), Vec::<String>::new());
+        return;
+    };
+
+    let staged = tempfile::tempdir().expect("a temp dir");
+    let mut broken = Vec::new();
+    for (name, body) in scripts() {
+        // Renamed on the way in: the extension is what tells the parser this
+        // is a module, and a `.js` would be read as a script, where `import`
+        // is a syntax error in every file the page ships.
+        let path = staged
+            .path()
+            .join(format!("{}.mjs", name.trim_end_matches(".js")));
+        std::fs::write(&path, &body).expect("a staged copy");
+        let checked = std::process::Command::new(&node)
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        if !checked.status.success() {
+            let said = String::from_utf8_lossy(&checked.stderr);
+            // The first line naming the fault, not the whole stack, which is
+            // about the temporary path and not about the page.
+            let why = said
+                .lines()
+                .find(|line| line.contains("Error"))
+                .unwrap_or("did not parse");
+            broken.push(format!("{name}: {why}"));
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "these scripts do not parse, so the page they are on never runs: {broken:?}"
+    );
+}
+
+/// TC-WEB-13: no module declares one top-level name twice.
+///
+/// The narrower half of TC-WEB-12, kept as a case of its own because it is the
+/// half that runs everywhere and because it names the fault rather than
+/// reporting a parser's line number. `const asked` beside `function asked` is
+/// the shape; so is a second `let` of a name a `const` already holds.
+#[test]
+fn no_module_declares_one_top_level_name_twice() {
+    let clashes = duplicated_top_level();
+    assert!(
+        clashes.is_empty(),
+        "these names are declared twice at the top level of one module, \
+         which is a SyntaxError and stops the whole module: {clashes:?}"
+    );
+}
+
+/// `node`, if this machine has one.
+fn node() -> Option<String> {
+    let found = std::process::Command::new("node").arg("--version").output();
+    matches!(&found, Ok(out) if out.status.success()).then(|| "node".to_string())
+}
+
+/// Every top-level name each script declares more than once.
+///
+/// Top level is column zero: everything nested in this codebase is indented,
+/// and a declaration that is not indented is not nested. That is a scan again,
+/// but of a kind that cannot be fooled into silence the way the others were -
+/// it looks for the collision itself rather than for a property that happens
+/// to survive one.
+fn duplicated_top_level() -> Vec<String> {
+    let mut found = Vec::new();
+    for (file, body) in scripts() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for line in body.lines() {
+            if line.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let Some(name) = declared_name(line) else {
+                continue;
+            };
+            if !seen.insert(name.clone()) {
+                found.push(format!("{file}: {name}"));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The name a top-level declaration binds, if the line is one.
+fn declared_name(line: &str) -> Option<String> {
+    // `export` does not change what is bound, only who else can see it.
+    let rest = line.strip_prefix("export ").unwrap_or(line);
+    let rest = rest.strip_prefix("default ").unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    let (_, after) = ["const ", "let ", "var ", "function ", "class "]
+        .into_iter()
+        .find_map(|keyword| rest.strip_prefix(keyword).map(|after| (keyword, after)))?;
+    let name: String = after
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    // A destructuring binding - `const { a, b } = ...` - starts with a brace
+    // and binds several names; it is not this scan's business and answering
+    // "" for it would collide with every other one.
+    (!name.is_empty()).then_some(name)
+}
+
 /// Every string literal that follows `marker`, in either quote style.
 ///
 /// Deliberately a scan rather than a parser. What it can miss is a computed

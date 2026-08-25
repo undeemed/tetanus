@@ -218,6 +218,64 @@ fn the_banner_names_the_directory_the_document_set() {
     assert!(said.contains("sessions  journals"), "{said}");
 }
 
+/// TC-CLI-SERVE-9: a provider the document declares is on the served
+/// catalogue.
+///
+/// Input: a settings document declaring `llm.providers.local.*`, and a peer
+/// asking `catalog.models` over the stdio carrier.
+/// Expected: the answer lists the two built-in routes and `local`, with the
+/// document's model and credential reference. This is the panel's own path:
+/// the browser picker is drawn from this call and nothing else, so a server
+/// that composed its registry anywhere but at the boot would list the offline
+/// mock alone however the document was written - which is exactly what it did
+/// before this slice.
+///
+/// Environmental needs: the harness home is the case's own directory, which
+/// `serve` sets, so the document below is the one the server reads.
+#[test]
+fn the_served_catalogue_lists_a_provider_the_document_declared() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("settings.yaml"),
+        "llm:
+  providers:
+    local:
+      base_url: http://127.0.0.1:11434/v1
+      api_key_env: TETANUS_SERVE_LOCAL_KEY
+      models: [stub-model]
+",
+    )
+    .expect("the document is written");
+    let mut server = serve(dir.path(), &[]);
+    let mut reader = BufReader::new(server.stdout.take().expect("stdout is piped"));
+
+    exchange(&mut server, &mut reader, HELLO);
+    let answered = exchange(
+        &mut server,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","id":2,"method":"catalog.models","params":{}}"#,
+    );
+    let frame: serde_json::Value = serde_json::from_str(&answered).expect("a JSON frame");
+
+    let listed = frame["result"]["providers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no providers: {answered}"));
+    let routes: Vec<&str> = listed
+        .iter()
+        .filter_map(|entry| entry["provider"].as_str())
+        .collect();
+    assert_eq!(routes, ["mock", "deepseek-official", "local"], "{answered}");
+    let local = &listed[2];
+    assert_eq!(local["models"][0], "stub-model", "{answered}");
+    assert_eq!(
+        local["credential_env"], "TETANUS_SERVE_LOCAL_KEY",
+        "{answered}"
+    );
+
+    let (_, out) = hang_up(server, reader);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
 /// A WebSocket server on a port the operating system chooses, read far enough
 /// to learn which one.
 ///

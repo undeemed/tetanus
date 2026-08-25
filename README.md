@@ -58,7 +58,7 @@ Phase ① is the core turn engine. It is implemented and covered by tests.
 | Context | A conversation that outgrows its window folds its older span into a summary recorded on the journal, so a replay derives the compacted history; over-long tool results shrink first, without a model | Manual compaction, per-model policy |
 | Projections | Named folds over the journal, driven as events commit and checkpointed: title, stats, token usage, context pressure, context breakdown | Telemetry, log export |
 | Secrets and spill | A credential store outside the settings document - the environment over an owner-only file - whose values reach no dump, log line or journal; oversized payloads spill to disk behind a bounded preview | Wiring spill into the tool pipeline |
-| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | More adapters, token counts anchored on what a provider reports |
+| Model providers | Deterministic offline mock; DeepSeek chat completions with SSE streaming; any other OpenAI-compatible endpoint declared as `llm.providers.<name>` in the settings document, registered at boot and reachable by that name from `--adapter`, `tetanus models` and the browser panel's picker alike; a bounded retry policy for transient failures, with the executor that runs it against a live route and records every scheduled attempt; heuristic pricing of the model-visible surface | Adapters for native APIs of another shape, token counts anchored on what a provider reports |
 | Tools | `echo`, `shell`, the four persistent-shell tools and the six terminal tools through the documented pipeline; parallel-safe calls share a bounded pool, an exclusive call is a barrier, results commit in model order; a call a tool declares irreversible is decided before it runs, and a refused call never runs; `web_fetch` and `web_search`, and the tools any MCP server advertises, all dispatched by that same pipeline. Every tool the binary offers comes from one declared set of named sources - one line per crate - which the settings document selects by crate, so the tools page and the registry a turn dispatches from are the same list | Cancellation inside a step |
 | Feature tools | The built-in tools a usable harness has, each over state kept only on the journal: a todo list, a standing goal with revisions, plan mode, an operator feedback channel, skills discovered from project and user roots, attachments admitted and content-addressed, and a workspace sketch; a surface reads all of it through one folded vocabulary (`SessionView`, `WorkspaceView`) that carries no bytes and no presentation; all of them offered by the shipped binary | Putting the views on the JSON-RPC boundary, an autonomous goal driver, a workspace picker |
 | Filesystem | A filesystem service with a local and a sandboxed backend behind one trait - read, write, edit, list, glob, stat, delete - each failing in a named class rather than an `io::Error` string; seven model-facing tools over it; the read-before-write policy that refuses to overwrite what a session has not read | Read windows over bytes, a search tool, the kernel sandbox backends |
@@ -149,6 +149,48 @@ To talk to the real provider, set `DEEPSEEK_API_KEY` and pass `--adapter deepsee
 Without the key the command says so and stops before any network call.
 `DEEPSEEK_BASE_URL` overrides the endpoint.
 
+### Plug in any model
+
+Any endpoint that speaks the OpenAI-compatible `POST {base_url}/chat/completions` protocol is a
+provider this build can run: OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, LM Studio.
+Declare it in the settings document - `settings.yaml`, `settings.yml` or `settings.json` under
+`$TETANUS_HOME` (`~/.tetanus` when that is unset), or wherever `--settings <path>` points:
+
+```yaml
+llm:
+  providers:
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      api_key_env: OPENROUTER_API_KEY
+      models: [anthropic/claude-sonnet-4.5, openai/gpt-5]
+    ollama:
+      base_url: http://127.0.0.1:11434/v1
+      api_key_env: OLLAMA_API_KEY   # any non-empty placeholder; a local server ignores it
+```
+
+`base_url` and `api_key_env` are required; `models`, `max_tokens`, `stream_idle_timeout_ms` and
+`request_deadline_ms` are optional.
+`api_key_env` names the *variable* holding the key, never the key: the document is a file people
+share, and a credential in it is a credential in a repository.
+A local server that wants no credential still needs the variable set to something, because a route
+that needs no key and a route whose key is missing would otherwise be the same state, and the second
+one has to fail.
+The listed models are advisory - an unlisted id still passes through - and a name a built-in route
+already owns (`mock`, `deepseek`, `deepseek-official`) is refused rather than silently shadowed.
+
+The name then works on all three surfaces, because they read one registry:
+
+```bash
+tetanus run --adapter openrouter -m openai/gpt-5 -p "list the files"
+tetanus chat --adapter ollama -m llama3
+tetanus serve --listen 127.0.0.1:8137 --frontend web/app   # the browser panel's picker lists it
+```
+
+`tetanus models` lists every registered route with the models it advertises and whether its
+credential is present, so what the terminal shows and what the panel offers cannot disagree.
+A native API of another shape - Anthropic Messages, for one - is not this: it arrives later as a
+second adapter behind the same registry.
+
 ## CLI
 
 | Command | What it does |
@@ -163,7 +205,8 @@ Without the key the command says so and stops before any network call.
 | `tetanus serve` | Host the JSON-RPC protocol on stdio, or on a socket with `--listen`, for an editor or a script |
 | `tetanus info` | Print what this build is: version, protocol, catalogue sizes, platform |
 
-`tetanus run` flags: `--adapter mock|deepseek`, `--model <id>`,
+`tetanus run` flags: `--adapter <name>` (`mock`, `deepseek`, or any name the settings document
+declares under `llm.providers.<name>`), `--model <id>`,
 `--session <path>`, `--max-steps <n>`, `--think` (unfold the model's reasoning),
 `--trace` (the raw sequence) with `--verbose` (each durable payload), `--ui` (a screen of its own),
 and `--json`.

@@ -64,6 +64,20 @@ fn document(dir: &Path, body: &str) -> std::path::PathBuf {
     path
 }
 
+/// A page with its soft wraps taken out.
+///
+/// A note is folded to the terminal's width, and a long `$TMPDIR` - which is
+/// what a shared build machine has - puts the fold inside the path the case is
+/// looking for. The path itself holds no whitespace, so joining each wrapped
+/// line back onto the one before it restores exactly what was printed and
+/// changes nothing else the case reads.
+fn unwrapped(page: &str) -> String {
+    page.lines()
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// TC-CLI-TOOLSET-1: every landed tool crate's tools are offered by the binary.
 ///
 /// The acceptance this slice exists for, and the one a green workspace does not
@@ -208,7 +222,7 @@ fn a_source_this_build_does_not_ship_is_refused_against_the_document() {
     assert!(said.contains("nope"), "names the bad word: {said}");
     assert!(said.contains("fs"), "names what does exist: {said}");
     assert!(
-        said.contains(&path.display().to_string()),
+        unwrapped(&said).contains(&path.display().to_string()),
         "names the document: {said}"
     );
     assert!(!said.contains("panicked"), "reported, not panicked: {said}");

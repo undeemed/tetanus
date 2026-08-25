@@ -6,6 +6,7 @@
 pub mod attribution;
 pub mod deepseek;
 pub mod mock;
+pub mod openai_compat;
 pub mod retry;
 
 use crate::tools::{ToolCall, ToolSchema};

@@ -37,19 +37,24 @@ import { button, pill, stateDot } from "./primitives.js";
  *
  * `onStart(provider, model)` is called when a reader picks one. Omit it for a
  * read-only catalogue.
+ *
+ * `current` is the model this conversation runs on and `currentProvider` its
+ * route. Both are needed to mark one line: a model id is unique to a provider
+ * and not to a deployment, and two routes offering `gpt-5` - an official one
+ * and a gateway - would otherwise both be marked as this conversation.
  */
-export function models(root, providers, { current, onStart } = {}) {
+export function models(root, providers, { current, currentProvider, onStart } = {}) {
   root.replaceChildren();
   if (!providers || providers.length === 0) {
     root.append(nothing("This build has no providers registered."));
     return;
   }
   for (const provider of providers) {
-    root.append(providerRow(provider, current, onStart));
+    root.append(providerRow(provider, current, currentProvider, onStart));
   }
 }
 
-function providerRow(provider, current, onStart) {
+function providerRow(provider, current, currentProvider, onStart) {
   const root = document.createElement("div");
   root.className = "trace-turn";
 
@@ -83,7 +88,10 @@ function providerRow(provider, current, onStart) {
     label.className = "trace-name";
     label.textContent = model;
     line.append(label);
-    if (current && current === model) line.append(pill("this conversation", "ok"));
+    // Marked by route and model together. A page that knows the model and not
+    // the route marks by model alone, which is what it can honestly say.
+    const mine = current === model && (!currentProvider || currentProvider === provider.provider);
+    if (current && mine) line.append(pill("this conversation", "ok"));
     if (onStart) {
       const go = button("Start here", {
         title: provider.available

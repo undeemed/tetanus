@@ -13,6 +13,7 @@ pub mod boot;
 pub mod catalog;
 pub mod convert;
 pub mod preset;
+pub mod providers;
 pub mod retry;
 pub mod session;
 pub mod subscribe;

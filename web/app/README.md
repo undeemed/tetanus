@@ -62,8 +62,6 @@ description of the same events.
 
 - **No authentication, and no encryption.** `serve.py` is a development server, and the carrier
   behind it answers anyone who can reach the port. Run it where you would run `cargo run`.
-- **Mock replies only, today.** `tetanus serve` builds its engine with the default provider set,
-  which is the offline mock. A real model through this panel waits on the engine lane.
 - **One session per page.** A conversation is named in the query and the page puts it there itself,
   but two conversations cannot be open at once.
 

@@ -111,6 +111,7 @@ const ROOT_EXAMPLES: &[(&str, &str)] = &[
     ),
     ("tetanus config", "every key, and what set it"),
     ("tetanus models", "which providers are reachable"),
+    ("tetanus run -a <name>", "a provider your document declares"),
     ("tetanus tools", "what the agent is able to call"),
     ("tetanus serve", "hand stdout to the protocol"),
     (
