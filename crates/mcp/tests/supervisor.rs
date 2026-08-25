@@ -37,7 +37,9 @@ use tetanus_mcp::fault::class;
 use tetanus_mcp::supervisor::{Health, PolicyError, MAX_DELAY};
 use tetanus_mcp::{ClientInfo, ReconnectPolicy, Supervisor, Timeouts};
 
-use harness::{eventually, fake_server, FakeServer, ScriptedLauncher};
+use harness::{
+    eventually, fake_server, fake_server_dying_after_handshake, FakeServer, ScriptedLauncher,
+};
 
 /// Brisk but not instant: a backoff of a few milliseconds keeps the cases
 /// under a second while still exercising the wait.
@@ -195,14 +197,14 @@ async fn the_attempt_cap_is_a_floor_under_the_retrying() {
 /// allows - and `GaveUp`.
 #[tokio::test]
 async fn a_crash_loop_exhausts_the_cap_although_every_connect_succeeds() {
+    // It answers the handshake, then goes away at once - as an ordering, not
+    // as a sleep. `max_delay` is both the backoff ceiling and the uptime that
+    // buys a fresh budget, so a server told to die on a one-millisecond timer
+    // resets the budget on every cycle the moment a loaded runtime delays that
+    // timer past the twenty-millisecond window, and this case then fails on
+    // its own deadline having measured the clock rather than the cap.
     let launcher = ScriptedLauncher::new(move |_attempt| {
-        let (link, mut server) = fake_server(vec!["ping".to_string()]);
-        // It answers the handshake, then goes away at once.
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            server.hang_up();
-        });
-        Some(link)
+        Some(fake_server_dying_after_handshake(vec!["ping".to_string()]))
     });
 
     let (supervisor, _) = Supervisor::start(

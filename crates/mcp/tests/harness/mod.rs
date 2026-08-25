@@ -126,12 +126,75 @@ impl FakeServer {
 
 /// A server advertising `tools`, answering every call with the tool's name.
 pub fn fake_server(tools: Vec<String>) -> (Link, FakeServer) {
-    let (link, mut peer) = tetanus_mcp::memory::pair();
-    let (hangup, mut told) = tokio::sync::oneshot::channel();
+    let (link, peer) = tetanus_mcp::memory::pair();
+    let (hangup, told) = tokio::sync::oneshot::channel();
+    serve(peer, tools, Some(told), Dies::WhenTold);
+    (
+        link,
+        FakeServer {
+            hangup: Some(hangup),
+        },
+    )
+}
+
+/// A server that answers the handshake and then goes away at once, with no
+/// timer anywhere.
+///
+/// The crash-loop cases need a connection that succeeds and dies immediately.
+/// Writing "immediately" as a short sleep races the supervisor's own clock:
+/// [`ReconnectPolicy::max_delay`] is both the backoff ceiling *and* the uptime
+/// that buys a fresh budget, so a one-millisecond sleep that a loaded runtime
+/// delays past the twenty-millisecond window resets the budget on every cycle.
+/// The cap then never empties, and the case fails on its five-second deadline
+/// with `the crash loop was not stopped: Up` - an outcome decided by a
+/// nineteen-millisecond margin between two timers rather than by the behaviour
+/// under test.
+///
+/// Hanging up when the last handshake message has been answered says the same
+/// thing as an ordering. There is no second timer to lose to, and the uptime
+/// is as near zero as the runtime allows.
+pub fn fake_server_dying_after_handshake(tools: Vec<String>) -> Link {
+    let (link, peer) = tetanus_mcp::memory::pair();
+    // No hang-up channel at all. An earlier cut of this made one and dropped
+    // the sender, which resolves the receiver at once - the server then left
+    // before reading a byte, and the handshake failed instead of succeeding
+    // and dying. `None` is the difference between "nobody will tell me to
+    // leave" and "I have already been told".
+    serve(peer, tools, None, Dies::AfterHandshake);
+    link
+}
+
+/// When a fake server leaves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dies {
+    /// On [`FakeServer::hang_up`], and not before.
+    WhenTold,
+    /// As soon as it has answered `tools/list`, the last message of the
+    /// handshake.
+    AfterHandshake,
+}
+
+/// The one server loop both constructors run.
+fn serve(
+    mut peer: tetanus_mcp::memory::Peer,
+    tools: Vec<String>,
+    mut told: Option<tokio::sync::oneshot::Receiver<()>>,
+    dies: Dies,
+) {
     tokio::spawn(async move {
         loop {
+            // A server nobody can tell to leave waits forever on this arm,
+            // rather than resolving the moment a dropped sender would.
+            let ordered = async {
+                match told.as_mut() {
+                    Some(hangup) => {
+                        let _ = hangup.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
-                _ = &mut told => return,
+                _ = ordered => return,
                 line = peer.recv() => {
                     let Some(line) = line else { return };
                     let message: Value = serde_json::from_str(&line).expect("the client sends JSON");
@@ -144,6 +207,12 @@ pub fn fake_server(tools: Vec<String>) -> (Link, FakeServer) {
                                 .map(|name| json!({ "name": name, "description": "a fake tool" }))
                                 .collect();
                             peer.send(result(&id, json!({ "tools": listed })));
+                            // The channel hands the buffered answer over before
+                            // the client sees end of stream, so the handshake
+                            // completes and *then* the server is gone.
+                            if dies == Dies::AfterHandshake {
+                                return;
+                            }
                         }
                         m if m == tetanus_mcp::wire::method::TOOLS_CALL => {
                             let name = message
@@ -161,12 +230,6 @@ pub fn fake_server(tools: Vec<String>) -> (Link, FakeServer) {
             }
         }
     });
-    (
-        link,
-        FakeServer {
-            hangup: Some(hangup),
-        },
-    )
 }
 
 /// A launcher a case scripts: it hands over the link the plan names for each
