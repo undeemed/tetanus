@@ -44,30 +44,6 @@ const STILL_BARE: &[(&str, &str)] = &[
         "landed after the last view pass; its results are prose with a snippet \
          per hit and would read far better as rows",
     ),
-    (
-        "exit_plan_mode",
-        "a view is written and waiting in the feature-tools branch",
-    ),
-    (
-        "get_goal",
-        "a view is written and waiting in the feature-tools branch",
-    ),
-    (
-        "report_feedback",
-        "a view is written and waiting in the feature-tools branch",
-    ),
-    (
-        "skill",
-        "a view is written and waiting in the feature-tools branch",
-    ),
-    (
-        "todo_write",
-        "a view is written and waiting in the feature-tools branch",
-    ),
-    (
-        "update_goal",
-        "a view is written and waiting in the feature-tools branch",
-    ),
 ];
 
 fn app() -> PathBuf {

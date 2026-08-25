@@ -88,7 +88,6 @@ export const featureViews = {
     result: (text) => markdown(String(text ?? "")),
   },
 
-  tools: { summary: () => "what this build offers" },
 };
 
 /**
