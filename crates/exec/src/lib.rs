@@ -39,6 +39,7 @@
 //! what is served and what is not.
 
 pub mod backend;
+pub mod background;
 pub mod hooks;
 pub mod piped;
 pub mod proc;

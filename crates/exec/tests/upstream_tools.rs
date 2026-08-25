@@ -18,9 +18,9 @@
 //! request, and every one of those is the engine's doing rather than the
 //! tool's.
 //!
-//! What is not restated, and why. Upstream's `run_in_background` half needs
-//! the job store this phase has not built (`docs/parity.md`, `jobs/*`), and
-//! its sandbox-escalation arguments (`sandbox_permissions`, `justification`)
+//! What is not restated, and why. Upstream's `run_in_background` half has its
+//! own file now that the job store exists (`upstream_background.rs`), and its
+//! sandbox-escalation arguments (`sandbox_permissions`, `justification`)
 //! need the sandbox mode vocabulary that stays phase ③. Its presentation
 //! callbacks (`presentCall`, `presentResult`, terminal cards) belong to the
 //! presentation lane and are not part of the engine boundary. Its
@@ -43,7 +43,9 @@ use tetanus_core::EventBus;
 use tetanus_exec::backend::Bash;
 use tetanus_exec::session::SessionConfig;
 use tetanus_exec::shell::ShellConfig;
-use tetanus_exec::tools::{ShellTools, SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN, SHELL_RUN};
+use tetanus_exec::tools::{
+    ShellTools, SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN, SHELL_RESULT, SHELL_RUN,
+};
 use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot_with;
 use tetanus_turn::interrupt::Interrupt;
@@ -53,7 +55,7 @@ use tetanus_turn::llm::{
 use tetanus_turn::tools::ToolCall;
 use tetanus_turn::{TurnConfig, TurnEngine};
 
-/// TC-PORT-SHELL-12: the five tools are registered, and each advertises a
+/// TC-PORT-SHELL-12: the six tools are registered, and each advertises a
 /// schema a model can call.
 ///
 /// Upstream: "registers the bash tool with its parameter schema", and the
@@ -64,17 +66,24 @@ use tetanus_turn::{TurnConfig, TurnEngine};
 /// wrongly on its first attempt.
 ///
 /// Input: a registry the shell tools registered on.
-/// Expected: the five names; `shell` requires `command` and advertises
+/// Expected: the six names; `shell` requires `command` and advertises
 /// `workdir` and `timeout_ms`; `shell_run` requires both its arguments;
 /// `shell_list` takes none.
 #[test]
-fn the_five_tools_are_registered_with_callable_schemas() {
+fn the_six_tools_are_registered_with_callable_schemas() {
     let tools = shell_tools(&std::env::temp_dir(), Interrupt::new());
     let registry = tools.registry();
 
     assert_eq!(
         registry.names().cloned().collect::<Vec<_>>(),
-        vec![SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN, SHELL_RUN],
+        vec![
+            SHELL,
+            SHELL_CLOSE,
+            SHELL_LIST,
+            SHELL_OPEN,
+            SHELL_RESULT,
+            SHELL_RUN
+        ],
         "the registry offers them in one settled order"
     );
 
