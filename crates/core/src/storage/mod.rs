@@ -28,6 +28,7 @@
 //! domain layer over them - typed specs, events, migrations - is a further
 //! package and stays phase (2)/(3).
 
+pub mod domain;
 pub mod json;
 pub mod registry;
 pub mod sqlite;
@@ -37,6 +38,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+pub use domain::{Domain, DomainChanged, DomainRouter, DomainSpec, GlobalSpec, TableSpec};
 pub use json::{Store, FORMAT_VERSION};
 pub use registry::{SharedStore, StorageRegistry};
 pub use sqlite::SqliteStore;
