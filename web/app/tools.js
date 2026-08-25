@@ -38,6 +38,7 @@ import { disclosure, jsonTree, pill } from "./primitives.js";
 import { fileViews } from "./tool-files.js";
 import { shellViews } from "./tool-shell.js";
 import { webViews } from "./tool-web.js";
+import { featureViews } from "./tool-features.js";
 
 /**
  * Views by tool name. Empty of everything but the tool this build has, and
@@ -76,6 +77,7 @@ export const views = {
   ...fileViews,
   ...shellViews,
   ...webViews,
+  ...featureViews,
 };
 
 /**
