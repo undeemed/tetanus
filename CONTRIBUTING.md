@@ -102,6 +102,26 @@ cargo test -p tetanus-turn --test upstream_workflow        # multi-step work out
 cargo test -p tetanus-turn --test upstream_lsp             # a language server, and one that dies
 ```
 
+### Building on a shared machine
+
+A long-lived target directory keeps every artifact generation cargo has ever
+written, so it grows without bound. Prune it before a full run rather than
+after the disk fills:
+
+```bash
+python3 docs/tools/prune-cargo-gens.py "$CARGO_TARGET_DIR" 2
+python3 docs/tools/prune-cargo-gens.py "$CARGO_TARGET_DIR" 2 --dry-run   # look first
+```
+
+It keeps the two newest generations per target stem under `debug/deps` and
+deletes the rest, holding cargo's own `debug/.cargo-build-lock` while it works
+so a concurrent build waits rather than losing artifacts mid-link. Everything it
+removes is something cargo rebuilds.
+
+Do not delete the target directory to reclaim space. It works, and it buys a
+full cold rebuild of this workspace - long enough that the lane looks wedged
+from outside while it runs.
+
 Three rules keep it a gate rather than a formality.
 
 1. **The expected sequence is one constant.** `MOCK_TURN_FLOW` in
