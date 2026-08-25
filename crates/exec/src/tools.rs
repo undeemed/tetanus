@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
+use tetanus_core::jobs::{JobStatus, JobStore};
 use tetanus_sandbox::Mode;
 use tetanus_turn::interrupt::Interrupt;
 use tetanus_turn::tools::{
@@ -46,6 +47,10 @@ pub const SHELL_OPEN: &str = "shell_open";
 pub const SHELL_RUN: &str = "shell_run";
 pub const SHELL_CLOSE: &str = "shell_close";
 pub const SHELL_LIST: &str = "shell_list";
+/// What the harness owes: the jobs a background command left behind.
+pub const JOB_LIST: &str = "job_list";
+pub const JOB_OUTPUT: &str = "job_output";
+pub const JOB_KILL: &str = "job_kill";
 
 /// Everything the five tools share: one resolved backend, the one-shot
 /// executor, the open sessions, and the turn's stop switch.
@@ -57,6 +62,16 @@ pub struct ShellTools {
     /// The turn's interrupt. A command a stopped turn is no longer waiting for
     /// is killed with its process group rather than left running.
     interrupt: Arc<Interrupt>,
+    /// Where a background command's record lives. `None` composes a build with
+    /// no durable place to put one, and `run_in_background` then refuses in
+    /// words rather than starting work nothing can collect - a job whose record
+    /// dies with the process is worse than no background at all, because the
+    /// model is told it started something and can never find out what happened.
+    /// Set in place after construction, the way `watching` is: `ShellExec`
+    /// holds a run counter and is deliberately not `Clone`, so a composition
+    /// that added a store by rebuilding this value would be starting a second
+    /// executor with the first one's numbering.
+    jobs: Mutex<Option<Jobs>>,
     /// Where incremental output goes while a command runs, when a surface has
     /// asked to watch. Behind a lock because the tools are shared and the
     /// watcher is attached after they are built.
@@ -83,16 +98,49 @@ impl ShellTools {
             session_config,
             interrupt,
             watching: Mutex::new(None),
+            jobs: Mutex::new(None),
         }))
     }
 
-    /// Register all five tools on `registry`.
+    /// Compose these tools with somewhere to keep a background command's
+    /// record.
+    ///
+    /// Taken after construction, like the filesystem tools take an image sink,
+    /// so a composition with no durable store composes exactly as it did
+    /// before this existed.
+    pub fn with_jobs(self: &Arc<Self>, store: Arc<JobStore>, session: Option<String>) -> Arc<Self> {
+        *self.jobs.lock().expect("jobs") = Some(Jobs { store, session });
+        Arc::clone(self)
+    }
+
+    /// The store and whose jobs these are, when a composition supplied one.
+    fn jobs(&self) -> Option<Jobs> {
+        self.jobs.lock().expect("jobs").clone()
+    }
+
+    /// Register all eight tools, whether or not a store is composed.
+    ///
+    /// The first cut registered the job tools only with a store, on the
+    /// argument that `job_list` over no store has nothing to say. Running the
+    /// binary showed what that costs: `tetanus tools` composes no session and
+    /// therefore no store, so the catalogue advertised five tools where a run
+    /// offers eight - which is exactly the disagreement contract §4.7.3 exists
+    /// to forbid, and the one a client cannot tell from an empty toolbox.
+    ///
+    /// So they are declared always and answer in words when there is nowhere
+    /// to keep a record, the way `read_image` does without an attachment
+    /// store. A model told "this build keeps no job records" can run the
+    /// command in the foreground; a model whose tool vanished between the
+    /// catalogue and the call learns nothing.
     pub fn register(self: &Arc<Self>, registry: &mut ToolRegistry) {
         registry.register(Arc::new(ShellTool(Arc::clone(self))));
         registry.register(Arc::new(ShellOpenTool(Arc::clone(self))));
         registry.register(Arc::new(ShellRunTool(Arc::clone(self))));
         registry.register(Arc::new(ShellCloseTool(Arc::clone(self))));
         registry.register(Arc::new(ShellListTool(Arc::clone(self))));
+        registry.register(Arc::new(JobListTool(Arc::clone(self))));
+        registry.register(Arc::new(JobOutputTool(Arc::clone(self))));
+        registry.register(Arc::new(JobKillTool(Arc::clone(self))));
     }
 
     /// A registry holding exactly these five tools, for a caller composing one
@@ -118,9 +166,16 @@ impl ShellTools {
         config: ShellConfig,
         session_config: SessionConfig,
         interrupt: Arc<Interrupt>,
+        jobs: Option<(Arc<JobStore>, Option<String>)>,
     ) {
         match Self::new(backend, config, session_config, interrupt) {
-            Ok(tools) => tools.register(registry),
+            Ok(tools) => {
+                let tools = match jobs {
+                    Some((store, session)) => tools.with_jobs(store, session),
+                    None => tools,
+                };
+                tools.register(registry)
+            }
             Err(refused) => {
                 tracing::warn!(%refused, "the shell tools are unavailable on this host");
                 registry.register(Arc::new(MissingShell(refused.to_string())));
@@ -283,6 +338,276 @@ fn escalation(arguments: &Value, from: Mode) -> Result<Option<Escalation>, ToolE
     Ok(Some(Escalation { to, justification }))
 }
 
+impl ShellTools {
+    /// Start a command, record it, and answer with the id that collects it.
+    ///
+    /// **The record is written before the work starts.** A job that began and
+    /// has no record is work nobody can find; a record whose work never
+    /// started is one call to `job_output` away from saying so. Only one of
+    /// those two failures is recoverable, so the order is not arbitrary.
+    ///
+    /// **Nothing here awaits the command.** The turn that asked is free to end,
+    /// which is the whole point - and it is also the cost, stated in the
+    /// schema: a model that backgrounds a command and then ends its turn
+    /// cannot read the output in that turn.
+    fn start_in_background(
+        self: &Arc<Self>,
+        command: &str,
+        arguments: &Value,
+        escalated: Option<Mode>,
+        spec: crate::shell::ShellSpec,
+    ) -> Result<ToolOutcome, ToolError> {
+        let Some(Jobs { store, session }) = self.jobs() else {
+            return Ok(ToolOutcome::failed(format!(
+                "{SHELL}: this build keeps no job records, so a background command could not be \
+                 collected. Run it in the foreground, or raise its `timeout_ms`."
+            )));
+        };
+        let label = arguments
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| command.to_owned());
+
+        let job = store
+            .queue(None, "shell", &label, session.as_deref())
+            .map_err(|error| ToolError::Failed(SHELL.into(), error.to_string()))?;
+        let id = job.id.clone();
+
+        let running = store.clone();
+        let started = id.clone();
+        let tools = Arc::clone(self);
+        tokio::spawn(async move {
+            if running.start(&started).is_err() {
+                return;
+            }
+            // The same path a foreground command takes, including the turn's
+            // stop switch: a background command belongs to the session rather
+            // than to the step, and an interrupt a person types is meant to
+            // reach everything the harness started.
+            let outcome = tools.run_under(escalated, &spec).await;
+            let (status, detail, output) = match outcome {
+                Ok(run) => {
+                    let text = render(&run);
+                    let status = if run.output.ok() {
+                        JobStatus::Completed
+                    } else {
+                        JobStatus::Failed
+                    };
+                    (status, None, Some(text))
+                }
+                // A command that could not be started at all is a failed job
+                // with the refusal as its detail, not a lost one: the model
+                // asked for something and is owed an answer it can read.
+                Err(refused) => (JobStatus::Failed, Some(refused.to_string()), None),
+            };
+            let _ = running.finish(&started, status, detail.as_deref(), output.as_deref());
+        });
+
+        Ok(ToolOutcome::ok(format!(
+            "started {label:?} in the background as job {id}. Collect it with `{JOB_OUTPUT}` and \
+             stop it with `{JOB_KILL}`; it keeps running after this turn ends."
+        )))
+    }
+}
+
+/// A job store, and whose jobs it holds for this composition.
+#[derive(Clone)]
+struct Jobs {
+    store: Arc<JobStore>,
+    session: Option<String>,
+}
+
+/// What the harness owes: the background commands this session started.
+struct JobListTool(Arc<ShellTools>);
+
+#[async_trait::async_trait]
+impl Tool for JobListTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: JOB_LIST.into(),
+            description: "List the background commands this session started, with their state. \
+                          Read one with `job_output`."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    /// Reading a list changes nothing and blocks nothing.
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        ToolMode::Parallel
+    }
+
+    async fn execute(&self, _arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let Some(Jobs { store, session }) = self.0.jobs() else {
+            return Ok(ToolOutcome::failed(no_store(JOB_LIST)));
+        };
+        // This session's jobs, never the store's: two sessions share one file
+        // and one must not read the other's work back.
+        let jobs = match session.as_deref() {
+            Some(session) => store.owned_by(session),
+            None => store.list(),
+        };
+        if jobs.is_empty() {
+            return Ok(ToolOutcome::ok(
+                "no background commands have been started in this session".to_string(),
+            ));
+        }
+        let lines: Vec<String> = jobs
+            .iter()
+            .map(|job| format!("{}  {:?}  {}", job.id, job.status, job.label))
+            .collect();
+        Ok(ToolOutcome::ok(lines.join("\n")))
+    }
+}
+
+/// Collect what a background command produced.
+struct JobOutputTool(Arc<ShellTools>);
+
+#[async_trait::async_trait]
+impl Tool for JobOutputTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: JOB_OUTPUT.into(),
+            description: "Read a background command's state and, once it has ended, everything it \
+                          printed. A job that is still running answers with that and nothing else."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "The id `shell` answered with." },
+                },
+                "required": ["job_id"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        ToolMode::Parallel
+    }
+
+    async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let id = text(arguments, "job_id", JOB_OUTPUT)?;
+        let Some(Jobs { store, session }) = self.0.jobs() else {
+            return Ok(ToolOutcome::failed(no_store(JOB_OUTPUT)));
+        };
+        let Some(job) = owned(&store, &session, &id) else {
+            return Ok(ToolOutcome::failed(format!(
+                "{JOB_OUTPUT}: this session has no job {id:?}"
+            )));
+        };
+        if job.is_live() {
+            // Not a failure: "still running" is the answer, and a model that
+            // reads it knows to ask again rather than to try something else.
+            return Ok(ToolOutcome::ok(format!(
+                "job {id} is {:?}: {}. Nothing to read yet.",
+                job.status, job.label
+            )));
+        }
+        let mut said = format!("job {id} {:?}: {}", job.status, job.label);
+        if let Some(detail) = &job.detail {
+            said.push_str(&format!("\n{detail}"));
+        }
+        if let Some(output) = &job.output {
+            said.push('\n');
+            said.push_str(output);
+        }
+        // A job that failed is reported as a *successful read* of a failed
+        // job, for the reason a non-zero exit is not a tool failure: the call
+        // did what it was asked, and the news it carries is the answer.
+        Ok(ToolOutcome::ok(said))
+    }
+}
+
+/// Stop a background command.
+struct JobKillTool(Arc<ShellTools>);
+
+#[async_trait::async_trait]
+impl Tool for JobKillTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: JOB_KILL.into(),
+            description: "Stop a background command and mark its job cancelled. A job that has \
+                          already ended is left as it is."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "The id `shell` answered with." },
+                },
+                "required": ["job_id"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    /// Stopping work is a barrier: what runs after it should see the world it
+    /// leaves behind.
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        ToolMode::Exclusive
+    }
+
+    async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let id = text(arguments, "job_id", JOB_KILL)?;
+        let Some(Jobs { store, session }) = self.0.jobs() else {
+            return Ok(ToolOutcome::failed(no_store(JOB_KILL)));
+        };
+        let Some(job) = owned(&store, &session, &id) else {
+            return Ok(ToolOutcome::failed(format!(
+                "{JOB_KILL}: this session has no job {id:?}"
+            )));
+        };
+        if !job.is_live() {
+            return Ok(ToolOutcome::ok(format!(
+                "job {id} had already ended {:?}; nothing to stop",
+                job.status
+            )));
+        }
+        // The turn's own switch, which every command this session started is
+        // running under. It is deliberately not a per-job kill: a job id names
+        // a record, and the thing that reaches work rather than a handle is
+        // the interrupt the process group is bound to. A per-job signal wants
+        // the group id on the record, which is the next slice and is named in
+        // the note.
+        self.0.interrupt.stop();
+        let ended = store
+            .finish(&id, JobStatus::Cancelled, Some("stopped by job_kill"), None)
+            .map_err(|error| ToolError::Failed(JOB_KILL.into(), error.to_string()))?;
+        Ok(ToolOutcome::ok(format!(
+            "job {id} is {:?}: {}",
+            ended.status, ended.label
+        )))
+    }
+}
+
+/// One job of this session's, or nothing.
+fn owned(
+    store: &Arc<JobStore>,
+    session: &Option<String>,
+    id: &str,
+) -> Option<tetanus_core::jobs::Job> {
+    let job = store.get(id)?;
+    match session {
+        Some(session) if job.session.as_deref() != Some(session.as_str()) => None,
+        _ => Some(job),
+    }
+}
+
+/// What a job tool says on a build that keeps no records.
+///
+/// Reachable, and deliberately so: the three are always registered, so the
+/// catalogue and a run offer one set, and a session with nowhere durable to
+/// write reads a sentence instead of meeting a tool that is not there.
+fn no_store(tool: &str) -> String {
+    format!("{tool}: this build keeps no job records")
+}
+
 /// Run one command in a fresh shell.
 struct ShellTool(Arc<ShellTools>);
 
@@ -308,6 +633,10 @@ impl Tool for ShellTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "How long the command may run before it and everything it started are killed. The deployment caps this.",
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Start the command and answer at once with a job id instead of waiting. Collect it with `job_output`, stop it with `job_kill`. Use this for work that outlasts a turn - a build, a long test run - and not to make a slow command feel fast: a turn that ends before the job does cannot read its output.",
                 },
                 "secret": {
                     "type": "boolean",
@@ -390,7 +719,7 @@ impl Tool for ShellTool {
         // there was no escalation, or the person answering granted it. What is
         // left here is applying the mode that was approved.
         let escalated = escalation(arguments, self.0.mode())?.map(|escalation| escalation.to);
-        let mut request = ShellRequest::new(command);
+        let mut request = ShellRequest::new(command.clone());
         if let Some(workdir) = optional_text(arguments, "workdir", SHELL)? {
             request = request.workdir(workdir);
         }
@@ -403,6 +732,13 @@ impl Tool for ShellTool {
             .exec
             .resolve(request)
             .map_err(|refused| refused_call(SHELL, refused))?;
+
+        if flag(arguments, "run_in_background") {
+            return self
+                .0
+                .start_in_background(&command, arguments, escalated, spec);
+        }
+
         let run = self
             .0
             .run_under(escalated, &spec)
@@ -716,6 +1052,14 @@ fn marked(text: String, code: i32) -> String {
         return format!("[exit code: {code}]");
     }
     format!("{}\n[exit code: {code}]", text.trim_end_matches('\n'))
+}
+
+/// Whether a boolean argument was set.
+fn flag(arguments: &Value, field: &str) -> bool {
+    arguments
+        .get(field)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// A required string argument.
