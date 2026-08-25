@@ -37,6 +37,9 @@ use tetanus_turn::tools::{
 use crate::backend::ShellBackend;
 use crate::proc::OutputSink;
 use crate::session::{SessionConfig, SessionError, ShellSessions};
+use tetanus_core::jobs::JobStatus;
+
+use crate::background::{self, BackgroundTo};
 use crate::shell::{render, ShellConfig, ShellError, ShellExec, ShellRequest};
 
 /// The name of the one-shot tool.
@@ -46,6 +49,14 @@ pub const SHELL_OPEN: &str = "shell_open";
 pub const SHELL_RUN: &str = "shell_run";
 pub const SHELL_CLOSE: &str = "shell_close";
 pub const SHELL_LIST: &str = "shell_list";
+/// The name of the tool that collects a backgrounded command.
+pub const SHELL_RESULT: &str = "shell_result";
+
+/// How much of a backgrounded command's artifact a collection answers with.
+///
+/// The artifact holds the whole stream; this is what a model reads without
+/// asking for more, and the answer names the artifact so the rest is reachable.
+const COLLECT_TAIL: usize = 16 * 1024;
 
 /// Everything the five tools share: one resolved backend, the one-shot
 /// executor, the open sessions, and the turn's stop switch.
@@ -61,6 +72,14 @@ pub struct ShellTools {
     /// asked to watch. Behind a lock because the tools are shared and the
     /// watcher is attached after they are built.
     watching: Mutex<Option<Arc<dyn OutputSink>>>,
+    /// The artifact each backgrounded job this process started is writing to,
+    /// until it finishes and the record carries the path itself. See
+    /// [`crate::background::collect`].
+    live_artifacts: Mutex<std::collections::HashMap<String, String>>,
+    /// The store and the artifact directory a backgrounded command needs.
+    /// Behind a lock for the reason `watching` is: a composition attaches it
+    /// once the session it is scoped to exists, which is after these are built.
+    background: Mutex<Option<BackgroundTo>>,
 }
 
 impl ShellTools {
@@ -83,7 +102,26 @@ impl ShellTools {
             session_config,
             interrupt,
             watching: Mutex::new(None),
+            live_artifacts: Mutex::new(std::collections::HashMap::new()),
+            background: Mutex::new(None),
         }))
+    }
+
+    /// Let this build background a command, recording it in `to.jobs` and
+    /// writing its output to `to.spill`.
+    ///
+    /// A composition that does not call this leaves `run_in_background`
+    /// refused by name rather than silently run in the foreground: see
+    /// [`crate::background`] and contract section 4.3.6.
+    pub fn backgrounding(&self, to: BackgroundTo) {
+        *self.background.lock().expect("no panic holds this lock") = Some(to);
+    }
+
+    fn background_to(&self) -> Option<BackgroundTo> {
+        self.background
+            .lock()
+            .expect("no panic holds this lock")
+            .clone()
     }
 
     /// Register all five tools on `registry`.
@@ -93,6 +131,7 @@ impl ShellTools {
         registry.register(Arc::new(ShellRunTool(Arc::clone(self))));
         registry.register(Arc::new(ShellCloseTool(Arc::clone(self))));
         registry.register(Arc::new(ShellListTool(Arc::clone(self))));
+        registry.register(Arc::new(ShellResultTool(Arc::clone(self))));
     }
 
     /// A registry holding exactly these five tools, for a caller composing one
@@ -222,6 +261,133 @@ impl ShellTools {
             .expect("no panic holds this lock")
             .clone()
     }
+
+    /// Start a command that outlives this call, and answer with its job id.
+    ///
+    /// Three things make it a background run rather than a slow one. The work
+    /// is recorded as a job before the process starts, so a crash between the
+    /// two leaves a queued job rather than an untracked child. The output goes
+    /// to an artifact opened here, because a command nobody is waiting for has
+    /// no result to carry it. And the run is not handed this turn's interrupt:
+    /// a backgrounded build is not the turn's command any more, and sweeping it
+    /// when the turn stops would make `run_in_background` mean "until the user
+    /// presses stop", which is not what a model asks for when it backgrounds a
+    /// test suite.
+    async fn background_run(
+        self: &Arc<Self>,
+        escalated: Option<Mode>,
+        spec: crate::shell::ShellSpec,
+        command: &str,
+    ) -> Result<ToolOutcome, ToolError> {
+        let Some(to) = self.background_to() else {
+            return Err(no_background(SHELL));
+        };
+        let job = to
+            .jobs
+            .queue(None, background::JOB_KIND, command, Some(&to.session))
+            .map_err(|error| {
+                ToolError::Failed(SHELL.into(), format!("the job store refused this: {error}"))
+            })?;
+        let sink = Arc::new(
+            background::ArtifactSink::open(&to, &job.id).map_err(|error| {
+                ToolError::Failed(
+                    SHELL.into(),
+                    format!("a backgrounded command needs an artifact to write to: {error}"),
+                )
+            })?,
+        );
+        let artifact = sink.locator();
+        self.live_artifacts
+            .lock()
+            .expect("no panic holds this lock")
+            .insert(job.id.clone(), artifact.clone());
+        to.jobs.start(&job.id).map_err(|error| {
+            ToolError::Failed(SHELL.into(), format!("the job store refused this: {error}"))
+        })?;
+
+        let tools = Arc::clone(self);
+        let id = job.id.clone();
+        let artifact_for_task = artifact.clone();
+        tokio::spawn(async move {
+            let watching: Arc<dyn OutputSink> = Arc::clone(&sink) as Arc<dyn OutputSink>;
+            let outcome = tools.run_detached(escalated, &spec, watching).await;
+            sink.finish();
+            let (status, detail, final_output) = match outcome {
+                Ok(run) => (
+                    if run.output.ok() {
+                        JobStatus::Completed
+                    } else {
+                        JobStatus::Failed
+                    },
+                    background::detail(
+                        &artifact_for_task,
+                        run.output.code,
+                        run.output.signal.as_deref(),
+                    ),
+                    // `output` is the store's own field for "the producer's
+                    // final output", and a rendered result is exactly that:
+                    // the bounded text a foreground call would have answered
+                    // with, markers and all. The unbounded stream is what the
+                    // artifact is for, because that field is documented as a
+                    // final output and not a stream.
+                    Some(render(&run)),
+                ),
+                // The shell refused to start it. That is a fact about this
+                // job, so it is recorded on the job rather than logged: the
+                // model asked for something and has to be able to find out it
+                // never ran.
+                Err(error) => (
+                    JobStatus::Failed,
+                    background::detail(&artifact_for_task, None, Some(&error.to_string())),
+                    None,
+                ),
+            };
+            let _ = to
+                .jobs
+                .finish(&id, status, Some(&detail), final_output.as_deref());
+            // The record carries the path from here, so the process's own note
+            // is dropped rather than kept: two answers to one question is how
+            // they come to disagree.
+            tools
+                .live_artifacts
+                .lock()
+                .expect("no panic holds this lock")
+                .remove(&id);
+        });
+
+        Ok(ToolOutcome::ok(format!(
+            "[job {id}: started] `{command}`\nRead it with `{SHELL_RESULT}` and this id. The \
+             complete output is being written to {artifact}.",
+            id = job.id
+        )))
+    }
+
+    /// [`ShellTools::run_under`] without the turn's interrupt, writing to
+    /// `sink`.
+    async fn run_detached(
+        &self,
+        escalated: Option<Mode>,
+        spec: &crate::shell::ShellSpec,
+        sink: Arc<dyn OutputSink>,
+    ) -> Result<crate::shell::ShellRun, ShellError> {
+        let Some(mode) = escalated else {
+            return self.exec.run_with(spec, Some(sink), None).await;
+        };
+        let widened = self
+            .exec
+            .config()
+            .sandbox
+            .widened_to(mode)
+            .expect("the request was checked as strictly wider before it was asked");
+        let once = ShellExec::new(
+            Arc::clone(&self.backend),
+            ShellConfig {
+                sandbox: widened,
+                ..self.exec.config().clone()
+            },
+        )?;
+        once.run_with(spec, Some(sink), None).await
+    }
 }
 
 /// The two arguments an escalation is made of, read off one call.
@@ -313,6 +479,10 @@ impl Tool for ShellTool {
                     "type": "boolean",
                     "description": "Set this when the command line itself carries a credential - a password in a flag, a token in a header. The command still runs as written; the session journal keeps `<redacted>` in place of it. Prefer a command that reads the secret from a file or the environment, because a redacted command line is one nobody can audit either.",
                 },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Start the command and answer immediately with a job id instead of waiting for it. Use it for work measured in minutes - a build, a test suite, a long download - and read it with `shell_result`. The command keeps running after this call returns and is not killed when the turn is stopped; its whole output is written to an artifact, so nothing is lost while you are not watching.",
+                },
             },
             "required": ["command"],
             "additionalProperties": false,
@@ -390,7 +560,7 @@ impl Tool for ShellTool {
         // there was no escalation, or the person answering granted it. What is
         // left here is applying the mode that was approved.
         let escalated = escalation(arguments, self.0.mode())?.map(|escalation| escalation.to);
-        let mut request = ShellRequest::new(command);
+        let mut request = ShellRequest::new(command.clone());
         if let Some(workdir) = optional_text(arguments, "workdir", SHELL)? {
             request = request.workdir(workdir);
         }
@@ -403,6 +573,11 @@ impl Tool for ShellTool {
             .exec
             .resolve(request)
             .map_err(|refused| refused_call(SHELL, refused))?;
+
+        if optional_bool(arguments, "run_in_background", SHELL)?.unwrap_or(false) {
+            return self.0.background_run(escalated, spec, &command).await;
+        }
+
         let run = self
             .0
             .run_under(escalated, &spec)
@@ -419,6 +594,112 @@ impl Tool for ShellTool {
             ToolOutcome::failed(text)
         })
     }
+}
+
+/// Collect a command started with `run_in_background`.
+struct ShellResultTool(Arc<ShellTools>);
+
+#[async_trait::async_trait]
+impl Tool for ShellResultTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: SHELL_RESULT.into(),
+            description: format!(
+                "Read what a backgrounded `{SHELL}` command has printed. Answer it with the job \
+                 id that call returned. A job that is still running answers with what it has \
+                 written so far, so this is how you watch one as well as how you collect it. The \
+                 answer names the artifact holding the complete output, for output longer than \
+                 this call returns."
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "job": {
+                        "type": "string",
+                        "description": "The job id the backgrounded call answered with.",
+                    },
+                },
+                "required": ["job"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        // Reading a job is a read: two collections at once answer the same
+        // thing, and neither changes what the other sees.
+        ToolMode::Parallel
+    }
+
+    async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let id = text(arguments, "job", SHELL_RESULT)?;
+        let Some(to) = self.0.background_to() else {
+            return Err(no_background(SHELL_RESULT));
+        };
+        let live = self
+            .0
+            .live_artifacts
+            .lock()
+            .expect("no panic holds this lock")
+            .get(&id)
+            .cloned();
+        let Some(collected) = background::collect(&to.jobs, &id, COLLECT_TAIL, live) else {
+            return Ok(ToolOutcome::failed(format!(
+                "no job `{id}`. The id is the one the backgrounded `{SHELL}` call answered with, \
+                 and it belongs to this session."
+            )));
+        };
+
+        let mut text = String::new();
+        if !collected.text.is_empty() {
+            text.push_str(&collected.text);
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+        text.push_str(&match collected.status {
+            JobStatus::Queued | JobStatus::Running => {
+                format!("[job {id}: still running] `{}`", collected.label)
+            }
+            other => format!("[job {id}: {}] `{}`", status_word(other), collected.label),
+        });
+        if let Some(artifact) = &collected.artifact {
+            text.push_str(&format!("\n[complete output: {artifact}]"));
+        }
+        Ok(ToolOutcome::ok(text))
+    }
+}
+
+/// The one word a status is reported as.
+///
+/// Spelled here rather than by `Debug`, because the text a model reads is a
+/// surface and a derived name is one a rename would change silently.
+fn status_word(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Completed => "finished",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "cancelled",
+        JobStatus::Interrupted => "interrupted",
+    }
+}
+
+/// The refusal a composition with no job store earns.
+///
+/// Named rather than silent, and it names both halves, because a deployment
+/// that wired one and not the other has a fixable mistake and a message that
+/// said only "unavailable" would not say which half to fix.
+fn no_background(tool: &str) -> ToolError {
+    ToolError::InvalidArguments(
+        tool.into(),
+        format!(
+            "this deployment cannot background a command: it has no job store and artifact \
+             directory attached to its shell tools, so `run_in_background` has nowhere to record \
+             the work or keep its output. Run the command in the foreground, or ask the operator \
+             to compose `{tool}` with both."
+        ),
+    )
 }
 
 /// Open a persistent shell.
@@ -750,6 +1031,23 @@ fn optional_text(arguments: &Value, field: &str, tool: &str) -> Result<Option<St
 /// An optional duration in milliseconds. Zero and negative are refused rather
 /// than clamped: they are not budgets, and a command that ran under one was
 /// never going to finish.
+/// Read an optional boolean argument.
+///
+/// Absent and `null` are both "no", and anything that is not a boolean is a
+/// mistake in the call rather than a value to coerce: a model that sent the
+/// string "true" asked for something this cannot honour, and guessing which
+/// way it meant is how a command runs in a mode nobody chose.
+fn optional_bool(arguments: &Value, field: &str, tool: &str) -> Result<Option<bool>, ToolError> {
+    match arguments.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(other) => Err(ToolError::InvalidArguments(
+            tool.into(),
+            format!("`{field}` must be true or false, not {other}"),
+        )),
+    }
+}
+
 fn optional_millis(
     arguments: &Value,
     field: &str,
