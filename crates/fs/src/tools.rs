@@ -35,6 +35,7 @@ use crate::error::FsError;
 use crate::observation::{Observation, ObservedState};
 use crate::service::{
     DirEntry, EditRequest, FileKind, FileSystem, FsTarget, WriteIntent, MAX_GLOB_MATCHES,
+    MAX_WINDOW_BYTES,
 };
 
 /// The default and maximum number of lines one `read` answers with.
@@ -73,6 +74,10 @@ pub struct FsTools {
     /// had.
     observed: Option<Arc<ObservedState>>,
     owner: String,
+    /// Where `read_image` puts a picture. [`crate::image::NoSink`] until a
+    /// composition supplies one, so the tool explains its own absence rather
+    /// than disappearing.
+    images: crate::image::SharedSink,
 }
 
 impl FsTools {
@@ -87,6 +92,7 @@ impl FsTools {
             fs,
             observed: Some(observed),
             owner: owner.into(),
+            images: Arc::new(crate::image::NoSink),
         })
     }
 
@@ -101,6 +107,7 @@ impl FsTools {
             fs,
             observed: None,
             owner: owner.into(),
+            images: Arc::new(crate::image::NoSink),
         })
     }
 
@@ -109,7 +116,7 @@ impl FsTools {
         &self.fs
     }
 
-    /// Register all eight into a registry.
+    /// Register all nine into a registry.
     ///
     /// One call, so a deployment cannot compose five of them and wonder why
     /// the model keeps asking for the sixth.
@@ -122,14 +129,37 @@ impl FsTools {
         registry.register(Arc::new(StatTool(Arc::clone(self))));
         registry.register(Arc::new(DeleteTool(Arc::clone(self))));
         registry.register(Arc::new(SearchTool(Arc::clone(self))));
+        registry.register(Arc::new(ReadImageTool(Arc::clone(self))));
     }
 
     /// The names these tools register under, in canonical order. A deployment
     /// writing a `tools.order` needs them, and a test asserting the roster
     /// needs them to come from one place.
     pub const NAMES: &'static [&'static str] = &[
-        "delete", "edit", "glob", "list", "read", "search", "stat", "write",
+        "delete",
+        "edit",
+        "glob",
+        "list",
+        "read",
+        "read_image",
+        "search",
+        "stat",
+        "write",
     ];
+
+    /// Compose these tools with somewhere to put a picture.
+    ///
+    /// Taken after construction rather than as an argument, so a composition
+    /// that has no store composes exactly as it did before this existed and
+    /// one that has a store adds a line.
+    pub fn with_images(self: Arc<Self>, sink: crate::image::SharedSink) -> Arc<Self> {
+        Arc::new(Self {
+            fs: Arc::clone(&self.fs),
+            observed: self.observed.clone(),
+            owner: self.owner.clone(),
+            images: sink,
+        })
+    }
 
     fn record(&self, target: &FsTarget, observation: Observation) {
         if let Some(state) = &self.observed {
@@ -231,6 +261,7 @@ fs_tool!(ListTool, "list");
 fs_tool!(GlobTool, "glob");
 fs_tool!(StatTool, "stat");
 fs_tool!(SearchTool, "search");
+fs_tool!(ReadImageTool, "read_image");
 fs_tool!(DeleteTool, "delete");
 
 #[async_trait::async_trait]
@@ -778,6 +809,84 @@ fn truncate_line(line: &str) -> String {
     }
     let kept: String = line.chars().take(MAX_LINE_LENGTH).collect();
     format!("{kept} ... [line truncated]")
+}
+
+#[async_trait::async_trait]
+impl Tool for ReadImageTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: Self::NAME.into(),
+            description: "Read a picture from the workspace and keep it as an attachment. Answers \
+                          its id, media type, size and dimensions - never the bytes, so use this \
+                          for what an image *is* rather than to quote it."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": path_property("The picture to read."),
+                },
+                "required": ["path"],
+            }),
+        }
+    }
+
+    fn mode(&self, _arguments: &Value) -> ToolMode {
+        ToolMode::Parallel
+    }
+
+    async fn execute(&self, arguments: &Value) -> Result<ToolOutcome, ToolError> {
+        let path = required_str(Self::NAME, arguments, "path")?;
+        let target = match self.0.fs.resolve(path) {
+            Ok(target) => target,
+            Err(error) => return Ok(refused(&error)),
+        };
+        // Bytes rather than text, through the same seam `read` uses: the fence
+        // and the confined worker judge a picture exactly as they judge a
+        // source file, and `read` itself would refuse this file twice over -
+        // once for not being UTF-8 and once for being larger than the text cap.
+        let (bytes, _) = match self.0.fs.read_bytes(&target, 0, MAX_WINDOW_BYTES) {
+            Ok(read) => read,
+            Err(error) => return Ok(refused(&error)),
+        };
+        if bytes.is_empty() {
+            return Ok(ToolOutcome::failed(format!(
+                "FS_NOT_FOUND: {} is empty, so there is no picture in it",
+                target.display()
+            )));
+        }
+        let name = std::path::Path::new(target.display())
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| target.display().to_string());
+
+        // Reading a picture is not observing a file for the read-before-write
+        // rule, for `search`'s reason turned around: the model never saw the
+        // content at all, only a description of it, so it has less standing to
+        // overwrite the file than a search gave it.
+        match self.0.images.admit(&name, bytes) {
+            Ok(stored) => Ok(ToolOutcome::ok(describe_image(&target, &stored))),
+            Err(said) => Ok(ToolOutcome::failed(format!("FS_IMAGE_REFUSED: {said}"))),
+        }
+    }
+}
+
+/// What the model reads about a picture it will never see.
+fn describe_image(target: &FsTarget, stored: &crate::image::Stored) -> String {
+    let size = match stored.dimensions {
+        Some((width, height)) => format!("{width}x{height}, "),
+        // Said rather than omitted: a build that could not measure the header
+        // and a picture that has no dimensions are different facts, and a
+        // model deciding whether to ask a person to look wants to know which.
+        None => "dimensions unread, ".to_string(),
+    };
+    format!(
+        "{} kept as {} ({}{} bytes, {})",
+        target.display(),
+        stored.id,
+        size,
+        stored.bytes,
+        stored.media_type
+    )
 }
 
 #[async_trait::async_trait]

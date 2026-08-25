@@ -135,6 +135,12 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                         Arc::new(tetanus_fs::ObservedState::new()),
                         cx.session_id.clone(),
                     )
+                    // The attachment store lives in `crates/features`, and
+                    // `crates/fs` deliberately does not depend on it: the sink
+                    // is a trait there and the composition is where the two
+                    // meet, which is what keeps a harness composed without the
+                    // feature tools a harness whose file tools still build.
+                    .with_images(images(cx))
                     .register(registry),
                     Err(refused) => {
                         tracing::warn!(%refused, "the file tools are unavailable on this host");
@@ -262,6 +268,82 @@ fn register_terminals(_registry: &mut ToolRegistry, _cx: &Composition) {}
 /// A function rather than a line because there are seven of them from six
 /// modules, and a `vec!` of seven constructor calls inside `sources` would bury
 /// the one line per crate that makes that list readable.
+/// Where a picture `read_image` reads is kept.
+///
+/// A session with nowhere durable to put one gets the refusing sink rather
+/// than a temporary directory, for the reason spill artifacts get none: a file
+/// nobody can find later is a file nobody deletes either, and a model told
+/// plainly that this build keeps no attachments can do something else.
+fn images(cx: &Composition) -> tetanus_fs::image::SharedSink {
+    match cx.artifacts.as_ref() {
+        Some(artifacts) => Arc::new(AttachmentSink {
+            root: tetanus_features::attachment::store_root(artifacts, &cx.session_id),
+            log: Arc::clone(&cx.log),
+        }),
+        None => Arc::new(tetanus_fs::image::NoSink),
+    }
+}
+
+/// The feature crate's attachment store, behind the file crate's one-method
+/// seam.
+struct AttachmentSink {
+    root: std::path::PathBuf,
+    log: Arc<dyn tetanus_session::SessionLog>,
+}
+
+impl tetanus_fs::image::ImageSink for AttachmentSink {
+    fn admit(&self, name: &str, bytes: Vec<u8>) -> Result<tetanus_fs::image::Stored, String> {
+        // The type is read from the bytes rather than from the name, because
+        // the name came from a model reading a directory listing and the bytes
+        // are the thing being stored. An unrecognised header is stored as a
+        // stream of octets rather than refused: the store measures what it can
+        // and says nothing it cannot, and a picture this build cannot name is
+        // still a picture somebody can open.
+        let media_type = media_type_of(&bytes).to_string();
+        let incoming = tetanus_features::attachment::Incoming {
+            name: name.to_string(),
+            media_type,
+            bytes,
+        };
+        // One picture is a batch of one, so the whole-batch admission rule
+        // applies unchanged: nothing is stored unless everything is
+        // admissible, which for a batch of one is the plain reading anyway.
+        let mut admitted = tetanus_features::attachment::attach(
+            self.log.as_ref(),
+            &self.root,
+            std::slice::from_ref(&incoming),
+            &tetanus_features::attachment::Limits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let stored = admitted.pop().ok_or("the store admitted nothing")?;
+        Ok(tetanus_fs::image::Stored {
+            id: stored.id,
+            media_type: stored.media_type,
+            bytes: stored.bytes,
+            dimensions: stored.dimensions.map(|size| (size.width, size.height)),
+        })
+    }
+}
+
+/// What a picture is, according to its first bytes.
+///
+/// The four signatures `crates/features` can already measure, and nothing
+/// else: a longer table would be a second sniffing implementation to keep in
+/// step with the one that reads dimensions.
+fn media_type_of(bytes: &[u8]) -> &'static str {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const GIF: &[u8] = b"GIF8";
+    match bytes {
+        _ if bytes.starts_with(PNG) => "image/png",
+        _ if bytes.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+        _ if bytes.starts_with(GIF) => "image/gif",
+        _ if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" => {
+            "image/webp"
+        }
+        _ => "application/octet-stream",
+    }
+}
+
 fn features(cx: &Composition) -> Vec<Arc<dyn Tool>> {
     let roots = tetanus_features::skill::default_roots(&cx.workspace, cx.home.as_deref(), &[]);
     let roster = Arc::new(tetanus_features::skill::discover(&roots));

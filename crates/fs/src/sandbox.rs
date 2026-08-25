@@ -153,6 +153,15 @@ impl FileSystem for SandboxedFs {
         self.inner.read(target)
     }
 
+    fn read_bytes(
+        &self,
+        target: &FsTarget,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Vec<u8>, FsVersion), FsError> {
+        self.inner.read_bytes(target, offset, len)
+    }
+
     fn write(
         &self,
         target: &FsTarget,

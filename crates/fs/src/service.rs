@@ -229,6 +229,15 @@ pub struct Deleted {
 /// that meets it is told to read a window instead, which is a move it can make.
 pub const MAX_TEXT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The most bytes one [`FileSystem::read_bytes`] window answers with.
+///
+/// Larger than the text cap on purpose: a picture is bigger than a source file
+/// and is still the thing being asked for. It is a bound rather than a
+/// promise - a caller that wants more asks twice, which is what a window is
+/// for - and it exists so that one call cannot ask a confined worker thread to
+/// materialize an arbitrary file in memory.
+pub const MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The most entries one glob answers with.
 pub const MAX_GLOB_MATCHES: usize = 1000;
 
@@ -267,6 +276,27 @@ pub trait FileSystem: Send + Sync {
     /// point: a caller that stats and then reads has two moments and a race
     /// between them.
     fn read(&self, target: &FsTarget) -> Result<(String, FsVersion), FsError>;
+
+    /// A window of a file's bytes, with the version it had when it was read.
+    ///
+    /// Bytes rather than text, and a window rather than the whole file, because
+    /// the two limits [`FileSystem::read`] carries are the wrong ones for some
+    /// callers: it refuses anything that is not UTF-8, and it refuses anything
+    /// past the text cap. A picture is both. So this is the primitive under a
+    /// consumer that knows what it is looking at - an image reader, a header
+    /// probe, a caller checking a magic number - and `read` stays the one a
+    /// model calls, because a model reading raw bytes is a model spending its
+    /// context on a hex dump.
+    ///
+    /// `offset` past the end answers empty rather than failing: asking where a
+    /// file ends is a question with an answer, and a caller that windows
+    /// through a file meets that boundary on its last read every time.
+    fn read_bytes(
+        &self,
+        target: &FsTarget,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Vec<u8>, FsVersion), FsError>;
 
     /// Create or replace a file's whole content, atomically.
     fn write(

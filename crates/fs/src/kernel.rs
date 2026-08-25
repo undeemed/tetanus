@@ -197,6 +197,17 @@ impl FileSystem for KernelConfined {
         self.inside("read", path, move |fs| fs.read(&target))
     }
 
+    fn read_bytes(
+        &self,
+        target: &FsTarget,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Vec<u8>, FsVersion), FsError> {
+        let target = target.clone();
+        let path = target.display().to_string();
+        self.inside("read", path, move |fs| fs.read_bytes(&target, offset, len))
+    }
+
     fn write(
         &self,
         target: &FsTarget,

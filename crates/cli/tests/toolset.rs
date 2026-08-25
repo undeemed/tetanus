@@ -155,7 +155,7 @@ fn a_tool_the_page_lists_is_a_tool_a_turn_can_dispatch() {
 /// assembly.
 ///
 /// Input: a document naming `builtin` and `fs`.
-/// Expected: exactly those two sources' tools - `echo` and the eight file tools
+/// Expected: exactly those two sources' tools - `echo` and the nine file tools
 /// - and no shell or feature tool.
 #[test]
 fn the_document_narrows_what_the_binary_offers_by_source() {
@@ -166,7 +166,18 @@ fn the_document_narrows_what_the_binary_offers_by_source() {
 
     assert_eq!(
         names,
-        ["delete", "echo", "edit", "glob", "list", "read", "search", "stat", "write"],
+        [
+            "delete",
+            "echo",
+            "edit",
+            "glob",
+            "list",
+            "read",
+            "read_image",
+            "search",
+            "stat",
+            "write",
+        ],
         "only the two named sources compose"
     );
 }
