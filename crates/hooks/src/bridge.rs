@@ -84,6 +84,14 @@ pub struct BridgeConfig {
     pub model: String,
     /// How much of a hook's stderr is kept on `hook/result`.
     pub stderr_summary_max_chars: usize,
+    /// Environment entries every hook process is started with.
+    ///
+    /// Claude Code exports `CLAUDE_PROJECT_DIR` and unmodified hooks in the
+    /// wild use it to find project-relative files, so a bridge that dropped it
+    /// would run those hooks successfully and have them look in the wrong
+    /// place - which is worse than not running them at all.
+    /// [`crate::discovery::DiscoveredHooks::env`] supplies it.
+    pub env: Vec<(String, String)>,
 }
 
 impl BridgeConfig {
@@ -96,6 +104,7 @@ impl BridgeConfig {
             context,
             model: String::new(),
             stderr_summary_max_chars: DEFAULT_STDERR_SUMMARY_MAX_CHARS,
+            env: Vec::new(),
         }
     }
 
@@ -230,7 +239,7 @@ async fn run_point(
             hook,
             RunHookOptions {
                 payload: payload.clone(),
-                env: None,
+                env: (!config.env.is_empty()).then(|| config.env.clone()),
                 cwd: Some(config.context.cwd.clone()),
                 trailing_newline: config.trailing_newline(),
                 default_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
