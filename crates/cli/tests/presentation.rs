@@ -251,6 +251,36 @@ fn progress_stays_on_stderr_and_stays_plain_in_a_pipe() {
     );
 }
 
+/// TC-CLI-UI-18: the same progress line, whichever way the turn is asked for.
+/// Expected: with both streams piped, the plain run, `--trace` and `--json`
+/// each write `running the turn on mock-echo-1` to stderr and nothing of it to
+/// stdout. One mistake, one answer: a redirected stderr is a log, and which
+/// human view was asked for on stdout does not decide whether the log is
+/// written. `--json` is the one that used to write nothing here, so a script
+/// that logged its runs learnt less than a script that did not ask for JSON.
+#[test]
+fn every_way_of_running_a_turn_writes_the_same_status() {
+    for view in [vec![], vec!["--trace"], vec!["--json"]] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut args = vec!["run", "-p", "hi", "--session", "j.jsonl"];
+        args.extend_from_slice(&view);
+        let out = run(dir.path(), &args, &[]);
+
+        assert!(out.status.success(), "`{view:?}`: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("running the turn on mock-echo-1"),
+            "`{view:?}` wrote no status: {err:?}"
+        );
+        assert!(!err.contains('\r'), "`{view:?}` repainted a pipe: {err:?}");
+        assert!(!err.contains(ESC), "`{view:?}` coloured a pipe: {err:?}");
+        assert!(
+            !stdout(&out).contains("running the turn"),
+            "`{view:?}` leaked the status onto stdout"
+        );
+    }
+}
+
 /// TC-CLI-UI-8: `tetanus replay` on a journal a run just wrote.
 /// Expected: the timeline, not the raw event dump - the header naming what
 /// the session ran under, the prompt under `you`, the answer under `ai`, and
