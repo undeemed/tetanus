@@ -18,6 +18,7 @@ One entry is one file. Two lanes writing at once touch no common line, so there
 is nothing to conflict and nothing to resolve.
 
     add      write a new entry file, named so two lanes cannot collide
+    adopt    convert rows a branch appended to the rendered file into entries
     build    render the published changelog from the entry directory
     check    report whether the published file matches the directory
 
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import subprocess
 import sys
 from datetime import date as date_cls
 from pathlib import Path
@@ -54,6 +56,7 @@ ENTRY_RE = re.compile(
 # change removes - and sort after every migrated one.
 UNORDERED = 10**9
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ROW_RE = re.compile(r"^\| \d{4}-\d{2}-\d{2} \|")
 
 
 class EntryError(Exception):
@@ -167,6 +170,95 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adopt(args: argparse.Namespace) -> int:
+    """Convert rows a branch appended to the rendered file into entry files.
+
+    Every branch opened before the split appends its row to the rendered
+    changelog, which is now generated. Left alone that row survives the rebase
+    and then disappears on the next `build`, with no error and no conflict -
+    the silent loss this whole arrangement exists to prevent. This turns those
+    rows into entry files and takes them back out of the rendered file, so the
+    branch carries what it meant to carry.
+
+    The rows are read from the branch's own diff against a base, so nobody has
+    to retype an entry that is already written.
+
+    Finding nothing is a failure, not a quiet success: this runs mid-rebase in
+    the middle of a queue, and a tool that prints nothing and exits zero there
+    reads exactly like one that worked.
+    """
+    base = args.base
+    diff = subprocess.run(
+        ["git", "diff", f"{base}...HEAD", "--", str(PUBLISHED.relative_to(DOCS.parent))],
+        capture_output=True,
+        text=True,
+        cwd=DOCS.parent,
+    )
+    if diff.returncode != 0:
+        print(diff.stderr.strip() or f"could not diff against {base}", file=sys.stderr)
+        return 2
+
+    touched = diff.stdout.strip() != ""
+    rows = [
+        line[1:]
+        for line in diff.stdout.split("\n")
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    entries = [r for r in rows if ROW_RE.match(r)]
+
+    # Refuse rather than guess. A tool run at the one moment it is needed -
+    # mid-rebase, by a lane working through a queue - that prints nothing and
+    # exits zero is indistinguishable from success, and the row it did not
+    # adopt disappears on the next render with no error. Both ways of finding
+    # nothing are therefore failures with a sentence saying which.
+    if not entries:
+        if not touched:
+            print(
+                f"nothing to adopt: this branch makes no change to "
+                f"{PUBLISHED.name} against {base}.\n"
+                "If it should carry a changelog entry, write one with "
+                "`parity-changelog.py add \"...\"`.",
+                file=sys.stderr,
+            )
+            return 3
+        sample = next((r for r in rows if r.strip()), "")
+        print(
+            f"refusing to guess: this branch changes {PUBLISHED.name} against "
+            f"{base}, but no added line is a changelog row.\n"
+            f"A row looks like `| YYYY-MM-DD | text |`; the first added line "
+            f"is:\n  {sample[:120]}\n"
+            "Resolve that hunk by hand, then run this again.",
+            file=sys.stderr,
+        )
+        return 3
+
+    existing = {text for _day, _order, _name, text in load_entries()}
+    written, already = [], 0
+    ENTRIES.mkdir(parents=True, exist_ok=True)
+    for row in entries:
+        body = row[1:].rsplit("|", 1)[0]
+        day, text = body.split("|", 1)
+        day, text = day.strip(), " ".join(text.split())
+        if text in existing:
+            # Adopting twice must not duplicate an entry, because a lane may
+            # run this again after a second rebase.
+            already += 1
+            continue
+        path = ENTRIES / entry_name(day, text)
+        path.write_text(f"---\ndate: {day}\n---\n{text}\n", encoding="utf-8")
+        written.append(path.name)
+
+    for name in written:
+        print(f"adopted {name}")
+    if already:
+        print(f"{already} row(s) already had an entry file; left alone")
+    # Put the rendered file back to what the directory says, so the branch no
+    # longer carries a hand-edit of a generated file.
+    PUBLISHED.write_text(render(), encoding="utf-8")
+    print(f"{PUBLISHED.name} re-rendered from {len(load_entries())} entries")
+    return 0
+
+
 def cmd_build(_args: argparse.Namespace) -> int:
     PUBLISHED.write_text(render(), encoding="utf-8")
     print(f"{PUBLISHED.relative_to(DOCS.parent)}: {len(load_entries())} entries")
@@ -197,6 +289,16 @@ def main() -> int:
     add.add_argument("--date", help="YYYY-MM-DD; today when omitted")
     add.add_argument("text", nargs="?", help="the entry text; stdin when omitted")
     add.set_defaults(func=cmd_add)
+
+    adopt = sub.add_parser(
+        "adopt", help="convert rows this branch appended to the rendered file"
+    )
+    adopt.add_argument(
+        "--base",
+        default="origin/master",
+        help="the branch point to diff against (default: origin/master)",
+    )
+    adopt.set_defaults(func=cmd_adopt)
 
     sub.add_parser("build", help="render the published changelog").set_defaults(
         func=cmd_build
