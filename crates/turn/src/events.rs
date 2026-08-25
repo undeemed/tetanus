@@ -344,6 +344,18 @@ pub enum StopReason {
     /// The turn never ended: this reason is written by crash repair when a
     /// later run finds the journal open. See [`crate::repair`].
     Interrupted,
+    /// The turn ran past the time the deployment allowed it
+    /// (`docs/interface-contract.md` section 4.4.2, [`crate::guard`]).
+    ///
+    /// Separate from [`StopReason::Repeated`] because the two need opposite
+    /// answers: this one usually means a bigger budget or a smaller task.
+    TimedOut,
+    /// The model asked for the same thing more times in a row than the
+    /// deployment allows (section 4.4.2, [`crate::guard`]).
+    ///
+    /// Separate from [`StopReason::TimedOut`] because a bigger budget makes
+    /// this one strictly worse.
+    Repeated,
 }
 
 /// The `turn/end` reason for a turn a failure ended
@@ -365,6 +377,8 @@ impl StopReason {
             StopReason::Cancelled => "cancelled",
             StopReason::MaxTokens => "max-tokens",
             StopReason::Interrupted => "interrupted",
+            StopReason::TimedOut => "timed-out",
+            StopReason::Repeated => "repeated",
         }
     }
 }
