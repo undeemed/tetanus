@@ -21,6 +21,7 @@
 //! and "newest" has to be a single record for that rule to be decidable.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -110,6 +111,9 @@ impl ContextRegistry {
 
     /// Gather every provider's part for one turn, in registration order.
     ///
+    /// A provider that panics contributes an empty part instead of ending the
+    /// turn; see the note at the call.
+    ///
     /// The gathering happens once, at the start of the turn: section 4.4.8
     /// says a snapshot is a fact about when the turn began and not a promise
     /// about the future, so nothing re-reads it and a step that runs for ten
@@ -125,7 +129,30 @@ impl ContextRegistry {
         providers
             .into_iter()
             .map(|((_, name), produce)| {
-                let text = produce(at);
+                // A provider that panics contributes nothing, and the turn
+                // runs. A runtime context is a decoration on the work, not the
+                // work: letting a plugin that cannot read a clock, a branch or
+                // an environment variable end the turn trades a missing
+                // sentence for an agent that stops - and the deployment that
+                // installed the provider is rarely the one holding the
+                // conversation. `crates/turn/src/tools.rs` contains a tool's
+                // classifier the same way and for the same reason.
+                //
+                // The fault is logged rather than swallowed, because a
+                // provider that silently says nothing for ever looks exactly
+                // like one nobody registered.
+                let text = match std::panic::catch_unwind(AssertUnwindSafe(|| produce(at))) {
+                    Ok(text) => text,
+                    Err(payload) => {
+                        let fault = crate::tools::panicked(payload);
+                        tracing::error!(
+                            provider = name,
+                            %fault,
+                            "a runtime-context provider panicked; it contributes nothing this turn"
+                        );
+                        String::new()
+                    }
+                };
                 ContextPart { name, text }
             })
             .collect()
