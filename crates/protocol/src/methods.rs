@@ -53,6 +53,7 @@ pub mod method {
         AGENT_PROMPT,
         AGENT_STATUS,
         AGENT_INTERRUPT,
+        AGENT_STEER,
         CATALOG_TOOLS,
         CATALOG_MODELS,
         CONFIG_DUMP,
