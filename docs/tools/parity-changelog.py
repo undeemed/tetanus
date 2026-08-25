@@ -180,16 +180,21 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     rows into entry files and takes them back out of the rendered file, so the
     branch carries what it meant to carry.
 
-    The rows are read from the branch's own diff against a base, so nobody has
-    to retype an entry that is already written.
+    The rows are read from a diff, so nobody has to retype an entry that is
+    already written. Which diff matters: a branch older than the split carries
+    its row inside the conflicted hunk, so resolving that hunk in favour of the
+    generated file - which is the right resolution - discards the row before
+    this ever runs. `--head` is for that case: point it at the pre-rebase
+    commit, which still has the row, while the entry file lands in the tree
+    that is being rebuilt.
 
     Finding nothing is a failure, not a quiet success: this runs mid-rebase in
     the middle of a queue, and a tool that prints nothing and exits zero there
     reads exactly like one that worked.
     """
-    base = args.base
+    base, head = args.base, args.head
     diff = subprocess.run(
-        ["git", "diff", f"{base}...HEAD", "--", str(PUBLISHED.relative_to(DOCS.parent))],
+        ["git", "diff", f"{base}...{head}", "--", str(PUBLISHED.relative_to(DOCS.parent))],
         capture_output=True,
         text=True,
         cwd=DOCS.parent,
@@ -214,16 +219,20 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     if not entries:
         if not touched:
             print(
-                f"nothing to adopt: this branch makes no change to "
+                f"nothing to adopt: {head} makes no change to "
                 f"{PUBLISHED.name} against {base}.\n"
-                "If it should carry a changelog entry, write one with "
-                "`parity-changelog.py add \"...\"`.",
+                "If the rebase is already done, the row was discarded with the "
+                "conflicted hunk and is not in HEAD any more - point this at "
+                "the commit that still has it:\n"
+                "  parity-changelog.py adopt --base <old-base> --head <pre-rebase-head>\n"
+                "Otherwise, if this branch should carry an entry, write one "
+                "with `parity-changelog.py add \"...\"`.",
                 file=sys.stderr,
             )
             return 3
         sample = next((r for r in rows if r.strip()), "")
         print(
-            f"refusing to guess: this branch changes {PUBLISHED.name} against "
+            f"refusing to guess: {head} changes {PUBLISHED.name} against "
             f"{base}, but no added line is a changelog row.\n"
             f"A row looks like `| YYYY-MM-DD | text |`; the first added line "
             f"is:\n  {sample[:120]}\n"
@@ -252,10 +261,34 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         print(f"adopted {name}")
     if already:
         print(f"{already} row(s) already had an entry file; left alone")
-    # Put the rendered file back to what the directory says, so the branch no
-    # longer carries a hand-edit of a generated file.
-    PUBLISHED.write_text(render(), encoding="utf-8")
-    print(f"{PUBLISHED.name} re-rendered from {len(load_entries())} entries")
+    # Restore the rendered file to the base's copy rather than re-rendering it.
+    #
+    # Re-rendering here looks tidier and is wrong. Rendering is a single-writer
+    # step, so the committed file lags the directory on purpose - it was nine
+    # entries behind when this was written. A lane that re-rendered would pull
+    # every other lane's unrendered entry into its own diff, which is exactly
+    # the shared-line churn the split removed. Restoring leaves the branch
+    # carrying its entry file and nothing else, so the diff on the rendered
+    # file is empty.
+    restore = subprocess.run(
+        ["git", "checkout", args.restore_from, "--", str(PUBLISHED.relative_to(DOCS.parent))],
+        capture_output=True,
+        text=True,
+        cwd=DOCS.parent,
+    )
+    if restore.returncode != 0:
+        print(
+            f"adopted the entries, but could not restore {PUBLISHED.name} from "
+            f"{args.restore_from}: {restore.stderr.strip()}\n"
+            "Restore it by hand so this branch carries no edit to the "
+            "generated file.",
+            file=sys.stderr,
+        )
+        return 4
+    print(
+        f"{PUBLISHED.name} restored from {args.restore_from}; "
+        "it carries no branch edit"
+    )
     return 0
 
 
@@ -297,6 +330,25 @@ def main() -> int:
         "--base",
         default="origin/master",
         help="the branch point to diff against (default: origin/master)",
+    )
+    adopt.add_argument(
+        "--restore-from",
+        default="origin/master",
+        help=(
+            "what the rendered file is put back to (default: origin/master). "
+            "Separate from --base, which only says where to read rows: when "
+            "--base points at a pre-split commit, restoring from it would "
+            "resurrect the old hand-written file"
+        ),
+    )
+    adopt.add_argument(
+        "--head",
+        default="HEAD",
+        help=(
+            "the commit whose added rows are read (default: HEAD). Point this "
+            "at the pre-rebase commit when the rebase has already discarded "
+            "the row with its conflicted hunk"
+        ),
     )
     adopt.set_defaults(func=cmd_adopt)
 
