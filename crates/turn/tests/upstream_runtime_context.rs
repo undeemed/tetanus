@@ -444,3 +444,57 @@ fn a_clock_at_the_edges_still_renders() {
         "a clock before the epoch reads as the epoch, not as a negative year"
     );
 }
+
+/// TC-RTCTX-11: a provider that panics contributes nothing, and the turn runs.
+///
+/// A runtime context is a decoration on the work, not the work. A provider
+/// reads a clock, a branch, an environment variable - things that are absent
+/// or malformed on somebody's machine - and the deployment that installed one
+/// is rarely the person holding the conversation. Letting a panicking provider
+/// end the turn trades a missing sentence for an agent that stops working,
+/// which is the worse failure by a wide margin and the harder one to diagnose.
+///
+/// `crates/turn/src/tools.rs` contains a tool's classifier the same way and
+/// for the same reason; this is that rule applied to the other plugin callback
+/// the turn makes.
+///
+/// Input: two providers, the first of which panics.
+/// Expected: the snapshot has both parts, the panicking one empty; the healthy
+/// one is unaffected; and the reading the model sees is just the healthy text.
+#[test]
+fn a_panicking_provider_contributes_nothing_and_the_rest_still_speak() {
+    static QUIET: std::sync::Once = std::sync::Once::new();
+    QUIET.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !info
+                .to_string()
+                .contains("deliberate context provider fault")
+            {
+                previous(info);
+            }
+        }));
+    });
+
+    let registry = ContextRegistry::new();
+    let _faulty = registry.provider("faulty", 0, |_at| {
+        panic!("deliberate context provider fault")
+    });
+    let _healthy = registry.provider("healthy", 1, |_at| "the branch is main".to_owned());
+
+    let parts = registry.snapshot(&ContextAt { turn: 1 });
+
+    assert_eq!(
+        parts
+            .iter()
+            .map(|p| (p.name.as_str(), p.text.as_str()))
+            .collect::<Vec<_>>(),
+        [("faulty", ""), ("healthy", "the branch is main")],
+        "the faulty provider is still named, with nothing to say"
+    );
+    assert_eq!(
+        render(&parts),
+        "the branch is main",
+        "and an empty part leaves no gap in what the model reads"
+    );
+}
