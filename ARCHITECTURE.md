@@ -466,6 +466,15 @@ the caller ([docs/interface-contract.md](docs/interface-contract.md) section 4.5
 The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
 which is what keeps its cases offline and free of a clock.
 
+A turn also carries the bounds a deployment set on it, rather than on one request
+([crates/turn/src/guard.rs](crates/turn/src/guard.rs)): how long the whole turn may take, and how
+many times running the model may ask for the same thing. Both are absent by default. They are read
+at a step boundary, where an interrupt lands and for the same reason - a dispatched step has already
+had its effect - so a guarded turn is a whole turn with a balanced journal, and `agent.prompt`
+answers a summary rather than an error, because a bound being reached is the bound working. The two
+reasons stay separate (`timed-out`, `repeated`) because they need opposite answers: one asks for a
+bigger budget, and a bigger budget makes the other strictly worse.
+
 A failed call is offered to `agent/request-error` before it ends the turn, and a listener there may
 ask for the same request to be sent again.
 That is the seam `retry::install` occupies, and it is why the driver needs no clock of its own: the

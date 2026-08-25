@@ -46,6 +46,7 @@ use crate::events::{
     RequestError, RequestErrorAction, RequestFailure, StopReason, SystemPrompt, ToolsExecute,
     ToolsPermission, ToolsPostExecute, ToolsPreExecute, TurnStopping, FAILED_STOP_REASON,
 };
+use crate::guard::{GuardBreach, TurnGuards, TurnWatch};
 use crate::inbox::{Inbox, InboxError, InboxTarget, PendingMessage};
 use crate::interrupt::Interrupt;
 use crate::llm::{
@@ -131,6 +132,11 @@ pub struct TurnConfig {
     /// tell how close a request came to the limit without knowing the model's
     /// catalog. It is also what a compaction budget is scaled against.
     pub context_window: Option<u64>,
+    /// What this deployment allows one turn: how long it may take, and how
+    /// many times the model may ask for the same thing (contract section
+    /// 4.4.2, [`crate::guard`]). Both absent by default, which is the
+    /// behaviour every build had before guards existed.
+    pub guards: TurnGuards,
     /// What to do when the next request would not fit. `None` never compacts,
     /// which is what a deployment that has not set a window gets: a budget
     /// with no window to scale against is a guess, and a guess that silently
@@ -168,6 +174,9 @@ impl Default for TurnConfig {
             approval_policy: ApprovalPolicy::Ask,
             context_window: None,
             compaction: None,
+            // No bound by default: a deployment that sets neither guard is
+            // bounded by the step budget, exactly as before guards existed.
+            guards: TurnGuards::default(),
         }
     }
 }
@@ -542,6 +551,11 @@ impl TurnEngine {
     ) -> Result<Closing, TurnError> {
         let mut claimed = vec![Message::user(input)];
         let mut reason = StopReason::Natural;
+        // The turn's own bounds, started when the turn starts: elapsed time is
+        // measured on a monotonic clock rather than by subtracting journal
+        // stamps, which the contract itself says is an estimate that is
+        // occasionally negative.
+        let mut watch = TurnWatch::start(self.config.guards.clone());
         let mut content = String::new();
 
         loop {
@@ -747,6 +761,17 @@ impl TurnEngine {
             // finished anyway is not reported as cancelled.
             if self.interrupt.stopped() {
                 reason = StopReason::Cancelled;
+                break;
+            }
+            // And where a guard lands, for the same reason: a step already
+            // dispatched has already had its effect, so a bound that fired
+            // mid-step would leave a tool call with no result. The repeat
+            // count is taken from what this step actually asked for.
+            if let Some(breach) = watch.observe(asked).or_else(|| watch.breached()) {
+                reason = match breach {
+                    GuardBreach::TimedOut => StopReason::TimedOut,
+                    GuardBreach::Repeated => StopReason::Repeated,
+                };
                 break;
             }
             if progress.steps >= self.config.max_steps {

@@ -41,7 +41,10 @@ pub fn stop_reason(reason: tetanus_turn::StopReason) -> wire::StopReason {
         // contract 1.0, and section 7.5 is what lets them travel as the
         // fallback. The word is the engine's own, which is also the word the
         // journal carries, so a surface reading either sees one spelling.
-        reason @ (tetanus_turn::StopReason::MaxTokens | tetanus_turn::StopReason::Interrupted) => {
+        reason @ (tetanus_turn::StopReason::MaxTokens
+        | tetanus_turn::StopReason::Interrupted
+        | tetanus_turn::StopReason::TimedOut
+        | tetanus_turn::StopReason::Repeated) => {
             wire::StopReason::Other(reason.as_str().to_string())
         }
     }

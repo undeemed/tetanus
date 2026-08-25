@@ -41,6 +41,7 @@ pub mod context;
 pub mod engine;
 pub mod events;
 pub mod fs;
+pub mod guard;
 pub mod inbox;
 pub mod instructions;
 pub mod interrupt;
