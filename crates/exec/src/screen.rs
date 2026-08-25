@@ -38,6 +38,15 @@
 
 use std::sync::Mutex;
 
+/// What this terminal says it is when a program asks (`CSI c`): a VT100 with
+/// the advanced video option. The honest floor for what is modelled here.
+const PRIMARY_ATTRIBUTES: &str = "\u{1b}[?1;2c";
+
+/// What it says when asked for a version (`CSI > c`): VT100, firmware 10,
+/// no options - a shape every terminal library parses and nothing keys
+/// behaviour off.
+const SECONDARY_ATTRIBUTES: &str = "\u{1b}[>0;10;1c";
+
 /// One terminal screen: the grid, the cursor, and the state a program's
 /// escape sequences change.
 #[derive(Debug)]
@@ -78,6 +87,15 @@ struct Grid {
     alternate: bool,
     /// A sequence that has begun and not finished, carried between feeds.
     pending: String,
+    /// Answers this terminal owes the program on it.
+    ///
+    /// A terminal is not only a screen: it is asked questions, and a program
+    /// that asks one *waits*. PowerShell's line editor asks where the cursor
+    /// is (`CSI 6n`) before it draws anything at all, and on a terminal that
+    /// never answers it does not start - it prints a bug report instead. So
+    /// the thing that models the screen answers as the screen, because it is
+    /// the only thing here that knows where the cursor is.
+    owed: Vec<String>,
 }
 
 impl Screen {
@@ -87,12 +105,18 @@ impl Screen {
         }
     }
 
-    /// Feed the terminal's raw output, escapes and all.
-    pub fn feed(&self, bytes: &str) {
-        self.state
-            .lock()
-            .expect("no panic holds this lock")
-            .feed(bytes);
+    /// Feed the terminal's raw output, escapes and all, and answer with
+    /// whatever the program asked the terminal for.
+    ///
+    /// The replies are the caller's to write back, because this type owns no
+    /// descriptor: it models a screen, and a screen does not do I/O. What it
+    /// knows - where the cursor is, what kind of terminal this claims to be -
+    /// is exactly what the questions are about.
+    #[must_use = "a program that asked the terminal a question is waiting for the answer"]
+    pub fn feed(&self, bytes: &str) -> Vec<String> {
+        let mut state = self.state.lock().expect("no panic holds this lock");
+        state.feed(bytes);
+        std::mem::take(&mut state.owed)
     }
 
     /// What is on the screen now, one line per row, with trailing blanks
@@ -144,6 +168,7 @@ impl Grid {
             stashed: None,
             alternate: false,
             pending: String::new(),
+            owed: Vec::new(),
         }
     }
 
@@ -224,19 +249,59 @@ impl Grid {
         let end = body.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c))?;
         let (params, final_byte) = body.split_at(end);
         let final_byte = final_byte.chars().next()?;
-        let private = params.starts_with('?');
+        // `?`, `>`, `<` and `=` each introduce a different family, and the
+        // difference matters here: `CSI c` asks what this terminal is and
+        // `CSI > c` asks what version it is, and a program waits for whichever
+        // it sent.
+        let prefix = params.chars().next().filter(|c| "?><=".contains(*c));
         let numbers: Vec<usize> = params
-            .trim_start_matches('?')
+            .trim_start_matches(|c| "?><=".contains(c))
             .split(';')
             .map(|value| value.trim().parse::<usize>().unwrap_or(0))
             .collect();
 
-        if private {
-            self.private_mode(numbers.first().copied().unwrap_or(0), final_byte);
-        } else if !self.moved(&numbers, final_byte) {
-            self.changed(&numbers, final_byte);
+        match prefix {
+            Some('?') => self.private_mode(numbers.first().copied().unwrap_or(0), final_byte),
+            Some('>') if final_byte == 'c' => self.answer(SECONDARY_ATTRIBUTES),
+            Some(_) => {}
+            None if self.reported(&numbers, final_byte) => {}
+            None if self.moved(&numbers, final_byte) => {}
+            None => self.changed(&numbers, final_byte),
         }
         Some(2 + end + final_byte.len_utf8())
+    }
+
+    /// The questions a program asks the terminal, and what this one answers.
+    ///
+    /// Answering is not decoration: a program that asks and is ignored blocks.
+    /// PowerShell's `PSReadLine` asks for the cursor position before it prints
+    /// its first prompt, and against a terminal that never replies it aborts
+    /// with a bug report rather than starting - measured against a bare
+    /// pseudo-terminal, and against `script`, which behaves the same way.
+    ///
+    /// What is answered is what a screen can answer truthfully: where the
+    /// cursor is, that the terminal is alive, and what it claims to be. It
+    /// claims `VT100 with an advanced video option`, which is the honest floor
+    /// for what `crate::screen` implements - enough of the cursor and erase
+    /// families to be read back, and no colour.
+    fn reported(&mut self, numbers: &[usize], final_byte: char) -> bool {
+        match (final_byte, numbers.first().copied().unwrap_or(0)) {
+            // Device status: is the terminal there.
+            ('n', 5) => self.answer("\u{1b}[0n".to_string()),
+            // Cursor position, counted from one as the sequence counts.
+            ('n', 6) => {
+                let (row, col) = (self.cursor.row + 1, self.cursor.col + 1);
+                self.answer(format!("\u{1b}[{row};{col}R"));
+            }
+            // Primary device attributes: what kind of terminal is this.
+            ('c', 0) => self.answer(PRIMARY_ATTRIBUTES.to_string()),
+            _ => return false,
+        }
+        true
+    }
+
+    fn answer(&mut self, reply: impl Into<String>) {
+        self.owed.push(reply.into());
     }
 
     /// The `?`-prefixed modes. Only two matter to a model of text: whether the

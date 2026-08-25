@@ -39,7 +39,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tetanus_exec::backend::Bash;
+use tetanus_exec::backend::{Bash, ShellBackend};
 use tetanus_exec::sanitize::{Sanitizer, PROMPT_TEXT};
 use tetanus_exec::terminal::{
     Status, TerminalConfig, TerminalError, TerminalSession, TerminalSignal, WaitReason,
@@ -763,6 +763,114 @@ async fn a_session_is_published_only_once_its_shell_is_asking_for_input() {
         ),
         other => panic!("a missing shell must be refused loudly, got {other:?}"),
     }
+}
+
+/// TC-PORT-TERM-46: a PowerShell terminal announces its prompts, and its
+/// state survives between sends.
+///
+/// `docs/parity.md` carried this as a gap in these words: *a prompt marker for
+/// PowerShell, whose equivalent lives in the `$PROFILE` that `-NoProfile`
+/// deliberately does not load.* A terminal can type, so it types the
+/// definition once the REPL is ready - which is what `terminal_setup` is for,
+/// and what bash already uses for `stty -echo`.
+///
+/// Without it a pwsh session had no readiness signal at all: every send
+/// settled on silence, three seconds at a time, and reported no status. With
+/// it, pwsh is exactly as readable as bash - the marker carries `$LASTEXITCODE`
+/// or `$?`, whichever the last command set.
+///
+/// Skipped where this host has no PowerShell, which is most of them; CI's
+/// `ubuntu-latest` image ships one, and it can be run here by putting a
+/// release tarball on `PATH`.
+///
+/// Input: a pwsh terminal; a command that succeeds; a `Set-Location` and an
+/// environment variable; a command that reads both back; and a command that
+/// does not exist.
+/// Expected: every send settles as `stdin_read` rather than on silence, the
+/// directory and the variable survive, and the failing command reports a
+/// non-zero status.
+#[tokio::test]
+async fn a_powershell_terminal_announces_its_prompts() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let backend = Arc::new(tetanus_exec::backend::PowerShell::new());
+    if backend.resolve().is_err() {
+        eprintln!("skipped: this host has no PowerShell");
+        return;
+    }
+    let session = match TerminalSession::open(
+        "pty-pwsh".into(),
+        None,
+        "pwsh".into(),
+        backend,
+        TerminalConfig {
+            cwd: workspace.path().to_path_buf(),
+            idle_silence: Duration::from_secs(10),
+            timeout: Duration::from_secs(30),
+            grace: Duration::from_millis(300),
+            ..TerminalConfig::default()
+        },
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(TerminalError::Pty(tetanus_exec::pty::PtyError::Allocate(why))) => {
+            eprintln!("skipped: this host cannot allocate a pseudo-terminal ({why})");
+            return;
+        }
+        Err(other) => panic!("a host with a PowerShell should open one: {other}"),
+    };
+
+    let first = session
+        .send("Write-Output hello-from-pwsh", true, None)
+        .await
+        .expect("sent");
+    assert_eq!(
+        first.wait,
+        WaitReason::StdinRead,
+        "the marker is what makes this exact rather than a three-second guess"
+    );
+    assert_eq!(first.code, Some(0));
+    assert!(
+        first.viewport.contains("hello-from-pwsh"),
+        "what the command printed has to be in the viewport: {:?}",
+        first.viewport
+    );
+
+    session
+        .send("Set-Location /tmp; $env:TETANUS_PWSH = 'kept'", true, None)
+        .await
+        .expect("sent");
+    let kept = session
+        .send(
+            "Write-Output \"at=$((Get-Location).Path) var=$env:TETANUS_PWSH\"",
+            true,
+            None,
+        )
+        .await
+        .expect("sent");
+    assert!(
+        kept.viewport.contains("at=/tmp") && kept.viewport.contains("var=kept"),
+        "the session keeps its own state between sends: {:?}",
+        kept.viewport
+    );
+    assert_eq!(kept.code, Some(0));
+
+    let failed = session
+        .send("no-such-command-here", true, None)
+        .await
+        .expect("sent");
+    assert_eq!(
+        failed.wait,
+        WaitReason::StdinRead,
+        "a command that failed still ends at a prompt"
+    );
+    assert!(
+        failed.code.is_some_and(|code| code != 0),
+        "the marker carries the failure: {:?}",
+        failed.code
+    );
+
+    session.close().await;
 }
 
 // ---------------------------------------------------------------- fixtures
