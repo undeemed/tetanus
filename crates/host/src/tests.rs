@@ -264,10 +264,22 @@ async fn a_head_this_carrier_will_not_parse_is_refused() {
 /// A dist directory with an index, an asset and a file of an unknown kind.
 fn dist() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
-    std::fs::write(dir.path().join("index.html"), "<html>the page</html>").expect("index");
-    std::fs::create_dir_all(dir.path().join("assets")).expect("assets");
-    std::fs::write(dir.path().join("assets/app.js"), "console.log(1)").expect("js");
-    std::fs::write(dir.path().join("assets/thing.bin"), [0_u8, 1, 2]).expect("bin");
+    dist_under(dir.path(), ".");
+    dir
+}
+
+/// The same frontend, built at `at` inside a directory the caller owns.
+///
+/// One case needs the served root to have a *parent it controls*, because what
+/// it asserts is that `..` does not escape, and asking that honestly means
+/// having something outside for `..` to find. Answers the root it built rather
+/// than a `TempDir`, since the caller holds the one that owns it.
+fn dist_under(root: &std::path::Path, at: &str) -> std::path::PathBuf {
+    let dir = root.join(at);
+    std::fs::create_dir_all(dir.join("assets")).expect("assets");
+    std::fs::write(dir.join("index.html"), "<html>the page</html>").expect("index");
+    std::fs::write(dir.join("assets/app.js"), "console.log(1)").expect("js");
+    std::fs::write(dir.join("assets/thing.bin"), [0_u8, 1, 2]).expect("bin");
     dir
 }
 
@@ -314,15 +326,25 @@ async fn a_miss_is_the_page_and_not_a_404() {
 /// and a symlink both spell `..` without writing it.
 #[tokio::test]
 async fn nothing_outside_the_frontend_is_served() {
-    let dir = dist();
-    let secret = dir.path().parent().expect("a parent").join("secret.txt");
+    // The file this case must not leak lives in a directory this case owns.
+    //
+    // It used to live at `dir.path().parent()`, which is `$TMPDIR` itself - a
+    // fixed name in a directory every process on the machine shares. Two
+    // copies of this case in different processes, which is what a full
+    // workspace run and a busy box produce, wrote and *deleted* the same
+    // `$TMPDIR/secret.txt`; a delete landing between another copy's symlink
+    // and its request leaves a dangling link, and a dangling link is a miss,
+    // and a miss is the page - `HTTP/1.1 200`, where the case demands 403.
+    let outside = tempfile::tempdir().expect("a directory this case owns");
+    let dir = dist_under(outside.path(), "dist");
+    let secret = outside.path().join("secret.txt");
     std::fs::write(&secret, "not yours").expect("the file outside");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).expect("the symlink");
+    std::os::unix::fs::symlink(&secret, dir.join("link.txt")).expect("the symlink");
 
     let (server, listener) = carrier().await;
     let address = server.address();
-    let _seat = Frontend::mount(&server, &dir.path().join("index.html")).expect("free");
+    let _seat = Frontend::mount(&server, &dir.join("index.html")).expect("free");
     tokio::spawn(server.serve(listener));
 
     for path in ["/../secret.txt", "/%2e%2e/secret.txt", "/link.txt"] {
@@ -333,7 +355,8 @@ async fn nothing_outside_the_frontend_is_served() {
             "{path} leaked the file: {said}"
         );
     }
-    let _ = std::fs::remove_file(secret);
+    // Nothing to clean up: the directory goes when `outside` does, which is
+    // also why no other process can be affected by what this one does.
 }
 
 /// TC-HOST-STATIC-4: a POST to a path no named route claimed.
