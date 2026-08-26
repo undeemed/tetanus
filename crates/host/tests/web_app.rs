@@ -783,3 +783,75 @@ fn the_page_accounts_for_every_durable_type_the_engine_writes() {
          them from UNDRAWN: {gone:?}"
     );
 }
+
+/// Every name the engine can put on the wire: durable topics, plus the method
+/// and notification names the protocol crates declare.
+///
+/// Both halves are needed for the reverse check. The page handles
+/// `agent/status` and `ui/ask`, which are a push and a server-to-client
+/// request rather than journal entries, so a rule built on topics alone would
+/// call two correct handlers dead code.
+fn engine_vocabulary() -> BTreeSet<String> {
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+    let mut found = durable_topics();
+    let mut stack = vec![crates];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "tests") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let Ok(src) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in src.lines().filter(|l| l.contains("pub const")) {
+                    if let Some(name) = topic_literal(line) {
+                        found.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// TC-WEB-11: the page names no event the engine cannot produce.
+///
+/// The mirror of TC-WEB-10, and it guards a failure that leaves no trace: a
+/// mistyped type in a `case` or a table key never matches, so the handler
+/// simply never fires. The event falls to the raw path and the page looks like
+/// one the engine never told about it. Nothing throws, nothing logs, and the
+/// only way to notice is to know what the transcript should have said.
+///
+/// Judged per *family*, which is what makes it precise rather than noisy. A
+/// name whose family the engine uses - `goal/`, `tool/`, `compaction/` - must
+/// be one the engine can actually produce; a slash string from some other
+/// vocabulary, like the media type `application/json`, is not an event name
+/// and is not treated as one.
+#[test]
+fn the_page_names_no_event_the_engine_cannot_produce() {
+    let known = engine_vocabulary();
+    let families: BTreeSet<&str> = known.iter().filter_map(|n| n.split('/').next()).collect();
+
+    let page: String = scripts().into_iter().map(|(_, body)| body).collect();
+    let invented: Vec<String> = page
+        .match_indices('"')
+        .filter_map(|(at, _)| topic_literal(&page[at..]))
+        .filter(|name| {
+            let family = name.split('/').next().unwrap_or_default();
+            families.contains(family) && !known.contains(name)
+        })
+        .collect();
+
+    assert!(
+        invented.is_empty(),
+        "the page handles these and the engine writes no such thing - a name \
+         that never matches is a handler that never fires: {invented:?}"
+    );
+}
