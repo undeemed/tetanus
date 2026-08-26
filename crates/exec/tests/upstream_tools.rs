@@ -43,7 +43,10 @@ use tetanus_core::EventBus;
 use tetanus_exec::backend::Bash;
 use tetanus_exec::session::SessionConfig;
 use tetanus_exec::shell::ShellConfig;
-use tetanus_exec::tools::{ShellTools, SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN, SHELL_RUN};
+use tetanus_exec::tools::{
+    ShellTools, JOB_KILL, JOB_LIST, JOB_OUTPUT, SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN,
+    SHELL_RUN,
+};
 use tetanus_session::{JsonlSessionLog, SessionLog};
 use tetanus_turn::boot::boot_with;
 use tetanus_turn::interrupt::Interrupt;
@@ -53,7 +56,7 @@ use tetanus_turn::llm::{
 use tetanus_turn::tools::ToolCall;
 use tetanus_turn::{TurnConfig, TurnEngine};
 
-/// TC-PORT-SHELL-12: the five tools are registered, and each advertises a
+/// TC-PORT-SHELL-12: the eight tools are registered, and each advertises a
 /// schema a model can call.
 ///
 /// Upstream: "registers the bash tool with its parameter schema", and the
@@ -64,17 +67,28 @@ use tetanus_turn::{TurnConfig, TurnEngine};
 /// wrongly on its first attempt.
 ///
 /// Input: a registry the shell tools registered on.
-/// Expected: the five names; `shell` requires `command` and advertises
-/// `workdir` and `timeout_ms`; `shell_run` requires both its arguments;
-/// `shell_list` takes none.
+/// Expected: the eight names - the five shell tools and the three job tools,
+/// which are declared whether or not a store is composed so the catalogue and
+/// a run cannot offer different sets; `shell` requires `command` and
+/// advertises `workdir` and `timeout_ms`; `shell_run` requires both its
+/// arguments; `shell_list` takes none.
 #[test]
-fn the_five_tools_are_registered_with_callable_schemas() {
+fn the_eight_tools_are_registered_with_callable_schemas() {
     let tools = shell_tools(&std::env::temp_dir(), Interrupt::new());
     let registry = tools.registry();
 
     assert_eq!(
         registry.names().cloned().collect::<Vec<_>>(),
-        vec![SHELL, SHELL_CLOSE, SHELL_LIST, SHELL_OPEN, SHELL_RUN],
+        vec![
+            JOB_KILL,
+            JOB_LIST,
+            JOB_OUTPUT,
+            SHELL,
+            SHELL_CLOSE,
+            SHELL_LIST,
+            SHELL_OPEN,
+            SHELL_RUN
+        ],
         "the registry offers them in one settled order"
     );
 
@@ -662,6 +676,8 @@ async fn a_host_with_no_shell_still_advertises_the_tool_and_explains() {
         },
         SessionConfig::default(),
         Interrupt::new(),
+        // No job store: this suite is about the five shell tools.
+        None,
     );
 
     assert_eq!(

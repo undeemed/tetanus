@@ -122,6 +122,13 @@ pub fn sources(cx: &Composition) -> Vec<Source> {
                         ..tetanus_exec::session::SessionConfig::default()
                     },
                     Arc::clone(&cx.interrupt),
+                    // A background command needs somewhere durable to leave
+                    // its record, and that is the session's own directory -
+                    // the place a reader is already looking. A session with no
+                    // journal on disk gets no store and no job tools, for the
+                    // reason it gets no spill store: work nobody can find
+                    // later is worse than work that never started.
+                    jobs_for(cx),
                 );
                 register_terminals(registry, cx);
             },
@@ -207,6 +214,17 @@ fn lsp(cx: &Composition) -> Vec<Arc<dyn Tool>> {
         .collect();
     let config = tetanus_turn::lsp::LspConfig::new(program, cx.workspace.clone()).with_args(args);
     vec![Arc::new(tetanus_turn::lsp::tool::LspTool::new(config))]
+}
+
+/// Where a background command's record is kept, when this session has a
+/// durable place for one.
+fn jobs_for(cx: &Composition) -> Option<(Arc<tetanus_core::jobs::JobStore>, Option<String>)> {
+    let artifacts = cx.artifacts.as_ref()?;
+    // One file per harness home rather than per session: `job_list` filters by
+    // session, and a store per session would make "what is this harness still
+    // running" a question nobody could answer without opening every file.
+    let store = tetanus_core::jobs::JobStore::open(artifacts.join("jobs.jsonl")).ok()?;
+    Some((Arc::new(store), Some(cx.session_id.clone())))
 }
 
 /// Where this session's oversized command output is kept, when it has a place

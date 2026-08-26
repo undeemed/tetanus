@@ -44,6 +44,23 @@ const STILL_BARE: &[(&str, &str)] = &[
         "landed after the last view pass; its results are prose with a snippet \
          per hit and would read far better as rows",
     ),
+    (
+        "job_list",
+        "background work landed after the last view pass; a list of jobs with \
+         live state is the one of these three that most wants a view, because \
+         a reader watching a build wants it to change without being asked",
+    ),
+    (
+        "job_output",
+        "background work landed after the last view pass; its answer is a \
+         command's output, which the shell view already knows how to draw - \
+         the view is a reuse rather than a new shape",
+    ),
+    (
+        "job_kill",
+        "background work landed after the last view pass; it answers one line \
+         and the generic frame says it faithfully",
+    ),
 ];
 
 fn app() -> PathBuf {
