@@ -1429,11 +1429,12 @@ fn json_beside_a_human_view_is_a_usage_error() {
 }
 
 /// TC-CLI-CAT-9: `tetanus models`, with and without the credential.
-/// Expected: both providers listed under the names `--adapter` accepts; the
-/// one whose key is absent names the variable to set, and the same command
-/// reads `ready` once that variable is exported. The catalogue is read at the
-/// moment it is asked for - a cached answer would tell a user who just fixed
-/// their key that it is still broken.
+/// Expected: both built-in providers listed under their registry routes -
+/// which is what the panel lists, and what `--adapter` takes beside the
+/// `deepseek` alias; the one whose key is absent names the variable to set,
+/// and the same command reads `ready` once that variable is exported. The
+/// catalogue is read at the moment it is asked for - a cached answer would
+/// tell a user who just fixed their key that it is still broken.
 #[test]
 fn the_model_page_answers_whether_a_provider_can_be_reached() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1441,7 +1442,7 @@ fn the_model_page_answers_whether_a_provider_can_be_reached() {
     let bare = stdout(&run(dir.path(), &["models"], &[]));
     assert!(bare.contains("mock"), "{bare}");
     assert!(
-        bare.contains("deepseek  set DEEPSEEK_API_KEY"),
+        bare.contains("deepseek-official  set DEEPSEEK_API_KEY"),
         "the unreachable provider does not say what to do:\n{bare}"
     );
 
@@ -1451,7 +1452,7 @@ fn the_model_page_answers_whether_a_provider_can_be_reached() {
         &[("DEEPSEEK_API_KEY", "sk-x")],
     ));
     assert!(
-        keyed.contains("deepseek  ready"),
+        keyed.contains("deepseek-official  ready"),
         "the key was exported and the page did not notice:\n{keyed}"
     );
 }

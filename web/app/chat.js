@@ -68,6 +68,8 @@ const seen = [];
 
 /** The model this conversation is on, so the catalogue can mark it. */
 let running = null;
+/** And the route it is on: two providers may offer the same model id. */
+let runningProvider = null;
 
 let greeted = null;
 const post = async (method, params) => {
@@ -98,6 +100,16 @@ const address = carrier && token
   ? carrier + (carrier.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
   : carrier;
 let session = query.get("session") || null;
+// What the catalogue's "Start here" put in the query. A fresh session is
+// created on them, which is what makes the picker start what it picked: the
+// button writes the route and the model into the URL, the reload lands here,
+// and `session.create` takes both. Ignored when a session is already named -
+// that journal has its own header and nothing moves a session to another
+// model.
+const picked = {
+  provider: query.get("provider") || null,
+  model: query.get("model") || null,
+};
 
 let journal = "";
 let socket = null;
@@ -189,12 +201,29 @@ function connect() {
   };
 }
 
+/**
+ * The params `session.create` opens this page's conversation with.
+ *
+ * A named session is resumed and nothing else is said about it: its journal
+ * already carries the route and the model it was created under, and sending
+ * either again would ask the engine to change a header it never changes. A
+ * fresh one carries whatever the picker chose; both fields are optional in
+ * the contract, so a page opened with neither still gets the server default.
+ */
+function opening() {
+  if (session) return { session_id: session };
+  const params = {};
+  if (picked.provider) params.provider = picked.provider;
+  if (picked.model) params.model = picked.model;
+  return params;
+}
+
 async function boot() {
   await call("rpc.hello", { protocol_version: PROTOCOL, client: CLIENT });
   // Connected and talking: the next drop starts its waiting from the bottom
   // again, because a server that answered once is worth dialling quickly.
   waiting = FIRST_WAIT;
-  const info = await call("session.create", session ? { session_id: session } : {});
+  const info = await call("session.create", opening());
   session = info.session_id;
   // So a reload continues this conversation rather than starting another.
   const url = new URL(location.href);
@@ -203,6 +232,7 @@ async function boot() {
 
   view.who.replaceChildren();
   running = info.model;
+  runningProvider = info.provider;
   view.who.append("session ", strong(session), " · model ", strong(info.model));
   journal = info.path;
 
@@ -963,6 +993,7 @@ document.getElementById("catalogue-open").onclick = async () => {
     offeredTools = (toolset.tools || []).map((tool) => tool.name);
     models(shown, providers.providers || [], {
       current: running,
+      currentProvider: runningProvider,
       onStart: (provider, chosen) => {
         // A new conversation, because that is what this contract offers:
         // `session.create` takes a route and a model, and nothing moves a

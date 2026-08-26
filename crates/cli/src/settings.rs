@@ -23,7 +23,7 @@ use tetanus_protocol::rpc::{ErrorCode, RpcError};
 use tetanus_ui::{Policy, Ui};
 
 use crate::render;
-use crate::{fail, misconfigured, place, report, AdapterChoice, Reported};
+use crate::{fail, misconfigured, place, report, Reported};
 
 /// Write the page for the settings the next command would run on.
 ///
@@ -216,7 +216,7 @@ pub fn compiled(policy: &Policy) -> Result<tetanus_engine::EngineConfig, Reporte
 /// The flags a command that runs turns was given, before the document has
 /// been read. Every one of them is optional for the reason [`root`] gives.
 pub struct TurnFlags {
-    pub adapter: Option<AdapterChoice>,
+    pub adapter: Option<String>,
     pub model: Option<String>,
     pub max_steps: Option<u32>,
     pub session: Option<PathBuf>,
@@ -231,7 +231,10 @@ pub struct Turn {
     /// The settled settings, so the engine the turn opens on is the one
     /// `tetanus config` described.
     pub settings: tetanus_engine::EngineConfig,
-    pub provider: AdapterChoice,
+    /// The route the turn runs on, resolved once. Its name reaches the
+    /// `session/start` header unchanged, so a journal records what was asked
+    /// for rather than what it resolved to.
+    pub provider: Route,
     /// `None` leaves the model to the adapter's own catalogue, which is the
     /// only sensible default for an adapter nobody configured.
     pub model: Option<String>,
@@ -251,14 +254,14 @@ pub fn turn_settings(
     policy: &Policy,
     document: &std::path::Path,
     flags: TurnFlags,
-    fallback: AdapterChoice,
+    fallback: &str,
     journal: &str,
 ) -> Result<Turn, Reported> {
     use tetanus_engine::catalog::key;
 
     let mut overrides: Vec<(&'static str, serde_json::Value)> = Vec::new();
-    if let Some(adapter) = flags.adapter {
-        overrides.push((key::PROVIDER, serde_json::json!(adapter.route())));
+    if let Some(adapter) = &flags.adapter {
+        overrides.push((key::PROVIDER, serde_json::json!(adapter)));
     }
     if let Some(model) = &flags.model {
         overrides.push((key::MODEL, serde_json::json!(model)));
@@ -283,10 +286,18 @@ pub fn turn_settings(
     };
 
     Ok(Turn {
-        provider: match written(key::PROVIDER) {
-            true => provider_named(policy, document, &settings.default_provider)?,
-            false => fallback,
-        },
+        // The command's own fallback goes through the same resolver as a name
+        // somebody wrote: it is a name like any other, and resolving it any
+        // other way would be a second answer to one question.
+        provider: provider_named(
+            policy,
+            document,
+            &settings,
+            match written(key::PROVIDER) {
+                true => &settings.default_provider,
+                false => fallback,
+            },
+        )?,
         // Not the settled value when nobody set it: the engine's compiled
         // model belongs to the engine's compiled provider, and offering it to
         // an adapter that never advertised it would name a model that does
@@ -300,33 +311,82 @@ pub fn turn_settings(
     })
 }
 
-/// The adapter a provider name asks for.
+/// The alias `--adapter` keeps for the built-in DeepSeek route.
 ///
-/// clap refuses an unknown `--adapter`, so a name that gets this far came out
-/// of a document or an environment, and is reported the way any other value
-/// in one is: it names the key, and it names the file that has to be edited.
+/// The CLI has said `deepseek` since it had two providers and the adapter has
+/// answered to `deepseek-official` for as long as it has existed. Unifying the
+/// two spellings rewrites journal fixtures across the conformance suite and
+/// buys nothing this feature needs, so the shorter one stays as an alias and
+/// every document, script and case that types it keeps working.
+const DEEPSEEK_ALIAS: &str = "deepseek";
+
+/// A route a turn will run on: the name the user typed, and the adapter the
+/// registry answered with.
+///
+/// Both halves travel together because they are resolved together and must not
+/// disagree: the name reaches the `session/start` header and every diagnostic,
+/// and the adapter is what the turn calls. A caller holding only the name
+/// would have to look the adapter up again, and a second lookup is a second
+/// chance to answer differently - which is precisely what the alias makes
+/// possible.
+pub struct Route {
+    name: String,
+    adapter: std::sync::Arc<dyn tetanus_turn::llm::LlmAdapter>,
+}
+
+impl Route {
+    /// The name as it was typed, which is what a journal records.
+    pub fn route(&self) -> &str {
+        &self.name
+    }
+
+    /// The adapter that answered to it.
+    pub fn adapter(&self) -> std::sync::Arc<dyn tetanus_turn::llm::LlmAdapter> {
+        std::sync::Arc::clone(&self.adapter)
+    }
+}
+
+/// The route a provider name asks for, checked against the registry this
+/// document composed.
+///
+/// `--adapter` takes any name now, so an unknown one arrives here whether it
+/// was typed, written in a document or exported into the environment, and is
+/// reported the way any other bad value is: it names the key, it names the
+/// file that has to be edited, and it lists what this build can actually
+/// reach. Listing the registry rather than a compiled pair is what makes a
+/// provider somebody declared appear in the message that refuses its typo.
 pub fn provider_named(
     policy: &Policy,
     document: &std::path::Path,
+    settings: &tetanus_engine::EngineConfig,
     name: &str,
-) -> Result<AdapterChoice, Reported> {
-    [AdapterChoice::Mock, AdapterChoice::Deepseek]
+) -> Result<Route, Reported> {
+    let registry = &settings.providers;
+    let found = registry.adapter(name).or_else(|| match name {
+        DEEPSEEK_ALIAS => registry.adapter(tetanus_turn::llm::deepseek::PROVIDER),
+        _ => None,
+    });
+    if let Some(adapter) = found {
+        return Ok(Route {
+            name: name.to_string(),
+            adapter,
+        });
+    }
+    let known = registry
+        .all()
         .into_iter()
-        .find(|choice| choice.route() == name)
-        .ok_or_else(|| {
-            let known = [AdapterChoice::Mock, AdapterChoice::Deepseek]
-                .map(AdapterChoice::route)
-                .join(" or ");
-            misconfigured(
-                policy,
-                document,
-                &RpcError::new(
-                    ErrorCode::InvalidParams,
-                    format!("must be a provider this build can reach, {known}, not {name:?}"),
-                )
-                .with_data(serde_json::json!({
-                    "field": tetanus_engine::catalog::key::PROVIDER,
-                })),
-            )
-        })
+        .map(|adapter| adapter.provider().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(misconfigured(
+        policy,
+        document,
+        &RpcError::new(
+            ErrorCode::InvalidParams,
+            format!("must be a provider this build can reach, one of {known}, not {name:?}"),
+        )
+        .with_data(serde_json::json!({
+            "field": tetanus_engine::catalog::key::PROVIDER,
+        })),
+    ))
 }

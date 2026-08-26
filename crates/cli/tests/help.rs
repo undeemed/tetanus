@@ -269,7 +269,7 @@ fn every_example_model_is_offered_by_its_adapter() {
 #[test]
 fn the_examples_survive_an_eighty_column_terminal() {
     for (args, count) in [
-        (vec!["--help"], 15),
+        (vec!["--help"], 16),
         (vec!["run", "--help"], 9),
         (vec!["chat", "--help"], 5),
     ] {
@@ -377,7 +377,7 @@ fn the_statuses_the_page_words_are_the_ones_it_exits_with() {
 #[test]
 fn the_examples_stack_where_two_columns_do_not_fit() {
     for (args, count) in [
-        (vec!["--help"], 15),
+        (vec!["--help"], 16),
         (vec!["run", "--help"], 9),
         (vec!["chat", "--help"], 5),
     ] {

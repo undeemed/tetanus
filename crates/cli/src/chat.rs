@@ -48,14 +48,16 @@ use tetanus_turn::{TurnConfig, TurnEngine};
 use tetanus_ui::{tame_line, when_killed, Held, Key, Keys, Policy, Tty, Ui};
 
 use crate::render;
-use crate::{AdapterChoice, Reported};
+use crate::Reported;
 
 #[derive(clap::Args)]
 pub struct ChatArgs {
-    /// Which model provider to talk to. Defaults to `provider.default` in
-    /// the settings document, and to DeepSeek when nothing sets it
-    #[arg(short, long, value_enum)]
-    pub adapter: Option<AdapterChoice>,
+    /// Which model provider to talk to: mock, deepseek, or any name the
+    /// settings document declares under `llm.providers.<name>`. Defaults to
+    /// `provider.default` in the settings document, and to DeepSeek when
+    /// nothing sets it
+    #[arg(short, long, value_name = "NAME", value_parser = crate::named())]
+    pub adapter: Option<String>,
     /// Model id. Defaults to the adapter's first catalog entry.
     #[arg(short, long, value_name = "ID")]
     pub model: Option<String>,
@@ -218,14 +220,14 @@ pub async fn chat<W: Write>(
         },
         // A conversation with the mock adapter is a demonstration rather than
         // a use, so an unconfigured chat is DeepSeek.
-        AdapterChoice::Deepseek,
+        "deepseek",
         "chat.jsonl",
     )?;
 
     // As `run` refuses a prompt it will not send: a chat that cannot reach a
     // model must say so at the point the adapter was named, not after it has
     // written a journal holding no turns.
-    let (adapter, model) = crate::adapter(policy, settled.provider, settled.model.clone())?;
+    let (adapter, model) = crate::adapter(policy, &settled.provider, settled.model.clone())?;
 
     let opened = crate::session(
         settled.settings.clone(),

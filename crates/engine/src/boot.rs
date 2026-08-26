@@ -131,7 +131,12 @@ impl EngineConfig {
             presets: crate::preset::roster(&settings)?,
             retry: crate::retry::policy(&settings)?,
             provider_retry: crate::retry::provider_policies(&settings)?,
-            providers: base.providers,
+            // The one place a document's provider blocks become adapters, so
+            // every surface that boots from settings - `serve` on either
+            // carrier, `chat`, `run`, `config` - reaches the same routes.
+            // `EngineConfig::default` keeps the offline mock alone, which is
+            // what a fixture that never read a document still gets.
+            providers: Arc::new(crate::providers::ProviderSet::from_settings(&settings)?),
             tools: base.tools,
             // A document names no tools, so a composer's own factory is
             // carried through settings resolution untouched.
