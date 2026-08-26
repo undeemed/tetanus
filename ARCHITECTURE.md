@@ -466,6 +466,16 @@ the caller ([docs/interface-contract.md](docs/interface-contract.md) section 4.5
 The policy is a value that decides, not a loop that waits: it returns the delay instead of sleeping,
 which is what keeps its cases offline and free of a clock.
 
+A process being asked to stop closes its turns on the way out
+([crates/engine/src/agent.rs](crates/engine/src/agent.rs), `HarnessEngine::drain`): every running
+turn is interrupted at the next step boundary through the mechanism `agent.interrupt` already uses,
+and the drain waits, bounded, for them to close. `turn/end` then carries `shutdown` rather than
+`cancelled` - the same event to the engine, different facts to a reader, since one is a decision to
+respect and the other is a restart to go and look at. A clean exit therefore leaves nothing for
+crash repair to synthesize, and `interrupted` after a restart means the drain ran out of time
+([docs/interface-contract.md](docs/interface-contract.md) section 4.4.11). Which signal a
+deployment drains on, and the carrier that stops accepting connections, are the presentation lane's.
+
 A turn also carries the bounds a deployment set on it, rather than on one request
 ([crates/turn/src/guard.rs](crates/turn/src/guard.rs)): how long the whole turn may take, and how
 many times running the model may ask for the same thing. Both are absent by default. They are read

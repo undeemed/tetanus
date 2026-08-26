@@ -175,6 +175,24 @@ impl HarnessEngine {
         }
     }
 
+    /// Stop taking new work and close the turns already running (contract
+    /// section 4.4.11).
+    ///
+    /// The engine half of a shutdown: it interrupts every running turn at the
+    /// next step boundary and waits, bounded, for them to close, so a clean
+    /// exit leaves nothing for crash repair to synthesize. Answers how many
+    /// turns were still open when the budget ran out - zero for a drain that
+    /// finished.
+    ///
+    /// **Refusing new calls is the carrier's, not this method's.** Section
+    /// 4.4.11 says a stopping server closes the connection rather than
+    /// answering a "server is stopping" code, because adding one is a change
+    /// both lanes land together; a carrier that keeps accepting while this
+    /// runs would simply be starting turns the drain has already passed.
+    pub async fn drain(&self, budget: std::time::Duration) -> usize {
+        self.runtime.drain(budget).await
+    }
+
     pub fn sessions(&self) -> &Arc<SessionStore> {
         &self.sessions
     }

@@ -350,6 +350,14 @@ pub enum StopReason {
     /// Separate from [`StopReason::Repeated`] because the two need opposite
     /// answers: this one usually means a bigger budget or a smaller task.
     TimedOut,
+    /// The process was stopping and closed this turn on the way out
+    /// (`docs/interface-contract.md` section 4.4.11).
+    ///
+    /// Deliberately not [`StopReason::Cancelled`]: the same event to the
+    /// engine, different facts to a reader. Someone pressed stop, or a
+    /// deployment restarted underneath the turn - the first is a decision to
+    /// respect and the second is something to go and look at.
+    Shutdown,
     /// The model asked for the same thing more times in a row than the
     /// deployment allows (section 4.4.2, [`crate::guard`]).
     ///
@@ -379,6 +387,7 @@ impl StopReason {
             StopReason::Interrupted => "interrupted",
             StopReason::TimedOut => "timed-out",
             StopReason::Repeated => "repeated",
+            StopReason::Shutdown => "shutdown",
         }
     }
 }
