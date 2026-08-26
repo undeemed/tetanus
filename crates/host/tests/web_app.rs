@@ -403,3 +403,161 @@ fn quoted_after(text: &str, marker: &str) -> Vec<String> {
     }
     found
 }
+
+/// The durable event types the engine writes.
+///
+/// Two signals, because the codebase uses two conventions and a rule that saw
+/// only one would report a gap that is really a blind spot. A constant inside
+/// a `mod topic` block is the declared form; a string literal handed straight
+/// to `append` is the other. Method names are excluded by construction - those
+/// live in `mod method`, and a scan that swept them in would demand the page
+/// draw `tools/list`.
+fn durable_topics() -> BTreeSet<String> {
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+    let mut found = BTreeSet::new();
+    let mut stack = vec![crates];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                // A test's own fixtures are not the engine's vocabulary.
+                if path.file_name().is_some_and(|name| name == "tests") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let Ok(src) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                collect_topics(&src, &mut found);
+            }
+        }
+    }
+    assert!(
+        found.len() > 20,
+        "the topic scan stopped finding anything: {found:?}"
+    );
+    found
+}
+
+fn collect_topics(src: &str, found: &mut BTreeSet<String>) {
+    for (at, _) in src.match_indices("mod topic") {
+        let Some(open) = src[at..].find('{').map(|i| at + i + 1) else {
+            continue;
+        };
+        let mut depth = 1usize;
+        let mut end = open;
+        for (offset, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for line in src[open..end].lines() {
+            if line.contains("pub const") {
+                if let Some(topic) = topic_literal(line) {
+                    found.insert(topic);
+                }
+            }
+        }
+    }
+    for (at, _) in src.match_indices(".append") {
+        let rest = &src[at..];
+        let head: String = rest.chars().take(60).collect();
+        if let Some(topic) = topic_literal(&head) {
+            found.insert(topic);
+        }
+    }
+}
+
+/// The first `"family/name"` in a line, and nothing that is not one.
+fn topic_literal(line: &str) -> Option<String> {
+    let start = line.find('"')? + 1;
+    let end = start + line[start..].find('"')?;
+    let text = &line[start..end];
+    let (family, name) = text.split_once('/')?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
+    };
+    (ok(family) && ok(name)).then(|| text.to_string())
+}
+
+/// Durable types the page draws through the raw fallback rather than a view.
+///
+/// Being here is a decision, not a defect: §4.3.2 says a surface passes an
+/// unknown type through, and the raw rendering does exactly that. What it is
+/// not is an accident, which is the point of writing them down.
+const UNDRAWN: &[(&str, &str)] = &[
+    (
+        "workflow/start",
+        "the workflow family landed after the last pass; four types that want \
+         one view between them, showing a run's steps as they settle",
+    ),
+    ("workflow/step-start", "as above"),
+    ("workflow/step-end", "as above"),
+    ("workflow/end", "as above"),
+    (
+        "permission/preset",
+        "log-only intent - the preset a person chose - and worth a line on the \
+         transcript once the approval audit has somewhere to put it",
+    ),
+    (
+        "fs/mode",
+        "the filesystem knob, whose last value is the session's, exactly as \
+         `approval/policy` works; it belongs beside that pill",
+    ),
+];
+
+/// TC-WEB-10: every durable type the engine writes is drawn or listed.
+///
+/// The diff that found `question/asked` sitting undrawn for weeks while
+/// `questions.js`'s own header claimed it, and then the whole `compaction/*`
+/// family. Both were found by hand; this is the same comparison run by the
+/// suite. It cannot say a type is drawn *well* - only that the page has an
+/// opinion about the whole vocabulary rather than an accidental subset.
+#[test]
+fn the_page_accounts_for_every_durable_type_the_engine_writes() {
+    let page: String = scripts().into_iter().map(|(_, body)| body).collect();
+    let named: BTreeSet<String> = page
+        .match_indices('"')
+        .filter_map(|(at, _)| topic_literal(&page[at..]))
+        .collect();
+    let listed: BTreeSet<String> = UNDRAWN.iter().map(|(t, _)| t.to_string()).collect();
+    let topics = durable_topics();
+
+    let unaccounted: Vec<&String> = topics
+        .iter()
+        .filter(|t| !named.contains(*t) && !listed.contains(*t))
+        .collect();
+    assert!(
+        unaccounted.is_empty(),
+        "the engine writes these and the page says nothing about them - draw \
+         them, or add a line to UNDRAWN saying why not: {unaccounted:?}"
+    );
+
+    let stale: Vec<&String> = listed.iter().filter(|t| named.contains(*t)).collect();
+    assert!(
+        stale.is_empty(),
+        "these are listed as undrawn and the page now names them; drop them \
+         from UNDRAWN: {stale:?}"
+    );
+
+    let gone: Vec<&String> = listed.iter().filter(|t| !topics.contains(*t)).collect();
+    assert!(
+        gone.is_empty(),
+        "these are listed as undrawn and nothing writes them any more; drop \
+         them from UNDRAWN: {gone:?}"
+    );
+}
