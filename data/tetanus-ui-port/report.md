@@ -240,7 +240,7 @@ Both test surfaces this stage does not have, and inventing a stub to assert agai
 - **14, the picker starts what it picked.** There is no directory picker: this screen opens one session and does not choose a workspace. Upstream's picker is `ui-directory-picker-browse`, which is stage 3.
 - **15, the catalogue marks the current conversation by route and model.** There is no session catalogue - no sidebar, no session list. The model *is* shown, in the header bar, so half of the claim has a place to live; the route half needs a catalogue to be a claim about.
 
-**Both must come back with the surfaces they test.** They are listed in section 9 against the stages that reintroduce them.
+**Both must come back with the surfaces they test.** They are listed in section 10 against the stages that reintroduce them.
 
 ## 7. Coverage, measured
 
@@ -328,7 +328,7 @@ The first is the dependency-injection container and the whole-client-context har
 
 The second is a spec whose subject was not vendored - `input/machine.ts`, `skeleton/safari.ts` and so on are outside the conversation view's runtime closure. A spec for a file that is not here has nothing to assert against.
 
-**What that costs, said plainly:** the tool card renderers (`read-card`, `diff-card`, `search-card`, `terminal-card`, `web-card`, `tool-row`, `tool-call-tree`) and the conversation's own view specs are among the 41. Those components are still exercised - by `renderers.spec.tsx` and by `app.spec.tsx` driving a whole turn through them, which is what puts `ui-tool` at 56% and `ui-conversation` at 34% in the table above - but by our cases rather than theirs. Recovering upstream's own is stage 2 work and depends on whether we vendor their test runtime, which is the "track or fork" question in section 9.
+**What that costs, said plainly:** the tool card renderers (`read-card`, `diff-card`, `search-card`, `terminal-card`, `web-card`, `tool-row`, `tool-call-tree`) and the conversation's own view specs are among the 41. Those components are still exercised - by `renderers.spec.tsx` and by `app.spec.tsx` driving a whole turn through them, which is what puts `ui-tool` at 56% and `ui-conversation` at 34% in the table above - but by our cases rather than theirs. Recovering upstream's own is stage 2 work and depends on whether we vendor their test runtime, which is the "track or fork" question in section 10.
 
 Two edits were needed to make the 26 that did come across pass, and both are recorded in each file's header:
 
@@ -442,7 +442,46 @@ The brief offered to route the CI fix as its own PR ahead of this one. **It shou
 
 There **is** a separate PR worth routing, and it is a different one: fixing `web_app.rs`'s topic scan (section 6.3) so the *shipping* panel's guard stops under-reporting. That is a change to the live panel's tests and does not belong here.
 
-## 9. The staged plan
+## 9. The structural gate, and the one number that does not clear its floor
+
+`CONTRIBUTING.md` asks a change to hold **7000+** on `sentrux gate`, with **6200** as the floor. This branch reports **5000**, and that has to be said plainly rather than buried.
+
+```
+Quality:      7192 -> 5000
+Coupling:     0.37 -> 0.04
+Cycles:       0 -> 4
+Complex functions: 11 -> 28
+```
+
+**Every point of that drop is upstream's code.** `sentrux` scans `git ls-files`, and this branch commits 178 files of vendored React. Measured with the vendored directory out of the index and nothing else changed:
+
+```
+Quality:      7192 -> 7138
+Coupling:     0.37 -> 0.06
+Cycles:       0 -> 0
+Complex functions: unchanged
+✓ No degradation detected
+```
+
+Reproducible in three commands:
+
+```sh
+git rm -r --cached web/deepseek/upstream -q
+sentrux gate .
+git reset -q
+```
+
+So the code this branch *writes* costs 54 points and introduces no cycle, no god file and no complex function. The 2,192-point difference and all four cycles are structural facts about DeepSeek Harness, which this change is copying rather than authoring.
+
+`sentrux` has no ignore mechanism - `gate` takes a path and a `--save`, and nothing else - so there is no way to express "measure our code, record theirs" today. Three ways out, and **this is not the worker's call to make**:
+
+1. **Accept the number with this explanation**, as the coverage split in section 7 does: two numbers, never blended, each honest about what it measures.
+2. **Teach `sentrux` a vendored-path ignore**, which is the real fix and is a change to a tool outside this repository.
+3. **Keep `upstream/` out of git** and fetch it during the build. This is the worst of the three: it breaks the licence wiring (the copyright headers are what makes the copy compliant, and they have to exist in the tree a reader gets), and it makes the build depend on a checkout CI does not have.
+
+**Never run `sentrux gate --save`** to make this go away. That overwrites the fact every other branch is measured against, and a branch that saves its own numbers reports "no degradation" by construction.
+
+## 10. The staged plan
 
 Each stage is shippable on its own and each names the guards it brings back.
 
@@ -462,7 +501,7 @@ Two things to decide before stage 2, and both are cheap to get wrong later:
 1. **Do we track upstream, or fork?** `tools/vendor.py` assumes tracking - it recomputes the closure and preserves our two edits. Every stage that edits a vendored file makes tracking more expensive. Tracking is the right default while their code is moving; say so out loud before the edit count grows.
 2. **Where does `dist/` come from for a user who is not building?** Section 5.3. Only worth answering once the panel is chosen.
 
-## 10. What this port is not
+## 11. What this port is not
 
 Stated plainly so nobody reads more into a working screenshot than is there.
 
