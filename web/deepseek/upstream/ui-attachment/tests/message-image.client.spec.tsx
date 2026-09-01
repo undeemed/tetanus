@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
-import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment/brand.ts'
 import { ImageGallery, MessageImage } from '../MessageImage.tsx'
 import type { MessageImageLabels } from '../MessageImage.tsx'
 

@@ -1,7 +1,11 @@
 /* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
- * Vendored verbatim from deepseek-ai/deepseek-harness: packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
- * The full notice is web/deepseek/upstream/LICENSE. Unmodified
- * apart from this header. */
+ * Vendored from deepseek-ai/deepseek-harness: packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
+ * The full notice is web/deepseek/upstream/LICENSE.
+ *
+ * MODIFIED by the tetanus project: a barrel import was narrowed to the
+ * module that owns the symbol (see DEEP in tools/vendor.py). Same symbol,
+ * same behaviour; what changes is that the barrel's other exports are no
+ * longer dragged in behind it. */
 /**
  * Pure derivation of the terminal-card props from a frozen call slice: the
  * `card:'terminal'` render intent the shell tools declare arrives on the
@@ -12,7 +16,7 @@
  * are derived once.
  * @module
  */
-import { resolveWorkspacePath } from '@deepseek-ai/dsh-client-runtime/client'
+import { resolveWorkspacePath } from '@deepseek-ai/dsh-client-runtime/client/workspaces/path.ts'
 import type { TerminalBlockLabels, TerminalBlockProps } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallBlock } from './tool-call-model.ts'

@@ -39,8 +39,11 @@ ENTRIES = [
     "packages/client/ui-tool/src/client/tool/ToolCallTree.tsx",
     "packages/client/ui-tool/src/client/locale.ts",
     # Value-imported by a vendored spec rather than by a component, so the
-    # closure does not reach it on its own.
-    "packages/attachment/attachment/src/index.ts",
+    # closure does not reach it on its own. The brand module rather than the
+    # package barrel, for the reason DEEP states: the barrel is a Service
+    # registration that pulls in cordis and cosmokit, and the spec wants one
+    # 19-line branding helper.
+    "packages/attachment/attachment/src/brand.ts",
 ]
 
 # Theme tokens. Every vendored component styles itself from `--dsw-*` and
@@ -73,6 +76,20 @@ REFUSED = {
 # for a package that is not here has nothing to assert against.
 SPEC_PACKAGES = ["ui-primitives", "ui-conversation", "ui-tool", "ui-attachment"]
 
+# Upstream package name to the directory it is vendored into. The build's
+# alias table in `vite.config.ts` says the same thing; this copy is what lets
+# the tool decide whether a spec's imports will resolve before writing it.
+VENDORED_DIRS = {
+    "@deepseek-ai/dsh-attachment": "attachment",
+    "@deepseek-ai/dsh-client-runtime": "runtime",
+    "@deepseek-ai/dsh-client-ui-attachment": "ui-attachment",
+    "@deepseek-ai/dsh-client-ui-conversation": "ui-conversation",
+    "@deepseek-ai/dsh-client-ui-primitives": "ui-primitives",
+    "@deepseek-ai/dsh-client-ui-slots": "ui-slots",
+    "@deepseek-ai/dsh-client-ui-theme": "ui-theme",
+    "@deepseek-ai/dsh-client-ui-tool": "ui-tool",
+}
+
 # A spec is refused when it needs upstream's own test harness. `cordis` is the
 # dependency-injection container this panel replaces with a plain map, and
 # `dsh-client-test-runtime` assembles a whole client context; bringing either
@@ -95,6 +112,39 @@ REFUSED_SUITES = ["FishLogo", "BrandWordmark"]
 SPEC_TIMEOUT_FLOOR = 180_000
 TIMEOUT_OPTION = re.compile(r"\{\s*timeout:\s*([\d_]+)\s*\}")
 
+# A barrel is not a dependency; the symbol is.
+#
+# `terminal-card-model.ts` imports ONE function - `resolveWorkspacePath`, 17
+# lines with no imports of its own - from `@deepseek-ai/dsh-client-runtime/
+# client`. Followed to the barrel, that single symbol drags 56 files and about
+# 3,600 lines across six packages into the tree: upstream's session service,
+# workspace manager, projection store, their dependency-injection container
+# and its utility library. Measured, 0.7% of `runtime` and 5.8% of `cordis`
+# ever execute here, because this panel replaces every one of those with
+# `src/`.
+#
+# It is also what the structural gate reacts to. Vendoring that tail cost 1,043
+# quality points and three of the four dependency cycles; the packages the
+# conversation view actually draws with cost none - `ui-primitives` measured 90
+# points BETTER than not having it.
+#
+# So a barrel re-export is followed to the module that owns the symbol. One
+# entry, because there is one such import; a second would be a line here and a
+# sentence saying which symbol and why.
+# Keyed by (barrel specifier, symbol) and answering the specifier to rewrite
+# the import to. The rewrite is recorded in the file's own header, because a
+# changed import is a modification even when it changes no behaviour.
+DEEP: dict[tuple[str, str], str] = {
+    ("@deepseek-ai/dsh-client-runtime/client", "resolveWorkspacePath"):
+        "@deepseek-ai/dsh-client-runtime/client/workspaces/path.ts",
+    # The same shape one layer down: a vendored spec wants the `AttachmentId`
+    # branding helper, and the package barrel that re-exports it registers a
+    # cordis Service - so the barrel costs the container and its utility
+    # library for 19 lines of type branding.
+    ("@deepseek-ai/dsh-attachment", "AttachmentId"):
+        "@deepseek-ai/dsh-attachment/brand.ts",
+}
+
 # Value imports only. `import type` and `export type` are erased before
 # resolution, and following them is what turns a 175-file closure into a
 # 579-file one that never runs.
@@ -113,11 +163,38 @@ FROM_CLAUSE = re.compile(r"""\bfrom\s+['"]([^'"]+)['"]""")
 SIDE_EFFECT = re.compile(r"""(?:^|\n)\s*import\s+['"]([^'"]+)['"]""")
 DYNAMIC_IMPORT = re.compile(r"""\bimport\(\s*['"]([^'"]+)['"]\s*\)""")
 
-HEADER = (
+VERBATIM = (
     "/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.\n"
     " * Vendored verbatim from deepseek-ai/deepseek-harness: {rel}\n"
     " * The full notice is web/deepseek/upstream/LICENSE. Unmodified\n"
     " * apart from this header. */\n"
+)
+
+NARROWED = (
+    "/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.\n"
+    " * Vendored from deepseek-ai/deepseek-harness: {rel}\n"
+    " * The full notice is web/deepseek/upstream/LICENSE.\n"
+    " *\n"
+    " * MODIFIED by the tetanus project: a barrel import was narrowed to the\n"
+    " * module that owns the symbol (see DEEP in tools/vendor.py). Same symbol,\n"
+    " * same behaviour; what changes is that the barrel's other exports are no\n"
+    " * longer dragged in behind it. */\n"
+)
+
+
+class _Header:
+    """`HEADER.format(rel=..., narrowed=...)`, picking which text applies."""
+
+    @staticmethod
+    def format(rel: str, narrowed: bool = False) -> str:
+        return (NARROWED if narrowed else VERBATIM).format(rel=rel)
+
+
+HEADER = _Header
+
+
+NAMED_IMPORT = re.compile(
+    r"""(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]"""
 )
 
 
@@ -129,6 +206,36 @@ def specifiers(source: str) -> list[str]:
         + SIDE_EFFECT.findall(without_types)
         + DYNAMIC_IMPORT.findall(without_types)
     )
+
+
+def deepen(source: str) -> tuple[str, bool]:
+    """Rewrite every barrel import DEEP knows how to narrow.
+
+    Answers the source and whether anything changed. A barrel import naming two
+    symbols where only one is known keeps the barrel: narrowing it would leave
+    the other silently unresolved.
+    """
+    changed = False
+    for named, spec in NAMED_IMPORT.findall(TYPE_STATEMENT.sub("\n", source)):
+        symbols = [
+            piece.strip().split(" as ")[0].strip()
+            for piece in named.split(",")
+            if piece.strip() and not piece.strip().startswith("type ")
+        ]
+        if not symbols:
+            continue
+        deep = {DEEP.get((spec, symbol)) for symbol in symbols}
+        if len(deep) != 1 or None in deep:
+            continue
+        narrowed = deep.pop()
+        assert narrowed is not None
+        for quote in ("'", '"'):
+            if f"from {quote}{spec}{quote}" in source:
+                source = source.replace(
+                    f"from {quote}{spec}{quote}", f"from {quote}{narrowed}{quote}"
+                )
+                changed = True
+    return source, changed
 
 
 def packages(root: str) -> dict[str, str]:
@@ -200,6 +307,7 @@ def closure(root: str, pkgs: dict[str, str]) -> set[str]:
             continue
         with open(os.path.join(root, rel), encoding="utf-8", errors="ignore") as handle:
             source = handle.read()
+        source, _ = deepen(source)
         for spec in specifiers(source):
             found = resolve(spec, rel, root, pkgs)
             if found is not None:
@@ -272,11 +380,24 @@ def resolvable(source: str, spec_dir: str, out: str) -> bool:
     somebody has to remember to update.
     """
     for spec in specifiers(source):
-        if not spec.startswith("."):
+        if spec.startswith("."):
+            base = os.path.normpath(os.path.join(spec_dir, spec))
+        elif spec.startswith("@deepseek-ai/"):
+            # The vendored layout, which is the package name's last segment
+            # with the `dsh-client-`/`dsh-` prefix already stripped by the
+            # directory it landed in.
+            parts = spec.split("/")
+            landed_dir = VENDORED_DIRS.get("/".join(parts[:2]))
+            if landed_dir is None:
+                return False
+            base = os.path.join(landed_dir, *parts[2:])
+        else:
             continue
-        base = os.path.normpath(os.path.join(spec_dir, spec))
+        # A FILE, not a directory: `runtime/client` still exists as a folder
+        # after the barrel it named was narrowed away, so `exists` would call a
+        # spec resolvable whose import has nothing to load.
         if not any(
-            os.path.exists(os.path.join(out, base + end))
+            os.path.isfile(os.path.join(out, base + end))
             for end in ("", ".ts", ".tsx", "/index.ts", "/index.tsx")
         ):
             return False
@@ -315,6 +436,7 @@ def vendor_specs(root: str, out: str) -> tuple[int, list[str]]:
                 shorter = without_suite(body, suite)
                 edited = edited or shorter != body
                 body = shorter
+            body, _ = deepen(body)
             if not resolvable(body, f"{package}/tests", out):
                 refused.append(f"{rel}: its subject is outside the ported closure")
                 continue
@@ -345,8 +467,9 @@ def main() -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(os.path.join(root, rel), encoding="utf-8") as handle:
             body = handle.read()
+        body, narrowed = deepen(body)
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(HEADER.format(rel=rel) + body)
+            handle.write(HEADER.format(rel=rel, narrowed=narrowed) + body)
         written += 1
 
     with open(os.path.join(root, "LICENSE"), encoding="utf-8") as handle:

@@ -44,4 +44,5 @@ packages/client/ui-tool/tests/todo-row.client.spec.tsx: needs upstream's cordis/
 packages/client/ui-tool/tests/tool-call-tree.client.spec.tsx: needs upstream's cordis/test-runtime harness
 packages/client/ui-tool/tests/tool-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
 packages/client/ui-tool/tests/toolview-slot.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/toolview-type-chain.client.spec.tsx: its subject is outside the ported closure
 packages/client/ui-tool/tests/web-card.client.spec.tsx: needs upstream's cordis/test-runtime harness

@@ -10,7 +10,7 @@
 ## 2. The short version
 
 Upstream's conversation view now renders our journal.
-It took **175 vendored files** and **about 900 lines of our own adapter**, not the 66,900 lines the brief warned about, because the thing that makes their UI look enormous is type-only imports that never run.
+It took **94 vendored files** and **about 900 lines of our own adapter**, not the 66,900 lines the brief warned about, because the thing that makes their UI look enormous is type-only imports that never run.
 
 Two findings change the premise the brief was written on, and both are in section 4:
 their published npm packages **cannot be installed at all**, and the packages they publish are under a **different licence** from the source we were pointed at.
@@ -59,7 +59,7 @@ Putting it in TypeScript beside their types rather than in Rust behind a gateway
 | Packages `ui-conversation` reaches | 64 | dependency + peerDependency closure |
 | Files a naive import trace finds from `ChatView` | 220 (40,020 lines) | all imports followed |
 | Files `ChatView` actually **runs** | 55 (8,428 lines) | value imports only; `import type` erased |
-| Files the whole screen runs, with every node renderer | 175 | `web/deepseek/tools/vendor.py` |
+| Files the whole screen runs, with every node renderer | 94 (178 before the barrel trim, section 9.2) | `web/deepseek/tools/vendor.py` |
 | Our adapter | ~900 lines | `web/deepseek/src/` |
 
 **The 4x gap between rows three and four is the whole story of this port.**
@@ -282,7 +282,7 @@ The cases are not happy-path. What is exercised, by count: every branch of the f
 
 ### 7.2 Upstream's specs came with upstream's components
 
-**26 spec files, 521 cases, all passing** against the vendored copy.
+**25 spec files, 520 cases, all passing** against the vendored copy.
 `pnpm run test:upstream`, and `panel_port.rs::upstreams_own_specs_still_pass` runs it inside the gate.
 
 They are **not** held to a coverage threshold, and that is a decision with a reason rather than a shortcut: **upstream does not hold this code to one either.**
@@ -294,41 +294,33 @@ The code being ported *is* upstream's own coverage debt. Adopting a number they 
 ```
                   covered/total lines
 ui-attachment          89/    89   100.0%
+attachment              1/     1   100.0%
 ui-primitives        1521/  1598    95.2%
-apiproxy               11/    20    55.0%
 ui-tool               113/   202    55.9%
 ui-conversation       206/   600    34.3%
-cosmokit               43/   189    22.8%
-attachment              3/    21    14.3%
-cordis                 50/   868     5.8%
-llm                     2/    43     4.7%
-ui-slots                3/   163     1.8%
-session                 1/   131     0.8%
-runtime                16/  2386     0.7%
+runtime                 0/     5     0.0%
 -------------------------------------------
-TOTAL                2058/  6310    32.6%
+TOTAL                1930/  2495    77.4%
 ```
 
-**Read the shape, not the total.** The components the panel actually draws with are well covered - `ui-primitives` at 95%, `ui-attachment` at 100%, and `ui-tool`/`ui-conversation` in the middle because their own specs are among the 43 that could not come across.
+The first vendoring measured **32.6%** here, against 6,310 lines. The difference is not new tests: it is section 9.2's barrel trim removing 3,815 lines that were imported and never executed. A coverage figure that moves that far because code was *deleted* is the clearest evidence available that the deleted code was dead.
 
-The total is dragged down by four support packages - `runtime` (2,386 lines), `cordis` (868), `cosmokit` (189) and `session` (131) - which together are **56% of the denominator and almost none of the executed code**. They are in the tree because a vendored file imports them, not because the conversation view runs them: `runtime` is upstream's session service, workspace manager and projection store, and this panel replaces every one of those with `src/`. Rollup tree-shakes them out of the bundle; the closure tool cannot, because it resolves imports rather than executing them.
+`ui-conversation` at 34% and `ui-tool` at 56% are the two packages whose own specs are among the 44 that could not come across; what covers them is our `renderers.spec.tsx` and `app.spec.tsx`. `runtime` is now a single 17-line function reached only through a code path this panel's fixtures do not take.
 
-That is a real cost of the port and it is worth naming: **about 3,500 of the 6,310 vendored lines are reached by an import and barely executed.** Trimming them is possible - the closure could be computed from the bundle's module graph rather than from the import graph - and it is deliberately not done here, because the tool that computes the closure is what makes a refresh a copy rather than a merge, and making it cleverer before the panel is even chosen is optimising the wrong end.
-
-### 7.3 The 43 specs that could not come across, and why
+### 7.3 The 44 specs that could not come across, and why
 
 Written to `web/deepseek/upstream/SPECS-NOT-PORTED.txt` by `tools/vendor.py`, computed rather than listed, so a refresh cannot quietly widen it. Two reasons, both structural:
 
 | Count | Reason |
 | --- | --- |
 | 38 | needs `@deepseek-ai/cordis` or `@deepseek-ai/dsh-client-test-runtime` |
-| 5 | its subject is outside the ported closure |
+| 6 | its subject is outside the ported closure |
 
 The first is the dependency-injection container and the whole-client-context harness that this port exists to avoid: `src/renderers.tsx` replaces the container with a map, so a spec that assembles a cordis context has no context to assemble. Bringing them would mean vendoring the framework, which is the thing that made the naive port look like 103,000 lines.
 
 The second is a spec whose subject was not vendored - `input/machine.ts`, `skeleton/safari.ts` and so on are outside the conversation view's runtime closure. A spec for a file that is not here has nothing to assert against.
 
-**What that costs, said plainly:** the tool card renderers (`read-card`, `diff-card`, `search-card`, `terminal-card`, `web-card`, `tool-row`, `tool-call-tree`) and the conversation's own view specs are among the 41. Those components are still exercised - by `renderers.spec.tsx` and by `app.spec.tsx` driving a whole turn through them, which is what puts `ui-tool` at 56% and `ui-conversation` at 34% in the table above - but by our cases rather than theirs. Recovering upstream's own is stage 2 work and depends on whether we vendor their test runtime, which is the "track or fork" question in section 10.
+**What that costs, said plainly:** the tool card renderers (`read-card`, `diff-card`, `search-card`, `terminal-card`, `web-card`, `tool-row`, `tool-call-tree`) and the conversation's own view specs are among the 41. Those components are still exercised - by `renderers.spec.tsx` and by `app.spec.tsx` driving a whole turn through them, which is what puts `ui-tool` at 56% and `ui-conversation` at 34% in section 9.2's table - but by our cases rather than theirs. Recovering upstream's own is stage 2 work and depends on whether we vendor their test runtime, which is the "track or fork" question in section 10.
 
 Two edits were needed to make the 26 that did come across pass, and both are recorded in each file's header:
 
@@ -442,42 +434,87 @@ The brief offered to route the CI fix as its own PR ahead of this one. **It shou
 
 There **is** a separate PR worth routing, and it is a different one: fixing `web_app.rs`'s topic scan (section 6.3) so the *shipping* panel's guard stops under-reporting. That is a change to the live panel's tests and does not belong here.
 
-## 9. The structural gate, and the one number that does not clear its floor
+## 9. The structural gate: the anatomy of the drop, and what was recovered
 
-`CONTRIBUTING.md` asks a change to hold **7000+** on `sentrux gate`, with **6200** as the floor. This branch reports **5000**, and that has to be said plainly rather than buried.
+`CONTRIBUTING.md` asks a change to hold **7000+**, with **6200** as the floor.
+
+The first vendoring of this port scored **5000**, down 2,192, with four new dependency cycles.
+That is not a number to explain away, so it was taken apart. **1,910 points of it were an artefact of how the tree was vendored, and they are now recovered.**
+
+| | quality | cycles | complex fns | vendored files |
+| --- | --- | --- | --- | --- |
+| `master` baseline | 7192 | 0 | 11 | - |
+| first vendoring | **5000** | 4 | 28 | 178 |
+| after the trim below | **6910** | **0** | 18 | 94 |
+
+### 9.1 It is not a counting artefact, and that was the first thing tested
+
+The obvious hypothesis is that a Rust-shaped checker penalises a TypeScript tree simply for existing - that their files are being counted as our new code.
+**Measured, that is false, and the measurement is the reverse of what the hypothesis predicts.**
+
+Packages were added to the index one group at a time:
+
+| index contains | files | quality | cycles | complex fns |
+| --- | --- | --- | --- | --- |
+| our code only (including our own ~1,900 lines of TypeScript) | 742 | 7138 | 0 | 11 |
+| `+ ui-primitives` (40 source files, 129 paths) | 871 | **7228** | 0 | 18 |
+| `+ ui-attachment`, `attachment` | 887 | **7240** | 0 | 18 |
+| `+ ui-tool`, `ui-conversation`, `ui-slots` | 934 | 6045 | 1 | 19 |
+| `+ runtime` | 967 | 5250 | 3 | 26 |
+| `+ cordis`, `cosmokit`, `session`, `llm`, `apiproxy` | 990 | 5002 | 4 | 28 |
+
+Two things fall out of that table.
+
+**Volume is not the driver.** Adding 129 paths of `ui-primitives` *raised* the score by 90 points. Our own TypeScript - `src/` and `tests/`, about 1,900 lines - is inside the 7138 row and costs nothing. The checker is not reacting to the language or to the file count; it is reacting to structure, and upstream's best-structured package scores better than not having it.
+
+**The cost was concentrated in code the panel does not run.** The three rows that hurt are the slot-registry indirection (`ui-slots` ties `ui-conversation` and `ui-tool` into a cycle) and, far worse, `runtime` and the five support packages behind it.
+
+### 9.2 What was avoidable, and why it was there at all
+
+`runtime` was 33 files and 2,386 lines measured at **0.7% executed**. `cordis` was 868 lines at 5.8%. They are upstream's session service, workspace manager, projection store, dependency-injection container and its utility library - every one of which `src/` replaces.
+
+They were in the tree for one reason, and it is worth naming exactly because it is the kind of thing that looks like an unavoidable cost and is not:
+
+> `ui-tool/client/tool/models/terminal-card-model.ts` imports **one function**, `resolveWorkspacePath`, which is **17 lines with no imports of its own**, from the package *barrel* `@deepseek-ai/dsh-client-runtime/client`.
+
+Followed to the barrel, that single symbol drags 56 files and about 3,600 lines across six packages. A second instance of the same shape - a vendored spec wanting the 19-line `AttachmentId` branding helper through a barrel that registers a cordis Service - accounted for the rest.
+
+The fix is that a barrel is not a dependency; the symbol is. `tools/vendor.py` now narrows such an import to the module that owns the symbol, records the rewrite in that file's own header, and refuses a spec whose barrel no longer resolves. Two entries, each with the symbol named and the reason written down.
+
+**Result: 178 vendored source files to 94, six packages to four, 5000 to 6910, and four cycles to none.**
+
+The same trim is visible in the coverage figures, which is independent evidence that the removed code really was dead rather than merely untested:
+
+| | before the trim | after |
+| --- | --- | --- |
+| vendored lines measured | 6,310 | 2,495 |
+| vendored lines executed | 32.6% | **77.4%** |
 
 ```
-Quality:      7192 -> 5000
-Coupling:     0.37 -> 0.04
-Cycles:       0 -> 4
-Complex functions: 11 -> 28
+ui-attachment      89/  89  100.0%      attachment      1/   1  100.0%
+ui-primitives    1521/1598   95.2%      runtime         0/   5    0.0%
+ui-tool           113/ 202   55.9%
+ui-conversation   206/ 600   34.3%
+-----------------------------------------------------------------
+TOTAL            1930/2495   77.4%
 ```
 
-**Every point of that drop is upstream's code.** `sentrux` scans `git ls-files`, and this branch commits 178 files of vendored React. Measured with the vendored directory out of the index and nothing else changed:
+### 9.3 What is left, and whether it is avoidable
 
-```
-Quality:      7192 -> 7138
-Coupling:     0.37 -> 0.06
-Cycles:       0 -> 0
-Complex functions: unchanged
-✓ No degradation detected
-```
+**6910. Above the 6200 floor, 90 short of the 7000 hold, and still DEGRADED on exactly one line: complex functions 11 to 18.**
 
-Reproducible in three commands:
+Those seven functions were located by removing files one at a time. They are diffuse and they are all in code the panel draws with: two in the markdown renderer, two in the ANSI parser, the rest across the diff, search, terminal and read block renderers. Removing any single one moves quality by less than 15 points - inside the noise - so there is no file whose deletion buys the last 90.
 
-```sh
-git rm -r --cached web/deepseek/upstream -q
-sentrux gate .
-git reset -q
-```
+They are parsers and renderers. A markdown parser has a complex function because markdown is complex. **This part is inherent**: it is the price of rendering their conversation view rather than writing our own, and it cannot be paid down without either not having the feature or refactoring 8,000 lines of somebody else's code, which is a far larger and far riskier change than the port itself.
 
-So the code this branch *writes* costs 54 points and introduces no cycle, no god file and no complex function. The 2,192-point difference and all four cycles are structural facts about DeepSeek Harness, which this change is copying rather than authoring.
+### 9.4 The honest bottom line for the decision
 
-`sentrux` has no ignore mechanism - `gate` takes a path and a `--save`, and nothing else - so there is no way to express "measure our code, record theirs" today. Three ways out, and **this is not the worker's call to make**:
+- **Taking their conversation view costs about 280 quality points and 7 complex functions, permanently.** That is the real, irreducible number, and it is much smaller than the 2,192 the first attempt reported.
+- **It does not clear the bar.** 6910 fails the 7000 hold, and the single remaining violation is *complexity*, not coupling - so ruling A's exception does not apply and must not be claimed.
+- **It is not a counting artefact.** That was tested first and disproved: their best package improves the score.
+- **`sentrux` has no ignore mechanism**, so "measure ours, record theirs" cannot be expressed today even though that is what the coverage split in section 7 already does deliberately.
 
-1. **Accept the number with this explanation**, as the coverage split in section 7 does: two numbers, never blended, each honest about what it measures.
-2. **Teach `sentrux` a vendored-path ignore**, which is the real fix and is a change to a tool outside this repository.
-3. **Keep `upstream/` out of git** and fetch it during the build. This is the worst of the three: it breaks the licence wiring (the copyright headers are what makes the copy compliant, and they have to exist in the tree a reader gets), and it makes the build depend on a checkout CI does not have.
+So the captain's decision is not "is the port tidy" but a straight trade: **their conversation view, for 280 points and 7 complex functions in vendored parsers.** He ordered this believing it was a rebrand; it is a rebrand plus that. Whether it is worth it is his call, and nothing here should be merged on an exception that does not cover it.
 
 **Never run `sentrux gate --save`** to make this go away. That overwrites the fact every other branch is measured against, and a branch that saves its own numbers reports "no degradation" by construction.
 
