@@ -1,0 +1,13 @@
+/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
+ * Vendored verbatim from deepseek-ai/deepseek-harness: packages/client/ui-conversation/src/client/chat/TurnTailNodeView.module.css
+ * The full notice is web/deepseek/upstream/LICENSE. Unmodified
+ * apart from this header. */
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.actions {
+  margin-left: -6px;
+}

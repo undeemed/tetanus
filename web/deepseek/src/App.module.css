@@ -1,0 +1,152 @@
+/* The chrome around upstream's conversation view.
+ *
+ * Written against upstream's own `--dsw-*` design tokens
+ * (`upstream/ui-theme/styles/design-platform.css`) so the bar, the composer
+ * and the transcript answer one theme rather than two. Nothing here restyles
+ * a vendored component: a rule that reached into upstream's class names would
+ * break on the next refresh, and the hashed CSS-module names make it
+ * impossible by construction.
+ *
+ * The two `--dsh-*` custom properties are the exception, and they are not a
+ * restyle: `ChatView.module.css` reads them and upstream's `ConversationRoot`
+ * declares them. This panel mounts the view without that shell, so the
+ * declarations have to come from somewhere, and the values are upstream's own
+ * (ConversationRoot.module.css lines 22-24). Dropping them is what made the
+ * first working build render a full-bleed transcript with no column. */
+
+.root {
+  --dsh-chat-content-width: 748px;
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
+  --dsh-composer-side-clearance: 16px;
+
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-width: 0;
+  /* Upstream's components inherit the page font rather than each setting one,
+   * so the body has to state it or every message draws in the browser's
+   * default serif. */
+  font-family: var(--dsw-font-family);
+  font-size: 14px;
+  line-height: 1.55;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  flex: none;
+  min-width: 0;
+}
+
+.mark {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  flex: none;
+}
+
+.tagline {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  /* A narrow viewport drops the tagline before it pushes the health pill off
+   * the bar. TC-WEB-6's rule is that nothing pins a width a small screen
+   * cannot give, and a flex child needs `min-width: 0` to honour it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model,
+.health {
+  flex: none;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.health[data-state='open'] {
+  border-color: var(--dsw-alias-state-success-primary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.health[data-state='closed'] {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* The scrollport `ChatView` looks for. Naming it here is what puts the
+ * transcript in flow and this element in charge of overflow, which is the
+ * arrangement upstream's active conversation column uses. */
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  /* Centred on the same axis as the transcript, and capped at the same width,
+   * so the input and the messages share one edge. */
+  width: min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)), 100%);
+  margin: 0 auto;
+  padding: 12px var(--dsh-composer-side-clearance) 16px;
+  flex: none;
+  min-width: 0;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  font: inherit;
+  color: inherit;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.input:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.send,
+.stop {
+  flex: none;
+  font: inherit;
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  cursor: pointer;
+}
+
+.stop {
+  background: var(--dsw-alias-bg-layer-2);
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-primary);
+}
+
+.send:disabled {
+  background: var(--dsw-alias-button-primary-dimmed);
+  cursor: default;
+}

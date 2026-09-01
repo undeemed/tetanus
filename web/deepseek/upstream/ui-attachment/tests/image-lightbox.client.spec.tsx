@@ -1,0 +1,57 @@
+/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
+ * Vendored from deepseek-ai/deepseek-harness: packages/client/ui-attachment/tests/image-lightbox.client.spec.tsx
+ * The full notice is web/deepseek/upstream/LICENSE.
+ * Unmodified apart from this header and the relative import paths,
+ * which lost their `src/` segment when the sources were vendored one
+ * directory shallower. */
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { ImageLightbox } from '../ImageLightbox.tsx'
+
+afterEach(cleanup)
+
+const labels = { dialog: '原图预览', close: '关闭原图预览' }
+
+describe('ImageLightbox', () => {
+  it('focuses its close control, closes by button and Escape, and restores focus', () => {
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+    const onClose = vi.fn()
+    const view = render(<ImageLightbox src="blob:original" alt="原图" labels={labels} onClose={onClose} />)
+    const close = view.getByRole('button', { name: '关闭原图预览' })
+    expect(document.activeElement).toBe(close)
+    fireEvent.keyDown(window, { key: 'a' })
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.click(close)
+    expect(onClose).toHaveBeenCalledTimes(2)
+    view.unmount()
+    expect(document.activeElement).toBe(opener)
+    opener.remove()
+  })
+
+  it('tolerates a focus owner it cannot restore (no active element at mount)', () => {
+    // jsdom always reports body as the fallback active element; stub the
+    // element-less state a detached focus can leave.
+    Object.defineProperty(document, 'activeElement', { configurable: true, get: () => null })
+    try {
+      const view = render(<ImageLightbox src="blob:original" alt="原图" labels={labels} onClose={vi.fn()} />)
+      view.unmount()
+    } finally {
+      delete (document as { activeElement?: unknown }).activeElement
+    }
+  })
+
+  it('closes on a mask press but not on a press over the image', () => {
+    const onClose = vi.fn()
+    const view = render(<ImageLightbox src="blob:original" alt="原图" labels={labels} onClose={onClose} />)
+    fireEvent.mouseDown(view.getByRole('img'))
+    expect(onClose).not.toHaveBeenCalled()
+    const mask = document.querySelector('[aria-hidden="true"]') as HTMLElement
+    fireEvent.mouseDown(mask)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})

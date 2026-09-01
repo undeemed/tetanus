@@ -1,0 +1,78 @@
+<div class="_markdown_9a20e6">
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+          #text "ts"
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <div>
+      <pre class="shiki css-variables" style="background-color:var(--shiki-background);color:var(--shiki-foreground)" tabindex="0">
+        <code>
+          <span class="line">
+            <span style="color:var(--shiki-token-keyword)">
+              #text "const"
+            <span style="color:var(--shiki-token-constant)">
+              #text " answer"
+            <span style="color:var(--shiki-token-keyword)">
+              #text ":"
+            <span style="color:var(--shiki-token-constant)">
+              #text " number"
+            <span style="color:var(--shiki-token-keyword)">
+              #text " ="
+            <span style="color:var(--shiki-token-constant)">
+              #text " 42"
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <pre class="_plain_f307ab">
+      <code>
+        #text "no language"
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+          #text "unknown-lang"
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <pre class="_plain_f307ab">
+      <code>
+        #text "plain fallback"
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+          #text "ts"
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <div>
+      <pre class="shiki css-variables" style="background-color:var(--shiki-background);color:var(--shiki-foreground)" tabindex="0">
+        <code>
+          <span class="line">
+            <span style="color:var(--shiki-token-keyword)">
+              #text "const"
+            <span style="color:var(--shiki-token-constant)">
+              #text " withMeta"
+            <span style="color:var(--shiki-token-keyword)">
+              #text " ="
+            <span style="color:var(--shiki-token-constant)">
+              #text " true"
+  <pre>
+    <code>
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <pre class="_plain_f307ab">
+      <code>
+        #text "indented code block\nsecond line"

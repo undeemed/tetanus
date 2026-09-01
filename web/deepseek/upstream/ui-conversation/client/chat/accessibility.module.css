@@ -1,0 +1,12 @@
+/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
+ * Vendored verbatim from deepseek-ai/deepseek-harness: packages/client/ui-conversation/src/client/chat/accessibility.module.css
+ * The full notice is web/deepseek/upstream/LICENSE. Unmodified
+ * apart from this header. */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
