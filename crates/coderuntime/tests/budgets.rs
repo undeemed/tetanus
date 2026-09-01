@@ -72,9 +72,21 @@ async fn workers_reclaimed(runtime: &LocalRuntime) -> bool {
 /// Input: `while (true) { }` under a small fuel budget.
 /// Expected: a `timeout` naming the compute budget, inside the test's bound,
 /// and no live worker afterwards.
+///
+/// The wall clock is deliberately set out of reach rather than left at
+/// [`tight`]'s 300ms. Fuel and the wall clock are two independent budgets
+/// racing to stop the same loop, and this case names the *fuel* one: on a
+/// loaded box the evaluator is descheduled long enough for 300ms to elapse
+/// first, and the case failed reporting a wall-clock stop for a claim about
+/// compute. Raising the ceiling removes the race instead of widening it -
+/// the run is still bounded, by the 10s `tokio::time::timeout` below, so a
+/// regression in fuel accounting still fails this case rather than hanging it.
 #[tokio::test]
 async fn a_program_that_never_stops_is_stopped_and_its_worker_comes_back() {
-    let runtime = LocalRuntime::new(tight());
+    let runtime = LocalRuntime::new(Budget {
+        wall: Duration::from_secs(30),
+        ..tight()
+    });
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         runtime.run(RunRequest::new("while (true) { }")),
@@ -435,8 +447,12 @@ async fn a_binding_that_never_returns_is_bounded_and_named_as_the_reason() {
 async fn the_budgets_are_what_the_caller_set_not_what_the_program_asked_for() {
     let program = "let i = 0; while (i < 5000) { i = i + 1; } return i;";
 
+    // The wall clock is out of reach for the same reason TC-PORT-CODERT-15
+    // puts it there: this half asserts the program *completes*, so a 300ms
+    // ceiling firing under load would fail a claim that is about fuel.
     let generous = LocalRuntime::new(Budget {
         fuel: 200_000,
+        wall: Duration::from_secs(30),
         ..tight()
     });
     assert_eq!(
@@ -450,10 +466,22 @@ async fn the_budgets_are_what_the_caller_set_not_what_the_program_asked_for() {
 
     let mean = LocalRuntime::new(Budget {
         fuel: 500,
+        wall: Duration::from_secs(30),
         ..tight()
     });
     let starved = mean.run(RunRequest::new(program)).await.expect("ran");
     assert_eq!(starved.kind(), Some(FailureKind::Timeout));
+    // `Timeout` is the kind for both budgets, so the kind alone would pass
+    // against a runtime that stopped this on the wall clock instead - which is
+    // not what "the smaller budget fails" claims. Name the budget.
+    assert!(
+        starved
+            .error
+            .as_ref()
+            .is_some_and(|failure| failure.message.contains("compute budget")),
+        "the starved run must stop on fuel, not on the clock: {:?}",
+        starved.error
+    );
     assert_eq!(mean.budget().fuel, 500, "the budget is the runtime's");
 }
 

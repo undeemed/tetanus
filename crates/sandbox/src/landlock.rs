@@ -31,7 +31,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
-use crate::policy::{Enforcement, Mode, Network, Policy};
+use crate::policy::{Enforcement, Network, Policy};
 use crate::{Confinement, SandboxError, Support};
 
 // The three Landlock system calls, by number. They have no libc wrappers.
@@ -142,8 +142,18 @@ pub fn abi_version() -> Result<u32, SandboxError> {
     if answered > 0 {
         return Ok(answered as u32);
     }
-    let errno = std::io::Error::last_os_error();
-    Err(SandboxError::Unavailable {
+    Err(unavailable(std::io::Error::last_os_error()))
+}
+
+/// Why this kernel offers no Landlock, in the words an operator can act on.
+///
+/// Separated from the syscall so the three answers can be asserted on a host
+/// that has Landlock. Every machine in this fleet does, so inside
+/// [`abi_version`] this mapping was unreachable and untested - and it is the
+/// text an operator reads when confinement is unavailable, which is exactly
+/// when nobody wants it to be wrong.
+fn unavailable(errno: std::io::Error) -> SandboxError {
+    SandboxError::Unavailable {
         backend: "landlock",
         why: match errno.raw_os_error() {
             Some(libc::ENOSYS) => {
@@ -158,22 +168,32 @@ pub fn abi_version() -> Result<u32, SandboxError> {
             }
             _ => format!("the kernel refused a Landlock version query: {errno}"),
         },
-    })
+    }
 }
 
 /// What this host can enforce, and how completely.
 pub fn support() -> Result<Support, SandboxError> {
-    let abi = abi_version()?;
-    Ok(Support {
+    Ok(support_at(abi_version()?))
+}
+
+/// What a kernel speaking `abi` can enforce.
+///
+/// Taken as an argument rather than probed, because the interesting values are
+/// the ones this machine is not: a host at ABI 1 governs no truncation and no
+/// TCP, and the refusal that depends on it ([`verdict`]) is unreachable on
+/// any modern kernel. A function that probes cannot be asked about a kernel it
+/// is not running on; this one can.
+fn support_at(abi: u32) -> Support {
+    Support {
         backend: "landlock",
         abi: Some(abi),
         // Everything below ABI 4 cannot govern TCP at all; that only matters
         // for a policy that asks, so the judgement is made per policy in
-        // `prepare` rather than declared here.
+        // `verdict` rather than declared here.
         governs_network: abi >= 4,
         governs_truncate: abi >= 3,
         governs_ioctl: abi >= 5,
-    })
+    }
 }
 
 /// The handled-access sets for one kernel: everything it knows about, so
@@ -210,28 +230,7 @@ pub fn prepare(policy: &Policy) -> Result<Confinement, SandboxError> {
     let support = support()?;
     let abi = support.abi.unwrap_or(0);
 
-    // A policy that asks for something this kernel cannot govern is refused
-    // unless the caller said it would accept less. This is the degraded-kernel
-    // path: loud at the boundary, never a quiet downgrade.
-    let mut missing: Vec<&'static str> = Vec::new();
-    if policy.network_policy() == Network::Deny && !support.governs_network {
-        missing.push("network denial (needs Landlock ABI 4)");
-    }
-    if !support.governs_truncate {
-        missing.push("truncation of an existing file (needs Landlock ABI 3)");
-    }
-    let enforcement = if missing.is_empty() {
-        Enforcement::Full
-    } else {
-        Enforcement::Partial
-    };
-    if enforcement == Enforcement::Partial && !policy.accepts_partial() {
-        return Err(SandboxError::Degraded {
-            backend: "landlock",
-            abi,
-            missing: missing.join(", "),
-        });
-    }
+    let enforcement = verdict(&support, policy)?;
 
     let (handled_fs, handled_net) = handled(abi, policy.network_policy());
     let ruleset = create_ruleset(abi, handled_fs, handled_net)?;
@@ -264,6 +263,35 @@ pub fn prepare(policy: &Policy) -> Result<Confinement, SandboxError> {
     })
 }
 
+/// How completely `support` can enforce `policy`, or the refusal to try.
+///
+/// What the kernel cannot govern, and whether the caller said in writing that
+/// it would accept less: one decision, so one function. A policy asking for
+/// more than this kernel has is refused loud at the boundary, never downgraded
+/// quietly. Split out of [`prepare`] because inside it that refusal is
+/// reachable only by running on an old kernel - so on this fleet, and on CI,
+/// it was never once executed.
+fn verdict(support: &Support, policy: &Policy) -> Result<Enforcement, SandboxError> {
+    let mut missing: Vec<&'static str> = Vec::new();
+    if policy.network_policy() == Network::Deny && !support.governs_network {
+        missing.push("network denial (needs Landlock ABI 4)");
+    }
+    if !support.governs_truncate {
+        missing.push("truncation of an existing file (needs Landlock ABI 3)");
+    }
+    if missing.is_empty() {
+        return Ok(Enforcement::Full);
+    }
+    if policy.accepts_partial() {
+        return Ok(Enforcement::Partial);
+    }
+    Err(SandboxError::Degraded {
+        backend: "landlock",
+        abi: support.abi.unwrap_or(0),
+        missing: missing.join(", "),
+    })
+}
+
 /// Whether a granted root has to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Requirement {
@@ -286,13 +314,7 @@ fn create_ruleset(abi: u32, handled_fs: u64, handled_net: u64) -> Result<OwnedFd
         handled_access_fs: handled_fs,
         handled_access_net: handled_net,
     };
-    // Before ABI 4 the struct had no network field, and passing the larger
-    // size to an older kernel is E2BIG.
-    let size = if abi >= 4 {
-        std::mem::size_of::<RulesetAttr>()
-    } else {
-        std::mem::size_of::<u64>()
-    };
+    let size = attr_size(abi);
     // Safety: `attr` outlives the call, `size` describes exactly the prefix of
     // it this ABI defines, and the flags are zero as the kernel requires for a
     // real ruleset.
@@ -306,6 +328,21 @@ fn create_ruleset(abi: u32, handled_fs: u64, handled_net: u64) -> Result<OwnedFd
     }
     // Safety: the kernel returned a fresh descriptor this call now owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// How much of [`RulesetAttr`] this ABI defines.
+///
+/// Before ABI 4 the struct had no network field, and passing the larger size
+/// to an older kernel is `E2BIG` - a refusal to create any ruleset at all,
+/// which on a host that could have been confined is the worst outcome
+/// available. Separated so both sides of the boundary are asserted without an
+/// old kernel to run on.
+fn attr_size(abi: u32) -> usize {
+    if abi >= 4 {
+        std::mem::size_of::<RulesetAttr>()
+    } else {
+        std::mem::size_of::<u64>()
+    }
 }
 
 /// Grant `rights` beneath `path`.
@@ -427,14 +464,424 @@ pub fn confine_current_thread(policy: &Policy) -> Result<Enforcement, SandboxErr
     Ok(enforcement)
 }
 
-/// The mode a policy asks for, as a sentence for a diagnostic.
-pub fn described(policy: &Policy) -> String {
-    match policy.mode() {
-        Mode::ReadOnly => "read-only".to_string(),
-        Mode::WorkspaceWrite => format!(
-            "workspace-write under {}",
-            policy.workspace_root().display()
-        ),
-        Mode::DangerFullAccess => "unconfined".to_string(),
+#[cfg(test)]
+mod tests {
+    //! Test Design Specification: the Landlock backend's kernel-dependent
+    //! decisions, asked of every ABI from one host.
+    //!
+    //! Features under test: the ABI-to-capability mapping, the degraded-kernel
+    //! refusal, the syscall struct size, and the unavailability diagnostic.
+    //!
+    //! Approach and why it is not the integration suite's. Every one of these
+    //! decisions turns on the ABI level of the running kernel, and this fleet -
+    //! and the CI runner - run kernels capable enough that
+    //! `crates/sandbox/tests/upstream_sandbox.rs` TC-PORT-SANDBOX-7 takes its
+    //! "this kernel can govern it" early return. Measured on 2026-09-01, that
+    //! left the whole refusal path at zero coverage: both `verdict` pushes,
+    //! `Enforcement::Partial`, `SandboxError::Degraded`, and
+    //! `Policy::accepts_partial` were never once executed by the suite. The
+    //! functions here take the ABI and the support as arguments precisely so
+    //! that a host cannot decide what gets tested.
+    //!
+    //! These are the *decisions*. The kernel is still asked to enforce them in
+    //! the integration suite, which is the only place that can prove a denial
+    //! is real - a policy object asserting about itself proves nothing, which
+    //! is the rule `ARCHITECTURE.md` §4.10 states.
+    //!
+    //! Environmental needs: none required. The decision cases make no syscall
+    //! at all; TC-SANDBOX-ABI-10 through -12 do touch the kernel - one confines
+    //! a thread of its own, two build a real ruleset so that a refusal is the
+    //! path's and not the ruleset's - and those report themselves skipped on a
+    //! host without Landlock rather than passing on nothing.
+    //!
+    //! Pass criteria: each case's stated expected value exactly.
+    //! Fail criteria: any other value, or a panic.
+
+    use super::*;
+    use crate::policy::Mode;
+
+    /// TC-SANDBOX-ABI-1: every capability flips on at its own ABI and not one
+    /// level earlier.
+    ///
+    /// The failure this prevents is an off-by-one in a security capability
+    /// table: a host at ABI 3 believed to govern TCP denies nothing and says
+    /// it denies everything. Both sides of every boundary are asked, which is
+    /// what makes `>=` distinguishable from `>`.
+    ///
+    /// Input: ABI 0 through 6.
+    /// Expected: each flag false strictly below its arrival level and true at
+    /// and above it.
+    #[test]
+    fn each_capability_arrives_at_its_own_abi_and_not_before() {
+        for abi in 0..=6u32 {
+            let support = support_at(abi);
+            assert_eq!(support.backend, "landlock");
+            assert_eq!(support.abi, Some(abi), "the level is reported as given");
+            assert_eq!(support.governs_truncate, abi >= 3, "truncate at ABI {abi}");
+            assert_eq!(support.governs_network, abi >= 4, "network at ABI {abi}");
+            assert_eq!(support.governs_ioctl, abi >= 5, "ioctl at ABI {abi}");
+        }
+    }
+
+    /// TC-SANDBOX-ABI-2: an ABI-1 kernel cannot govern truncation, and a
+    /// policy that did not accept less is refused rather than downgraded.
+    ///
+    /// This is the case that could not previously exist. It is the quiet
+    /// failure the crate's own module docs name: a deployment moves to an
+    /// older kernel, the policy stops being enforceable, and the run still
+    /// works so nothing says so.
+    ///
+    /// Input: `workspace-write`, network allowed, against ABI 1 and ABI 2.
+    /// Expected: `Degraded` naming the backend, the ABI, and truncation.
+    #[test]
+    fn a_kernel_below_abi_3_refuses_a_policy_that_did_not_accept_less() {
+        let policy = Policy::new(Mode::WorkspaceWrite, "/work");
+        for abi in [0, 1, 2] {
+            let refused = verdict(&support_at(abi), &policy)
+                .expect_err("a kernel that cannot govern truncation must refuse");
+            let SandboxError::Degraded {
+                backend,
+                abi: said,
+                missing,
+            } = refused
+            else {
+                panic!("the refusal must be `Degraded`, got {refused:?}");
+            };
+            assert_eq!(backend, "landlock");
+            assert_eq!(said, abi, "the refusal names the ABI it measured");
+            assert!(
+                missing.contains("truncation"),
+                "the refusal names what is missing: {missing}"
+            );
+            assert!(
+                missing.contains("ABI 3"),
+                "and what would fix it: {missing}"
+            );
+        }
+    }
+
+    /// TC-SANDBOX-ABI-3: below ABI 4 a network denial is named as missing too,
+    /// and both shortfalls are reported together.
+    ///
+    /// One refusal listing one of two missing capabilities would send an
+    /// operator to fix half the problem and meet the same refusal again.
+    ///
+    /// Input: `workspace-write` denying the network, at ABI 3 (truncation
+    /// arrived, TCP has not) and at ABI 1 (neither has).
+    /// Expected: ABI 3 names only the network; ABI 1 names both.
+    #[test]
+    fn a_refusal_names_every_missing_capability_not_the_first() {
+        let strict = Policy::new(Mode::WorkspaceWrite, "/work").network(Network::Deny);
+
+        let at_three = refusal(3, &strict);
+        assert!(at_three.contains("network denial"), "{at_three}");
+        assert!(
+            !at_three.contains("truncation"),
+            "ABI 3 governs truncation, so it is not missing: {at_three}"
+        );
+
+        let at_one = refusal(1, &strict);
+        assert!(at_one.contains("network denial"), "{at_one}");
+        assert!(
+            at_one.contains("truncation"),
+            "neither capability exists, so both are named: {at_one}"
+        );
+    }
+
+    /// What `verdict` says is missing when it refuses `policy` at `abi`.
+    fn refusal(abi: u32, policy: &Policy) -> String {
+        match verdict(&support_at(abi), policy) {
+            Err(SandboxError::Degraded { missing, .. }) => missing,
+            other => panic!("ABI {abi} must refuse this policy, got {other:?}"),
+        }
+    }
+
+    /// TC-SANDBOX-ABI-4: a policy that allows the network is not refused for
+    /// TCP it never asked to deny.
+    ///
+    /// The complement of TC-SANDBOX-ABI-3, and the boundary from the other
+    /// side: a shortfall computed from the kernel alone would refuse every
+    /// policy on an old host, including the ones it can serve completely.
+    ///
+    /// Input: `workspace-write` with `Network::Allow` at ABI 3 and ABI 5.
+    /// Expected: nothing missing at either, and `Full` enforcement.
+    #[test]
+    fn a_policy_that_does_not_deny_the_network_is_not_refused_for_tcp() {
+        let relaxed = Policy::new(Mode::WorkspaceWrite, "/work").network(Network::Allow);
+        for abi in [3, 4, 5, 6] {
+            assert_eq!(
+                verdict(&support_at(abi), &relaxed)
+                    .unwrap_or_else(|why| panic!("ABI {abi} governs all this asks: {why}")),
+                Enforcement::Full
+            );
+        }
+    }
+
+    /// TC-SANDBOX-ABI-5: accepting partial enforcement in writing converts the
+    /// refusal into `Partial`, and never into `Full`.
+    ///
+    /// Reporting `Full` here would be the single worst outcome in this crate:
+    /// a caller that asked whether the boundary was real, and was told yes by
+    /// a kernel that cannot make it real.
+    ///
+    /// Input: the ABI-1 policy of TC-SANDBOX-ABI-2, with
+    /// `accept_partial_enforcement`.
+    /// Expected: `Ok(Partial)` - not an error, and not `Full`.
+    #[test]
+    fn accepting_less_in_writing_yields_partial_and_never_full() {
+        let accepted = Policy::new(Mode::WorkspaceWrite, "/work").accept_partial_enforcement();
+        assert!(accepted.accepts_partial());
+
+        let enforcement = verdict(&support_at(1), &accepted)
+            .expect("partial enforcement was accepted in writing");
+        assert_eq!(
+            enforcement,
+            Enforcement::Partial,
+            "a kernel that cannot govern truncation must never report a full boundary"
+        );
+    }
+
+    /// TC-SANDBOX-ABI-6: the ruleset attribute is sized to the ABI, because
+    /// the larger shape is `E2BIG` on an older kernel.
+    ///
+    /// Input: ABI 3 and ABI 4.
+    /// Expected: one `u64` below 4, the whole struct at and above it, and the
+    /// two sizes actually differ - a struct that gained no field would make
+    /// this case pass while proving nothing.
+    #[test]
+    fn the_ruleset_attribute_is_sized_to_the_abi() {
+        assert!(
+            attr_size(4) > attr_size(3),
+            "the network field has to make the ABI-4 shape larger, or this \
+             boundary is not a boundary"
+        );
+        for abi in 0..=3 {
+            assert_eq!(attr_size(abi), std::mem::size_of::<u64>(), "ABI {abi}");
+        }
+        for abi in 4..=6 {
+            assert_eq!(
+                attr_size(abi),
+                std::mem::size_of::<RulesetAttr>(),
+                "ABI {abi}"
+            );
+        }
+    }
+
+    /// TC-SANDBOX-ABI-7: the handled-access set only ever grows with the ABI,
+    /// and network rights are handled only when the policy denies them.
+    ///
+    /// Deny-by-default is the whole mechanism: a right the ruleset does not
+    /// *handle* is a right the kernel does not govern, so a handled set that
+    /// shrank as the ABI rose would silently un-govern an effect. The
+    /// monotonicity is asserted rather than the exact bits, because the bits
+    /// are the kernel's to name and the ordering is this function's to keep.
+    ///
+    /// Input: every ABI 1..=6 under both network decisions.
+    /// Expected: the filesystem set is a superset of every lower ABI's; TCP
+    /// rights are handled from ABI 4 under `Deny` and never under `Allow`.
+    #[test]
+    fn the_handled_set_grows_with_the_abi_and_tcp_only_when_denied() {
+        let mut previous_fs = 0u64;
+        for abi in 1..=6u32 {
+            let (fs, net) = handled(abi, Network::Allow);
+            assert_eq!(
+                fs & previous_fs,
+                previous_fs,
+                "ABI {abi} handles less than ABI {} did, which un-governs an effect",
+                abi - 1
+            );
+            previous_fs = fs;
+            assert_eq!(net, 0, "ABI {abi}: an allowed network handles no TCP right");
+
+            let (denied_fs, denied_net) = handled(abi, Network::Deny);
+            assert_eq!(
+                denied_fs, fs,
+                "the network decision must not move the fs set"
+            );
+            assert_eq!(
+                denied_net,
+                if abi >= 4 { net::ALL } else { 0 },
+                "ABI {abi}: TCP is handled from 4 and cannot be handled before it"
+            );
+        }
+        // The specific bits the ABI table promises, from both sides.
+        assert_eq!(handled(1, Network::Allow).0 & access::REFER, 0);
+        assert_eq!(handled(2, Network::Allow).0 & access::REFER, access::REFER);
+        assert_eq!(handled(2, Network::Allow).0 & access::TRUNCATE, 0);
+        assert_eq!(
+            handled(3, Network::Allow).0 & access::TRUNCATE,
+            access::TRUNCATE
+        );
+        assert_eq!(handled(4, Network::Allow).0 & access::IOCTL_DEV, 0);
+        assert_eq!(
+            handled(5, Network::Allow).0 & access::IOCTL_DEV,
+            access::IOCTL_DEV
+        );
+    }
+
+    /// TC-SANDBOX-ABI-8: the truncate right is granted exactly when the kernel
+    /// knows it.
+    ///
+    /// Granting a bit an ABI does not define is `EINVAL` from `add_rule`,
+    /// which fails the whole `prepare` - so this boundary decides whether an
+    /// old host is confined or refused outright.
+    ///
+    /// Input: ABI 0..=6.
+    /// Expected: zero below 3, the truncate bit at and above it.
+    #[test]
+    fn the_truncate_right_is_granted_exactly_when_the_kernel_knows_it() {
+        for abi in 0..=2 {
+            assert_eq!(truncate_bit(abi), 0, "ABI {abi} has no truncate right");
+        }
+        for abi in 3..=6 {
+            assert_eq!(truncate_bit(abi), access::TRUNCATE, "ABI {abi}");
+        }
+    }
+
+    /// TC-SANDBOX-ABI-9: an unavailable Landlock says which of the three
+    /// reasons it is, in words that name the fix.
+    ///
+    /// An operator reading this line is already in the failure case, and the
+    /// three causes have three different remedies: rebuild the kernel, change
+    /// a boot parameter, or read the errno. A single generic sentence sends
+    /// all three to the wrong place. This mapping was unreachable on any host
+    /// that has Landlock, which is every host in this fleet.
+    ///
+    /// Input: `ENOSYS`, `EOPNOTSUPP`, and an unrelated errno.
+    /// Expected: three distinct messages, each naming its own remedy, all
+    /// reported as `Unavailable` from the `landlock` backend.
+    #[test]
+    fn an_unavailable_landlock_names_which_reason_it_is() {
+        let cases = [
+            (libc::ENOSYS, "CONFIG_SECURITY_LANDLOCK", "5.13"),
+            (libc::EOPNOTSUPP, "lsm=", "boot parameter"),
+        ];
+        for (errno, must_name, also) in cases {
+            let SandboxError::Unavailable { backend, why } =
+                unavailable(std::io::Error::from_raw_os_error(errno))
+            else {
+                panic!("errno {errno} must report the backend unavailable");
+            };
+            assert_eq!(backend, "landlock");
+            assert!(why.contains(must_name), "errno {errno} said: {why}");
+            assert!(why.contains(also), "errno {errno} said: {why}");
+        }
+
+        // Anything else carries the errno through rather than guessing.
+        let SandboxError::Unavailable { why, .. } =
+            unavailable(std::io::Error::from_raw_os_error(libc::EPERM))
+        else {
+            panic!("an unexpected errno is still an unavailable backend");
+        };
+        assert!(
+            why.contains("refused a Landlock version query"),
+            "an unrecognised errno is reported as itself: {why}"
+        );
+        assert!(
+            !why.contains("CONFIG_SECURITY_LANDLOCK"),
+            "and is not misattributed to a cause it is not: {why}"
+        );
+    }
+
+    /// TC-SANDBOX-ABI-10: an unconfining policy asks the kernel for nothing.
+    ///
+    /// Input: `danger-full-access` through `confine_current_thread`.
+    /// Expected: `Full` - the boundary the caller asked for is the absence of
+    /// one, and it is completely enforced - with no ruleset created. Run on a
+    /// thread of its own because restriction is one-way and would otherwise
+    /// confine every case that followed.
+    #[test]
+    fn an_unconfining_policy_restricts_nothing_and_reports_full() {
+        let answered =
+            std::thread::spawn(|| confine_current_thread(&Policy::danger_full_access("/work")))
+                .join()
+                .expect("the thread finished");
+        assert_eq!(
+            answered.expect("an unconfined policy cannot fail"),
+            Enforcement::Full
+        );
+    }
+
+    /// TC-SANDBOX-ABI-11: a granted root whose spelling contains a NUL is
+    /// refused by name, not passed to the kernel.
+    ///
+    /// A path with an interior NUL cannot become a `CString`, and the failure
+    /// mode this prevents is silence: an early `return Ok(())` would drop the
+    /// grant and confine a run more tightly than its policy said, which looks
+    /// like a broken command rather than a rejected path.
+    ///
+    /// Input: a writable root containing a NUL byte.
+    /// Expected: `SandboxError::Path` quoting the path and saying why.
+    #[test]
+    #[cfg(unix)]
+    fn a_granted_root_containing_a_nul_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let hostile = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/a\0b"));
+
+        // A real ruleset, so the refusal is the path's and not the ruleset's.
+        let Some(ruleset) = ruleset_or_skip() else {
+            return;
+        };
+
+        let refused = allow(&ruleset, &hostile, access::READ, Requirement::Required)
+            .expect_err("a path with an interior NUL cannot be granted");
+        let SandboxError::Path { path, why } = refused else {
+            panic!("the refusal must name the path, got {refused:?}");
+        };
+        assert!(path.contains("work"), "the refusal quotes the path: {path}");
+        assert!(why.contains("null byte"), "and says why: {why}");
+    }
+
+    /// TC-SANDBOX-ABI-12: an absent root is optional or fatal according to its
+    /// requirement, and granting no rights touches nothing at all.
+    ///
+    /// The two requirements exist for two real cases - a `TMPDIR` that is
+    /// per-user and may not exist, versus `/` which must - and collapsing them
+    /// either fails every run on a host without a `TMPDIR` or silently skips a
+    /// root the policy depended on. The zero-rights guard belongs with them
+    /// because `truncate_bit` returns zero below ABI 3, so a caller composes an
+    /// empty right set without meaning to, and an empty `path_beneath` rule is
+    /// `EINVAL` - a `prepare` failing with nothing wrong with it.
+    ///
+    /// Input: one path that does not exist, under both requirements and with
+    /// no rights.
+    /// Expected: `Ok` for `Optional`; `SandboxError::Path` naming the path for
+    /// `Required`; and `Ok` for no rights even under `Required`, which can only
+    /// mean the guard returned before the `open`.
+    #[test]
+    fn an_absent_root_is_optional_or_fatal_and_no_rights_touches_nothing() {
+        let Some(ruleset) = ruleset_or_skip() else {
+            return;
+        };
+        let absent = std::path::Path::new("/nonexistent-tetanus-sandbox-probe");
+        assert!(!absent.exists(), "the fixture depends on this being absent");
+
+        allow(&ruleset, absent, access::READ, Requirement::Optional)
+            .expect("a root that is not there yet grants nothing and is not a fault");
+
+        allow(&ruleset, absent, 0, Requirement::Required)
+            .expect("no rights is nothing to grant, so the path is never opened");
+
+        let refused = allow(&ruleset, absent, access::READ, Requirement::Required)
+            .expect_err("a required root that cannot be opened is a fault");
+        let SandboxError::Path { path, why } = refused else {
+            panic!("the refusal must name the path, got {refused:?}");
+        };
+        assert!(path.contains("nonexistent-tetanus-sandbox-probe"));
+        assert!(why.contains("could not be opened"), "{why}");
+    }
+
+    /// A real ruleset, or `None` after reporting the case skipped.
+    ///
+    /// The cases that call `allow` need one so a refusal is the path's and not
+    /// the ruleset's, and a host without Landlock cannot make one.
+    fn ruleset_or_skip() -> Option<OwnedFd> {
+        let Ok(abi) = abi_version() else {
+            eprintln!("skipped: no Landlock on this host, so there is no ruleset to add a rule to");
+            return None;
+        };
+        Some(
+            create_ruleset(abi, handled(abi, Network::Allow).0, 0).expect("a ruleset for the test"),
+        )
     }
 }

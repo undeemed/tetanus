@@ -6,3 +6,7 @@ __pycache__/
 # Seeds a failing proptest writes. A real counterexample belongs in a case,
 # not in a file the next run reads back.
 *.proptest-regressions
+
+# Raw LLVM coverage counters a child writes when the piped seam clears its
+# environment - see AGENTS.md.
+*.profraw
