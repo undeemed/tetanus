@@ -502,7 +502,74 @@ fn the_panel_folds_no_event_the_engine_cannot_produce() {
     );
 }
 
-/// TC-PANEL-11: the attribution travels with the copy.
+/// TC-PANEL-11: nothing is vendored that nothing renders.
+///
+/// The vendoring tool takes one entry point per node renderer, because
+/// upstream registers those through a container this panel replaces with a
+/// plain map. Two lists therefore have to agree, and nothing made them:
+/// `ENTRIES` in `tools/vendor.py` and `NODES` in `src/renderers.tsx`.
+///
+/// They did not agree. `TurnTailNodeView` and `CommandNodeView` were vendored
+/// with their closures - five files - and no kind the fold produces ever
+/// reached them. That is the same defect as following a barrel: code copied in
+/// because an import mentions it rather than because anything runs it, and it
+/// is the defect that cost this port 1,910 quality points the first time.
+///
+/// Expected: every chat entry point the vendoring tool names is a renderer the
+/// table registers, and every renderer the table registers has an entry point.
+#[test]
+fn every_vendored_entry_point_is_a_renderer_the_panel_registers() {
+    let entries = read("tools/vendor.py");
+    let vendored: BTreeSet<String> = entries
+        .lines()
+        .filter_map(|line| {
+            let quoted = line.trim().trim_start_matches('"').trim_end_matches("\",");
+            let file = quoted.strip_prefix("packages/client/ui-conversation/src/client/chat/")?;
+            file.strip_suffix("NodeView.tsx")
+                .map(|name| name.to_string())
+        })
+        .collect();
+
+    let table = read("src/renderers.tsx");
+    let registered: BTreeSet<String> = table
+        .lines()
+        .skip_while(|line| !line.contains("const NODES"))
+        .skip(1)
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| {
+            line.trim()
+                .split_once(": ")?
+                .1
+                .strip_suffix(',')
+                .map(str::to_string)
+        })
+        .filter_map(|component| component.strip_suffix("NodeView").map(str::to_string))
+        .collect();
+
+    let unrendered: Vec<&String> = vendored.difference(&registered).collect();
+    assert!(
+        unrendered.is_empty(),
+        "these node views are vendored and nothing renders them - drop them \
+         from ENTRIES in web/deepseek/tools/vendor.py, or register them in \
+         src/renderers.tsx: {unrendered:?}"
+    );
+
+    // The other direction, so a renderer added to the table cannot quietly
+    // depend on a file the vendoring tool never copies.
+    let unvendored: Vec<&String> = registered
+        .difference(&vendored)
+        // `MessageItem.tsx` owns two of them and is reached through ChatView,
+        // so it is not its own entry point.
+        .filter(|name| !matches!(name.as_str(), "UserMessage" | "Unknown"))
+        .collect();
+    assert!(
+        unvendored.is_empty(),
+        "these renderers are registered and the vendoring tool has no entry \
+         point for them: {unvendored:?}"
+    );
+}
+
+/// TC-PANEL-12: the attribution travels with the copy.
 ///
 /// Not one of the fifteen, and the one failure the brief calls unrecoverable
 /// by a later commit. Every vendored file carries upstream's copyright and
@@ -578,7 +645,7 @@ fn every_vendored_file_carries_its_notice() {
     );
 }
 
-/// TC-PANEL-12: upstream's brand art is not vendored.
+/// TC-PANEL-13: upstream's brand art is not vendored.
 ///
 /// The MIT licence grants copyright permission and says nothing about trade
 /// marks. DeepSeek's whale mark and its `deepseek-official HARNESS`

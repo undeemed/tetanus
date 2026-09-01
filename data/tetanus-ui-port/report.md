@@ -445,7 +445,7 @@ That is not a number to explain away, so it was taken apart. **1,910 points of i
 | --- | --- | --- | --- | --- |
 | `master` baseline | 7192 | 0 | 11 | - |
 | first vendoring | **5000** | 4 | 28 | 178 |
-| after the trim below | **6910** | **0** | 18 | 94 |
+| after the trims below | **6906** | **0** | 18 | 89 |
 
 ### 9.1 It is not a counting artefact, and that was the first thing tested
 
@@ -481,7 +481,11 @@ Followed to the barrel, that single symbol drags 56 files and about 3,600 lines 
 
 The fix is that a barrel is not a dependency; the symbol is. `tools/vendor.py` now narrows such an import to the module that owns the symbol, records the rewrite in that file's own header, and refuses a spec whose barrel no longer resolves. Two entries, each with the symbol named and the reason written down.
 
-**Result: 178 vendored source files to 94, six packages to four, 5000 to 6910, and four cycles to none.**
+**Result: 178 vendored source files to 89, six packages to four, 5000 to 6906, and four cycles to none.**
+
+A second, smaller instance of the same defect was found afterwards and is worth naming because it was **ours, not upstream's**: `TurnTailNodeView` and `CommandNodeView` were listed as vendoring entry points and nothing ever rendered them - the fold produces four node kinds and neither is one of them. Five more files vendored dead. It cost almost nothing in quality (4 points) and it is fixed, and more usefully `panel_port.rs::every_vendored_entry_point_is_a_renderer_the_panel_registers` now holds `ENTRIES` in `tools/vendor.py` against `NODES` in `src/renderers.tsx` in both directions, so the two lists cannot drift again.
+
+**A barrel prune was also tried and reverted.** Cutting `ui-primitives/index.ts` down to the thirteen modules the panel imports removed twenty-seven files and made things *worse*: quality 6910 to 6892, and 17 of upstream's specs broke because they test modules the prune had removed. It is recorded here rather than left out because the negative result is the useful part - past the barrel *narrowing* above, there is no more cheap structure to recover.
 
 The same trim is visible in the coverage figures, which is independent evidence that the removed code really was dead rather than merely untested:
 
@@ -501,7 +505,9 @@ TOTAL            1930/2495   77.4%
 
 ### 9.3 What is left, and whether it is avoidable
 
-**6910. Above the 6200 floor, 90 short of the 7000 hold, and still DEGRADED on exactly one line: complex functions 11 to 18.**
+**6906. Above the 6200 floor, 94 short of the 7000 hold, and still DEGRADED on exactly one line: complex functions 11 to 18.**
+
+It also exceeds the local Stop hook's 250-point per-turn tolerance by 36, so this branch cannot be finished on this machine without the one action `AGENTS.md` and `CONTRIBUTING.md` both forbid - `sentrux gate --save`, which would overwrite the fact every other branch is measured against. It has not been run.
 
 Those seven functions were located by removing files one at a time. They are diffuse and they are all in code the panel draws with: two in the markdown renderer, two in the ANSI parser, the rest across the diff, search, terminal and read block renderers. Removing any single one moves quality by less than 15 points - inside the noise - so there is no file whose deletion buys the last 90.
 
@@ -509,12 +515,12 @@ They are parsers and renderers. A markdown parser has a complex function because
 
 ### 9.4 The honest bottom line for the decision
 
-- **Taking their conversation view costs about 280 quality points and 7 complex functions, permanently.** That is the real, irreducible number, and it is much smaller than the 2,192 the first attempt reported.
-- **It does not clear the bar.** 6910 fails the 7000 hold, and the single remaining violation is *complexity*, not coupling - so ruling A's exception does not apply and must not be claimed.
+- **Taking their conversation view costs about 286 quality points and 7 complex functions, permanently.** That is the real, irreducible number, and it is much smaller than the 2,192 the first attempt reported.
+- **It does not clear the bar.** 6906 fails the 7000 hold, and the single remaining violation is *complexity*, not coupling - so ruling A's exception does not apply and must not be claimed.
 - **It is not a counting artefact.** That was tested first and disproved: their best package improves the score.
 - **`sentrux` has no ignore mechanism**, so "measure ours, record theirs" cannot be expressed today even though that is what the coverage split in section 7 already does deliberately.
 
-So the captain's decision is not "is the port tidy" but a straight trade: **their conversation view, for 280 points and 7 complex functions in vendored parsers.** He ordered this believing it was a rebrand; it is a rebrand plus that. Whether it is worth it is his call, and nothing here should be merged on an exception that does not cover it.
+So the captain's decision is not "is the port tidy" but a straight trade: **their conversation view, for 286 points and 7 complex functions in vendored parsers.** He ordered this believing it was a rebrand; it is a rebrand plus that. Whether it is worth it is his call, and nothing here should be merged on an exception that does not cover it.
 
 **Never run `sentrux gate --save`** to make this go away. That overwrites the fact every other branch is measured against, and a branch that saves its own numbers reports "no degradation" by construction.
 

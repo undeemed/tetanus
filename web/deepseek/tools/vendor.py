@@ -30,11 +30,15 @@ import sys
 # the view itself, because upstream registers the renderers through a
 # dependency-injection container this panel replaces with a plain map
 # (`src/renderers.tsx`) - so the container's edges have to be named here.
+#
+# The list must match `NODES` in `src/renderers.tsx` and nothing more.
+# `TurnTailNodeView` and `CommandNodeView` were here for a while and nothing
+# rendered them: the fold produces four node kinds and neither is one of them,
+# so they and their closures were vendored dead. `crates/host/tests/
+# panel_port.rs` now holds the two lists against each other.
 ENTRIES = [
     "packages/client/ui-conversation/src/client/chat/ChatView.tsx",
     "packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx",
-    "packages/client/ui-conversation/src/client/chat/TurnTailNodeView.tsx",
-    "packages/client/ui-conversation/src/client/chat/CommandNodeView.tsx",
     "packages/client/ui-conversation/src/client/locales.ts",
     "packages/client/ui-tool/src/client/tool/ToolCallTree.tsx",
     "packages/client/ui-tool/src/client/locale.ts",
