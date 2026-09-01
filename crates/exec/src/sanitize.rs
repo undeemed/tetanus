@@ -244,3 +244,49 @@ fn csi_end(text: &str, escape: usize) -> Option<usize> {
         .find(|c: char| ('\u{40}'..='\u{7e}').contains(&c))
         .map(|at| escape + 2 + at + 1)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Inline because TC-EXEC-SANE-8 reads `pending` directly. The bound is
+    //! the one invariant this module has that its own output cannot show: the
+    //! recovery skips exactly what the parser would have consumed, so the text
+    //! is byte-for-byte identical with the bound and without it, and only the
+    //! memory differs.
+
+    use super::*;
+
+    // Kept deliberately: without it, raising `MAX_PENDING` to 8 MiB leaves
+    // TC-EXEC-SANE-8 green while handing a child a thousand times the memory -
+    // measured, that mutation survived until this line existed.
+    const _: () = assert!(MAX_PENDING <= 64 * 1024);
+
+    /// TC-EXEC-SANE-8: a child cannot make the sanitizer hold more than the
+    /// bound, however it feeds it.
+    ///
+    /// The carry is memory whose size the child chooses, so a program that
+    /// writes `ESC [` and never stops is an allocation nothing else bounds.
+    /// Fed as many small reads rather than one huge one. Both cross the same
+    /// comparison, so this is not a second path - it is the shape a real read
+    /// loop produces, and it is the one that distinguishes a bound on the
+    /// accumulated buffer from a bound on the current chunk. A per-chunk check
+    /// would pass the single-huge-read form and fail this one.
+    ///
+    /// Input: an unterminated CSI and an unterminated OSC, each fed as many
+    /// small chunks that only exceed the bound in aggregate.
+    /// Expected: after every push, the carried buffer is within the bound.
+    #[test]
+    fn a_child_cannot_make_the_carried_buffer_grow_past_the_bound() {
+        // One introducer is enough: `enforce_pending_bound` compares the
+        // length before it looks at what kind of sequence this is.
+        let mut sanitizer = Sanitizer::new();
+        let _ = sanitizer.push("\u{1b}[");
+        for _ in 0..(MAX_PENDING / 64 * 4) {
+            let _ = sanitizer.push(&"1".repeat(64));
+            assert!(
+                sanitizer.pending.len() <= MAX_PENDING,
+                "small reads accumulated {} bytes carried, bound is {MAX_PENDING}",
+                sanitizer.pending.len()
+            );
+        }
+    }
+}
