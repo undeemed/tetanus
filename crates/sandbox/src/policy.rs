@@ -231,6 +231,18 @@ impl Policy {
     /// Deduplicated and sorted, so two policies that mean the same thing
     /// produce the same rules and a failure message reads the same twice.
     pub fn writable_roots(&self) -> Vec<PathBuf> {
+        self.writable_roots_given(std::env::var_os("TMPDIR"))
+    }
+
+    /// The same, told what `TMPDIR` is instead of reading it.
+    ///
+    /// The environment is process-global, so a case that set `TMPDIR` to
+    /// exercise the unset and empty branches would be writing state every
+    /// other case in the binary reads - the shared-mutable-state trap
+    /// `AGENTS.md` records having already cost this project three red tests.
+    /// Taking the value as an argument makes both branches ordinary to assert
+    /// and leaves the process alone.
+    fn writable_roots_given(&self, tmpdir: Option<std::ffi::OsString>) -> Vec<PathBuf> {
         if self.mode != Mode::WorkspaceWrite {
             return self
                 .extra_writable
@@ -243,7 +255,10 @@ impl Policy {
         let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
         roots.insert(self.workspace_root.clone());
         roots.insert(PathBuf::from("/tmp"));
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        // An unset `TMPDIR` is ordinary; an empty one is a deployment mistake,
+        // and granting `PathBuf::from("")` would add a root that names the
+        // current directory - a write grant nobody asked for.
+        if let Some(tmpdir) = tmpdir {
             if !tmpdir.is_empty() {
                 roots.insert(PathBuf::from(tmpdir));
             }
@@ -280,24 +295,237 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn read_only_grants_no_writable_root() {
-        let policy = Policy::new(Mode::ReadOnly, "/work");
-        assert!(policy.writable_roots().is_empty());
-    }
-
-    #[test]
-    fn workspace_write_grants_the_workspace_and_the_temp_areas() {
-        let policy = Policy::new(Mode::WorkspaceWrite, "/work");
-        let roots = policy.writable_roots();
-        assert!(roots.contains(&PathBuf::from("/work")));
-        assert!(roots.contains(&PathBuf::from("/tmp")));
-    }
+    use std::ffi::OsString;
 
     #[test]
     fn a_named_root_is_writable_under_any_mode() {
         let policy = Policy::new(Mode::ReadOnly, "/work").writable("/var/state");
         assert_eq!(policy.writable_roots(), vec![PathBuf::from("/var/state")]);
+    }
+
+    /// TC-SANDBOX-POL-1: an unset or empty `TMPDIR` grants no extra root, and
+    /// an empty one never grants the current directory.
+    ///
+    /// `PathBuf::from("")` is a relative path meaning "here", so granting it
+    /// would hand a confined run write access to whatever directory it
+    /// happened to start in - a grant no policy asked for and no operator
+    /// could see. The unset and empty cases are different inputs and are asked
+    /// separately.
+    ///
+    /// Input: `workspace-write` at `/work`, told `TMPDIR` is absent, empty,
+    /// and set.
+    /// Expected: workspace and `/tmp` in all three; nothing else when absent
+    /// or empty; the named directory as well when set.
+    #[test]
+    fn an_absent_or_empty_tmpdir_grants_nothing_extra() {
+        let policy = Policy::new(Mode::WorkspaceWrite, "/work");
+        let expected = vec![PathBuf::from("/tmp"), PathBuf::from("/work")];
+
+        assert_eq!(policy.writable_roots_given(None), expected, "absent");
+        assert_eq!(
+            policy.writable_roots_given(Some(OsString::from(""))),
+            expected,
+            "an empty TMPDIR grants nothing, and never the current directory"
+        );
+        assert_eq!(
+            policy.writable_roots_given(Some(OsString::from("/scratch"))),
+            vec![
+                PathBuf::from("/scratch"),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/work")
+            ],
+            "set"
+        );
+    }
+
+    /// TC-SANDBOX-POL-2: two policies that mean the same thing produce the
+    /// same roots, once each.
+    ///
+    /// The roots become kernel rules and a failure message, and a duplicate in
+    /// either is a rule added twice and a message that reads as though
+    /// something is wrong. Sorted and deduplicated is the stated contract.
+    ///
+    /// Input: a `TMPDIR` of `/tmp`, plus the same extra root named twice.
+    /// Expected: three roots, sorted, no repeats.
+    #[test]
+    fn roots_are_deduplicated_and_sorted_however_they_arrive() {
+        let policy = Policy::new(Mode::WorkspaceWrite, "/work")
+            .writable("/var/state")
+            .writable("/var/state");
+        let roots = policy.writable_roots_given(Some(OsString::from("/tmp")));
+
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/tmp"),
+                PathBuf::from("/var/state"),
+                PathBuf::from("/work")
+            ]
+        );
+    }
+
+    /// TC-SANDBOX-POL-3: escalation widens and refuses to do anything else.
+    ///
+    /// "Escalate to the mode I already have" is a mistake in what a model
+    /// wrote, and a silent no-op would hide it; escalating *downwards* while
+    /// reporting success would be worse - a caller believing it had narrowed a
+    /// policy that had not moved.
+    ///
+    /// Input: every ordered pair of modes.
+    /// Expected: `Some` exactly when the target is strictly wider, and the
+    /// widened policy keeps every other axis.
+    #[test]
+    fn widening_is_the_only_direction_escalation_moves() {
+        let ladder = [Mode::ReadOnly, Mode::WorkspaceWrite, Mode::DangerFullAccess];
+        for from in ladder {
+            for to in ladder {
+                let policy = Policy::new(from, "/work");
+                let widened = policy.widened_to(to);
+                assert_eq!(
+                    widened.is_some(),
+                    to > from,
+                    "{from} -> {to}: only a strictly wider mode is granted"
+                );
+                if let Some(widened) = widened {
+                    assert_eq!(widened.mode(), to);
+                    assert_eq!(widened.workspace_root(), policy.workspace_root());
+                }
+            }
+        }
+    }
+
+    /// TC-SANDBOX-POL-4: an escalation carries the whole policy, not just the
+    /// mode.
+    ///
+    /// An escalation widens one axis. A `widened_to` that rebuilt the policy
+    /// would drop the extra roots and the network decision, so an approved
+    /// escalation would quietly *narrow* the run in every other respect.
+    ///
+    /// Input: a policy with an extra root, a network denial and accepted
+    /// partial enforcement, widened one step.
+    /// Expected: every axis preserved.
+    #[test]
+    fn an_escalation_carries_every_other_axis_unchanged() {
+        let policy = Policy::new(Mode::ReadOnly, "/work")
+            .writable("/var/state")
+            .network(Network::Deny)
+            .accept_partial_enforcement();
+        let widened = policy
+            .widened_to(Mode::WorkspaceWrite)
+            .expect("workspace-write is wider than read-only");
+
+        assert_eq!(widened.network_policy(), Network::Deny);
+        assert!(widened.accepts_partial());
+        assert!(widened
+            .writable_roots()
+            .contains(&PathBuf::from("/var/state")));
+        assert_eq!(widened.workspace_root(), std::path::Path::new("/work"));
+    }
+
+    /// TC-SANDBOX-POL-5: the escalation targets of a mode are exactly the
+    /// modes wider than it, widest last.
+    ///
+    /// Input: each mode.
+    /// Expected: two targets from `read-only`, one from `workspace-write`, and
+    /// none at all from the widest - the boundary that stops a caller offering
+    /// an escalation that cannot exist.
+    #[test]
+    fn the_escalation_targets_are_the_wider_modes_and_stop_at_the_top() {
+        assert_eq!(
+            Mode::ReadOnly.wider_modes(),
+            vec![Mode::WorkspaceWrite, Mode::DangerFullAccess]
+        );
+        assert_eq!(
+            Mode::WorkspaceWrite.wider_modes(),
+            vec![Mode::DangerFullAccess]
+        );
+        assert!(
+            Mode::DangerFullAccess.wider_modes().is_empty(),
+            "there is nothing wider than unconfined to escalate to"
+        );
+    }
+
+    /// TC-SANDBOX-POL-6: every mode a document may name round-trips, and a
+    /// word that is not one of them is refused rather than defaulted.
+    ///
+    /// A settings document that misspells a mode must not quietly become the
+    /// widest one. A fourth variant added to the enum is caught by `as_str`'s
+    /// exhaustive match at compile time, so what needs asserting here is the
+    /// round trip and the refusals.
+    ///
+    /// Input: every name in `Mode::NAMES`, then hostile spellings.
+    /// Expected: each name parses to a mode whose `as_str` is that name;
+    /// `NAMES` covers the whole enum; every other word is `None`.
+    #[test]
+    fn every_mode_name_round_trips_and_anything_else_is_refused() {
+        for name in Mode::NAMES {
+            let mode = Mode::parse(name).unwrap_or_else(|| panic!("`{name}` is a listed name"));
+            assert_eq!(mode.as_str(), name);
+            assert_eq!(mode.to_string(), name, "Display and as_str agree");
+        }
+        // `Mode::parse` is an exact compare against three literals, so one
+        // spelling per class of mistake is the whole claim: a blank field, a
+        // stray space, a case difference, and a plausible alias.
+        for hostile in ["", " read-only", "READ-ONLY", "readonly"] {
+            assert_eq!(Mode::parse(hostile), None, "`{hostile}` is not a mode");
+        }
+    }
+
+    /// TC-SANDBOX-POL-7: only `danger-full-access` declines to confine.
+    ///
+    /// `Mode::confines` is what decides whether a backend is asked for
+    /// anything at all, so a mode wrongly answering `false` here is a run with
+    /// no sandbox and no error.
+    ///
+    /// Input: every mode.
+    /// Expected: true for both confining modes, false for the named one.
+    #[test]
+    fn only_the_named_mode_declines_to_confine() {
+        assert!(Mode::ReadOnly.confines());
+        assert!(Mode::WorkspaceWrite.confines());
+        assert!(!Mode::DangerFullAccess.confines());
+    }
+
+    /// TC-SANDBOX-POL-8: a policy that never said so does not accept partial
+    /// enforcement.
+    ///
+    /// The default is the whole safety argument: a policy that silently
+    /// degraded is the outcome this type exists to prevent, so the default is
+    /// asserted rather than assumed.
+    ///
+    /// Input: a fresh policy, and one that accepted in writing.
+    /// Expected: false then true.
+    #[test]
+    fn partial_enforcement_is_refused_until_it_is_accepted_in_writing() {
+        assert!(
+            !Policy::new(Mode::WorkspaceWrite, "/work").accepts_partial(),
+            "the default must be to refuse a partial boundary"
+        );
+        assert!(Policy::new(Mode::WorkspaceWrite, "/work")
+            .accept_partial_enforcement()
+            .accepts_partial());
+    }
+
+    /// TC-SANDBOX-POL-9: read-only grants the sinks, and reads everywhere.
+    ///
+    /// A program that cannot open `/dev/null` fails in ways that look nothing
+    /// like a sandbox denial, and a build that cannot read `/usr/lib` is not
+    /// confined but broken. Both are stated in the module docs and neither was
+    /// asserted.
+    ///
+    /// Input: a `read-only` policy.
+    /// Expected: `/dev/null` among the sinks, `/` the only readable root, and
+    /// no sink is also a writable root.
+    #[test]
+    fn every_mode_grants_the_sinks_and_reads_the_whole_filesystem() {
+        let policy = Policy::new(Mode::ReadOnly, "/work");
+        let sinks = policy.write_sinks();
+        assert!(sinks.contains(&PathBuf::from("/dev/null")));
+        assert!(sinks.contains(&PathBuf::from("/dev/urandom")));
+        assert_eq!(policy.readable_roots(), vec![PathBuf::from("/")]);
+        assert!(
+            policy.writable_roots().is_empty(),
+            "a sink is not a writable root: read-only grants no root at all"
+        );
     }
 }
