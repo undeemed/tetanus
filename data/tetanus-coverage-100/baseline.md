@@ -199,6 +199,30 @@ when it is set, or use continuous mode. Note that this one is *not* fixed by
 giving `serve` a graceful shutdown - the two artifacts have different causes
 and each needs its own answer.
 
+### 4.1c Code between `fork` and `exec` cannot be measured at all
+
+Found while starting group 2, and unlike the first two this one has no fix.
+
+`exec/src/signals.rs` reports **0.0% over 14 lines**. It is
+`reset_for_child`, which resets the ignorable signal dispositions and empties
+the signal mask in the child between `fork` and `exec` - the fix for the
+inherited `SIG_IGN` bug `AGENTS.md` records as having presented for days as
+three load-flaky tests.
+
+It runs in a child that then calls `exec`, and `exec` replaces the process
+image. The counters it incremented are in memory that no longer exists, and no
+`atexit` handler ever runs there. So the line count is structurally
+unobtainable, whatever the harness does about §4.1 and §4.1b.
+
+It is nonetheless tested, and well: `crates/exec/tests/upstream_signal_inheritance.rs`
+TC-PORT-TERM-44 and TC-PORT-TERM-48 start a harness whose own `SIGINT` is
+respectively *ignored* and *blocked*, and assert the child is still
+interrupted. Those are exactly the two shapes the code exists to defeat.
+
+**Do not assign this file as coverage work, and do not "fix" its percentage.**
+The honest treatment is to exclude it from the denominator with a reason,
+which is what this section is.
+
 ### 4.2 Browser JavaScript is not measured at all. 0%, honestly.
 
 | | |
@@ -281,7 +305,7 @@ magnitude in lane-days, not a promise.
 | --- | --- | --- | ---: | --- | --- |
 | **0** | **Fix the measurement** | harness only: `serve` shutdown, `LLVM_PROFILE_FILE` through the piped seam, or LLVM continuous mode | unblocks ~694 | 0.5 | Everything after this is measured against a broken instrument. Two distinct causes, §4.1 and §4.1b. Must land first or three lanes will chase artifacts. |
 | **1** | **Sandbox** *(this PR)* | `crates/sandbox` | 71 | 1 | The only thing between a model-written command and the filesystem. A silent hole here is unbounded and undetectable from inside. Its ABI-degradation logic is currently untestable on one kernel - restructure, do not waive. |
-| **2** | Process & signal containment | `crates/exec` (`pty`, `proc`, `session`, `screen`, `terminal*`) | 585 | 3 | Escaped process groups, undeliverable interrupts, a credential on a journal. 9 error variants unnamed. Already the source of the fleet's flaky-test tax. |
+| **2** | Process & signal containment | `crates/exec` (`pty`, `proc`, `session`, `terminal*`) | 585 | 3 | Escaped process groups, undeliverable interrupts, a credential on a journal. 9 error variants unnamed. Already the source of the fleet's flaky-test tax. **`screen.rs` and `sanitize.rs` are done** - the hostile-stream slice, which found and fixed a hang any child could cause. `signals.rs` is not work; see §4.1c. |
 | **3** | Path confinement & durability | `crates/fs`, `crates/core` (`jobs`, `schedule`, `registry`, `spill`) | 447 | 2.5 | A path escape and a corrupted append-only journal are both silent and both unrecoverable. `RegistryError::Cycle` is unnamed - a cycle bug is a hang. |
 | **4** | Contract surfaces | `crates/sdk`, `crates/mcp`, `crates/toolset`, `crates/acp` | 635 | 2.5 | Lowest coverage in the workspace (75.9%, 77.4%, 80.0%, 87.0%). These are the published seams; a wrong answer here is wrong for every client at once. |
 | **5** | Evaluator budgets | `crates/coderuntime` | 361 | 2 | Fuel and wall clock are the only reason a runaway program stops. Two cases here race their own budgets - fixed in this PR. |

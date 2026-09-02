@@ -505,7 +505,9 @@ impl Grid {
         if self.cursor.row < self.top || self.cursor.row > self.bottom {
             return;
         }
-        for _ in 0..lines {
+        // Clamped to the region: the count is any `usize` a child printed, and
+        // shifting by more than the height is shifting by the height.
+        for _ in 0..lines.min(self.bottom - self.top + 1) {
             self.cells.remove(self.bottom);
             self.cells.insert(self.cursor.row, vec![' '; self.cols]);
         }
@@ -515,7 +517,7 @@ impl Grid {
         if self.cursor.row < self.top || self.cursor.row > self.bottom {
             return;
         }
-        for _ in 0..lines {
+        for _ in 0..lines.min(self.bottom - self.top + 1) {
             self.cells.remove(self.cursor.row);
             self.cells.insert(self.bottom, vec![' '; self.cols]);
         }
@@ -523,7 +525,7 @@ impl Grid {
 
     fn insert_cells(&mut self, cells: usize) {
         let row = self.cursor.row.min(self.rows - 1);
-        for _ in 0..cells {
+        for _ in 0..cells.min(self.cols) {
             self.cells[row].pop();
             self.cells[row].insert(self.cursor.col.min(self.cols - 1), ' ');
         }
@@ -531,7 +533,7 @@ impl Grid {
 
     fn delete_cells(&mut self, cells: usize) {
         let row = self.cursor.row.min(self.rows - 1);
-        for _ in 0..cells {
+        for _ in 0..cells.min(self.cols) {
             if self.cursor.col < self.cols {
                 self.cells[row].remove(self.cursor.col);
                 self.cells[row].push(' ');
