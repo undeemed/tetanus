@@ -1,0 +1,44 @@
+<div class="_markdown_9a20e6">
+  <ul>
+    <li>
+      #text "tight one"
+    <li>
+      #text "tight two\n"
+      <ul>
+        <li>
+          #text "child"
+  <ol>
+    <li>
+      <p>
+        #text "first"
+    <li>
+      <p>
+        #text "second"
+    <li>
+      <p>
+        #text "ordered with start"
+    <li>
+      <p>
+        #text "next"
+  <ul>
+    <li>
+      <p>
+        #text "loose item one"
+    <li>
+      <p>
+        #text "loose item two"
+      <p>
+        #text "second paragraph of loose item"
+    <li>
+      <p>
+        #text "item with nested blocks"
+      <div class="_block_f307ab md-code-block">
+        <div class="_bannerWrap_f307ab">
+          <div class="_banner_f307ab">
+            <div class="_infostring_f307ab">
+            <div class="_action_f307ab">
+              <button class="_copyButton_f307ab" type="button">
+                #text "复制"
+        <pre class="_plain_f307ab">
+          <code>
+            #text "fenced inside list"

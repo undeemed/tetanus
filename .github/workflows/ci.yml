@@ -20,6 +20,31 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      # The browser panel at `web/deepseek` is React over a bundler, and its
+      # build is a test rather than a step of its own:
+      # `crates/host/tests/panel_port.rs` runs it, so `cargo test --workspace`
+      # answers the same on a laptop as it does here. What this job owes that
+      # test is a toolchain and an installed `node_modules`; without them the
+      # case fails on purpose, because `CI` is set and a skip in CI is the
+      # absence of protection wearing protection's clothes.
+      #
+      # This is the gap that closed here: until this step existed the workflow
+      # ran fmt, clippy, build and test with no Node anywhere, so `web_app.rs`'s
+      # parse guard - written because a duplicate identifier once shipped a
+      # dead panel through a fully green gate - skipped on every pull request
+      # this project has ever had. It only ever ran on somebody's machine.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/deepseek/pnpm-lock.yaml
+      - name: panel dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web/deepseek
+
       - name: format
         run: cargo fmt --all --check
       - name: lint

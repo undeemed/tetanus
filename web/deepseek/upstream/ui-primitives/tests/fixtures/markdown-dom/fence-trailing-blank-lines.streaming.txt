@@ -1,0 +1,23 @@
+<div class="_markdown_9a20e6">
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <pre class="_plain_f307ab">
+      <code>
+        #text "kept blank line follows\n"
+  <div class="_block_f307ab md-code-block">
+    <div class="_bannerWrap_f307ab">
+      <div class="_banner_f307ab">
+        <div class="_infostring_f307ab">
+        <div class="_action_f307ab">
+          <button class="_copyButton_f307ab" type="button">
+            #text "复制"
+    <pre class="_plain_f307ab">
+      <code>
+        #text "const doubled = true\n\n"
+  <p>
+    #text "after"

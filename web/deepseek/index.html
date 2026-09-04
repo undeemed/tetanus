@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The title is set again from `src/brand.ts` once the bundle runs; this
+         one is what a reader sees while it loads. -->
+    <title>tetanus panel</title>
+    <!-- `crates/host`'s index tap writes `window.TETANUS_BOOT` in before this
+         point, so `src/carrier.ts` reads it as data rather than the page
+         guessing where the socket is. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

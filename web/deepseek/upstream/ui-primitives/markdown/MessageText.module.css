@@ -1,0 +1,13 @@
+/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
+ * Vendored verbatim from deepseek-ai/deepseek-harness: packages/client/ui-primitives/src/markdown/MessageText.module.css
+ * The full notice is web/deepseek/upstream/LICENSE. Unmodified
+ * apart from this header. */
+.text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Font metrics inherit from the consumer's container (bubble 16/24,
+     assistant flow 16/28) — a generic text primitive must not pin its own
+     size, or every consumer's line grid breaks (44px bubble spec regression). */
+  font-size: inherit;
+  line-height: inherit;
+}

@@ -1,0 +1,48 @@
+Upstream specs that could not come across, and why.
+Written by tools/vendor.py; the reasoning is in
+data/tetanus-ui-port/report.md.
+
+packages/client/ui-attachment/tests/invariant.client.spec.ts: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/apply-inject.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/assembly-surfaces.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/chat-apply.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/chat-branch-tails.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/chat-stats.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/chat-store.client.spec.ts: its subject is outside the ported closure
+packages/client/ui-conversation/tests/chat-view.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/context-meter.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/conversation-node-definitions.client.spec.ts: its subject is outside the ported closure
+packages/client/ui-conversation/tests/coverage-tails.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/enter-behavior-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/gate-branch-tails.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/host.client.spec.ts: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/image-labels.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/input-bar.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/input-machine.client.spec.ts: its subject is outside the ported closure
+packages/client/ui-conversation/tests/input-matrix.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/input-scenarios.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/queue-dock.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/reasoning-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/safari.client.spec.ts: its subject is outside the ported closure
+packages/client/ui-conversation/tests/selection-survival.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/service-orchestration.client.spec.ts: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/skeleton.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/submission-policy.client.spec.ts: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/todo-panel.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-conversation/tests/turn-metrics.client.spec.ts: its subject is outside the ported closure
+packages/client/ui-conversation/tests/views-type-chain.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-primitives/tests/invariant.client.spec.ts: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/ask-question-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/assembly-surfaces.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/chat-code-subcalls.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/coverage-tails.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/diff-card.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/read-card.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/search-card.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/terminal-card.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/todo-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/tool-call-tree.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/tool-row.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/toolview-slot.client.spec.tsx: needs upstream's cordis/test-runtime harness
+packages/client/ui-tool/tests/toolview-type-chain.client.spec.tsx: its subject is outside the ported closure
+packages/client/ui-tool/tests/web-card.client.spec.tsx: needs upstream's cordis/test-runtime harness

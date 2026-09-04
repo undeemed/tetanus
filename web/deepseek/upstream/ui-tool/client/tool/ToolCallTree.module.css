@@ -1,0 +1,16 @@
+/* Copyright (c) 2026 DeepSeek. Licensed under the MIT License.
+ * Vendored verbatim from deepseek-ai/deepseek-harness: packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
+ * The full notice is web/deepseek/upstream/LICENSE. Unmodified
+ * apart from this header. */
+.callRow {
+  border-radius: 6px;
+}
+
+.subCalls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 2px 22px;
+  padding-left: 8px;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
